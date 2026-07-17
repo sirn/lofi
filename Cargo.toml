@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = ["lofi", "lofi-core", "lofi-code", "lofi-error", "lofi-providers", "lofi-types", "lofi-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://git.sr.ht/~sirn/lofi"
+
+[workspace.dependencies]
+# Internal crates.
+lofi-types = { path = "lofi-types" }
+lofi-error = { path = "lofi-error" }
+lofi-providers = { path = "lofi-providers" }
+lofi-code = { path = "lofi-code" }
+lofi-core = { path = "lofi-core" }
+lofi-ui = { path = "lofi-ui" }
+
+# Async runtime + HTTP.
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures = "0.3"
+bytes = "1"
+async-trait = "0.1"
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+
+# Serialization.
+serde = { version = "=1.0.214", features = ["derive"] }
+serde_json = "1"
+lz4_flex = "0.11"
+similar = "2"
+toml = "0.8"
+
+# CLI + errors + logging.
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Paths, glob, regex, ids, time.
+dirs = "6"
+regex = "1"
+globset = "0.4"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "=2.5.0", features = ["serde"] }
+
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2"
+base64 = "0.22"
+
+# TypeScript sandbox: swc strip + QuickJS.
+rquickjs = { version = "0.9", features = ["full", "futures"] }
+swc_common = "5"
+swc_ecma_ast = "5"
+swc_ecma_parser = "6"
+swc_ecma_visit = "5"
+swc_ecma_transforms_typescript = "7"
+swc_ecma_codegen = "5"
+
+# Test-only HTTP mocking.
+mockito = "1"
+
+# Test-only temp directories.
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+cargo = { level = "allow", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Narrowing/precision casts are intentional in the size, cost, and token
+# math and reviewed at each site; the lint fires too broadly to be useful.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
