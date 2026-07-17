@@ -1,0 +1,952 @@
+//! Built-in sandbox tools: `read`, `ls`, `find`, `grep`, `write`, `edit`,
+//! `bash`. Each file tool resolves its path against a workspace root and
+//! rejects escapes; `bash` is exempt (it shells out) but runs with its cwd
+//! pinned to the root.
+//!
+//! These are plain async methods on [`BuiltinTools`]; the code-mode sandbox
+//! (see [`crate::code`]) binds them directly onto the guest `lofi` object
+//! rather than going through a trait dispatch. The workspace root is held
+//! canonicalized so `starts_with` checks are reliable after `..` traversal.
+
+use std::fmt::Write;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use globset::Glob;
+use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+use crate::error::{Error, Result};
+
+/// Default `bash` timeout in milliseconds (120s).
+const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
+
+/// Per-stream byte cap for captured `bash` output. Prevents a runaway
+/// command from exhausting memory before the wall-clock timeout fires.
+const MAX_BASH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum bytes returned by `read` before truncation.
+const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum number of paths `find` returns before truncation.
+const MAX_FIND_RESULTS: usize = 4096;
+/// Maximum bytes of grep output before truncation.
+const MAX_GREP_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Files larger than this are skipped by `grep` to bound memory.
+const MAX_GREP_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Default match cap for `grep` when the caller omits `max`.
+const DEFAULT_GREP_MAX: usize = 1000;
+/// Maximum filesystem entries `find` traverses before signaling truncation.
+const MAX_FIND_VISITED: usize = 65_536;
+/// Maximum filesystem entries `grep` scans before signaling truncation.
+const MAX_GREP_VISITED: usize = 65_536;
+
+/// The builtin tool bundle.
+///
+/// Holds the workspace root (canonicalized in [`new`](Self::new)) so every
+/// file operation can be confined to it. Methods are async and return JSON
+/// values ready to hand back to the sandbox.
+#[derive(Debug, Clone)]
+pub struct BuiltinTools {
+    root: PathBuf,
+}
+
+impl BuiltinTools {
+    /// Construct a new bundle rooted at `root`.
+    ///
+    /// `root` is canonicalized on construction; if that fails (the directory
+    /// does not yet exist) the original path is kept and path checks fall
+    /// back to lexical resolution.
+    #[must_use]
+    pub fn new(root: PathBuf) -> Self {
+        let root = root.canonicalize().unwrap_or(root);
+        Self { root }
+    }
+
+    /// The canonicalized workspace root.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Read a file under the root as a UTF-8 string.
+    ///
+    /// The blocking read runs on `spawn_blocking` so a huge file can't freeze
+    /// the TUI event loop, and is truncated at [`MAX_READ_BYTES`].
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if the path escapes the root or the file
+    /// cannot be read.
+    pub async fn read(&self, path: &str) -> Result<Value> {
+        let resolved = resolve_under(&self.root, path)?;
+        let label = path.to_string();
+        let text = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+            use std::io::Read as _;
+            // Stream at most MAX+1 bytes so truncation is detectable without
+            // reading an entire huge file into memory.
+            let file = std::fs::File::open(&resolved)?;
+            let mut buf = Vec::new();
+            file.take(MAX_READ_BYTES as u64 + 1).read_to_end(&mut buf)?;
+            let truncated = buf.len() > MAX_READ_BYTES;
+            let slice = if truncated {
+                &buf[..MAX_READ_BYTES]
+            } else {
+                &buf[..]
+            };
+            let mut text = String::from_utf8_lossy(slice).into_owned();
+            if truncated {
+                text.push_str("\n<output truncated>");
+            }
+            Ok(text)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("read {label}: {e}")))?
+        .map_err(|e| Error::Tool(format!("read {label}: {e}")))?;
+        Ok(json!(text))
+    }
+
+    /// List directory entries under `dir` (empty/`.` means the root).
+    ///
+    /// Entries are returned as paths relative to the root, sorted,
+    /// newline-joined.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if `dir` escapes the root.
+    #[allow(clippy::unused_async)]
+    pub async fn ls(&self, dir: &str) -> Result<Value> {
+        let resolved = resolve_under(&self.root, dir)?;
+        let root = self.root.clone();
+        let label = dir.to_string();
+        let entries = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(&resolved)? {
+                let entry = entry?;
+                let rel = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                entries.push(rel);
+                if entries.len() >= MAX_FIND_RESULTS {
+                    break;
+                }
+            }
+            entries.sort();
+            Ok(entries)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("ls {label}: {e}")))?
+        .map_err(|e| Error::Tool(format!("ls {label}: {e}")))?;
+        Ok(json!(entries.join("\n")))
+    }
+
+    /// Recursively find files under `dir` (default root) matching `glob`.
+    ///
+    /// Returns newline-joined relative paths, sorted.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if `dir` escapes the root or the glob is
+    /// invalid.
+    #[allow(clippy::unused_async)]
+    pub async fn find(&self, glob: &str, dir: Option<&str>) -> Result<Value> {
+        let base = resolve_under(&self.root, dir.unwrap_or(""))?;
+        let matcher = Glob::new(glob)
+            .map_err(|e| Error::Tool(format!("invalid glob {glob:?}: {e}")))?
+            .compile_matcher();
+        let root = self.root.clone();
+        let out = tokio::task::spawn_blocking(move || -> Result<String> {
+            let mut hits = Vec::new();
+            let mut visited = 0usize;
+            // Match during traversal and stop once we have enough hits, so a
+            // matching file is not missed because an earlier non-matching
+            // region filled a candidate cap. A separate visited cap bounds
+            // runtime; `truncated` signals the result is incomplete.
+            let truncated = find_walk(
+                &base,
+                &root,
+                &matcher,
+                &mut hits,
+                MAX_FIND_RESULTS,
+                &mut visited,
+                MAX_FIND_VISITED,
+            )?;
+            hits.sort();
+            let mut out = hits.join("\n");
+            if truncated {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("<truncated>");
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("find {glob}: {e}")))??;
+        Ok(json!(out))
+    }
+
+    /// Grep files under `path` (default root, recursive) for `pattern`.
+    ///
+    /// `pattern` is either a string or an object `{ regex, ic?, ctx?, max? }`.
+    /// Matching lines are emitted as `file:line:content`; `ctx` surrounding
+    /// lines (if requested) get the same prefix and groups are separated by
+    /// `--`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or a
+    /// read failure.
+    #[allow(clippy::unused_async)]
+    pub async fn grep(&self, pattern: Value, path: Option<&str>) -> Result<Value> {
+        let (re_src, ic, ctx, max) = parse_grep_args(pattern)?;
+        let mut builder = regex::RegexBuilder::new(&re_src);
+        builder.case_insensitive(ic);
+        let re = builder
+            .build()
+            .map_err(|e| Error::Tool(format!("invalid regex {re_src:?}: {e}")))?;
+        let base = resolve_under(&self.root, path.unwrap_or(""))?;
+        let root = self.root.clone();
+        let out = tokio::task::spawn_blocking(move || -> Result<String> {
+            // A file path scans just that file; a directory recurses with a
+            // visited cap so a huge tree can't exhaust memory or hang.
+            let mut files = Vec::new();
+            let truncated_walk = if base.is_file() {
+                files.push(base.clone());
+                false
+            } else {
+                walk_files_capped(&base, &mut files, MAX_GREP_VISITED)?
+            };
+            files.sort();
+
+            let mut out = String::new();
+            let mut emitted = 0usize;
+            let max = if max == 0 { DEFAULT_GREP_MAX } else { max };
+            let truncate = |out: &mut String| {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("<output truncated>");
+            };
+            'outer: for file in &files {
+                // Skip oversized files so a single huge artifact can't blow
+                // memory by being fully read into a String.
+                let Ok(meta) = std::fs::metadata(file) else {
+                    continue;
+                };
+                if meta.len() > MAX_GREP_FILE_BYTES {
+                    continue;
+                }
+                let rel = file
+                    .strip_prefix(&root)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let Ok(text) = std::fs::read_to_string(file) else {
+                    continue;
+                };
+                let lines: Vec<&str> = text.lines().collect();
+                let mut i = 0;
+                let mut last_group_end: Option<usize> = None;
+                while i < lines.len() {
+                    if re.is_match(lines[i]) {
+                        let start = i.saturating_sub(ctx);
+                        let end = (i + ctx).min(lines.len().saturating_sub(1));
+                        if let Some(prev_end) = last_group_end {
+                            if prev_end + 1 < start {
+                                if out.len() >= MAX_GREP_OUTPUT_BYTES {
+                                    truncate(&mut out);
+                                    break 'outer;
+                                }
+                                out.push_str("--\n");
+                            }
+                        }
+                        for (j, line) in lines.iter().enumerate().take(end + 1).skip(start) {
+                            if out.len() >= MAX_GREP_OUTPUT_BYTES {
+                                truncate(&mut out);
+                                break 'outer;
+                            }
+                            let _ = writeln!(out, "{}:{}:{}", rel, j + 1, line);
+                        }
+                        last_group_end = Some(end);
+                        emitted += 1;
+                        if emitted >= max {
+                            break 'outer;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            if truncated_walk && out.is_empty() {
+                out.push_str("<truncated>");
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("grep {re_src}: {e}")))??;
+        Ok(json!(out))
+    }
+
+    /// Write `text` to `path`, creating parent directories as needed.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if `path` escapes the root or the write fails.
+    #[allow(clippy::unused_async)]
+    pub async fn write(&self, args: Value) -> Result<Value> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("write: missing 'path'".into()))?
+            .to_owned();
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("write: missing 'text'".into()))?
+            .to_owned();
+        let resolved = resolve_under(&self.root, &path)?;
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Tool(format!("write {path}: mkdir {e}")))?;
+        }
+        std::fs::write(&resolved, text).map_err(|e| Error::Tool(format!("write {path}: {e}")))?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Replace the single occurrence of `old` with `new` in `path`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if `path` escapes the root, if `old` is absent,
+    /// or if `old` occurs more than once (an ambiguous edit).
+    #[allow(clippy::unused_async)]
+    pub async fn edit(&self, args: Value) -> Result<Value> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("edit: missing 'path'".into()))?
+            .to_owned();
+        let old = args
+            .get("old")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("edit: missing 'old'".into()))?
+            .to_owned();
+        let new = args
+            .get("new")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("edit: missing 'new'".into()))?
+            .to_owned();
+        let resolved = resolve_under(&self.root, &path)?;
+        let content = std::fs::read_to_string(&resolved)
+            .map_err(|e| Error::Tool(format!("edit {path}: {e}")))?;
+        let count = content.matches(&old).count();
+        if count == 0 {
+            return Err(Error::Tool(format!("edit {path}: 'old' not found")));
+        }
+        if count > 1 {
+            return Err(Error::Tool(format!(
+                "edit {path}: 'old' found {count} times; expected exactly one"
+            )));
+        }
+        let updated = content.replacen(&old, &new, 1);
+        std::fs::write(&resolved, updated).map_err(|e| Error::Tool(format!("edit {path}: {e}")))?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Run `cmd` via `sh -c` with cwd pinned to the root.
+    ///
+    /// stdout and stderr are merged. `timeoutMs` bounds the run (default
+    /// 120s); on timeout the child is killed and `{ ok: false, output:
+    /// "<timeout>", code: null }` is returned.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] only if the process cannot be spawned.
+    pub async fn bash(&self, args: Value) -> Result<Value> {
+        let cmd = args
+            .get("cmd")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("bash: missing 'cmd'".into()))?
+            .to_owned();
+        let timeout_ms = args
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
+        let dur = Duration::from_millis(timeout_ms);
+
+        // `bash` is intentionally host-level (mirrors Pi's `lofi.bash`): it
+        // runs the user's project commands and is *not* a security sandbox.
+        // The two real risks a model-controlled shell poses here — leaking
+        // inherited credentials and leaving orphans on timeout — are handled
+        // below: secret-like env vars are scrubbed from the child, and the
+        // child runs in its own process group (`process_group(0)`) so a
+        // timeout or cancellation can kill the *entire* tree — background
+        // children and grandchildren included — rather than just the `sh`
+        // leader. The `PgrpKillGuard` makes that robust against early return
+        // or future cancellation.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&self.root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        for (k, _) in std::env::vars() {
+            if looks_secret(&k) {
+                command.env_remove(&k);
+            }
+        }
+
+        let mut child = command.spawn()?;
+        // `process_group(0)` makes the child its own session/group leader,
+        // so its pid is the process-group id. Killing `-pgid` reaches every
+        // descendant the shell spawned.
+        let mut guard = PgrpKillGuard::new(child.id());
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Tool("bash: stdout pipe unavailable".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::Tool("bash: stderr pipe unavailable".into()))?;
+
+        let result = tokio::time::timeout(
+            dur,
+            Box::pin(async {
+                let (out_res, err_res) = (
+                    read_capped(&mut stdout, MAX_BASH_OUTPUT_BYTES),
+                    read_capped(&mut stderr, MAX_BASH_OUTPUT_BYTES),
+                );
+                let (out, err) = tokio::join!(out_res, err_res);
+                Ok::<_, std::io::Error>((out?, err?))
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(Ok((out, err))) => {
+                // stdout EOF implies the child has exited; reap it. The guard
+                // is disarmed so the completed process group isn't signaled.
+                let status = child.wait().await?;
+                guard.disarm();
+                let (out_bytes, out_truncated) = out;
+                let (err_bytes, err_truncated) = err;
+                let mut merged = out_bytes;
+                merged.extend_from_slice(&err_bytes);
+                let mut output = String::from_utf8_lossy(&merged).into_owned();
+                if out_truncated || err_truncated {
+                    output.push_str("\n<output truncated>");
+                }
+                Ok(json!({
+                    "ok": status.success(),
+                    "output": output,
+                    "code": status.code(),
+                }))
+            }
+            Ok(Err(e)) => {
+                // A read error may leave the child running; kill the whole
+                // group and reap before surfacing the error so we don't
+                // orphan the shell or its descendants.
+                drop(guard);
+                let _ = child.wait().await;
+                Err(Error::Io(e))
+            }
+            Err(_) => {
+                // Timeout: drop the guard to SIGKILL the whole process group, then
+                // reap the leader so we don't leave a zombie.
+                drop(guard);
+                let _ = child.wait().await;
+                Ok(json!({
+                    "ok": false,
+                    "output": "<timeout>",
+                    "code": Value::Null,
+                }))
+            }
+        }
+    }
+}
+
+/// RAII guard that SIGKILLs a child's process group on drop unless disarmed.
+///
+/// `bash` runs the child in its own process group (`process_group(0)`); on
+/// timeout or future cancellation dropping this guard kills every descendant
+/// the shell spawned, not just the `sh` leader. Disarm once the child has been
+/// reaped normally.
+struct PgrpKillGuard {
+    pid: Option<u32>,
+}
+
+impl PgrpKillGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+#[allow(clippy::cast_possible_wrap)]
+impl Drop for PgrpKillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            // `kill(-pgid, SIGKILL)` signals the whole process group. The
+            // child was made group leader by `process_group(0)`, so its pid
+            // is the group id. `nix` wraps the FFI behind a safe API.
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-(pid as i32)),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
+/// Heuristic for env vars that carry credentials and should not be inherited
+/// by model-controlled shell commands.
+fn looks_secret(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    u.contains("API_KEY")
+        || u.contains("SECRET")
+        || u.contains("PASSWORD")
+        || u.contains("CREDENTIAL")
+        || u.contains("_TOKEN")
+        || u == "TOKEN"
+}
+
+/// Read up to `cap` bytes from `r` into a buffer, then drain any remainder
+/// to EOF (without storing it) so a full pipe can't deadlock the child. The
+/// caller is told whether truncation occurred.
+pub(crate) async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    r: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = r.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        let room = cap.saturating_sub(buf.len());
+        if room == 0 {
+            drain(r).await?;
+            return Ok((buf, true));
+        }
+        let take = n.min(room);
+        buf.extend_from_slice(&tmp[..take]);
+        if take < n {
+            drain(r).await?;
+            return Ok((buf, true));
+        }
+    }
+    Ok((buf, false))
+}
+
+async fn drain<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> std::io::Result<()> {
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = r.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `p` against `root`, rejecting escapes.
+///
+/// If the target exists, it is canonicalized directly. If not (the common
+/// `write` case where the leaf does not yet exist), the parent is
+/// canonicalized and the leaf filename is re-joined. The result must start
+/// with `root` or the call fails as a path-escape.
+fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
+    use std::path::Component;
+    // Reject any component that could escape the root lexically — parent
+    // references, absolute roots, and Windows prefixes — before touching the
+    // filesystem. `..` is never needed for a workspace-relative tool path,
+    // and allowing it would let a non-existent tail (e.g. `new/../../out`)
+    // bypass the canonicalization check by collapsing to an ancestor that
+    // `starts_with(root)` while the re-joined path resolves outside it.
+    let path = Path::new(p);
+    for c in path.components() {
+        match c {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::Tool(format!("path escapes workspace root: {p}")));
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    let joined = if p.is_empty() || p == "." {
+        root.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    // Fast path: the target exists, so canonicalize directly.
+    if let Ok(c) = joined.canonicalize() {
+        if !c.starts_with(root) {
+            return Err(Error::Tool(format!("path escapes workspace root: {p}")));
+        }
+        return Ok(c);
+    }
+    // Slow path: some tail of the path does not exist yet (the common
+    // `write` case where neither the file nor its directory exists). Walk
+    // up to the nearest existing ancestor, canonicalize that, then re-join
+    // the missing components — checking `starts_with(root)` at each step so
+    // a `..` in the tail cannot escape after the ancestor check passes.
+    let mut existing = joined.clone();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
+            .to_owned();
+        tail.push(name);
+        existing = existing
+            .parent()
+            .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
+            .to_path_buf();
+    }
+    let canon = existing
+        .canonicalize()
+        .map_err(|_| Error::Tool(format!("cannot resolve parent: {p}")))?;
+    if !canon.starts_with(root) {
+        return Err(Error::Tool(format!("path escapes workspace root: {p}")));
+    }
+    let mut resolved = canon;
+    for name in tail.into_iter().rev() {
+        resolved.push(name);
+        if !resolved.starts_with(root) {
+            return Err(Error::Tool(format!("path escapes workspace root: {p}")));
+        }
+    }
+    Ok(resolved)
+}
+
+/// Recursively collect files under `dir`.
+///
+/// Symlinks are skipped so a link pointing outside the workspace root can't
+/// smuggle files into `find`/`grep` results.
+/// Walk `dir` recursively, collecting regular-file paths into `out`. Stops
+/// once `out` reaches `cap` entries, bounding memory and runtime for callers
+/// that only need a bounded result set. Returns `true` when the traversal was
+/// truncated at the cap.
+fn walk_files_capped(dir: &Path, out: &mut Vec<PathBuf>, cap: usize) -> Result<bool> {
+    if !dir.is_dir() || out.len() >= cap {
+        return Ok(out.len() >= cap);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        if out.len() >= cap {
+            return Ok(true);
+        }
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            if walk_files_capped(&path, out, cap)? {
+                return Ok(true);
+            }
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(false)
+}
+
+/// Traverse `dir` applying `matcher` to each file's path relative to `root`,
+/// collecting matching relative paths into `hits` until either `max_hits`
+/// matches or `max_visited` files have been examined. Returns `true` when the
+/// traversal was truncated (so an empty/partial result is not mistaken for a
+/// complete search).
+fn find_walk(
+    dir: &Path,
+    root: &Path,
+    matcher: &globset::GlobMatcher,
+    hits: &mut Vec<String>,
+    max_hits: usize,
+    visited: &mut usize,
+    max_visited: usize,
+) -> Result<bool> {
+    if !dir.is_dir() || *visited >= max_visited {
+        return Ok(*visited >= max_visited);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        if hits.len() >= max_hits || *visited >= max_visited {
+            return Ok(true);
+        }
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            if find_walk(&path, root, matcher, hits, max_hits, visited, max_visited)? {
+                return Ok(true);
+            }
+        } else {
+            *visited += 1;
+            if let Ok(rel) = path.strip_prefix(root) {
+                let rel = rel.to_string_lossy().into_owned();
+                if matcher.is_match(&rel) {
+                    hits.push(rel);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Parse the `grep` pattern argument into (regex, ignore-case, ctx, max).
+fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, usize)> {
+    match pattern {
+        Value::String(s) => Ok((s, false, 0, 0)),
+        Value::Object(_) => {
+            let re_src = pattern
+                .get("regex")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Tool("grep: missing 'regex'".into()))?
+                .to_owned();
+            let ic = pattern.get("ic").and_then(Value::as_bool).unwrap_or(false);
+            let ctx = usize::try_from(pattern.get("ctx").and_then(Value::as_u64).unwrap_or(0))
+                .unwrap_or(0);
+            let max = usize::try_from(pattern.get("max").and_then(Value::as_u64).unwrap_or(0))
+                .unwrap_or(0);
+            Ok((re_src, ic, ctx, max))
+        }
+        _ => Err(Error::Tool("grep: pattern must be string or object".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn tools() -> (tempfile::TempDir, BuiltinTools) {
+        let dir = tempdir().unwrap();
+        let tools = BuiltinTools::new(dir.path().to_path_buf());
+        (dir, tools)
+    }
+
+    #[tokio::test]
+    async fn read_file() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "hello").unwrap();
+        let v = tools.read("a.txt").await.unwrap();
+        assert_eq!(v, json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn read_escape_rejected() {
+        let (_dir, tools) = tools();
+        let err = tools.read("../escape").await.unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn parent_dir_in_nonexistent_tail_rejected() {
+        // A `..` after a not-yet-created component must not be collapsible
+        // into an ancestor that passes the root check.
+        let (_dir, tools) = tools();
+        let err = tools
+            .write(json!({ "path": "new/../../escape.txt", "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+        assert!(!std::path::Path::new("escape.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn absolute_path_rejected() {
+        let (_dir, tools) = tools();
+        let err = tools.read("/etc/passwd").await.unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn ls_lists_entries() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("b.txt"), "b").unwrap();
+        std::fs::create_dir(tools.root().join("sub")).unwrap();
+        std::fs::write(tools.root().join("sub/c.txt"), "c").unwrap();
+        let v = tools.ls("").await.unwrap();
+        let lines: Vec<&str> = v.as_str().unwrap().lines().collect();
+        assert!(lines.contains(&"b.txt"));
+        assert!(lines.contains(&"sub"));
+    }
+
+    #[tokio::test]
+    async fn find_glob() {
+        let (_dir, tools) = tools();
+        std::fs::create_dir_all(tools.root().join("src")).unwrap();
+        std::fs::write(tools.root().join("src/a.rs"), "").unwrap();
+        std::fs::write(tools.root().join("src/b.txt"), "").unwrap();
+        std::fs::write(tools.root().join("root.rs"), "").unwrap();
+        let v = tools.find("**/*.rs", None).await.unwrap();
+        let lines: Vec<&str> = v.as_str().unwrap().lines().collect();
+        assert!(lines.contains(&"root.rs"));
+        assert!(lines.contains(&"src/a.rs"));
+        assert!(!lines.contains(&"src/b.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_basic_and_case_insensitive() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "Foo\nbar\nFOO\n").unwrap();
+        let v = tools.grep(json!("FOO"), None).await.unwrap();
+        assert!(v.as_str().unwrap().contains("a.txt:3:FOO"));
+        assert!(!v.as_str().unwrap().contains("a.txt:1:Foo"));
+
+        let v = tools
+            .grep(json!({ "regex": "foo", "ic": true }), None)
+            .await
+            .unwrap();
+        let s = v.as_str().unwrap();
+        assert!(s.contains("a.txt:1:Foo"));
+        assert!(s.contains("a.txt:3:FOO"));
+    }
+
+    #[tokio::test]
+    async fn grep_object_with_context_and_max() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "l1\nl2\nMATCH\nl4\nl5\n").unwrap();
+        let v = tools
+            .grep(json!({ "regex": "MATCH", "ctx": 1, "max": 1 }), None)
+            .await
+            .unwrap();
+        let s = v.as_str().unwrap();
+        assert!(s.contains("a.txt:2:l2"));
+        assert!(s.contains("a.txt:3:MATCH"));
+        assert!(s.contains("a.txt:4:l4"));
+    }
+
+    #[tokio::test]
+    async fn grep_single_file_path() {
+        // A regular-file `path` scans just that file instead of silently
+        // returning nothing (the directory walk returns early on a file).
+        let (_dir, tools) = tools();
+        std::fs::create_dir_all(tools.root().join("sub")).unwrap();
+        std::fs::write(tools.root().join("sub/a.txt"), "alpha\n").unwrap();
+        std::fs::write(tools.root().join("sub/b.txt"), "beta\n").unwrap();
+        let v = tools.grep(json!("alpha"), Some("sub/a.txt")).await.unwrap();
+        let s = v.as_str().unwrap();
+        assert!(s.contains("sub/a.txt:1:alpha"));
+        assert!(!s.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn write_then_read_round_trip() {
+        let (_dir, tools) = tools();
+        let v = tools
+            .write(json!({ "path": "nested/x.txt", "text": "hi" }))
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "ok": true }));
+        let v = tools.read("nested/x.txt").await.unwrap();
+        assert_eq!(v, json!("hi"));
+    }
+
+    #[tokio::test]
+    async fn write_escape_rejected() {
+        let (_dir, tools) = tools();
+        let err = tools
+            .write(json!({ "path": "../escape", "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn edit_success() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "alpha beta gamma").unwrap();
+        let v = tools
+            .edit(json!({ "path": "a.txt", "old": "beta", "new": "BETA" }))
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "ok": true }));
+        let v = tools.read("a.txt").await.unwrap();
+        assert_eq!(v, json!("alpha BETA gamma"));
+    }
+
+    #[tokio::test]
+    async fn edit_error_zero_occurrences() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "alpha beta").unwrap();
+        let err = tools
+            .edit(json!({ "path": "a.txt", "old": "zzz", "new": "y" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn edit_error_multiple_occurrences() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("a.txt"), "x x x").unwrap();
+        let err = tools
+            .edit(json!({ "path": "a.txt", "old": "x", "new": "y" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn edit_escape_rejected() {
+        let (_dir, tools) = tools();
+        let err = tools
+            .edit(json!({ "path": "../escape", "old": "a", "new": "b" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn bash_echo() {
+        let (_dir, tools) = tools();
+        let v = tools.bash(json!({ "cmd": "echo hello" })).await.unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["code"], json!(0));
+        assert!(v["output"].as_str().unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn bash_nonzero_exit() {
+        let (_dir, tools) = tools();
+        let v = tools.bash(json!({ "cmd": "false" })).await.unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_ne!(v["code"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn bash_timeout() {
+        let (_dir, tools) = tools();
+        let v = tools
+            .bash(json!({ "cmd": "sleep 5", "timeoutMs": 50 }))
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["output"], json!("<timeout>"));
+        assert_eq!(v["code"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_kills_process_group() {
+        // A background child that outlives the timed-out shell must be killed
+        // with the process group, not orphaned to write its marker afterward.
+        let (_dir, tools) = tools();
+        let marker = tools.root().join("late_marker");
+        let cmd = format!("(sleep 1; echo x > {}) & wait", marker.display());
+        let v = tools
+            .bash(json!({ "cmd": cmd, "timeoutMs": 100 }))
+            .await
+            .unwrap();
+        assert_eq!(v["output"], json!("<timeout>"));
+        // Give the background child enough time to have written the marker if
+        // it had survived the group kill.
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert!(
+            !marker.exists(),
+            "background child survived timeout; process group was not killed"
+        );
+    }
+}
