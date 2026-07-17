@@ -1,0 +1,680 @@
+//! Terminal UI: ratatui + crossterm event loop.
+//!
+//! Flicker-free rendering relies on ratatui's double-buffered diff: we never
+//! call `terminal.clear()` between frames, only `terminal.draw(|f| ...)` per
+//! wake, and ratatui writes just the changed cells.
+//!
+//! ## The `!Send` agent future
+//!
+//! [`crate::agent::Agent::run`] is **not** `Send`: the code-mode sandbox holds
+//! an `rquickjs` `AsyncContext` which is `!Send`/`!Sync` (see `crate::code`).
+//! That means the agent future cannot be `tokio::spawn`'d on the multi-thread
+//! runtime. The whole interactive loop therefore runs inside a
+//! [`tokio::task::LocalSet`] on the current worker thread: the agent is driven
+//! by [`tokio::task::spawn_local`], and the TUI event loop (`tokio::select!`
+//! over crossterm input, the `AgentEvent` receiver, and a 60 ms spinner tick)
+//! runs alongside it on the same thread. This is the standard pattern for
+//! `!Send` futures in tokio.
+
+pub mod view;
+
+use std::io::{self, Stdout};
+use std::time::Duration;
+
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use futures::StreamExt;
+use lofi_types::Usage;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use tokio::sync::mpsc::Receiver;
+use tokio::task::{JoinHandle, LocalSet};
+use tokio::time::MissedTickBehavior;
+
+use crate::agent::{Agent, AgentEvent};
+use crate::error::{Error, Result};
+use lofi_types::Message;
+
+/// Braille spinner frames, advanced on each tick while a run is active.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Spinner tick interval (ms). 60 ms is fast enough to look alive without
+/// burning a core.
+const TICK_MS: u64 = 60;
+
+/// A role tag for a line in the rendered message log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    You,
+    Assistant,
+    Tool,
+    Error,
+}
+
+/// One accumulated message in the log: a role tag plus the text rendered so
+/// far. Assistant text deltas are appended to the current `Assistant` message;
+/// tool start/end become `Tool` messages.
+#[derive(Debug, Clone)]
+struct RenderedMessage {
+    role: Role,
+    text: String,
+    /// Tool-call id when `role == Tool`, so parallel tool inputs/results land
+    /// under the correct `ToolStart` entry instead of the most recent one.
+    tool_id: Option<String>,
+}
+
+impl RenderedMessage {
+    fn new(role: Role, text: String) -> Self {
+        Self {
+            role,
+            text,
+            tool_id: None,
+        }
+    }
+
+    fn tool(id: String, text: String) -> Self {
+        Self {
+            role: Role::Tool,
+            text,
+            tool_id: Some(id),
+        }
+    }
+}
+
+/// The TUI's mutable state.
+///
+/// Kept intentionally small: the agent run handle lives in the event loop
+/// (it borrows the `mpsc::Receiver`, which is awkward to poll from inside a
+/// `select!` while also storing it here), and `App` holds only what the
+/// renderer needs.
+pub(crate) struct App {
+    messages: Vec<RenderedMessage>,
+    input: String,
+    input_cursor: usize,
+    status_model: String,
+    status_usage: Option<Usage>,
+    spinner_idx: usize,
+    /// When true the log follows the latest output (pinned to the bottom).
+    /// Scrolling up clears this and switches to [`App::top_line`] anchoring.
+    pinned: bool,
+    /// Absolute index of the first visible log line, used while [`pinned`]
+    /// is false. Kept stable across new output so scroll-back stays anchored.
+    top_line: usize,
+    /// Bottom scroll offset (`total_wrapped_lines - viewport_height`) from
+    /// the last render; used to seed [`top_line`] when un-pinning.
+    last_base: usize,
+    run_active: bool,
+    should_quit: bool,
+}
+
+impl App {
+    fn new(status_model: String) -> Self {
+        Self {
+            messages: Vec::new(),
+            input: String::new(),
+            input_cursor: 0,
+            status_model,
+            status_usage: None,
+            spinner_idx: 0,
+            pinned: true,
+            top_line: 0,
+            last_base: 0,
+            run_active: false,
+            should_quit: false,
+        }
+    }
+
+    /// Fold an [`AgentEvent`] into the rendered log / status.
+    fn apply_event(&mut self, ev: AgentEvent) {
+        match ev {
+            AgentEvent::Text(delta) => {
+                if let Some(last) = self.messages.last_mut() {
+                    if last.role == Role::Assistant {
+                        last.text.push_str(&delta);
+                        return;
+                    }
+                }
+                self.messages
+                    .push(RenderedMessage::new(Role::Assistant, delta));
+            }
+            AgentEvent::ToolStart { id, name } => {
+                self.messages
+                    .push(RenderedMessage::tool(id, format!("▶ {name}")));
+            }
+            AgentEvent::ToolInput { id, code } => {
+                let appended = if let Some(msg) = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == Role::Tool && m.tool_id.as_deref() == Some(id.as_str()))
+                {
+                    msg.text.push('\n');
+                    msg.text.push_str(&code);
+                    true
+                } else {
+                    false
+                };
+                if !appended {
+                    self.messages.push(RenderedMessage::tool(id, code));
+                }
+            }
+            AgentEvent::ToolEnd { id, result } => {
+                if let Some(msg) = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == Role::Tool && m.tool_id.as_deref() == Some(id.as_str()))
+                {
+                    msg.text.push_str("\n↳ ");
+                    msg.text.push_str(&result);
+                    return;
+                }
+                self.messages
+                    .push(RenderedMessage::tool(id, format!("↳ {result}")));
+            }
+            AgentEvent::Done(usage) => {
+                self.status_usage = Some(usage);
+            }
+            AgentEvent::Error(msg) => {
+                self.messages.push(RenderedMessage::new(Role::Error, msg));
+            }
+        }
+    }
+
+    /// Mark a run as finished (channel closed or cancelled).
+    fn run_finished(&mut self) {
+        self.run_active = false;
+        self.spinner_idx = 0;
+    }
+
+    /// Insert a char at the byte cursor, keeping the cursor on a char
+    /// boundary.
+    fn insert_char(&mut self, c: char) {
+        self.input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    /// Delete the char before the cursor.
+    fn backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let i = match self.input[..self.input_cursor].char_indices().last() {
+            Some((i, _)) => i,
+            None => 0,
+        };
+        self.input.replace_range(i..self.input_cursor, "");
+        self.input_cursor = i;
+    }
+
+    fn move_left(&mut self) {
+        if let Some((i, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input_cursor = i;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if let Some((_, c)) = self.input[self.input_cursor..].char_indices().next() {
+            self.input_cursor += c.len_utf8();
+        }
+    }
+
+    /// Display column of the cursor (in chars, not bytes).
+    fn cursor_col(&self) -> usize {
+        self.input[..self.input_cursor].chars().count()
+    }
+
+    fn scroll_up(&mut self) {
+        if self.pinned {
+            self.pinned = false;
+            self.top_line = self.last_base.saturating_sub(1);
+        } else {
+            self.top_line = self.top_line.saturating_sub(1);
+        }
+    }
+
+    fn scroll_down(&mut self) {
+        if self.pinned {
+            return;
+        }
+        self.top_line = self.top_line.saturating_add(1);
+        if self.top_line >= self.last_base {
+            self.pinned = true;
+        }
+    }
+
+    /// Render the full log as a single string with role prefixes.
+    fn render_log(&self) -> String {
+        let mut out = String::new();
+        for m in &self.messages {
+            let prefix = match m.role {
+                Role::You => "You: ",
+                Role::Assistant => "Assistant: ",
+                Role::Tool => "[tool] ",
+                Role::Error => "! ",
+            };
+            out.push_str(prefix);
+            out.push_str(&m.text);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// One-line status: model, spinner (when active), and token usage.
+    fn render_status(&self) -> String {
+        let spinner = if self.run_active {
+            SPINNER[self.spinner_idx % SPINNER.len()]
+        } else {
+            " "
+        };
+        let usage = match self.status_usage {
+            Some(u) => format!(" in:{} out:{}", u.input_tokens, u.output_tokens),
+            None => String::new(),
+        };
+        format!(" {} {}{}", self.status_model, spinner, usage)
+    }
+}
+
+/// An in-flight agent run: the spawned task handle and the event receiver.
+struct RunHandle {
+    handle: JoinHandle<()>,
+    rx: Receiver<AgentEvent>,
+}
+
+/// Owns the terminal and restores it on drop — even on panic. The `Drop`
+/// impl is the only teardown path; we never call `disable_raw_mode` /
+/// `LeaveAlternateScreen` inline.
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalGuard {
+    /// Diff-render one frame. Never clears between frames.
+    fn draw(&mut self, app: &mut App) -> Result<()> {
+        self.terminal
+            .draw(|f| view::render(f, app))
+            .map_err(Error::Io)?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best-effort restore; failures here cannot be surfaced usefully.
+        let _ = self.terminal.show_cursor();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+/// Enter the interactive TUI for `agent`, labeling the status bar with
+/// `model_label` (typically `provider/id`).
+///
+/// Runs the whole loop on a [`LocalSet`] so the `!Send` agent future can be
+/// `spawn_local`'d. Returns after the user quits (Ctrl+D / `q`); the
+/// [`TerminalGuard`] restores the terminal on the way out.
+pub(crate) async fn run(agent: Agent, model_label: String) -> Result<()> {
+    enable_raw_mode().map_err(Error::Io)?;
+    let setup = (|| -> std::io::Result<_> {
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        Terminal::new(backend)
+    })();
+    let terminal = match setup {
+        Ok(t) => t,
+        Err(e) => {
+            // `EnterAlternateScreen` may have already succeeded before
+            // `Terminal::new` failed; leave the alt screen before disabling
+            // raw mode so the user isn't stranded off-screen.
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(Error::Io(e));
+        }
+    };
+
+    let mut guard = TerminalGuard { terminal };
+    let local = LocalSet::new();
+    let result = local
+        .run_until(async move { run_loop(&mut guard, &agent, model_label).await })
+        .await;
+    result
+}
+
+/// The select loop: crossterm input, agent events, and a spinner tick.
+async fn run_loop(guard: &mut TerminalGuard, agent: &Agent, model_label: String) -> Result<()> {
+    let mut app = App::new(model_label);
+    let mut current_run: Option<RunHandle> = None;
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Canonical conversation history, shared with the spawned run tasks so
+    // follow-up prompts retain prior assistant/tool context.
+    let history = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+
+    loop {
+        guard.draw(&mut app)?;
+
+        // The receiver is polled via a borrowing async block: when no run is
+        // active it pending()s forever so the branch never fires. After a
+        // branch resolves the borrow is released, so the arm body can mutate
+        // `current_run`.
+        tokio::select! {
+            ev = async {
+                match &mut current_run {
+                    Some(r) => r.rx.recv().await,
+                    // No run active: pending forever so this branch never
+                    // resolves and the loop doesn't busy-spin on redraws.
+                    None => std::future::pending::<Option<AgentEvent>>().await,
+                }
+            } => {
+                match ev {
+                    Some(e) => app.apply_event(e),
+                    None => {
+                        if let Some(r) = current_run.take() {
+                            r.handle.abort();
+                            app.run_finished();
+                        }
+                    }
+                }
+            }
+            maybe_ev = events.next() => {
+                if let Some(Ok(ev)) = maybe_ev {
+                    handle_event(&ev, &mut app, agent, &mut current_run, &history);
+                }
+            }
+            _ = tick.tick() => {
+                if app.run_active {
+                    app.spinner_idx = app.spinner_idx.wrapping_add(1);
+                }
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    // Cancel any in-flight run on quit so the LocalSet doesn't deadlock
+    // waiting on a dropped receiver.
+    if let Some(r) = current_run.take() {
+        r.handle.abort();
+    }
+    Ok(())
+}
+
+/// Translate a crossterm terminal event into app state changes.
+fn handle_event(
+    ev: &Event,
+    app: &mut App,
+    agent: &Agent,
+    current_run: &mut Option<RunHandle>,
+    history: &std::sync::Arc<tokio::sync::Mutex<Vec<Message>>>,
+) {
+    let Event::Key(k) = ev else {
+        return;
+    };
+    if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return;
+    }
+    match k.code {
+        KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
+            let prompt = std::mem::take(&mut app.input);
+            app.input_cursor = 0;
+            app.messages
+                .push(RenderedMessage::new(Role::You, prompt.clone()));
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let agent_clone = agent.clone();
+            let history = std::sync::Arc::clone(history);
+            // Keep a clone of the sender so a fatal `run` error (e.g. a 4xx
+            // from the provider) is surfaced as an `AgentEvent::Error` before
+            // the channel closes — otherwise the TUI silently drops it.
+            let err_tx = tx.clone();
+            let handle = tokio::task::spawn_local(async move {
+                // Clone the canonical history under a short lock and run
+                // against the local copy without holding the mutex across the
+                // (long) provider/tool loop. Replace canonical history only
+                // after the turn completes, so a cancelled or failed run
+                // discards its partial assistant/tool blocks instead of
+                // leaving the next prompt to reuse invalid history.
+                let mut messages = history.lock().await.clone();
+                match agent_clone
+                    .run_continuation(&mut messages, prompt, tx)
+                    .await
+                {
+                    Ok(()) => {
+                        let mut g = history.lock().await;
+                        *g = messages;
+                    }
+                    Err(e) => {
+                        let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+            *current_run = Some(RunHandle { handle, rx });
+            app.run_active = true;
+            app.pinned = true;
+        }
+        KeyCode::Backspace => app.backspace(),
+        KeyCode::Left => app.move_left(),
+        KeyCode::Right => app.move_right(),
+        KeyCode::Up => app.scroll_up(),
+        KeyCode::Down => app.scroll_down(),
+        KeyCode::Esc => {
+            app.input.clear();
+            app.input_cursor = 0;
+        }
+        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(r) = current_run.take() {
+                r.handle.abort();
+                app.run_finished();
+                app.messages
+                    .push(RenderedMessage::new(Role::Error, "cancelled".to_string()));
+            }
+        }
+        KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+        // `q` quits only on an empty input with no run active, so it never
+        // swallows a typed prompt.
+        KeyCode::Char('q')
+            if k.modifiers == KeyModifiers::NONE
+                && app.input.is_empty()
+                && current_run.is_none() =>
+        {
+            app.should_quit = true;
+        }
+        KeyCode::Char(c) => app.insert_char(c),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use lofi_types::Usage;
+
+    fn app() -> App {
+        App::new("openai/gpt-4o".to_string())
+    }
+
+    #[test]
+    fn text_deltas_accumulate_into_one_assistant_message() {
+        let mut a = app();
+        a.apply_event(AgentEvent::Text("hel".to_string()));
+        a.apply_event(AgentEvent::Text("lo".to_string()));
+        assert_eq!(a.messages.len(), 1);
+        assert_eq!(a.messages[0].role, Role::Assistant);
+        assert_eq!(a.messages[0].text, "hello");
+    }
+
+    #[test]
+    fn tool_start_then_text_starts_new_assistant_message() {
+        let mut a = app();
+        a.apply_event(AgentEvent::Text("first".to_string()));
+        a.apply_event(AgentEvent::ToolStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        a.apply_event(AgentEvent::Text("second".to_string()));
+        assert_eq!(a.messages.len(), 3);
+        assert_eq!(a.messages[0].role, Role::Assistant);
+        assert_eq!(a.messages[1].role, Role::Tool);
+        assert_eq!(a.messages[2].role, Role::Assistant);
+        assert_eq!(a.messages[2].text, "second");
+    }
+
+    #[test]
+    fn tool_end_appends_to_tool_message() {
+        let mut a = app();
+        a.apply_event(AgentEvent::ToolStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        a.apply_event(AgentEvent::ToolEnd {
+            id: "t1".to_string(),
+            result: "{ ok: true }".to_string(),
+        });
+        assert_eq!(a.messages.len(), 1);
+        assert!(a.messages[0].text.contains("▶ exec"));
+        assert!(a.messages[0].text.contains("↳ { ok: true }"));
+    }
+
+    #[test]
+    fn parallel_tools_render_under_their_own_ids() {
+        let mut a = app();
+        a.apply_event(AgentEvent::ToolStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        });
+        a.apply_event(AgentEvent::ToolStart {
+            id: "t2".to_string(),
+            name: "exec".to_string(),
+        });
+        // Interleaved input/result must land under the matching id, not the
+        // most recent ToolStart.
+        a.apply_event(AgentEvent::ToolInput {
+            id: "t1".to_string(),
+            code: "code-1".to_string(),
+        });
+        a.apply_event(AgentEvent::ToolInput {
+            id: "t2".to_string(),
+            code: "code-2".to_string(),
+        });
+        a.apply_event(AgentEvent::ToolEnd {
+            id: "t1".to_string(),
+            result: "r1".to_string(),
+        });
+        a.apply_event(AgentEvent::ToolEnd {
+            id: "t2".to_string(),
+            result: "r2".to_string(),
+        });
+        assert_eq!(a.messages.len(), 2);
+        assert!(a.messages[0].text.contains("code-1"));
+        assert!(a.messages[0].text.contains("↳ r1"));
+        assert!(a.messages[1].text.contains("code-2"));
+        assert!(a.messages[1].text.contains("↳ r2"));
+    }
+
+    #[test]
+    fn done_updates_usage() {
+        let mut a = app();
+        a.apply_event(AgentEvent::Done(Usage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }));
+        assert_eq!(a.status_usage.unwrap().output_tokens, 20);
+    }
+
+    #[test]
+    fn spinner_frame_index_wraps() {
+        let mut a = app();
+        a.run_active = true;
+        for _ in 0..25 {
+            a.spinner_idx = a.spinner_idx.wrapping_add(1);
+        }
+        assert_eq!(SPINNER[a.spinner_idx % SPINNER.len()], SPINNER[5]);
+    }
+
+    #[test]
+    fn insert_backspace_cursor_boundaries() {
+        let mut a = app();
+        a.insert_char('h');
+        a.insert_char('i');
+        assert_eq!(a.input, "hi");
+        assert_eq!(a.input_cursor, 2);
+        a.move_left();
+        assert_eq!(a.input_cursor, 1);
+        a.insert_char('X');
+        assert_eq!(a.input, "hXi");
+        a.backspace();
+        assert_eq!(a.input, "hi");
+        a.move_right();
+        a.backspace();
+        assert_eq!(a.input, "h");
+    }
+
+    #[test]
+    fn scroll_up_unpins_and_walks_top_line() {
+        let mut a = app();
+        a.last_base = 10;
+        a.pinned = true;
+        a.scroll_up();
+        assert!(!a.pinned);
+        assert_eq!(a.top_line, 9);
+        a.scroll_up();
+        assert_eq!(a.top_line, 8);
+    }
+
+    #[test]
+    fn scroll_down_repins_at_bottom() {
+        let mut a = app();
+        a.last_base = 10;
+        a.pinned = false;
+        a.top_line = 9;
+        a.scroll_down();
+        assert!(a.pinned);
+        // Pinned scroll-down is a no-op.
+        a.scroll_down();
+        assert!(a.pinned);
+    }
+
+    #[test]
+    fn scroll_up_from_empty_log_clamps_to_zero() {
+        let mut a = app();
+        a.last_base = 0;
+        a.pinned = true;
+        a.scroll_up();
+        assert!(!a.pinned);
+        assert_eq!(a.top_line, 0);
+    }
+
+    #[test]
+    fn render_log_has_role_prefixes() {
+        let mut a = app();
+        a.apply_event(AgentEvent::Text("hi".to_string()));
+        a.messages
+            .push(RenderedMessage::new(Role::You, "hello".to_string()));
+        let log = a.render_log();
+        assert!(log.contains("Assistant: hi"));
+        assert!(log.contains("You: hello"));
+    }
+
+    #[test]
+    fn render_status_shows_spinner_only_when_active() {
+        let mut a = app();
+        let idle = a.render_status();
+        assert!(!idle.contains('⠋'));
+        a.run_active = true;
+        let active = a.render_status();
+        assert!(active.contains('⠋'));
+        assert!(active.contains("openai/gpt-4o"));
+    }
+}
