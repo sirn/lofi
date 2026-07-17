@@ -1,0 +1,43 @@
+[package]
+name = "lofi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lofi-types = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }
+
+# TUI.
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
+crossterm = { workspace = true }
+
+# TypeScript sandbox.
+rquickjs = { workspace = true }
+swc_common = { workspace = true }
+swc_ecma_ast = { workspace = true }
+swc_ecma_parser = { workspace = true }
+swc_ecma_visit = { workspace = true }
+swc_ecma_transforms_typescript = { workspace = true }
+swc_ecma_codegen = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockito = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true
