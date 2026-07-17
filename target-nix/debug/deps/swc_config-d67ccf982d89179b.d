@@ -1,0 +1,11 @@
+/home/sirn/Dev/src/git.sr.ht/~sirn/lofi/target-nix/debug/deps/swc_config-d67ccf982d89179b.d: /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/lib.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/mod.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_config.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_or_data.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/option.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/merge.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/module.rs
+
+/home/sirn/Dev/src/git.sr.ht/~sirn/lofi/target-nix/debug/deps/libswc_config-d67ccf982d89179b.rmeta: /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/lib.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/mod.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_config.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_or_data.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/option.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/merge.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/module.rs
+
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/lib.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/mod.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_config.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/bool_or_data.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/config_types/option.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/merge.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/swc_config-1.0.0/src/module.rs:
