@@ -1,0 +1,255 @@
+#![allow(clippy::wildcard_imports)]
+use super::*;
+
+fn active_index_path(index: &[store::EventIndex]) -> Vec<usize> {
+    use std::collections::HashMap;
+    let by_id: HashMap<&store::IndexId, usize> =
+        index.iter().enumerate().map(|(i, e)| (&e.id, i)).collect();
+    let mut out = Vec::new();
+    let mut cur = index.len().checked_sub(1);
+    while let Some(i) = cur {
+        out.push(i);
+        cur = index[i]
+            .parent_id
+            .as_ref()
+            .and_then(|id| by_id.get(id).copied());
+        if out.len() > index.len() {
+            return Vec::new();
+        }
+    }
+    out.reverse();
+    out
+}
+
+pub(super) fn visible_index_path(
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+) -> Result<Vec<usize>> {
+    use std::collections::HashSet;
+    let active = active_index_path(index);
+    let mut hidden = HashSet::new();
+    for (pos, &i) in active.iter().enumerate() {
+        if index[i].kind != store::IndexKind::Compaction {
+            continue;
+        }
+        let ev = cursor.event_at(index[i].offset)?;
+        if let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            checkpointed_tail: true,
+            ..
+        } = ev.kind
+        {
+            if let Some(start) = active[..pos]
+                .iter()
+                .position(|&j| index[j].id.matches(&first_kept_entry_id))
+            {
+                hidden.extend(active[start..pos].iter().copied());
+            }
+        }
+    }
+    Ok(active.into_iter().filter(|i| !hidden.contains(i)).collect())
+}
+
+pub(super) fn history_from_index(
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+    edit: &lofi_types::EditConfig,
+) -> Result<Vec<Message>> {
+    let active = active_index_path(index);
+    let mut start = 0;
+    for (pos, &i) in active.iter().enumerate().rev() {
+        if index[i].kind != store::IndexKind::Compaction {
+            continue;
+        }
+        let ev = cursor.event_at(index[i].offset)?;
+        if let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            ..
+        } = &ev.kind
+        {
+            start = if first_kept_entry_id.is_empty() {
+                pos
+            } else {
+                active[..pos]
+                    .iter()
+                    .position(|&j| index[j].id.matches(first_kept_entry_id))
+                    .unwrap_or(pos)
+            };
+            break;
+        }
+    }
+    let offsets: Vec<u64> = active[start..]
+        .iter()
+        .rev()
+        .map(|&i| index[i].offset)
+        .collect();
+    messages_from_cursor(cursor, &offsets, edit)
+}
+
+/// Rebuild provider history from leaf-first offsets while holding at most one
+/// complete transcript event at a time. Resume previously loaded the whole
+/// post-compaction range into a Vec before reducing it, so large historical
+/// tool results created a startup allocation peak that glibc retained even
+/// after the final compact history was small.
+fn messages_from_cursor(
+    cursor: &store::SessionCursor,
+    leaf_first_offsets: &[u64],
+    _edit: &lofi_types::EditConfig,
+) -> Result<Vec<Message>> {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let mut summary_msg = None;
+    cursor.visit_events(leaf_first_offsets, |event| {
+        match event.kind {
+            SessionEventKind::Compaction { summary, .. } => {
+                if !summary.is_empty() {
+                    summary_msg = Some(Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text { text: summary }],
+                    });
+                }
+            }
+            SessionEventKind::TurnFailed { .. } => skipping = true,
+            SessionEventKind::TurnEnd { .. } => skipping = false,
+            SessionEventKind::Message(message) if !skipping => out.push(message),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    out.reverse();
+    if let Some(summary) = summary_msg {
+        out.insert(0, summary);
+    }
+    Ok(out)
+}
+
+/// Restore the transcript as file-backed turn shells. Historical turns need
+/// only their prompt, offsets, and terminal accounting at startup; their full
+/// blocks are materialized from disk only when the viewport reaches them.
+/// The final turn remains fully resident so the initial bottom view renders
+/// without a second disk pass.
+pub(super) fn replay_indexed_session(
+    app: &mut App,
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+    file_size: u64,
+) -> Result<()> {
+    let visible = visible_index_path(cursor, index)?;
+    let starts: Vec<usize> = visible
+        .iter()
+        .enumerate()
+        .filter_map(|(p, &i)| (index[i].kind == store::IndexKind::UserPrompt).then_some(p))
+        .collect();
+    let prompt_offsets: Vec<u64> = starts
+        .iter()
+        .map(|&start_pos| index[visible[start_pos]].offset)
+        .collect();
+    let prompts = cursor.prompt_texts(&prompt_offsets)?;
+    app.turn_byte_ranges.clear();
+    app.turn_event_offsets.clear();
+    for (turn, &start_pos) in starts.iter().enumerate() {
+        let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
+        let selected = &visible[start_pos..end_pos];
+        let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
+        let is_last = turn + 1 == starts.len();
+        if is_last {
+            let events = cursor.events_at(&offsets)?;
+            replay_selected_session_events(&events, |ev| {
+                app.apply_file_backed_replay_event(ev);
+            });
+        } else {
+            app.apply_file_backed_replay_event(AgentEvent::TurnStart {
+                prompt: prompts.get(turn).cloned().unwrap_or_default(),
+            });
+            // Preserve cumulative cost/token accounting without parsing any
+            // message, tool-result, thinking, or native-result body.
+            for &i in selected {
+                if !matches!(
+                    index[i].kind,
+                    store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
+                ) {
+                    continue;
+                }
+                let event = cursor.event_at(index[i].offset)?;
+                replay_selected_session_events(&[event], |ev| {
+                    app.apply_file_backed_replay_event(ev);
+                });
+            }
+        }
+        let start = index[visible[start_pos]].offset;
+        // Physical EOF is correct only when this index represents the file's
+        // final appended leaf. A /tree rollback passes a projected lineage;
+        // its final turn must stop after that lineage's last event or an
+        // on-demand materialization would absorb later sibling branches.
+        let lineage_end = visible.last().map_or(file_size, |&i| index[i].end_offset);
+        let end = starts
+            .get(turn + 1)
+            .map_or(lineage_end, |&p| index[visible[p]].offset);
+        if let Some(range) = app.turn_byte_ranges.last_mut() {
+            *range = Some((start, end));
+        }
+        if let Some(event_offsets) = app.turn_event_offsets.last_mut() {
+            *event_offsets = Some(offsets);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn last_run_model_from_index(
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+) -> Option<RunModel> {
+    for &i in active_index_path(index).iter().rev() {
+        if !matches!(
+            index[i].kind,
+            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
+        ) {
+            continue;
+        }
+        match cursor.event_at(index[i].offset).ok()?.kind {
+            SessionEventKind::TurnEnd { model, .. }
+            | SessionEventKind::TurnFailed { model, .. } => return Some(model),
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(super) fn restore_compaction_from_index(
+    app: &mut App,
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+) {
+    let active = active_index_path(index);
+    let mut last_compaction_pos = None;
+    let mut last_usage = None;
+    for (pos, &i) in active.iter().enumerate() {
+        match index[i].kind {
+            store::IndexKind::Compaction => last_compaction_pos = Some(pos),
+            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => {
+                if let Ok(ev) = cursor.event_at(index[i].offset) {
+                    match ev.kind {
+                        SessionEventKind::TurnEnd { usage, .. }
+                        | SessionEventKind::TurnFailed { usage, .. } => {
+                            last_usage = Some((pos, usage));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // A compaction invalidates every older provider-usage measurement. This
+    // remains true when partial continuation messages follow the marker but
+    // no new terminal usage event was committed before shutdown.
+    let usage_after_compaction = last_usage
+        .filter(|(pos, _)| last_compaction_pos.is_none_or(|compact_pos| *pos > compact_pos))
+        .map(|(_, usage)| usage);
+    app.compacted = last_compaction_pos.is_some() && usage_after_compaction.is_none();
+    // Resume itself never compacts. Leave hysteresis unarmed so the first
+    // newly completed model round is evaluated against the soft cap instead
+    // of inheriting a missed pre-shutdown crossing forever.
+    app.prev_ctx_tokens = None;
+    app.status_usage = usage_after_compaction;
+}
