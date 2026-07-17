@@ -1,0 +1,13 @@
+/home/sirn/Dev/src/git.sr.ht/~sirn/lofi/target-nix/debug/deps/mockito-8891810a3ed03e1f.d: /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/lib.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/diff.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/error.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/matcher.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/mock.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/request.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/response.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server_pool.rs
+
+/home/sirn/Dev/src/git.sr.ht/~sirn/lofi/target-nix/debug/deps/libmockito-8891810a3ed03e1f.rmeta: /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/lib.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/diff.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/error.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/matcher.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/mock.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/request.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/response.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server.rs /home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server_pool.rs
+
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/lib.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/diff.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/error.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/matcher.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/mock.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/request.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/response.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server.rs:
+/home/sirn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mockito-1.7.2/src/server_pool.rs:
