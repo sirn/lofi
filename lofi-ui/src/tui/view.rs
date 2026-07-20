@@ -772,7 +772,7 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
     let w = u16::try_from(inner_w + 2)
         .unwrap_or(40)
         .min(area.width);
-    let content_h = info.lines.len() + 2; // body + blank + hint
+    let content_h = info.lines.len() + 1; // body + hint
     let h = u16::try_from(content_h + 2) // +2 border
         .unwrap_or(10)
         .min(area.height);
@@ -797,7 +797,6 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|l| Line::from(l.clone()))
         .collect();
-    lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled("y", key_style),
         Span::styled(" to copy / ", dim_style),
