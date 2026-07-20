@@ -250,6 +250,14 @@ struct PickerState {
     selected: usize,
 }
 
+/// A read-only information modal (e.g. `/session` output): a centered box
+/// showing `title` over `lines`. Dismissed by any key press.
+#[derive(Debug, Clone)]
+struct InfoModal {
+    title: String,
+    lines: Vec<String>,
+}
+
 /// Severity of a transient rule-line notification (see [`App::notify`]).
 /// Maps to a background color: Info → muted, Warn → warn, Error → error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,6 +518,8 @@ pub(crate) struct App {
     picker: Option<PickerState>,
     /// '/tree' overlay state, when open. See [`TreePickerState`].
     tree_picker: Option<TreePickerState>,
+    /// Read-only information modal (e.g. `/session` output), when open.
+    info: Option<InfoModal>,
     /// Slash-command autocomplete popover, active while the input is a
     /// prefix of a known command.
     slash_complete: Option<SlashComplete>,
@@ -629,6 +639,7 @@ impl App {
             },
             picker: None,
             tree_picker: None,
+            info: None,
             slash_complete: None,
             no_models_hint: None,
             theme: Theme::default(),
@@ -1903,16 +1914,18 @@ impl App {
     }
 
     fn show_session_info(&mut self) {
-        let info = match &self.session.path {
-            Some(p) => format!(
-                "session: {} · {} msgs · {}",
-                p.display(),
-                self.history.lock().map_or(0, |m| m.len()),
-                self.session_model(),
-            ),
-            None => "no session file (ephemeral or not yet started)".to_string(),
+        let lines = match &self.session.path {
+            Some(p) => vec![
+                format!("session: {}", p.display()),
+                format!("messages: {}", self.history.lock().map_or(0, |m| m.len())),
+                format!("model: {}", self.session_model()),
+            ],
+            None => vec!["no session file (ephemeral or not yet started)".to_string()],
         };
-        self.notify(NotifyKind::Info, info);
+        self.info = Some(InfoModal {
+            title: "Session".to_string(),
+            lines,
+        });
     }
 
     /// '/new': drop the transcript and start a fresh session file on the next
@@ -2067,6 +2080,17 @@ impl App {
             self.input = entry.prefill;
             self.input_cursor = self.input.chars().count();
         }
+    }
+
+    /// Key dispatch for the read-only information modal ([`InfoModal`]).
+    /// Any key press dismisses it. Returns `true` while the modal is open
+    /// so keys don't fall through to the prompt.
+    fn handle_info_key(&mut self, _k: &KeyEvent) -> bool {
+        if self.info.is_none() {
+            return false;
+        }
+        self.info = None;
+        true
     }
 
     /// Unified key dispatch for list-style modal overlays (`/resume` and
@@ -3681,6 +3705,9 @@ fn handle_event(
     }
     // Modal overlays (`/resume` and `/tree`) intercept keys while open:
     // up/down (`↑/↓` or `j`/`k`), Enter to confirm, `Esc`/`q` to cancel.
+    if app.handle_info_key(k) {
+        return;
+    }
     if app.handle_modal_key(k) {
         return;
     }
@@ -4729,14 +4756,22 @@ mod tests {
     }
 
     #[test]
-    fn session_info_notifies() {
+    fn session_info_opens_modal() {
         let mut a = app();
-        // No session path: info notification, no transcript turn.
+        // No session path: info modal (not a transcript turn or notification).
         assert!(a.slash_command("/session"));
         assert!(a.turns.is_empty());
-        let (msg, kind) = a.notify_badge().expect("/session notified");
-        assert_eq!(kind, NotifyKind::Info);
-        assert!(msg.contains("no session file"));
+        assert!(a.notify_badge().is_none());
+        let info = a.info.as_ref().expect("info modal open");
+        assert_eq!(info.title, "Session");
+        assert!(info
+            .lines
+            .iter()
+            .any(|l| l.contains("no session file")));
+        // Any key dismisses it.
+        let mut run = None;
+        handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+        assert!(a.info.is_none());
     }
 
     #[test]
