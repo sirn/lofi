@@ -251,7 +251,9 @@ struct PickerState {
 /// Slash-command autocomplete popover state. Active while the input is a
 /// prefix of one or more entries in [`SLASH_COMMANDS`] (e.g. `/`, `/tr`);
 /// dismissed by `Esc`, a non-matching edit, or selecting a candidate with
-/// `Tab`. `↑/↓` or `j`/`k` move the selection.
+/// `Tab`. `↑/↓` or `Ctrl+N`/`Ctrl+P` move the selection; `j`/`k`/`q` are
+/// not intercepted so they stay printable (the popover floats over a text
+/// input, unlike a [`Modal`]).
 #[derive(Debug, Clone)]
 struct SlashComplete {
     /// Indices into [`SLASH_COMMANDS`] of the matching candidates, in the
@@ -275,12 +277,24 @@ struct TreePickerState {
 }
 
 /// A list-style modal overlay (the `/resume` and `/tree` pickers). The
-/// shared key dispatch — up/down (`↑/↓` or `j`/`k`), `Esc`/`q` to cancel —
-/// lives in one place ([`App::handle_modal_key`]); each modal implements
-/// `confirm` for its own side effects via the per-slot `_confirm_inner`
-/// methods (they need `&mut App`, which a trait method can't borrow cleanly
-/// while the modal is also borrowed).
+/// shared key dispatch — up/down (`↑/↓` or `j`/`k`), `Ctrl+N`/`Ctrl+P`,
+/// `Enter` to confirm, `Esc`/`q` to cancel — lives in one place
+/// ([`App::handle_modal_key`]); each modal implements `confirm` for its own
+/// side effects via the per-slot `_confirm_inner` methods (they need
+/// `&mut App`, which a trait method can't borrow cleanly while the modal is
+/// also borrowed). Modals are full overlays with a header.
 trait Modal {
+    fn len(&self) -> usize;
+    fn selected(&self) -> usize;
+    fn set_selected(&mut self, n: usize);
+}
+
+/// A list-style popover (the slash-command autocomplete). Unlike a
+/// [`Modal`], a popover floats over a text input, so its keymap excludes
+/// `j`/`k`/`q` (those must stay printable) and has no header. Navigation is
+/// `↑/↓` or `Ctrl+N`/`Ctrl+P`; `Tab` accepts; `Esc` dismisses. Dispatch
+/// lives in [`App::handle_popover_key`].
+trait Popover {
     fn len(&self) -> usize;
     fn selected(&self) -> usize;
     fn set_selected(&mut self, n: usize);
@@ -301,6 +315,18 @@ impl Modal for PickerState {
 impl Modal for TreePickerState {
     fn len(&self) -> usize {
         self.entries.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
+impl Popover for SlashComplete {
+    fn len(&self) -> usize {
+        self.candidates.len()
     }
     fn selected(&self) -> usize {
         self.selected
@@ -2100,6 +2126,68 @@ impl App {
         }
     }
 
+    /// Unified key dispatch for the slash-command autocomplete popover.
+    /// `↑/↓` or `Ctrl+N`/`Ctrl+P` move the selection (clamped); `Tab`
+    /// moves down with wrap-around (last → first); `Enter` accepts the
+    /// selection (auto-completes); `Esc` dismisses. Unlike
+    /// [`handle_modal_key`], `j`/`k`/`q` are not intercepted — the popover
+    /// floats over a text input, so those must stay printable. Returns
+    /// `true` if the popover handled the key.
+    fn handle_popover_key(&mut self, k: &KeyEvent) -> bool {
+        if self.slash_complete.is_none() {
+            return false;
+        }
+        // Accept/dismiss take `&mut self` and are handled before borrowing
+        // the popover for navigation.
+        match k.code {
+            KeyCode::Enter => {
+                self.slash_complete_accept();
+                return true;
+            }
+            KeyCode::Esc => {
+                self.slash_complete = None;
+                return true;
+            }
+            _ => {}
+        }
+        let Some(popover) = self.slash_complete.as_mut().map(|p| p as &mut dyn Popover)
+        else {
+            return false;
+        };
+        let len = popover.len();
+        if len == 0 {
+            return false;
+        }
+        match k.code {
+            KeyCode::Up => {
+                let s = popover.selected();
+                popover.set_selected(if s > 0 { s - 1 } else { 0 });
+            }
+            KeyCode::Down => {
+                let s = popover.selected();
+                popover.set_selected(if s + 1 < len { s + 1 } else { s });
+            }
+            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
+            // Input-mode cursor keys.
+            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                let s = popover.selected();
+                popover.set_selected(if s + 1 < len { s + 1 } else { s });
+            }
+            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                let s = popover.selected();
+                popover.set_selected(if s > 0 { s - 1 } else { 0 });
+            }
+            // Tab moves down with wrap-around (last → first), like Ctrl+N
+            // but cycling instead of clamping.
+            KeyCode::Tab => {
+                let s = popover.selected();
+                popover.set_selected((s + 1) % len);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Test helper: confirm the active tree picker. In production,
     /// [`handle_modal_key`] dispatches Enter through the per-slot
     /// `tree_picker_confirm_inner`.
@@ -3569,40 +3657,8 @@ fn handle_event(
     // Slash-command autocomplete popover intercepts navigation/accept/dismiss
     // keys while active. Typing and other edits fall through to the normal
     // Input handlers and re-filter the popover via `refresh_slash_complete`.
-    if app.slash_complete.is_some() {
-        match k.code {
-            KeyCode::Up | KeyCode::Char('k')
-                if !k.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                app.slash_complete_up();
-                return;
-            }
-            KeyCode::Down | KeyCode::Char('j')
-                if !k.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                app.slash_complete_down();
-                return;
-            }
-            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
-            // Input-mode cursor keys.
-            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.slash_complete_down();
-                return;
-            }
-            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.slash_complete_up();
-                return;
-            }
-            KeyCode::Tab => {
-                app.slash_complete_accept();
-                return;
-            }
-            KeyCode::Esc => {
-                app.slash_complete = None;
-                return;
-            }
-            _ => {}
-        }
+    if app.handle_popover_key(k) {
+        return;
     }
     match k.code {
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
@@ -4621,6 +4677,25 @@ mod tests {
         a.slash_complete_accept();
         assert_eq!(a.input, "/help");
         assert_eq!(a.input_cursor, a.input.len());
+        assert!(a.slash_complete.is_none());
+    }
+
+    #[test]
+    fn slash_complete_enter_accepts_tab_wraps() {
+        let mut a = app();
+        let mut run = None;
+        a.input = "/".to_string();
+        a.refresh_slash_complete();
+        let len = a.slash_complete.as_ref().unwrap().candidates.len();
+        // Tab cycles forward with wrap-around: after `len` presses we're
+        // back at the first candidate (/clear, index 0 in SLASH_COMMANDS).
+        for _ in 0..len {
+            handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
+        }
+        assert_eq!(a.slash_complete.as_ref().unwrap().selected, 0);
+        // Enter accepts the selection (auto-completes), replacing the input.
+        handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+        assert_eq!(a.input, "/clear");
         assert!(a.slash_complete.is_none());
     }
 
