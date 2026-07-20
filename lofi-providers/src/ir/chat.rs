@@ -64,6 +64,7 @@ mod tests {
             output_price: None,
             cache_read_price: None,
             cache_write_price: None,
+            per_request_price: None,
         }
     }
 
