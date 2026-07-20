@@ -285,6 +285,12 @@ pub struct SessionCommit {
     pub path: PathBuf,
     /// `provider/model · level` label for the turn-end marker.
     pub label: String,
+    /// The entry id to branch this turn from. `None` appends to the file's
+    /// current active leaf (linear continuation); `Some(id)` starts a new
+    /// branch as a sibling of `id`'s existing children — used when the user
+    /// resumes from a selected entry in the tree picker rather than the
+    /// active leaf.
+    pub parent_hint: Option<String>,
 }
 
 /// Lock a mutex, recovering from poison by taking the guard anyway. The
@@ -715,7 +721,17 @@ impl Agent {
         // of on-disk-format concerns.
         if let Some(commit) = commit {
             let summary = stats.summary(elapsed_ms);
-            let mut recorder = SessionRecorder::new(commit.path.clone(), commit.label.clone());
+            // Branch off an explicit parent when the caller picked one (e.g.
+            // resuming from a non-leaf entry in the tree picker); otherwise
+            // append to the file's active leaf.
+            let mut recorder = match commit.parent_hint.as_deref() {
+                Some(id) => SessionRecorder::with_parent(
+                    commit.path.clone(),
+                    commit.label.clone(),
+                    id.to_string(),
+                ),
+                None => SessionRecorder::new(commit.path.clone(), commit.label.clone()),
+            };
             // A turn with no terminal outcome and no content writes nothing.
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {

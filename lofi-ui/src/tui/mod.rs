@@ -339,6 +339,11 @@ pub(crate) struct App {
     /// when false (the resume path, which has no `RoundUsage` events),
     /// `TurnEnd` applies its bundled totals as before.
     turn_has_round_usage: bool,
+    /// Explicit branch point for the next run, set by a UI gesture (e.g.
+    /// resuming from a selected entry in the tree picker). Taken and cleared
+    /// when the run starts so a single gesture applies to a single turn;
+    /// `None` means append to the file's active leaf (linear continuation).
+    branch_hint: Option<String>,
     ctx_limit: u64,
     /// Spinner frame while a run is active; None when idle.
     run: Option<usize>,
@@ -450,6 +455,7 @@ impl App {
             cost: 0.0,
             turn_cost: 0.0,
             turn_has_round_usage: false,
+            branch_hint: None,
             total_in: 0,
             total_out: 0,
             run: None,
@@ -500,6 +506,17 @@ impl App {
             self.model_label,
             self.thinking_label.as_deref().unwrap_or("")
         )
+    }
+
+    /// Set the explicit branch point for the next run. A UI gesture (e.g.
+    /// resuming from a selected entry in the tree picker) calls this with the
+    /// target entry's id; the next run branches off that id as a sibling of
+    /// its existing children instead of appending to the active leaf. The
+    /// hint is consumed by the run launcher, so a single gesture applies to a
+    /// single turn and a subsequent run without a gesture continues
+    /// linearly.
+    fn branch_from(&mut self, id: String) {
+        self.branch_hint = Some(id);
     }
 
     /// Number of select rows the input occupies after soft-wrapping to the
@@ -2850,6 +2867,7 @@ fn handle_event(
             let commit = session_path.as_ref().map(|p| SessionCommit {
                 path: p.clone(),
                 label: app.session_model(),
+                parent_hint: app.branch_hint.take(),
             });
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
