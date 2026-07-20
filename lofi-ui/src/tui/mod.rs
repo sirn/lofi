@@ -246,6 +246,42 @@ struct TreePickerState {
     selected: usize,
 }
 
+/// A list-style modal overlay (the `/resume` and `/tree` pickers). The
+/// shared key dispatch — up/down (`↑/↓` or `j`/`k`), `Esc`/`q` to cancel —
+/// lives in one place ([`App::handle_modal_key`]); each modal implements
+/// `confirm` for its own side effects via the per-slot `_confirm_inner`
+/// methods (they need `&mut App`, which a trait method can't borrow cleanly
+/// while the modal is also borrowed).
+trait Modal {
+    fn len(&self) -> usize;
+    fn selected(&self) -> usize;
+    fn set_selected(&mut self, n: usize);
+}
+
+impl Modal for PickerState {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
+impl Modal for TreePickerState {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
 /// One row in the '/tree' picker. `branch_point` is the event id the next
 /// run chains off (becomes the new turn's parent); `label` is the node text
 /// (`user: ...` or `agent: ...`); `prefix` is the ASCII tree art (`|- `,
@@ -1787,29 +1823,8 @@ impl App {
         }
     }
 
-    fn picker_up(&mut self) {
-        if let Some(p) = &mut self.picker {
-            if p.selected > 0 {
-                p.selected -= 1;
-            }
-        }
-    }
-
-    fn picker_down(&mut self) {
-        if let Some(p) = &mut self.picker {
-            p.selected = (p.selected + 1).min(p.entries.len().saturating_sub(1));
-        }
-    }
-
-    fn picker_cancel(&mut self) {
-        self.picker = None;
-    }
-
     /// Load the selected session into the transcript and close the picker.
-    fn picker_confirm(&mut self) {
-        let Some(picker) = self.picker.take() else {
-            return;
-        };
+    fn picker_confirm_inner(&mut self, picker: PickerState) {
         let entry = picker.entries.into_iter().nth(picker.selected);
         let Some(entry) = entry else {
             return;
@@ -1894,33 +1909,12 @@ impl App {
         self.tree_picker = Some(TreePickerState { entries, selected });
     }
 
-    fn tree_picker_up(&mut self) {
-        if let Some(p) = &mut self.tree_picker {
-            if p.selected > 0 {
-                p.selected -= 1;
-            }
-        }
-    }
-
-    fn tree_picker_down(&mut self) {
-        if let Some(p) = &mut self.tree_picker {
-            p.selected = (p.selected + 1).min(p.entries.len().saturating_sub(1));
-        }
-    }
-
-    fn tree_picker_cancel(&mut self) {
-        self.tree_picker = None;
-    }
-
     /// Confirm the hovered entry: roll the transcript back to the chosen
     /// branch point, set the branch hint so the next run chains off it, and
     /// (for "edit and resend" entries) load the original prompt into the
     /// input box. The visual rollback replaces the old "branch ready" badge —
     /// the user sees the conversation up to the branch point immediately.
-    fn tree_picker_confirm(&mut self) {
-        let Some(picker) = self.tree_picker.take() else {
-            return;
-        };
+    fn tree_picker_confirm_inner(&mut self, picker: TreePickerState) {
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
@@ -1944,6 +1938,76 @@ impl App {
         if !entry.prefill.is_empty() {
             self.input = entry.prefill;
             self.input_cursor = self.input.chars().count();
+        }
+    }
+
+    /// Unified key dispatch for list-style modal overlays (`/resume` and
+    /// `/tree`). `↑/↓` or `j`/`k` move the selection, `Enter` confirms,
+    /// `Esc`/`q` cancels. Returns `true` if a modal handled the key (so the
+    /// caller skips normal Input-mode processing).
+    fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
+        /// Which overlay slot is active, for per-slot confirm/cancel.
+        enum Slot { Picker, Tree }
+        let slot = if self.picker.is_some() {
+            Slot::Picker
+        } else if self.tree_picker.is_some() {
+            Slot::Tree
+        } else {
+            return false;
+        };
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(m) = self.active_modal_mut() {
+                    if m.selected() > 0 {
+                        m.set_selected(m.selected() - 1);
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(m) = self.active_modal_mut() {
+                    if m.selected() + 1 < m.len() {
+                        m.set_selected(m.selected() + 1);
+                    }
+                }
+            }
+            KeyCode::Enter => match slot {
+                Slot::Picker => {
+                    if let Some(picker) = self.picker.take() {
+                        self.picker_confirm_inner(picker);
+                    }
+                }
+                Slot::Tree => {
+                    if let Some(picker) = self.tree_picker.take() {
+                        self.tree_picker_confirm_inner(picker);
+                    }
+                }
+            },
+            KeyCode::Esc | KeyCode::Char('q') => match slot {
+                Slot::Picker => self.picker = None,
+                Slot::Tree => self.tree_picker = None,
+            },
+            _ => {}
+        }
+        true
+    }
+
+    /// Borrow whichever modal overlay is currently active, for shared
+    /// navigation. Only one slot is ever non-`None` at a time.
+    fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
+        if self.picker.is_some() {
+            self.picker.as_mut().map(|p| p as &mut dyn Modal)
+        } else {
+            self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
+        }
+    }
+
+    /// Test helper: confirm the active tree picker. In production,
+    /// [`handle_modal_key`] dispatches Enter through the per-slot
+    /// `tree_picker_confirm_inner`.
+    #[cfg(test)]
+    fn tree_picker_confirm(&mut self) {
+        if let Some(picker) = self.tree_picker.take() {
+            self.tree_picker_confirm_inner(picker);
         }
     }
 
@@ -2749,7 +2813,7 @@ fn build_tree_entries(
         let roots: Vec<usize> = indices
             .iter()
             .enumerate()
-            .filter(|&(i, ix)| {
+            .filter(|&(_, ix)| {
                 if !is_tree_node(&ix.kind) {
                     return false;
                 }
@@ -3354,26 +3418,9 @@ fn handle_event(
     if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return;
     }
-    // The '/resume' picker intercepts keys while open (Input-mode overlay).
-    if app.picker.is_some() {
-        match k.code {
-            KeyCode::Up => app.picker_up(),
-            KeyCode::Down => app.picker_down(),
-            KeyCode::Enter => app.picker_confirm(),
-            KeyCode::Esc | KeyCode::Char('q') => app.picker_cancel(),
-            _ => {}
-        }
-        return;
-    }
-    // The '/tree' branch-picker overlay does the same.
-    if app.tree_picker.is_some() {
-        match k.code {
-            KeyCode::Up | KeyCode::Char('k') => app.tree_picker_up(),
-            KeyCode::Down | KeyCode::Char('j') => app.tree_picker_down(),
-            KeyCode::Enter => app.tree_picker_confirm(),
-            KeyCode::Esc | KeyCode::Char('q') => app.tree_picker_cancel(),
-            _ => {}
-        }
+    // Modal overlays (`/resume` and `/tree`) intercept keys while open:
+    // up/down (`↑/↓` or `j`/`k`), Enter to confirm, `Esc`/`q` to cancel.
+    if app.handle_modal_key(k) {
         return;
     }
 
