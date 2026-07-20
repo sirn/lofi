@@ -281,6 +281,9 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 // A storage signal (turn appended to the transcript); the
                 // `--print` pipe has no use for it.
                 | AgentEvent::TurnCommitted { .. }
+                // Per-round usage is a status signal for the TUI; the pipe
+                // has no use for it (the final `TurnEnd` ends the run).
+                | AgentEvent::RoundUsage { .. }
                 // Retry lifecycle is invisible on the pipe; a transient
                 // error that retries will surface as normal text if it
                 // recovers, or as `Error` if it doesn't.

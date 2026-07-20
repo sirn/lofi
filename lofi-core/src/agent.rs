@@ -230,6 +230,20 @@ pub enum AgentEvent {
         /// recovered.
         final_error: Option<String>,
     },
+    /// A provider round completed within the current turn, carrying the
+    /// turn's cumulative USD cost so far and this round's token usage.
+    /// Emitted after each `StreamingEvent::Done` so the UI can refresh the
+    /// context gauge and cost counter per round instead of waiting for the
+    /// turn's final [`TurnEnd`](Self::TurnEnd). Multi-round turns (tool-use
+    /// loops) emit one per round; `TurnEnd` still fires once at the end with
+    /// the same totals (so the resume path, which has no `RoundUsage`
+    /// events, reconstructs identical state from `TurnEnd` alone).
+    RoundUsage {
+        /// Cumulative USD cost across the turn's rounds so far.
+        cost: f64,
+        /// This round's token usage (drives the context gauge).
+        usage: Usage,
+    },
     /// A turn's events were durably appended to the transcript file, covering
     /// the byte range `[byte_start, byte_end)`. The UI uses this to make the
     /// now-frozen turn file-backed (drop its in-memory blocks and re-materialize
@@ -809,6 +823,21 @@ impl Agent {
                                 round_usage = Some(*usage);
                                 if let Some(s) = stats.as_deref_mut() {
                                     s.add_usage(*usage, &self.model);
+                                    // Emit the turn's cumulative cost and
+                                    // this round's usage immediately so the
+                                    // UI's context gauge and cost counter
+                                    // refresh per round, not just at turn end.
+                                    if !emit(
+                                        tx,
+                                        AgentEvent::RoundUsage {
+                                            cost: s.cost,
+                                            usage: s.usage,
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        return Err(Error::Cancelled);
+                                    }
                                 }
                             }
                             StreamingEvent::Error(msg) => {

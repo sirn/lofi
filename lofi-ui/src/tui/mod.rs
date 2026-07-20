@@ -320,8 +320,20 @@ pub(crate) struct App {
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
-    /// Accumulated USD cost across turns (engine-computed, fed by `TurnEnd`).
+    /// Accumulated USD cost across turns (engine-computed, fed by
+    /// `RoundUsage` per round and folded by `TurnEnd`).
     cost: f64,
+    /// Cumulative USD cost within the current turn, refreshed by each
+    /// `RoundUsage` event. Folded into `cost` at `TurnEnd` and reset, so
+    /// the footer can show a live running cost during a multi-round turn
+    /// without double-counting on the final `TurnEnd`.
+    turn_cost: f64,
+    /// Whether the current turn has emitted any `RoundUsage` events. When
+    /// true, `TurnEnd` skips re-accumulating `total_in`/`total_out`/
+    /// `status_usage` (already applied per round) and only folds `turn_cost`;
+    /// when false (the resume path, which has no `RoundUsage` events),
+    /// `TurnEnd` applies its bundled totals as before.
+    turn_has_round_usage: bool,
     ctx_limit: u64,
     /// Spinner frame while a run is active; None when idle.
     run: Option<usize>,
@@ -431,6 +443,8 @@ impl App {
             status_usage: None,
             ctx_limit: if ctx_limit > 0 { ctx_limit } else { DEFAULT_CTX_LIMIT },
             cost: 0.0,
+            turn_cost: 0.0,
+            turn_has_round_usage: false,
             total_in: 0,
             total_out: 0,
             run: None,
@@ -567,6 +581,10 @@ impl App {
                 prompt,
                 blocks: Vec::new(),
             });
+            // Reset the per-turn accumulators: the live stream feeds these
+            // via `RoundUsage` events, and `TurnEnd` folds them once.
+            self.turn_cost = 0.0;
+            self.turn_has_round_usage = false;
             return;
         }
         // Status-only events the turn builder doesn't own.
@@ -598,12 +616,36 @@ impl App {
                 }
                 return;
             }
-            AgentEvent::TurnEnd { cost, usage, .. } => {
-                // Totals are owned by the App, not the turn builder.
-                self.cost += cost;
+            AgentEvent::RoundUsage { cost, usage } => {
+                // Per-round refresh of the context gauge and cost counter.
+                // `cost` is the turn's cumulative cost so far; track it in
+                // `turn_cost` (folded into `cost` at `TurnEnd`) so the
+                // footer can show a live running total. Tokens accumulate
+                // directly into the session totals; `TurnEnd` skips
+                // re-adding them when `turn_has_round_usage` is set.
+                self.turn_cost = cost;
+                self.turn_has_round_usage = true;
                 self.total_in += usage.input_tokens;
                 self.total_out += usage.output_tokens;
                 self.status_usage = Some(usage);
+                return;
+            }
+            AgentEvent::TurnEnd { cost, usage, .. } => {
+                // Totals are owned by the App, not the turn builder. On the
+                // live path `RoundUsage` already applied this turn's tokens
+                // and `turn_cost` holds its cumulative cost; fold `turn_cost`
+                // and skip the bundled totals. On the resume path (no
+                // `RoundUsage` events) apply the bundled totals as before.
+                if self.turn_has_round_usage {
+                    self.cost += self.turn_cost;
+                } else {
+                    self.cost += cost;
+                    self.total_in += usage.input_tokens;
+                    self.total_out += usage.output_tokens;
+                    self.status_usage = Some(usage);
+                }
+                self.turn_cost = 0.0;
+                self.turn_has_round_usage = false;
             }
             _ => {}
         }
@@ -1823,9 +1865,14 @@ impl App {
         }
     }
 
-    /// Footer cost, shown on the right edge of the usage line.
+    /// Footer cost, shown on the right edge of the usage line. Includes the
+    /// current turn's running cost (`turn_cost`) so a multi-round turn shows
+    /// a live total before `TurnEnd` folds it into `cost`.
     pub(crate) fn render_footer_cost(&self) -> Line<'static> {
-        Line::from(vec![Span::styled(fmt_cost(self.cost), Style::new().fg(self.theme.muted))])
+        Line::from(vec![Span::styled(
+            fmt_cost(self.cost + self.turn_cost),
+            Style::new().fg(self.theme.muted),
+        )])
     }
 
     /// Bottom-right footer: the model badge (with thinking level).
@@ -2195,6 +2242,7 @@ fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         AgentEvent::RetryStart { .. }
         | AgentEvent::RetryEnd { .. }
         | AgentEvent::TurnCommitted { .. }
+        | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. } => {}
     }
 }
@@ -3441,6 +3489,88 @@ mod tests {
         // TurnEnd accumulates into the footer totals (input + output).
         assert_eq!(a.total_in, 10);
         assert_eq!(a.total_out, 20);
+    }
+
+    #[test]
+    fn round_usage_updates_totals_per_round() {
+        let mut a = app();
+        a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
+        // Two rounds within one turn: each carries the turn's cumulative
+        // cost and that round's usage.
+        a.apply_event(AgentEvent::RoundUsage {
+            cost: 0.01,
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        assert_eq!(a.total_in, 100);
+        assert_eq!(a.total_out, 50);
+        assert_eq!(a.turn_cost, 0.01);
+        assert!(a.turn_has_round_usage);
+        // Footer shows the live running cost (base cost + turn_cost).
+        assert!((a.cost + a.turn_cost - 0.01).abs() < 1e-9);
+
+        a.apply_event(AgentEvent::RoundUsage {
+            cost: 0.03,
+            usage: Usage {
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        // Tokens accumulate per round; turn_cost is replaced with the
+        // turn's new cumulative cost.
+        assert_eq!(a.total_in, 300);
+        assert_eq!(a.total_out, 130);
+        assert!((a.turn_cost - 0.03).abs() < 1e-9);
+        assert!((a.cost + a.turn_cost - 0.03).abs() < 1e-9);
+
+        // TurnEnd folds turn_cost into cost and does NOT re-add tokens.
+        a.apply_event(AgentEvent::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 0,
+            cost: 0.03,
+            usage: Usage {
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        assert!((a.cost - 0.03).abs() < 1e-9);
+        assert_eq!(a.turn_cost, 0.0);
+        assert!(!a.turn_has_round_usage);
+        // Tokens unchanged: TurnEnd skipped re-accumulation.
+        assert_eq!(a.total_in, 300);
+        assert_eq!(a.total_out, 130);
+    }
+
+    #[test]
+    fn turn_end_folds_bundled_totals_on_resume_path() {
+        // The resume path has no RoundUsage events, so TurnEnd must apply
+        // its bundled cost/usage as before.
+        let mut a = app();
+        a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
+        a.apply_event(AgentEvent::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 0,
+            cost: 0.05,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        assert!((a.cost - 0.05).abs() < 1e-9);
+        assert_eq!(a.total_in, 10);
+        assert_eq!(a.total_out, 20);
+        assert_eq!(a.turn_cost, 0.0);
+        assert!(!a.turn_has_round_usage);
     }
 
     #[test]
