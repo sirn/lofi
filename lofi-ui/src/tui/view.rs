@@ -540,36 +540,54 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_info(f, chunks[3], app);
 }
 
-/// Mode-colored rule: `── INPUT ──…`, with the label on a mode-colored
-/// background. For a short window after a yank, the left dashes are replaced
-/// by a "Copied to clipboard" badge.
+/// Mode-colored rule line. The left edge keeps the `──` lead followed by
+/// bracketed notification tags (the yank/quit badges) — this side is
+/// reserved for transient and interactive notifications. The right edge
+/// carries the `[VERBOSE]` tag (while tool detail is expanded) and the
+/// mode chip (` INPUT ` / ` NAV `) with its `──` tail; dashes fill the
+/// middle.
 fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let (label, color) = app.mode_badge();
     let w = area.width as usize;
     let chip = format!(" {label} ");
-    let chip_w = prim::width(&chip);
     let tail = "──";
-    let tail_w = prim::width(tail);
-    // Left side keeps the `──` lead; the yank badge (if active) follows it.
-    // Quit takes precedence as a warning.
+    let bold = Modifier::BOLD;
+
+    // Left: leading `──` then bracketed notification tags. Quit takes
+    // precedence as a warning.
     let mut spans: Vec<Span<'static>> = vec![Span::styled("──", Style::new().fg(color))];
     if let Some(badge) = app.quit_badge() {
         spans.push(Span::styled(
-            format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(Modifier::BOLD),
+            format!("[{badge}]"),
+            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(badge) = app.yank_badge() {
         spans.push(Span::styled(
-            format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.primary).add_modifier(Modifier::BOLD),
+            format!("[{badge}]"),
+            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
     }
     let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
-    let dashes = "─".repeat(w.saturating_sub(left_w).saturating_sub(chip_w).saturating_sub(tail_w));
+
+    // Right: optional `[VERBOSE]` tag, the mode chip, and the `──` tail.
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if app.verbose {
+        right.push(Span::styled(
+            "[VERBOSE]",
+            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+        ));
+    }
+    right.push(Span::styled(
+        chip,
+        Style::new().fg(t.fg).bg(color).add_modifier(bold),
+    ));
+    right.push(Span::styled(tail, Style::new().fg(color)));
+    let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
+
+    let dashes = "─".repeat(w.saturating_sub(left_w).saturating_sub(right_w));
     spans.push(Span::styled(dashes, Style::new().fg(color)));
-    spans.push(Span::styled(chip, Style::new().fg(t.fg).bg(color).add_modifier(Modifier::BOLD)));
-    spans.push(Span::styled(tail, Style::new().fg(color)));
+    spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
