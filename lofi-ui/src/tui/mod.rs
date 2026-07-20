@@ -261,7 +261,7 @@ struct PickerState {
 #[derive(Debug, Clone)]
 struct InfoModal {
     title: String,
-    lines: Vec<String>,
+    lines: Vec<Line<'static>>,
     scroll: usize,
     total: usize,
     view_h: usize,
@@ -287,6 +287,33 @@ impl InfoModal {
     fn scroll_page_up(&mut self) {
         self.scroll = self.scroll.saturating_sub(self.view_h.max(1));
     }
+}
+
+/// Section header for an info modal: bold, accent-colored.
+fn info_section(t: Theme, label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        label.to_string(),
+        Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// `  key  value` row: key bold in `fg`, value muted, key padded to a fixed
+/// column so the values line up. Longer keys just overflow the column.
+fn info_kv(t: Theme, key: &str, value: &str) -> Line<'static> {
+    const COL: usize = 12;
+    let pad = COL.saturating_sub(key.chars().count());
+    Line::from(vec![
+        Span::styled(
+            format!("  {}{}", key, " ".repeat(pad)),
+            Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value.to_string(), Style::new().fg(t.muted)),
+    ])
+}
+
+/// A plain muted note line (no key column).
+fn info_note(t: Theme, text: &str) -> Line<'static> {
+    Line::from(Span::styled(format!("  {}", text), Style::new().fg(t.muted)))
 }
 
 /// Severity of a transient rule-line notification (see [`App::notify`]).
@@ -1942,10 +1969,49 @@ impl App {
     }
 
     fn show_help(&mut self) {
-        let help = "Keys\n  Enter        send  ·  Alt+Enter / Ctrl+J  newline\n  ↑ / ↓        move line, recall at edge  ·  Ctrl+↑/↓  move across lines\n  PgUp/PgDn    scroll a page (Input) · move cursor a page (Nav/Select)\n  Tab          switch mode: Input ↔ Navigate / back from Select\n  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        roll back to a past turn (edit + resend, or continue)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit\nSlash commands autocomplete: type / then ↑/↓ and Tab to complete";
+        let t = self.theme;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(info_section(t, "Keys"));
+        lines.push(info_kv(t, "Enter", "send"));
+        lines.push(info_kv(t, "Alt+Enter", "newline (Ctrl+J)"));
+        lines.push(info_kv(t, "↑ / ↓", "move line; recall at edge"));
+        lines.push(info_kv(t, "Ctrl+↑/↓", "move across lines"));
+        lines.push(info_kv(t, "PgUp/PgDn", "scroll page (Input); move cursor page (Nav)"));
+        lines.push(info_kv(t, "Tab", "switch mode: Input ↔ Navigate"));
+        lines.push(info_kv(t, "Esc", "clear input"));
+        lines.push(info_kv(t, "Ctrl+C", "cancel · clear · 2× quit (Input); back (Nav)"));
+        lines.push(info_kv(t, "Ctrl+D", "delete char; quit on empty"));
+        lines.push(Line::from(""));
+        lines.push(info_section(t, "Navigate"));
+        lines.push(info_kv(t, "j/k ↑↓", "scroll"));
+        lines.push(info_kv(t, "h/l ←→", "move column"));
+        lines.push(info_kv(t, "0 ^ $", "start / first non-blank / end"));
+        lines.push(info_kv(t, "w b e", "next / prev word"));
+        lines.push(info_kv(t, "g G", "top / bottom"));
+        lines.push(info_kv(t, "[ ]", "jump turns"));
+        lines.push(info_kv(t, "v", "select"));
+        lines.push(info_kv(t, "y", "yank line"));
+        lines.push(info_kv(t, "i", "back to Input"));
+        lines.push(Line::from(""));
+        lines.push(info_section(t, "Select"));
+        lines.push(info_kv(t, "move", "extends selection"));
+        lines.push(info_kv(t, "y / Enter", "yank → Input"));
+        lines.push(info_kv(t, "Tab / Esc", "back"));
+        lines.push(Line::from(""));
+        lines.push(info_section(t, "Commands"));
+        lines.push(info_kv(t, "/help", "this help"));
+        lines.push(info_kv(t, "/clear", "clear log"));
+        lines.push(info_kv(t, "/new", "start a fresh session"));
+        lines.push(info_kv(t, "/resume", "pick a past session"));
+        lines.push(info_kv(t, "/tree", "roll back to a past turn"));
+        lines.push(info_kv(t, "/session", "show session info"));
+        lines.push(info_kv(t, "/verbose", "toggle tool detail"));
+        lines.push(info_kv(t, "/quit", "exit"));
+        lines.push(Line::from(""));
+        lines.push(info_note(t, "Type / for slash-command autocomplete (↑/↓ and Tab)."));
         self.info = Some(InfoModal {
             title: "Help".to_string(),
-            lines: help.split('\n').map(str::to_string).collect(),
+            lines,
             scroll: 0,
             total: 0,
             view_h: 0,
@@ -1953,13 +2019,21 @@ impl App {
     }
 
     fn show_session_info(&mut self) {
+        let t = self.theme;
         let lines = match &self.session.path {
             Some(p) => vec![
-                format!("session: {}", p.display()),
-                format!("messages: {}", self.history.lock().map_or(0, |m| m.len())),
-                format!("model: {}", self.session_model()),
+                info_kv(t, "session", &p.display().to_string()),
+                info_kv(
+                    t,
+                    "messages",
+                    &self.history.lock().map_or(0, |m| m.len()).to_string(),
+                ),
+                info_kv(t, "model", &self.session_model()),
             ],
-            None => vec!["no session file (ephemeral or not yet started)".to_string()],
+            None => vec![info_note(
+                t,
+                "no session file (ephemeral or not yet started)",
+            )],
         };
         self.info = Some(InfoModal {
             title: "Session".to_string(),
@@ -2140,7 +2214,20 @@ impl App {
                 self.info = None;
             }
             KeyCode::Char('y') => {
-                let text = self.info.as_ref().unwrap().lines.join("\n");
+                let text = self
+                    .info
+                    .as_ref()
+                    .unwrap()
+                    .lines
+                    .iter()
+                    .map(|l| {
+                        l.spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.yank_text(&text);
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -4841,7 +4928,10 @@ mod tests {
         assert!(info
             .lines
             .iter()
-            .any(|l| l.contains("no session file")));
+            .any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.content.contains("no session file"))));
         // Any key dismisses it.
         let mut run = None;
         handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);

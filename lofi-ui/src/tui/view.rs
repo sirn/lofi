@@ -806,16 +806,12 @@ fn render_scrollbar(
     }
 }
 
-/// Pre-wrap `lines` to `width` display cells, never emitting an empty
-/// run (a blank source line yields one empty string).
-fn wrap_info_lines(lines: &[String], width: usize) -> Vec<String> {
+/// Pre-wrap each styled line to `width` cells (span-aware, whitespace-
+/// preserving) and flatten into the visible row list.
+fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in lines {
-        let mut lw = prim::wrap(l, width);
-        if lw.is_empty() {
-            lw = vec![String::new()];
-        }
-        out.extend(lw);
+        out.extend(prim::wrap_line_styled(l, width));
     }
     out
 }
@@ -833,21 +829,25 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
     let title = format!(" {} ", info.title);
-    // Pre-wrap body to the available width (terminal-bounded) so long
-    // lines (e.g. /help) never clip horizontally. When the body will
-    // overflow, reserve a scrollbar gutter and re-wrap one cell narrower.
+    // Body lines are styled spans; ratatui wraps them span-aware into the
+    // body area. We only need the wrapped row *count* up front (for the
+    // scrollbar and scroll clamping), computed from each line's plain text
+    // with the same greedy word-wrap prim uses.
+    // Body lines are styled spans; we pre-wrap them span-aware (preserving
+    // whitespace and styles) so the row count for the scrollbar and the
+    // rendered output agree exactly.
     let max_w = area.width.saturating_sub(2) as usize;
-    let max_body = info.lines.iter().map(|l| prim::width(l)).max().unwrap_or(0);
+    let line_w = |l: &Line| l.spans.iter().map(|s| prim::width(s.content.as_ref())).sum::<usize>();
+    let max_body = info.lines.iter().map(line_w).max().unwrap_or(0);
     let inner_w = max_body.min(max_w).max(prim::width(&title));
     let max_body_h = (area.height as usize).saturating_sub(3);
-    let wrapped = wrap_info_lines(&info.lines, inner_w.max(1));
-    let need_sb = wrapped.len() > max_body_h;
-    let (body_w, wrapped) = if need_sb {
-        let bw = inner_w.saturating_sub(1).max(1);
-        (bw, wrap_info_lines(&info.lines, bw))
+    let need_sb = wrap_info_lines_styled(&info.lines, inner_w.max(1)).len() > max_body_h;
+    let body_w = if need_sb {
+        inner_w.saturating_sub(1).max(1)
     } else {
-        (inner_w, wrapped)
+        inner_w
     };
+    let wrapped = wrap_info_lines_styled(&info.lines, body_w);
     let total = wrapped.len();
     let view_h = total.min(max_body_h);
     let h = u16::try_from(view_h + 3).unwrap_or(10).min(area.height);
@@ -892,10 +892,8 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     };
     f.render_widget(block, popup);
 
-    let body_lines: Vec<Line> = wrapped.iter().map(|l| Line::from(l.clone())).collect();
-    let body = Paragraph::new(body_lines)
-        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
-        .style(Style::default().fg(t.fg));
+    let body = Paragraph::new(wrapped)
+        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
     f.render_widget(body, body_rect);
 
     let key_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
