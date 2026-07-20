@@ -2055,6 +2055,12 @@ impl App {
         self.session.path = None;
         self.pinned = true;
         self.top_line = 0;
+        // Reset the footer usage/cost stats so a fresh session doesn't
+        // carry over the previous one's context gauge and accumulated cost.
+        self.status_usage = None;
+        self.cost = 0.0;
+        self.turn_cost = 0.0;
+        self.turn_has_round_usage = false;
         self.bump_render_epoch();
     }
 
@@ -4911,6 +4917,11 @@ mod tests {
         assert!(a.slash_command("/new"));
         assert!(a.turns.is_empty());
         assert!(a.session.path.is_none());
+        // Footer stats reset with the session.
+        assert!(a.status_usage.is_none());
+        assert_eq!(a.cost, 0.0);
+        assert_eq!(a.turn_cost, 0.0);
+        assert!(!a.turn_has_round_usage);
 
         assert!(a.slash_command("/quit"));
         assert!(a.should_quit);
