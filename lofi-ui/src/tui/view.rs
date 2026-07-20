@@ -140,6 +140,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     if app.tree_picker.is_some() {
         render_tree_picker(f, area, app);
     }
+    if app.info.is_some() {
+        render_info_modal(f, area, app);
+    }
     if app.slash_complete.is_some() {
         render_slash_complete(f, area, app);
     }
@@ -743,6 +746,49 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         popup,
         &mut ListState::default().with_selected(Some(sc.selected)),
     );
+}
+
+/// Read-only information modal (e.g. `/session` output): a centered box
+/// showing the title over the body lines. Dismissed by any key.
+fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType};
+    let Some(info) = &app.info else {
+        return;
+    };
+    let t = app.theme;
+    let title = format!(" {} ", info.title);
+    let max_line = info
+        .lines
+        .iter()
+        .map(|l| prim::width(l))
+        .max()
+        .unwrap_or(0);
+    let inner_w = max_line.max(prim::width(&title));
+    let w = u16::try_from(inner_w + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let h = u16::try_from(info.lines.len() + 2)
+        .unwrap_or(10)
+        .min(area.height);
+    let vert =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+            .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
+    let popup = horiz[1];
+    f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            title,
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let text: Vec<Line> = info.lines.iter().map(|l| Line::from(l.clone())).collect();
+    let para = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(t.fg));
+    f.render_widget(para, popup);
 }
 
 /// '/tree' branch-picker overlay: a popup showing the session's event tree
