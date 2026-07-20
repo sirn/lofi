@@ -10,13 +10,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lofi_error::{Error, Result};
-use lofi_types::{Message, SessionEvent};
+use lofi_types::{Message, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 /// Transcript format version. Bumped only on a breaking on-disk change;
 /// older files are rejected (no migration yet — lofi has no shipped sessions
 /// to migrate).
-pub const SESSION_VERSION: u32 = 1;
+pub const SESSION_VERSION: u32 = 2;
+
+/// The lowest version the store can still load (older files are migrated
+/// in-memory to [`SESSION_VERSION`]).
+pub const SESSION_MIN_VERSION: u32 = 1;
 
 /// Metadata written as the first JSONL line of every session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,17 +233,23 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
     };
     let header: Header = serde_json::from_str(&header_line)
         .map_err(|e| Error::State(format!("json: {e}")))?;
-    if header.meta.version != SESSION_VERSION {
+    if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return Err(Error::State(format!(
             "unsupported session version {} in {}",
             header.meta.version,
             path.display()
         )));
     }
+    let legacy_v1 = header.meta.version == 1;
     let mut events = Vec::new();
     // Byte offset of each event's line in the file (parallel to `events`).
     let mut offsets = Vec::new();
     let mut i = 0usize;
+    // For v1 migration and defensively-malformed v2 files: assign ids to
+    // any event missing one and chain `parent_id` to the previous event
+    // (or `None` for the first), producing a linear chain that matches the
+    // pre-tree semantics.
+    let mut prev_id: Option<String> = None;
     loop {
         buf.clear();
         let line_start = pos;
@@ -252,9 +262,16 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
         if line.is_empty() {
             continue;
         }
-        let ev = parse_event(line).map_err(|e| {
+        let mut ev = parse_event(line).map_err(|e| {
             Error::State(format!("parse event {} in {}: {e}", i + 1, path.display()))
         })?;
+        if legacy_v1 || ev.id.is_empty() {
+            ev.id = short_id();
+        }
+        if legacy_v1 || ev.parent_id.is_none() {
+            ev.parent_id = prev_id.clone();
+        }
+        prev_id = Some(ev.id.clone());
         events.push(ev);
         offsets.push(line_start);
         i += 1;
@@ -266,13 +283,36 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
 /// file is flushed before returning so a crash after the turn still has the
 /// data.
 ///
+/// Each event is stamped with a fresh `id` (any incoming `id` is
+/// overwritten) and chained to the previous one: the first event's
+/// `parent_id` is `parent_hint` when given, otherwise the file's current
+/// last event's id (so a continuation appends to the active leaf), or `None`
+/// if the file has no events yet (the root). `parent_hint` is how a branch
+/// is created — pass the entry id to branch from and the new turn becomes a
+/// sibling of the existing children.
+///
 /// # Errors
 /// Returns [`Error::Io`] on open/write failure or [`Error::State`] on a
 /// serialization failure.
-pub fn append_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
+pub fn append_events(
+    path: &Path,
+    events: &mut [SessionEvent],
+    parent_hint: Option<&str>,
+) -> Result<(u64, u64)> {
     if events.is_empty() {
         let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         return Ok((len, len));
+    }
+    // Resolve the first event's parent: explicit hint (branch) > the file's
+    // current last event (linear continuation) > None (root).
+    let mut parent = match parent_hint {
+        Some(id) => Some(id.to_string()),
+        None => last_event_id(path)?,
+    };
+    for ev in events.iter_mut() {
+        ev.id = short_id();
+        ev.parent_id = parent.clone();
+        parent = Some(ev.id.clone());
     }
     let byte_start = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut file = std::fs::OpenOptions::new()
@@ -290,6 +330,39 @@ pub fn append_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)>
     Ok((byte_start, byte_end))
 }
 
+/// Read the `id` of the last event line in `path`, or `None` if the file has
+/// no events (only a header, or empty). Used by [`append_events`] to chain a
+/// continuation onto the active leaf.
+///
+/// # Errors
+/// Returns [`Error::Io`] on a read failure other than the file not existing.
+fn last_event_id(path: &Path) -> Result<Option<String>> {
+    use std::io::{BufRead, BufReader};
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    let mut last: Option<String> = None;
+    let mut first = true;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if first {
+            // Skip the header line.
+            first = false;
+            continue;
+        }
+        if let Ok(ev) = parse_event(trimmed) {
+            last = Some(ev.id);
+        }
+    }
+    Ok(last)
+}
+
 /// Parse a single transcript body line into a [`SessionEvent`].
 ///
 /// Current files are tagged (`{"type":"message", ...}`); older files written
@@ -304,9 +377,65 @@ pub fn parse_event(line: &str) -> Result<SessionEvent> {
     if let Ok(ev) = serde_json::from_str::<SessionEvent>(line) {
         return Ok(ev);
     }
+    // Legacy pre-event-log files stored bare `Message` JSON per line; wrap
+    // it so those sessions still resume (without timings/cost, as before).
+    // `id`/`parent_id` are left empty and resolved by the caller (the load
+    // loop chains them into a linear v1 migration).
     serde_json::from_str::<Message>(line)
-        .map(SessionEvent::Message)
+        .map(|m| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(m),
+        })
         .map_err(|e| Error::State(format!("parse event: {e}")))
+}
+
+/// The id of the last event in `events` (the active leaf for a freshly
+/// loaded session), or `None` if there are no events.
+#[must_use]
+pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
+    events.last().map(|e| e.id.as_str())
+}
+
+/// Indices of the events on the path from the leaf `leaf_id` to the root,
+/// in root-first order (oldest to newest). Returns an empty `Vec` if
+/// `leaf_id` is not found.
+///
+/// This is the tree walk that builds the agent's conversation history and
+/// the UI's visible turn list: branching changes the leaf, and the walk
+/// excludes sibling branches automatically.
+#[must_use]
+pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, ev) in events.iter().enumerate() {
+        if !ev.id.is_empty() {
+            by_id.insert(ev.id.as_str(), i);
+        }
+    }
+    let mut path = Vec::new();
+    let mut cur = by_id.get(leaf_id).copied();
+    while let Some(i) = cur {
+        path.push(i);
+        let ev = &events[i];
+        cur = ev.parent_id.as_deref().and_then(|p| by_id.get(p).copied());
+        // Guard against a cycle (malformed parent linkage).
+        if path.len() > events.len() {
+            return Vec::new();
+        }
+    }
+    path.reverse();
+    path
+}
+
+/// Indices of the events on the path from the last event (the active leaf)
+/// to the root, in root-first order. Convenience for the common resume case
+/// where the leaf is the file's last-appended entry.
+#[must_use]
+pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
+    match leaf_id(events) {
+        Some(id) => active_path(events, id),
+        None => Vec::new(),
+    }
 }
 
 
@@ -318,13 +447,13 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
     let header: Header = serde_json::from_str(lines.next()?).ok()?;
-    if header.meta.version != SESSION_VERSION {
+    if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return None;
     }
     let count = lines
         .filter(|l| !l.is_empty())
         .filter(|l| {
-            parse_event(l).map_or(false, |ev| matches!(ev, SessionEvent::Message(_)))
+            parse_event(l).map_or(false, |ev| matches!(ev.kind, SessionEventKind::Message(_)))
         })
         .count();
     Some(SessionEntry {
@@ -357,11 +486,16 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use lofi_types::{ContentBlock, Role, Usage};
+    use lofi_types::{ContentBlock, Role, SessionEventKind, Usage};
 
-    /// Wrap a message as a `Message` session event.
+    /// Wrap a message as a `Message` session event (id/parent_id left empty;
+    /// `append_events` assigns and chains them).
     fn ev(msg: Message) -> SessionEvent {
-        SessionEvent::Message(msg)
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(msg),
+        }
     }
     use tempfile::tempdir;
 
@@ -408,11 +542,15 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/proj2");
         let path = store.create(cwd, "openai/gpt-4o").unwrap();
-        append_events(&path, &[ev(user("hello")), ev(assistant("hi there"))]).unwrap();
+        let mut batch = [ev(user("hello")), ev(assistant("hi there"))];
+        append_events(&path, &mut batch, None).unwrap();
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], SessionEvent::Message(m) if m.role == Role::User));
-        assert!(matches!(&events[1], SessionEvent::Message(m) if m.role == Role::Assistant));
+        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
+        assert!(matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
+        // Linear chain: first event is root, second chains to first.
+        assert!(events[0].parent_id.is_none());
+        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
     }
 
     #[test]
@@ -420,26 +558,60 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/events");
         let path = store.create(cwd, "m").unwrap();
-        append_events(
-            &path,
-            &[
-                ev(user("hi")),
-                SessionEvent::ToolTiming { id: "t1".into(), elapsed_ms: 5 },
-                SessionEvent::TurnEnd {
+        let mut batch = [
+            ev(user("hi")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::ToolTiming { tool_call_id: "t1".into(), elapsed_ms: 5 },
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
                     label: "m · medium".into(),
                     elapsed_ms: 1234,
                     cost: 0.01,
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Usage::default() },
                 },
-            ],
-        )
-        .unwrap();
+            },
+        ];
+        append_events(&path, &mut batch, None).unwrap();
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], SessionEvent::Message(m) if m.role == Role::User));
-        assert!(matches!(&events[1], SessionEvent::ToolTiming { id, elapsed_ms: 5 } if id == "t1"));
-        assert!(matches!(&events[2], SessionEvent::TurnEnd { label, elapsed_ms: 1234, cost, usage }
+        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
+        assert!(matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1"));
+        assert!(matches!(&events[2].kind, SessionEventKind::TurnEnd { label, elapsed_ms: 1234, cost, usage }
             if label == "m · medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10));
+    }
+
+    #[test]
+    fn append_with_parent_hint_branches_off_target() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/branch");
+        let path = store.create(cwd, "m").unwrap();
+        // Root chain: user -> assistant.
+        let mut first = [ev(user("a")), ev(assistant("b"))];
+        append_events(&path, &mut first, None).unwrap();
+        let (_meta, base, _, _) = load(&path).unwrap();
+        let root_id = base[0].id.clone();
+        // Branch a sibling user message off the root (not off the assistant).
+        let mut branch = [ev(user("alt"))];
+        append_events(&path, &mut branch, Some(&root_id)).unwrap();
+        let (_meta, events, _, _) = load(&path).unwrap();
+        // 3 events total; the branch's parent is the root, not the assistant.
+        assert_eq!(events.len(), 3);
+        let branch_ev = events.iter().find(|e| {
+            matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
+                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "alt")))
+        }).expect("branch event present");
+        assert_eq!(branch_ev.parent_id.as_deref(), Some(root_id.as_str()));
+        // active_path from the branch leaf is [root, branch] — the assistant
+        // is a sibling and excluded.
+        let path_idx = active_path(&events, &branch_ev.id);
+        assert_eq!(path_idx.len(), 2);
+        assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User));
+        assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User));
     }
 
     #[test]
@@ -457,7 +629,7 @@ mod tests {
             .unwrap();
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], SessionEvent::Message(m) if m.role == Role::User));
+        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
     }
 
     #[test]
@@ -467,7 +639,8 @@ mod tests {
         let p1 = store.create(cwd, "m").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let p2 = store.create(cwd, "m").unwrap();
-        append_events(&p1, &[ev(user("a"))]).unwrap();
+        let mut batch = [ev(user("a"))];
+        append_events(&p1, &mut batch, None).unwrap();
         let list = store.list_for_cwd(cwd).unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].path, p2);

@@ -1074,7 +1074,7 @@ impl Agent {
                         if let Some((name, args)) = lock(&native_pending).remove(&id) {
                             lock(&native_completed).push(NativeToolRecord {
                                 parent: parent.clone(),
-                                id,
+                                call_id: id,
                                 name,
                                 args,
                                 result: result.clone(),

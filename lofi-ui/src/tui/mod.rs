@@ -40,7 +40,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use lofi_core::session::store::{self, SessionEntry, SessionStore};
-use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -2081,8 +2081,8 @@ fn turn_byte_ranges_from_events(
     let mut cur_start: Option<u64> = None;
     for (i, ev) in events.iter().enumerate() {
         let is_turn_start = matches!(
-            ev,
-            SessionEvent::Message(m)
+            &ev.kind,
+            SessionEventKind::Message(m)
                 if m.role == Role::User
                     && !m.blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
         );
@@ -2283,14 +2283,14 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
     // assistant `Thinking` blocks as they are replayed.
     let mut thinking_timing: Vec<u64> = Vec::new();
     for ev in events {
-        match ev {
-            SessionEvent::ToolTiming { id, elapsed_ms } => {
-                tool_elapsed.insert(id.clone(), *elapsed_ms);
+        match &ev.kind {
+            SessionEventKind::ToolTiming { tool_call_id, elapsed_ms } => {
+                tool_elapsed.insert(tool_call_id.clone(), *elapsed_ms);
             }
-            SessionEvent::ThinkingTiming { elapsed_ms } => {
+            SessionEventKind::ThinkingTiming { elapsed_ms } => {
                 thinking_timing.push(*elapsed_ms);
             }
-            SessionEvent::NativeTool(rec) => {
+            SessionEventKind::NativeTool(rec) => {
                 native_by_parent
                     .entry(rec.parent.clone())
                     .or_default()
@@ -2302,8 +2302,8 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
     let mut out: Vec<AgentEvent> = Vec::new();
     let mut thinking_idx = 0usize;
     for ev in events {
-        match ev {
-            SessionEvent::Message(msg) => match msg.role {
+        match &ev.kind {
+            SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
                     // ToolResult blocks attach to the current turn's pending
                     // tool calls as deferred `ToolEnd` events.
@@ -2376,13 +2376,13 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
                                     for rec in natives {
                                         out.push(AgentEvent::NativeToolStart {
                                             parent: id.clone(),
-                                            id: rec.id,
+                                            id: rec.call_id,
                                             name: rec.name.clone(),
                                             args: rec.args.clone(),
                                         });
                                         out.push(AgentEvent::NativeToolEnd {
                                             parent: id.clone(),
-                                            id: rec.id,
+                                            id: rec.call_id,
                                             result: rec.result.clone(),
                                             is_error: rec.is_error,
                                         });
@@ -2414,8 +2414,8 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
                 }
                 Role::System => {}
             },
-            SessionEvent::NativeTool(_) | SessionEvent::ToolTiming { .. } | SessionEvent::ThinkingTiming { .. } => {}
-            SessionEvent::TurnEnd { label, elapsed_ms, cost, usage, .. } => {
+            SessionEventKind::NativeTool(_) | SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {}
+            SessionEventKind::TurnEnd { label, elapsed_ms, cost, usage, .. } => {
                 out.push(AgentEvent::TurnEnd {
                     label: label.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -2431,10 +2431,13 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
 /// Extract the conversation messages from a transcript event log, for the
 /// agent's in-memory history on resume.
 fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
-    events
-        .iter()
-        .filter_map(|ev| match ev {
-            SessionEvent::Message(m) => Some(m.clone()),
+    // Walk the active path (leaf -> root) so a resumed session continues
+    // from the active branch, excluding siblings. The path is root-first,
+    // which is the order messages should be fed to the model.
+    store::active_path_from_leaf(events)
+        .into_iter()
+        .filter_map(|i| match &events[i].kind {
+            SessionEventKind::Message(m) => Some(m.clone()),
             _ => None,
         })
         .collect()
@@ -3387,6 +3390,30 @@ mod tests {
         }
     }
 
+    /// Build a `Vec<SessionEvent>` from kinds, assigning fresh ids and
+    /// chaining each event's `parent_id` to the previous one (root = first).
+    /// Mirrors what `store::append_events` does on disk, so
+    /// `messages_from_events` / `replay_session_events` see a valid tree.
+    fn sev_chain<I: IntoIterator<Item = SessionEventKind>>(kinds: I) -> Vec<SessionEvent> {
+        let mut out = Vec::new();
+        let mut parent: Option<String> = None;
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let id = format!("e{i}");
+            out.push(SessionEvent {
+                id: id.clone(),
+                parent_id: parent.clone(),
+                kind,
+            });
+            parent = Some(id);
+        }
+        out
+    }
+
+    /// Wrap a message as a `Message` session-event kind.
+    fn msg(m: Message) -> SessionEventKind {
+        SessionEventKind::Message(m)
+    }
+
     #[test]
     fn text_deltas_accumulate_into_one_text_block() {
         let mut a = app();
@@ -3780,11 +3807,11 @@ mod tests {
                 },
             ],
         };
-        let events = vec![
-            SessionEvent::Message(user("hi")),
-            SessionEvent::Message(assistant_with_thinking),
-            SessionEvent::ThinkingTiming { elapsed_ms: 1234 },
-        ];
+        let events = sev_chain([
+            msg(user("hi")),
+            msg(assistant_with_thinking),
+            SessionEventKind::ThinkingTiming { elapsed_ms: 1234 },
+        ]);
         let turns = turns_from_session_events(&events);
         assert_eq!(turns.len(), 1);
         let thinking = turns[0]
@@ -3800,12 +3827,12 @@ mod tests {
 
     #[test]
     fn turns_from_events_round_trip() {
-        let events = vec![
-            SessionEvent::Message(user("hello")),
-            SessionEvent::Message(assistant("hi there")),
-            SessionEvent::Message(user("again")),
-            SessionEvent::Message(assistant("yep")),
-        ];
+        let events = sev_chain([
+            msg(user("hello")),
+            msg(assistant("hi there")),
+            msg(user("again")),
+            msg(assistant("yep")),
+        ]);
         let turns = turns_from_session_events(&events);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].prompt, "hello");
@@ -3841,7 +3868,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text { text: "done".to_string() }],
             },
         ];
-        let events: Vec<SessionEvent> = messages.into_iter().map(SessionEvent::Message).collect();
+        let events: Vec<SessionEvent> = sev_chain(messages.into_iter().map(msg));
         let turns = turns_from_session_events(&events);
         assert_eq!(turns.len(), 1);
         let blocks = &turns[0].blocks;
@@ -3857,9 +3884,9 @@ mod tests {
 
     #[test]
     fn turns_from_events_restores_timings() {
-        let events = vec![
-            SessionEvent::Message(user("run it")),
-            SessionEvent::Message(Message {
+        let events = sev_chain([
+            msg(user("run it")),
+            msg(Message {
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::ToolUse {
                     id: "t1".to_string(),
@@ -3867,7 +3894,7 @@ mod tests {
                     input: serde_json::json!({"code": "return 1"}),
                 }],
             }),
-            SessionEvent::Message(Message {
+            msg(Message {
                 role: Role::User,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".to_string(),
@@ -3875,18 +3902,18 @@ mod tests {
                     is_error: false,
                 }],
             }),
-            SessionEvent::Message(Message {
+            msg(Message {
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text { text: "done".to_string() }],
             }),
-            SessionEvent::ToolTiming { id: "t1".into(), elapsed_ms: 7 },
-            SessionEvent::TurnEnd {
+            SessionEventKind::ToolTiming { tool_call_id: "t1".into(), elapsed_ms: 7 },
+            SessionEventKind::TurnEnd {
                 label: "proxy/gemini-3-flash · medium".into(),
                 elapsed_ms: 2000,
                 cost: 0.0,
                 usage: Usage::default(),
             },
-        ];
+        ]);
         let turns = turns_from_session_events(&events);
         assert_eq!(turns.len(), 1);
         let blocks = &turns[0].blocks;

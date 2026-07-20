@@ -260,36 +260,33 @@ pub struct Usage {
 
 /// A native tool call (`lofi.bash`/`lofi.read`/…) that ran inside an `exec`
 /// block, captured so the nested call list survives resume. `parent` is the
-/// enclosing exec tool-call id; `id` is a per-exec counter.
+/// enclosing exec tool-call id; `call_id` is a per-exec counter. Named
+/// `call_id` (not `id`) so it does not collide with the tree-level `id` on
+/// [`SessionEvent`] when flattened together.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeToolRecord {
     pub parent: String,
-    pub id: u64,
+    pub call_id: u64,
     pub name: String,
     pub args: String,
     pub result: String,
     pub is_error: bool,
 }
 
-/// One append-only line in a session transcript log.
-///
-/// The first line of a session file is the session header (written by the
-/// store); every subsequent line is a `SessionEvent`. The engine appends
-/// events as a turn commits — the conversation messages plus the run's own
-/// timing/cost metadata — and the UI replays them into its view. Putting
-/// timings and cost in the same log as the messages (rather than a sidecar)
-/// means a resumed session reconstructs identically to the live one, through
-/// a single replayer.
+/// The payload of a [`SessionEvent`], exclusive of tree linkage. See
+/// [`SessionEvent`] for the on-disk shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionEvent {
+pub enum SessionEventKind {
     /// A conversation message: a user prompt, an assistant turn, or a tool
     /// result. Serialized as `{"type":"message", <Message fields>}`.
     Message(Message),
     /// Wall-clock duration of a completed tool call within a turn, so the
-    /// exec block's `took Ns` marker survives resume.
+    /// exec block's `took Ns` marker survives resume. `tool_call_id` is the
+    /// provider tool-call id; named `tool_call_id` (not `id`) so it does not
+    /// collide with the tree-level `id` on [`SessionEvent`] when flattened.
     ToolTiming {
-        id: String,
+        tool_call_id: String,
         elapsed_ms: u64,
     },
     /// Wall-clock duration of a completed thinking block within a turn, so the
@@ -310,6 +307,39 @@ pub enum SessionEvent {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
+}
+
+/// One append-only line in a session transcript log.
+///
+/// The first line of a session file is the session header (written by the
+/// store); every subsequent line is a `SessionEvent`. Events form a tree via
+/// `id`/`parent_id`: each entry points at its parent, the root entry's
+/// `parent_id` is `None`, and the "active leaf" is the current position in
+/// the tree. Branching appends a new child to an earlier entry instead of to
+/// the previous line, so alternatives coexist in one file.
+///
+/// The engine appends events as a turn commits — the conversation messages
+/// plus the run's own timing/cost metadata — and the UI replays them into its
+/// view. Putting timings and cost in the same log as the messages (rather
+/// than a sidecar) means a resumed session reconstructs identically to the
+/// live one, through a single replayer.
+///
+/// `id`/`parent_id` are `#[serde(default)]` so legacy v1 files (which have
+/// neither) still parse; the store migrates them by chaining each event to
+/// the previous one on load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEvent {
+    /// Short, low-entropy id unique within this file. Assigned by the store
+    /// on append.
+    #[serde(default)]
+    pub id: String,
+    /// Parent entry id, or `None` for the root entry (the first event after
+    /// the header).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// The payload (message / timing / turn marker / native tool).
+    #[serde(flatten)]
+    pub kind: SessionEventKind,
 }
 
 /// A model entry as resolved by the registry.
