@@ -27,7 +27,7 @@
 pub mod view;
 
 use std::io::{self, Stdout, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1869,11 +1869,11 @@ impl App {
             });
             return;
         };
-        // Reload events from disk so the picker reflects the freshly-committed
-        // state, not whatever was cached on resume. Failures fall through to
-        // an error turn rather than leaving the overlay half-open.
-        let events = match store::load(path) {
-            Ok((_meta, events, _offsets, _size)) => events,
+        // Lightweight index scan (id + parent_id + kind only — no
+        // ContentBlock deserialization) so /tree stays fast on large
+        // sessions. Labels are loaded on demand by offset.
+        let indices = match store::load_index(path) {
+            Ok((_meta, indices, _size)) => indices,
             Err(e) => {
                 self.push_turn(Turn {
                     prompt: "/tree".to_string(),
@@ -1882,7 +1882,7 @@ impl App {
                 return;
             }
         };
-        let entries = build_tree_entries(&events, self.branch_hint.as_deref());
+        let entries = build_tree_entries(&indices, self.branch_hint.as_deref(), path);
         if entries.is_empty() {
             self.push_turn(Turn {
                 prompt: "/tree".to_string(),
@@ -2647,122 +2647,131 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
     out
 }
 
-/// Build the '/tree' picker entries as a flat trunk with indented branches.
+/// Build the '/tree' picker entries from a lightweight event index.
 ///
-/// The active path (root → current leaf) is the trunk — rendered flat at the
-/// top level so a linear conversation reads as a simple list. Only actual
-/// branches (non-active sibling turns) create indentation, so the common
-/// case is two levels deep regardless of conversation length.
+/// Uses [`store::load_index`] (id + parent_id + kind discriminant only —
+/// no ContentBlock deserialization) to build the tree shape, then loads
+/// labels on demand via [`store::load_event_at`]. This keeps `/tree` fast
+/// on large sessions: the full [`store::load`] is avoided entirely.
+///
+/// The active path (root → `leaf_id`, or the file's last event when
+/// `leaf_id` is `None`) is the trunk — rendered flat. Only actual branches
+/// (non-active sibling turns) create indentation, so the common case is two
+/// levels deep regardless of conversation length.
 ///
 /// Node kinds:
 /// - `user:` — a user-prompt event. Selecting rolls back to BEFORE the
-///   prompt and prefills the input (edit and resend). `branch_point` is the
-///   prompt's parent.
+///   prompt and prefills the input (edit and resend).
 /// - `agent:` — a `turn_end`/`turn_failed`. Selecting rolls back to AFTER
 ///   the turn (inclusive), input empty (continue from here).
-///
-/// After each trunk node, non-active user-prompt children are rendered as a
-/// nested subtree (the branch and its descendants). Unicode box-drawing
-/// characters (`├─`, `└─`, `│`) show the structure.
-fn build_tree_entries(events: &[SessionEvent], leaf_id: Option<&str>) -> Vec<TreeEntry> {
+fn build_tree_entries(
+    indices: &[store::EventIndex],
+    leaf_id: Option<&str>,
+    path: &Path,
+) -> Vec<TreeEntry> {
     let mut children_by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&str, usize> = HashMap::new();
-    for (i, ev) in events.iter().enumerate() {
-        if !ev.id.is_empty() {
-            by_id.insert(ev.id.as_str(), i);
+    for (i, ix) in indices.iter().enumerate() {
+        if !ix.id.is_empty() {
+            by_id.insert(ix.id.as_str(), i);
         }
-        if let Some(p) = ev.parent_id.as_deref() {
+        if let Some(p) = ix.parent_id.as_deref() {
             if !p.is_empty() {
                 children_by_parent.entry(p).or_default().push(i);
             }
         }
     }
-    // Use the branch hint (if set) as the active leaf so a reverted-but-
-    // not-yet-continued session shows the rolled-back path as the trunk,
-    // not the file's last event. Without a hint, fall back to the file's
-    // last event (the normal linear-continuation case).
     let active_path: Vec<usize> = match leaf_id {
-        Some(id) => store::active_path(events, id),
-        None => store::active_path_from_leaf(events),
+        Some(id) => active_path_from_index(indices, &by_id, id),
+        None => indices
+            .last()
+            .map(|ix| active_path_from_index(indices, &by_id, &ix.id))
+            .unwrap_or_default(),
     };
     let active_set: std::collections::HashSet<usize> =
         active_path.iter().copied().collect();
 
-    // Trunk = active path filtered to displayable nodes (user prompts and
-    // turn outcomes). This is the flat spine of the tree.
+    // Trunk = active path filtered to displayable nodes.
     let trunk: Vec<usize> = active_path
         .iter()
         .copied()
-        .filter(|&i| is_tree_node(&events[i]))
+        .filter(|&i| is_tree_node(&indices[i].kind))
         .collect();
 
     let n = trunk.len();
     let mut out = Vec::new();
-
     for (pos, &idx) in trunk.iter().enumerate() {
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = if is_last { "   " } else { "│  " };
-        push_tree_entry(idx, connector, active_set.contains(&idx), events, &by_id, &mut out);
-        // Collect branches off this trunk node:
-        // 1. If this is a user prompt whose turn outcome (turn_end) is NOT
-        //    on the active path, the active path diverged before the turn
-        //    completed — the original turn_end and its descendants are a
-        //    branch.
-        // 2. Non-active user-prompt children = direct branches (e.g. from
-        //    the old /tree variant that chained off the user prompt).
+        push_tree_entry(
+            idx, connector, active_set.contains(&idx),
+            indices, &by_id, path, &mut out,
+        );
         let mut branches: Vec<usize> = Vec::new();
-        if is_user_prompt(&events[idx]) {
-            if let Some(te_idx) = find_turn_outcome(idx, events, &children_by_parent) {
+        if indices[idx].kind == store::IndexKind::UserPrompt {
+            if let Some(te_idx) = find_turn_outcome(idx, indices, &children_by_parent) {
                 if !active_set.contains(&te_idx) {
                     branches.push(te_idx);
                 }
             }
         }
         let user_branches: Vec<usize> = children_by_parent
-            .get(events[idx].id.as_str())
+            .get(indices[idx].id.as_str())
             .into_iter()
             .flatten()
             .copied()
-            .filter(|&i| is_user_prompt(&events[i]) && !active_set.contains(&i))
+            .filter(|&i| {
+                indices[i].kind == store::IndexKind::UserPrompt && !active_set.contains(&i)
+            })
             .collect();
         branches.extend(user_branches);
         if !branches.is_empty() {
             render_branch_subtree(
-                &branches,
-                events,
-                &children_by_parent,
-                &by_id,
-                child_indent,
-                &mut out,
+                &branches, indices, &children_by_parent, &by_id, path,
+                child_indent, &mut out,
             );
         }
     }
     out
 }
 
-/// Render one branch subtree: a list of sibling user-prompt nodes, each
-/// followed by its agent (turn outcome) and any sub-branches. Recurses so
-/// branches-off-branches nest further, but the common case is one level.
-/// Render branch subtrees using the same flat-trunk principle as the main
-/// tree: each branch root's linear chain (root → turn outcome → next user
-/// prompt → …) is rendered flat at this indentation level. Only actual
-/// sub-branches (divergences within a branch) create further indentation.
+/// Active path (root-first indices) from a leaf id, using the lightweight
+/// index instead of fully-loaded events.
+fn active_path_from_index(
+    indices: &[store::EventIndex],
+    by_id: &HashMap<&str, usize>,
+    leaf_id: &str,
+) -> Vec<usize> {
+    let mut path = Vec::new();
+    let mut cur = by_id.get(leaf_id).copied();
+    while let Some(i) = cur {
+        path.push(i);
+        cur = indices[i]
+            .parent_id
+            .as_deref()
+            .and_then(|p| by_id.get(p).copied());
+    }
+    path.reverse();
+    path
+}
+
+/// Render branch subtrees: each root's linear chain is rendered flat at
+/// this indentation level; only actual sub-branches (divergences within a
+/// branch) create further indentation.
 fn render_branch_subtree(
     roots: &[usize],
-    events: &[SessionEvent],
+    indices: &[store::EventIndex],
     children_by_parent: &HashMap<&str, Vec<usize>>,
     by_id: &HashMap<&str, usize>,
+    path: &Path,
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
-    // Walk each root's linear chain, flattening all chain nodes into one
-    // list at this level. `chain_set` lets us distinguish chain nodes
-    // (continuations) from sub-branches (divergences).
     let mut flat: Vec<usize> = Vec::new();
     let mut chain_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for &root in roots {
-        for idx in walk_chain(root, events, children_by_parent) {
+        for idx in walk_chain(root, indices, &children_by_parent) {
             flat.push(idx);
             chain_set.insert(idx);
         }
@@ -2772,32 +2781,32 @@ fn render_branch_subtree(
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
-        push_tree_entry(idx, &format!("{prefix}{connector}"), false, events, by_id, out);
-        // Sub-branches = children not on this chain.
+        push_tree_entry(
+            idx, &format!("{prefix}{connector}"), false,
+            indices, by_id, path, out,
+        );
         let mut sub_branches: Vec<usize> = Vec::new();
-        if is_user_prompt(&events[idx]) {
-            if let Some(te_idx) = find_turn_outcome(idx, events, children_by_parent) {
+        if indices[idx].kind == store::IndexKind::UserPrompt {
+            if let Some(te_idx) = find_turn_outcome(idx, indices, &children_by_parent) {
                 if !chain_set.contains(&te_idx) {
                     sub_branches.push(te_idx);
                 }
             }
         }
         let user_children: Vec<usize> = children_by_parent
-            .get(events[idx].id.as_str())
+            .get(indices[idx].id.as_str())
             .into_iter()
             .flatten()
             .copied()
-            .filter(|&i| is_user_prompt(&events[i]) && !chain_set.contains(&i))
+            .filter(|&i| {
+                indices[i].kind == store::IndexKind::UserPrompt && !chain_set.contains(&i)
+            })
             .collect();
         sub_branches.extend(user_children);
         if !sub_branches.is_empty() {
             render_branch_subtree(
-                &sub_branches,
-                events,
-                children_by_parent,
-                by_id,
-                &child_indent,
-                out,
+                &sub_branches, indices, &children_by_parent, &by_id, path,
+                &child_indent, out,
             );
         }
     }
@@ -2805,12 +2814,10 @@ fn render_branch_subtree(
 
 /// Walk the linear chain from `start`: user → turn outcome → next user
 /// prompt → …, following the first user-prompt child at each turn_end and
-/// the turn outcome at each user prompt. Stops at cycles or dead ends.
-/// This is the "spine" of a branch — nodes on it render flat; siblings
-/// not on it are sub-branches.
+/// the turn outcome at each user prompt.
 fn walk_chain(
     start: usize,
-    events: &[SessionEvent],
+    indices: &[store::EventIndex],
     children_by_parent: &HashMap<&str, Vec<usize>>,
 ) -> Vec<usize> {
     let mut chain = vec![start];
@@ -2818,15 +2825,15 @@ fn walk_chain(
     visited.insert(start);
     let mut cur = start;
     loop {
-        let next = if is_user_prompt(&events[cur]) {
-            find_turn_outcome(cur, events, children_by_parent)
+        let next = if indices[cur].kind == store::IndexKind::UserPrompt {
+            find_turn_outcome(cur, indices, children_by_parent)
         } else {
             children_by_parent
-                .get(events[cur].id.as_str())
+                .get(indices[cur].id.as_str())
                 .into_iter()
                 .flatten()
                 .copied()
-                .find(|&i| is_user_prompt(&events[i]))
+                .find(|&i| indices[i].kind == store::IndexKind::UserPrompt)
         };
         match next {
             Some(n) if visited.insert(n) => {
@@ -2839,34 +2846,29 @@ fn walk_chain(
     chain
 }
 
-/// Append one `TreeEntry` for event `idx` with the given prefix.
+/// Append one `TreeEntry` for index `idx`, loading the label lazily from
+/// disk via the event's byte offset.
 fn push_tree_entry(
     idx: usize,
     prefix: &str,
     is_active: bool,
-    events: &[SessionEvent],
+    indices: &[store::EventIndex],
     by_id: &HashMap<&str, usize>,
+    path: &Path,
     out: &mut Vec<TreeEntry>,
 ) {
-    let ev = &events[idx];
-    let (label, prefill, branch_point) = match &ev.kind {
-        SessionEventKind::Message(m) if m.role == Role::User => {
-            let prompt = m
-                .blocks
-                .iter()
-                .find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+    let ix = &indices[idx];
+    let (label, prefill, branch_point) = match ix.kind {
+        store::IndexKind::UserPrompt => {
+            let prompt = load_prompt_text(path, ix.offset);
             (
                 format!("user: {}", one_line(&prompt)),
                 prompt,
-                ev.parent_id.clone().unwrap_or_default(),
+                ix.parent_id.clone().unwrap_or_default(),
             )
         }
-        SessionEventKind::TurnEnd { .. } => {
-            let preview = last_assistant_preview(idx, events, by_id);
+        store::IndexKind::TurnEnd => {
+            let preview = load_assistant_preview(idx, indices, by_id, path);
             (
                 format!(
                     "agent: {}",
@@ -2877,17 +2879,18 @@ fn push_tree_entry(
                     }
                 ),
                 String::new(),
-                ev.id.clone(),
+                ix.id.clone(),
             )
         }
-        SessionEventKind::TurnFailed { error, .. } => {
+        store::IndexKind::TurnFailed => {
+            let error = load_failed_error(path, ix.offset);
             (
-                format!("agent: {} (failed)", one_line(error)),
+                format!("agent: {} (failed)", one_line(&error)),
                 String::new(),
-                ev.id.clone(),
+                ix.id.clone(),
             )
         }
-        _ => return,
+        store::IndexKind::AssistantMessage | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {
         prefix: prefix.to_string(),
@@ -2898,77 +2901,65 @@ fn push_tree_entry(
     });
 }
 
-/// Whether an event is a displayable tree node (user prompt or turn
-/// outcome). System/assistant/tool/timing events are skipped — they're
-/// intra-turn detail, not branch points.
-fn is_tree_node(ev: &SessionEvent) -> bool {
-    is_user_prompt(ev)
-        || matches!(
-            ev.kind,
-            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. }
-        )
+/// Whether a kind is a displayable tree node (user prompt or turn outcome).
+fn is_tree_node(kind: &store::IndexKind) -> bool {
+    matches!(
+        kind,
+        store::IndexKind::UserPrompt
+            | store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+    )
 }
 
-/// Whether an event is a user-prompt message.
-fn is_user_prompt(ev: &SessionEvent) -> bool {
-    matches!(&ev.kind, SessionEventKind::Message(m) if m.role == Role::User)
-}/// Walk the descendant chain from `start` (a user-prompt event) to find the
-/// first `turn_end` or `turn_failed` — the outcome of this turn. Follows the
-/// in-turn chain (assistant → tool → thinking → …), skipping any user-prompt
-/// children that are branches (from the old /tree variant). Returns `None`
-/// if the turn is still in progress (no outcome event yet).
+/// Walk the descendant chain from `start` (a user-prompt event) to find the
+/// first turn_end/turn_failed — the outcome of this turn. Follows the
+/// in-turn chain (assistant → tool → thinking → …), skipping user-prompt
+/// children that are branches.
 fn find_turn_outcome(
     start: usize,
-    events: &[SessionEvent],
+    indices: &[store::EventIndex],
     children_by_parent: &HashMap<&str, Vec<usize>>,
 ) -> Option<usize> {
     let mut cur = start;
     let mut visited = std::collections::HashSet::new();
     loop {
         if !visited.insert(cur) {
-            return None; // cycle guard
+            return None;
         }
-        if matches!(
-            events[cur].kind,
-            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. }
-        ) {
-            return Some(cur);
+        match indices[cur].kind {
+            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => return Some(cur),
+            _ => {}
         }
-        let children = children_by_parent.get(events[cur].id.as_str())?;
-        // Follow the first non-user-prompt child (the in-turn chain).
-        // User-prompt children are branches, not part of this turn.
-        cur = *children.iter().find(|&&i| {
-            !matches!(&events[i].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        })?;
+        let children = children_by_parent.get(indices[cur].id.as_str())?;
+        cur = *children
+            .iter()
+            .find(|&&i| indices[i].kind != store::IndexKind::UserPrompt)?;
     }
 }
 
 /// Preview of the last assistant text in the turn ending at `turn_end_idx`:
-/// walk the parent chain back to the user prompt, returning the first
-/// assistant `Text` block found.
-fn last_assistant_preview(
+/// walk the parent chain (using the index) back to the user prompt, loading
+/// only assistant-message events to find the first text block.
+fn load_assistant_preview(
     turn_end_idx: usize,
-    events: &[SessionEvent],
+    indices: &[store::EventIndex],
     by_id: &HashMap<&str, usize>,
+    path: &Path,
 ) -> String {
     let mut cur = turn_end_idx;
     let mut visited = std::collections::HashSet::new();
-    while let Some(parent_id) = events[cur].parent_id.as_deref() {
+    while let Some(parent_id) = indices[cur].parent_id.as_deref() {
         if !visited.insert(cur) {
             break;
         }
         let Some(&pidx) = by_id.get(parent_id) else { break };
-        if let SessionEventKind::Message(m) = &events[pidx].kind {
-            if m.role == Role::User {
-                break;
-            }
-            if m.role == Role::Assistant {
-                if let Some(text) = m.blocks.iter().find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                }) {
-                    return one_line(text);
-                }
+        let pix = &indices[pidx];
+        if pix.kind == store::IndexKind::UserPrompt {
+            break;
+        }
+        if pix.kind == store::IndexKind::AssistantMessage {
+            if let Some(text) = load_assistant_text(path, pix.offset) {
+                return one_line(&text);
             }
         }
         cur = pidx;
@@ -2976,9 +2967,52 @@ fn last_assistant_preview(
     String::new()
 }
 
-/// Collapse a prompt/response preview to a single line (newlines → ⏎) and
-/// trim to a display-friendly width so each picker row is one line.
-fn one_line(s: &str) -> String {
+/// Load a user-prompt event and extract its first text block.
+fn load_prompt_text(path: &Path, offset: u64) -> String {
+    let Ok(ev) = store::load_event_at(path, offset) else {
+        return String::new();
+    };
+    if let SessionEventKind::Message(m) = ev.kind {
+        if m.role == Role::User {
+            return m
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+        }
+    }
+    String::new()
+}
+
+/// Load an assistant-message event and extract its first text block.
+fn load_assistant_text(path: &Path, offset: u64) -> Option<String> {
+    let ev = store::load_event_at(path, offset).ok()?;
+    let SessionEventKind::Message(m) = ev.kind else { return None };
+    if m.role != Role::Assistant {
+        return None;
+    }
+    m.blocks
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+}
+
+/// Load a turn_failed event and extract its error message.
+fn load_failed_error(path: &Path, offset: u64) -> String {
+    let Ok(ev) = store::load_event_at(path, offset) else {
+        return String::new();
+    };
+    if let SessionEventKind::TurnFailed { error, .. } = ev.kind {
+        error
+    } else {
+        String::new()
+    }
+}fn one_line(s: &str) -> String {
     const MAX: usize = 60;
     let collapsed = s.replace('\n', " ⏎ ");
     if collapsed.chars().count() <= MAX {
