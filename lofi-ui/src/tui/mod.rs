@@ -142,6 +142,11 @@ enum Block {
     /// Turn-end rule: `<label> done in Ns` followed by a dash
     /// fill, appended when a run finishes.
     TurnEnd { label: String, elapsed: Duration },
+    /// Turn-failed rule: `<label> failed in Ns · <error>` in the error
+    /// tint, appended when a run ends in a non-retryable error or is
+    /// cancelled. The turn's partial messages precede it; the marker is the
+    /// leaf of the failed branch.
+    TurnFailed { label: String, elapsed: Duration, error: String },
 }
 
 /// A user prompt and the blocks produced in response.
@@ -638,6 +643,25 @@ impl App {
                 // `RoundUsage` events) apply the bundled totals as before.
                 if self.turn_has_round_usage {
                     self.cost += self.turn_cost;
+                } else {
+                    self.cost += cost;
+                    self.total_in += usage.input_tokens;
+                    self.total_out += usage.output_tokens;
+                    self.status_usage = Some(usage);
+                }
+                self.turn_cost = 0.0;
+                self.turn_has_round_usage = false;
+            }
+            AgentEvent::TurnFailed { cost, usage, .. } => {
+                // A failed turn's consumed tokens count honestly. Same
+                // fold logic as `TurnEnd`: the live path already applied
+                // per-round tokens via `RoundUsage` and `turn_cost` holds
+                // the cumulative cost; the resume path applies the bundled
+                // totals. `status_usage` updates either way so the gauge
+                // reflects the failed turn's last round.
+                if self.turn_has_round_usage {
+                    self.cost += self.turn_cost;
+                    self.status_usage = Some(usage);
                 } else {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
@@ -2233,6 +2257,14 @@ fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 elapsed: Duration::from_millis(elapsed_ms),
             });
         }
+        AgentEvent::TurnFailed { label, elapsed_ms, error, .. } => {
+            finalize_open_thinking(turn);
+            turn.blocks.push(Block::TurnFailed {
+                label,
+                elapsed: Duration::from_millis(elapsed_ms),
+                error,
+            });
+        }
         AgentEvent::Error(msg) => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::Error(msg));
@@ -2419,6 +2451,15 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
                 out.push(AgentEvent::TurnEnd {
                     label: label.clone(),
                     elapsed_ms: *elapsed_ms,
+                    cost: *cost,
+                    usage: *usage,
+                });
+            }
+            SessionEventKind::TurnFailed { label, elapsed_ms, error, cost, usage, .. } => {
+                out.push(AgentEvent::TurnFailed {
+                    label: label.clone(),
+                    elapsed_ms: *elapsed_ms,
+                    error: error.clone(),
                     cost: *cost,
                     usage: *usage,
                 });
@@ -3928,6 +3969,89 @@ mod tests {
             }
             other => panic!("expected TurnEnd, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn messages_from_events_excludes_failed_turn_branch() {
+        // Build a tree: root chain [user1, assistant1, TurnEnd1], then a
+        // failed branch off TurnEnd1: [user2, assistant2_partial, ...,
+        // TurnFailed] where TurnFailed.parent_id = TurnEnd1 (the checkpoint),
+        // NOT the failed turn's last message. The active-path walk must skip
+        // the failed branch's messages and continue from TurnEnd1.
+        use lofi_core::session::store::{active_path_from_leaf, last_event_id};
+        use std::path::Path;
+
+        // Simulate the recorder's on-disk output via a scratch file so we
+        // get real id/parent_id chaining (mirrors what append_events does).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n").unwrap();
+
+        // First (successful) turn: two messages + a TurnEnd, chained from
+        // the root (parent_hint None) so append_events assigns linear ids.
+        let mut t1_events: Vec<SessionEvent> = [
+            SessionEventKind::Message(user("hi")),
+            SessionEventKind::Message(assistant("hello")),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 10,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        ]
+        .into_iter()
+        .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+        .collect();
+        store::append_events(&path, &mut t1_events, None).unwrap();
+        // The checkpoint is the first turn's TurnEnd (now the file's leaf).
+        let checkpoint = last_event_id(&path).unwrap().unwrap();
+
+        // Second (failed) turn: messages chain off the checkpoint; the
+        // TurnFailed marker ALSO branches off the checkpoint (passed as the
+        // marker batch's parent_hint), mirroring the recorder's
+        // flush(Failed) logic. Empty ids/parents let append_events do the
+        // chaining.
+        let mut t2_events: Vec<SessionEvent> = [
+            SessionEventKind::Message(user("oops")),
+            SessionEventKind::Message(assistant("partial")),
+        ]
+        .into_iter()
+        .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+        .collect();
+        store::append_events(&path, &mut t2_events, Some(&checkpoint)).unwrap();
+
+        // Append the TurnFailed marker branched off the checkpoint.
+        let mut failed_marker = vec![SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnFailed {
+                label: "m".into(),
+                elapsed_ms: 5,
+                error: "boom".into(),
+                cost: 0.01,
+                usage: Usage::default(),
+            },
+        }];
+        store::append_events(&path, &mut failed_marker, Some(&checkpoint)).unwrap();
+
+        let (_meta, events, _, _) = store::load(&path).unwrap();
+        // The active leaf is the TurnFailed marker.
+        let path_idx = active_path_from_leaf(&events);
+        // Walking leaf -> root: TurnFailed -> TurnEnd1 -> assistant1 -> user1.
+        // The failed turn's user("oops")/assistant("partial") messages are a
+        // SIBLING branch off the checkpoint and must NOT appear on the path.
+        assert_eq!(path_idx.len(), 4, "active path excludes failed branch");
+        assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "hi")));
+        assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
+        assert!(matches!(events[path_idx[2]].kind, SessionEventKind::TurnEnd { .. }));
+        assert!(matches!(events[path_idx[3]].kind, SessionEventKind::TurnFailed { .. }));
+
+        // messages_from_events yields only the checkpoint's messages,
+        // excluding the failed turn.
+        let msgs = messages_from_events(&events);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
     }
 
     #[test]

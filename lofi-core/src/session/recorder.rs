@@ -22,6 +22,25 @@ use lofi_types::{Message, NativeToolRecord, SessionEvent, SessionEventKind, Usag
 use crate::session::store;
 use lofi_error::Result;
 
+/// How a turn ended, for [`SessionRecorder::flush`]. Determines whether a
+/// `TurnEnd`, `TurnFailed`, or no terminal marker is written.
+#[derive(Debug, Clone)]
+pub enum TurnOutcome {
+    /// The turn completed normally — write a `TurnEnd` marker.
+    Finished,
+    /// The turn ended in a non-retryable error or was cancelled — write a
+    /// `TurnFailed` marker carrying the error message. The turn's messages
+    /// and timings are still written so the failed attempt is visible in the
+    /// tree; the marker's `parent_id` points at the turn's checkpoint so the
+    /// active-path walk excludes the failed branch from the agent's history.
+    Failed(String),
+    /// The turn was abandoned before it produced anything worth recording —
+    /// write no terminal marker (and the flush's empty-input short-circuit
+    /// applies). Kept as a distinct state so the engine can signal "cancel
+    /// with nothing to show" without synthesizing an error string.
+    Cancelled,
+}
+
 /// A finished turn's engine-side accumulators, snapshotted at commit time and
 /// handed to [`SessionRecorder::flush`]. Built from the agent's private
 /// `TurnStats` so the recorder only depends on public data.
@@ -92,33 +111,45 @@ impl SessionRecorder {
     /// byte range of the appended lines (`None` if nothing was written).
     ///
     /// `messages` is the slice of conversation messages produced this turn
-    /// (user prompt, assistant turns, tool-result turns), in order. `finished`
-    /// is whether the turn completed normally (an errored or abandoned turn
-    /// writes its messages but no `TurnEnd` marker, matching the live view's
-    /// missing marker). `summary` carries the engine's timing/cost/native-tool
-    /// accumulators that become `ToolTiming`/`ThinkingTiming`/`NativeTool`/
-    /// `TurnEnd` events.
+    /// (user prompt, assistant turns, tool-result turns), in order. `outcome`
+    /// selects the terminal marker: [`TurnOutcome::Finished`] writes a
+    /// `TurnEnd`, [`TurnOutcome::Failed`] writes a `TurnFailed` whose
+    /// `parent_id` is the turn's checkpoint (so the active-path walk excludes
+    /// the failed branch from the agent's history), and
+    /// [`TurnOutcome::Cancelled`] writes no marker. `summary` carries the
+    /// engine's timing/cost/native-tool accumulators that become
+    /// `ToolTiming`/`ThinkingTiming`/`NativeTool`/terminal events.
     ///
     /// # Errors
     /// Propagates [`lofi_error::Error`] from disk write/serialization.
     pub fn flush(
         &mut self,
         messages: &[Message],
-        finished: bool,
+        outcome: &TurnOutcome,
         summary: &TurnSummary,
     ) -> Result<Option<(u64, u64)>> {
         if self.flushed {
             return Ok(None);
         }
         self.flushed = true;
+        let has_terminal = !matches!(outcome, TurnOutcome::Cancelled);
         if messages.is_empty()
             && summary.tool_elapsed.is_empty()
             && summary.thinking_elapsed.is_empty()
             && summary.native_tools.is_empty()
-            && !finished
+            && !has_terminal
         {
             return Ok(None);
         }
+        // Capture the checkpoint id (the file's current last event) before
+        // appending, so a `TurnFailed` marker can branch off it — making the
+        // failed turn's messages a side branch that the active-path walk
+        // skips on resume. When a `parent_hint` is set (an explicit branch)
+        // the checkpoint is the hint itself.
+        let checkpoint_id = match self.parent_hint.as_deref() {
+            Some(id) => Some(id.to_string()),
+            None => store::last_event_id(&self.path)?,
+        };
         let mut events: Vec<SessionEvent> = messages
             .iter()
             .cloned()
@@ -152,17 +183,37 @@ impl SessionRecorder {
                 kind: SessionEventKind::ThinkingTiming { elapsed_ms: *ms },
             });
         }
-        if finished {
-            events.push(SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    label: self.label.clone(),
-                    elapsed_ms: summary.elapsed_ms,
-                    cost: summary.cost,
-                    usage: summary.usage,
-                },
-            });
+        match outcome {
+            TurnOutcome::Finished => {
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::TurnEnd {
+                        label: self.label.clone(),
+                        elapsed_ms: summary.elapsed_ms,
+                        cost: summary.cost,
+                        usage: summary.usage,
+                    },
+                });
+            }
+            TurnOutcome::Failed(error) => {
+                // Branch the marker off the checkpoint so the active-path
+                // walk excludes the failed turn's messages. The messages
+                // themselves chain linearly off the checkpoint (their own
+                // branch), so they remain visible in the tree.
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: checkpoint_id.clone(),
+                    kind: SessionEventKind::TurnFailed {
+                        label: self.label.clone(),
+                        elapsed_ms: summary.elapsed_ms,
+                        error: error.clone(),
+                        cost: summary.cost,
+                        usage: summary.usage,
+                    },
+                });
+            }
+            TurnOutcome::Cancelled => {}
         }
         let (start, end) = store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
         if end > start {
@@ -248,11 +299,11 @@ mod tests {
             },
         ];
         let range = rec
-            .flush(&messages, true, &summary(100))
+            .flush(&messages, &TurnOutcome::Finished, &summary(100))
             .unwrap()
             .expect("wrote something");
         // Second flush is a no-op.
-        assert!(rec.flush(&messages, true, &summary(100)).unwrap().is_none());
+        assert!(rec.flush(&messages, &TurnOutcome::Finished, &summary(100)).unwrap().is_none());
         let (_meta, events, _offsets, _size) = store::load(&path).unwrap();
         // Expected order: 3 messages, native tool, tool timing, thinking
         // timing, turn end.
@@ -311,7 +362,7 @@ mod tests {
         std::fs::write(&path, header()).unwrap();
         let mut rec = SessionRecorder::new(path.clone(), "m".into());
         let messages = vec![user_msg("go"), assistant_text("hi")];
-        rec.flush(&messages, false, &summary(50)).unwrap();
+        rec.flush(&messages, &TurnOutcome::Cancelled, &summary(50)).unwrap();
         let (_meta, events, _, _) = store::load(&path).unwrap();
         assert!(
             !events
@@ -334,9 +385,78 @@ mod tests {
             thinking_elapsed: vec![],
             native_tools: vec![],
         };
-        let range = rec.flush(&[], false, &empty).unwrap();
+        let range = rec.flush(&[], &TurnOutcome::Cancelled, &empty).unwrap();
         assert!(range.is_none());
         let (_meta, events, _, _) = store::load(&path).unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn flush_with_turn_failed_branches_marker_off_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        // First turn: a completed user -> assistant exchange, so the file has
+        // a checkpoint (the TurnEnd) to branch the failed turn from.
+        let mut rec1 = SessionRecorder::new(path.clone(), "m".into());
+        rec1
+            .flush(
+                &[user_msg("first"), assistant_text("reply")],
+                &TurnOutcome::Finished,
+                &TurnSummary {
+                    elapsed_ms: 10,
+                    cost: 0.0,
+                    usage: Usage::default(),
+                    tool_elapsed: vec![],
+                    thinking_elapsed: vec![],
+                    native_tools: vec![],
+                },
+            )
+            .unwrap();
+        let (_meta, base, _, _) = store::load(&path).unwrap();
+        // The checkpoint is the last event of the first turn (the TurnEnd).
+        let checkpoint = base.last().unwrap().id.clone();
+
+        // Second turn: failed. Its messages chain off the checkpoint; the
+        // TurnFailed marker ALSO branches off the checkpoint, making the
+        // failed turn's messages a side branch.
+        let mut rec2 = SessionRecorder::new(path.clone(), "m".into());
+        rec2
+            .flush(
+                &[user_msg("second"), assistant_text("partial")],
+                &TurnOutcome::Failed("boom".into()),
+                &TurnSummary {
+                    elapsed_ms: 5,
+                    cost: 0.02,
+                    usage: Usage { input_tokens: 1, ..Usage::default() },
+                    tool_elapsed: vec![],
+                    thinking_elapsed: vec![],
+                    native_tools: vec![],
+                },
+            )
+            .unwrap();
+        let (_meta, events, _, _) = store::load(&path).unwrap();
+        // Find the TurnFailed marker.
+        let failed = events
+            .iter()
+            .find(|e| matches!(e.kind, SessionEventKind::TurnFailed { .. }))
+            .expect("TurnFailed marker written");
+        assert_eq!(failed.parent_id.as_deref(), Some(checkpoint.as_str()));
+        match &failed.kind {
+            SessionEventKind::TurnFailed { error, cost, .. } => {
+                assert_eq!(error, "boom");
+                assert!((*cost - 0.02).abs() < 1e-9);
+            }
+            _ => unreachable!(),
+        }
+        // The failed turn's first message also chains off the checkpoint
+        // (its parent is the checkpoint, not the previous failed-turn
+        // message), confirming both are siblings rooted at the checkpoint.
+        let failed_first_msg = events
+            .iter()
+            .find(|e| matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
+                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "second"))))
+            .expect("failed turn user message present");
+        assert_eq!(failed_first_msg.parent_id.as_deref(), Some(checkpoint.as_str()));
     }
 }

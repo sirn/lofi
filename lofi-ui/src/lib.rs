@@ -296,6 +296,10 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),
                 AgentEvent::TurnEnd { .. } => stdout.write_all(b"\n"),
+                AgentEvent::TurnFailed { error, .. } => {
+                    let _ = stdout.write_all(b"\n");
+                    writeln!(stderr, "error: {error}")
+                }
             };
             if let Err(e) = write_res {
                 // Close the receive side so agent sends fail immediately

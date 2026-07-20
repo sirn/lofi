@@ -31,7 +31,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config_loader::load_config_or_default;
 use crate::models::ModelRegistry;
-use crate::session::recorder::SessionRecorder;
+use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
 use lofi_code::{exec, AgentFn, ExecCtx, ExecOptions, ToolEvent};
@@ -198,6 +198,26 @@ pub enum AgentEvent {
         label: String,
         /// Wall-clock duration of the turn in milliseconds.
         elapsed_ms: u64,
+        /// Accumulated USD cost across the turn's rounds.
+        cost: f64,
+        /// Final round's token usage (drives the context gauge).
+        usage: Usage,
+    },
+    /// A turn ended in failure (a non-retryable provider error or a user
+    /// cancel): the rounds that did run still consumed tokens, so this
+    /// carries the same cost/usage as [`TurnEnd`](Self::TurnEnd) plus the
+    /// error message. The UI folds the turn's `turn_cost` into `cost` (so
+    /// failed attempts are honestly accounted for) and renders a red
+    /// `◇ label failed in Ns · <error>` marker. Emitted once per failed
+    /// turn, after any [`RoundUsage`](Self::RoundUsage) events for the
+    /// rounds that completed.
+    TurnFailed {
+        /// `provider/model · level` label for the failure marker.
+        label: String,
+        /// Wall-clock duration of the turn in milliseconds.
+        elapsed_ms: u64,
+        /// The error that ended the turn (provider error or "cancelled").
+        error: String,
         /// Accumulated USD cost across the turn's rounds.
         cost: f64,
         /// Final round's token usage (drives the context gauge).
@@ -547,6 +567,7 @@ impl Agent {
         }
         let mut stats = TurnStats::new();
         let mut finished_normally = false;
+        let mut cancelled = false;
         let mut err: Option<Error> = None;
         let retry = self.retry;
         let mut retry_attempt = 0u32;
@@ -574,12 +595,21 @@ impl Agent {
                     }
                     break;
                 }
-                Ok(false) if tx.is_closed() => break,
+                Ok(false) if tx.is_closed() => {
+                    // Receiver dropped mid-turn after a tool round. Record
+                    // the partial turn as a failed branch.
+                    cancelled = true;
+                    break;
+                }
                 Ok(false) => {}
                 Err(Error::Cancelled) => {
-                    // Abandoned: roll back the partial turn and commit nothing.
-                    messages.truncate(checkpoint);
-                    return Ok(());
+                    // Abandoned by the user (Ctrl-C / receiver dropped). The
+                    // rounds that ran still consumed tokens, so record the
+                    // partial turn as a failed branch instead of dropping it.
+                    // Fall through to the commit block, which emits a
+                    // `TurnFailed` marker and writes the partial messages.
+                    cancelled = true;
+                    break;
                 }
                 Err(e) => {
                     // Transient provider errors are retried with exponential
@@ -616,8 +646,10 @@ impl Agent {
                             }
                             Ok(_) => {
                                 // The receiver dropped during the backoff.
-                                messages.truncate(checkpoint);
-                                return Ok(());
+                                // Treat as a user cancel: record the partial
+                                // turn as a failed branch.
+                                cancelled = true;
+                                break;
                             }
                         }
                         continue;
@@ -638,20 +670,44 @@ impl Agent {
                 }
             }
         }
-        // Commit the turn's messages and tool timings. A `TurnEnd` marker
-        // (and its cost/usage summary) is written and emitted only when the
-        // turn completed normally — an errored or abandoned turn has no
-        // "done in Ns" summary, matching the live view's missing marker.
+        // Commit the turn's messages and tool timings. A terminal marker
+        // (`TurnEnd` for success, `TurnFailed` for error/cancel) is written
+        // and emitted when the turn produced something to record — failed
+        // turns are now kept as branches so their consumed tokens are
+        // honestly accounted for and the failed attempt is inspectable.
         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-        if finished_normally && !tx.is_closed() {
-            let _ = tx
-                .send(AgentEvent::TurnEnd {
-                    label: self.run_label(),
-                    elapsed_ms,
-                    cost: stats.cost,
-                    usage: stats.usage,
-                })
-                .await;
+        let outcome = if finished_normally {
+            Some(TurnOutcome::Finished)
+        } else if let Some(e) = &err {
+            Some(TurnOutcome::Failed(e.to_string()))
+        } else if cancelled {
+            Some(TurnOutcome::Failed("cancelled".to_string()))
+        } else {
+            None
+        };
+        if let Some(outcome) = &outcome {
+            if !tx.is_closed() {
+                let _ = match outcome {
+                    TurnOutcome::Finished => tx
+                        .send(AgentEvent::TurnEnd {
+                            label: self.run_label(),
+                            elapsed_ms,
+                            cost: stats.cost,
+                            usage: stats.usage,
+                        })
+                        .await,
+                    TurnOutcome::Failed(error) => tx
+                        .send(AgentEvent::TurnFailed {
+                            label: self.run_label(),
+                            elapsed_ms,
+                            error: error.clone(),
+                            cost: stats.cost,
+                            usage: stats.usage,
+                        })
+                        .await,
+                    TurnOutcome::Cancelled => Ok(()),
+                };
+            }
         }
         // The durable translation lives in `SessionRecorder`: hand it the
         // finalized message slice + a snapshot of the engine's accumulators
@@ -660,7 +716,9 @@ impl Agent {
         if let Some(commit) = commit {
             let summary = stats.summary(elapsed_ms);
             let mut recorder = SessionRecorder::new(commit.path.clone(), commit.label.clone());
-            match recorder.flush(&messages[prev_len..], finished_normally, &summary) {
+            // A turn with no terminal outcome and no content writes nothing.
+            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
+            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
                     let _ = tx
                         .send(AgentEvent::TurnCommitted { byte_start, byte_end })
