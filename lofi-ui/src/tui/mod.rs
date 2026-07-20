@@ -2643,31 +2643,24 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
     out
 }
 
-/// Extract the conversation messages from a transcript event log, for the
-/// agent's in-memory history on resume.
+/// Build the '/tree' picker entries as a flat trunk with indented branches.
 ///
-/// Walks the active path (leaf -> root) so a resumed session continues from
-/// the active branch, excluding siblings. A `TurnFailed` marker means the
-/// messages between it and the previous `TurnEnd` (the failed turn's
-/// partial content) must NOT be fed to the model on resume — the failed
-/// turn's content stays on the active path so the UI can render it, but the
-/// agent's history skips it. We walk leaf-first and toggle a `skipping`
-/// flag at the `TurnFailed` boundary, clearing it at the prior `TurnEnd`.
-/// Build the '/tree' picker as a tree of `user:` / `agent:` nodes rendered
-/// with ASCII tree art (`|-`, ``- `, `|  `, `   `), showing the session's
-/// branching structure. Two node kinds:
-/// - `user:` — a user-prompt event. Selecting it rolls back to BEFORE the
+/// The active path (root → current leaf) is the trunk — rendered flat at the
+/// top level so a linear conversation reads as a simple list. Only actual
+/// branches (non-active sibling turns) create indentation, so the common
+/// case is two levels deep regardless of conversation length.
+///
+/// Node kinds:
+/// - `user:` — a user-prompt event. Selecting rolls back to BEFORE the
 ///   prompt and prefills the input (edit and resend). `branch_point` is the
-///   prompt's parent (the prior `turn_end`).
-/// - `agent:` — a `turn_end` (or `turn_failed`) event. Selecting it rolls
-///   back to AFTER the turn (inclusive) and leaves the input empty
-///   (continue from here). `branch_point` is the event's own id.
-/// Nodes on the active path (root → current leaf) are flagged `is_active`
-/// so the renderer can highlight the current branch. All events are scanned
-/// (not just the active path) so sibling branches from prior `/tree`
-/// gestures appear as siblings in the tree.
+///   prompt's parent.
+/// - `agent:` — a `turn_end`/`turn_failed`. Selecting rolls back to AFTER
+///   the turn (inclusive), input empty (continue from here).
+///
+/// After each trunk node, non-active user-prompt children are rendered as a
+/// nested subtree (the branch and its descendants). Unicode box-drawing
+/// characters (`├─`, `└─`, `│`) show the structure.
 fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
-    // Index children by parent id for the tree walk.
     let mut children_by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&str, usize> = HashMap::new();
     for (i, ev) in events.iter().enumerate() {
@@ -2680,148 +2673,206 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
             }
         }
     }
-    // Active path (root → leaf) for highlighting.
-    let active_path: std::collections::HashSet<&str> =
-        store::active_path_from_leaf(events)
-            .iter()
-            .map(|&i| events[i].id.as_str())
-            .collect();
-    // Root user prompts: parent is None, empty, or a system message (the
-    // implicit session root). User prompts whose parent is a `turn_end` are
-    // children of that turn_end, not roots — they appear as branches in the
-    // tree.
-    let roots: Vec<usize> = events
+    let active_path: Vec<usize> = store::active_path_from_leaf(events);
+    let active_set: std::collections::HashSet<usize> =
+        active_path.iter().copied().collect();
+
+    // Trunk = active path filtered to displayable nodes (user prompts and
+    // turn outcomes). This is the flat spine of the tree.
+    let trunk: Vec<usize> = active_path
         .iter()
-        .enumerate()
-        .filter(|(_, ev)| {
-            if !matches!(&ev.kind, SessionEventKind::Message(m) if m.role == Role::User) {
-                return false;
-            }
-            match ev.parent_id.as_deref() {
-                None | Some("") => true,
-                Some(pid) => by_id.get(pid).map_or(true, |&pidx| {
-                    matches!(&events[pidx].kind, SessionEventKind::Message(m) if m.role == Role::System)
-                }),
-            }
-        })
-        .map(|(i, _)| i)
+        .copied()
+        .filter(|&i| is_tree_node(&events[i]))
         .collect();
+
     let mut out = Vec::new();
-    render_tree_nodes(
-        &roots,
-        events,
-        &children_by_parent,
-        &by_id,
-        &active_path,
-        "",
-        &mut out,
-    );
+    let n = trunk.len();
+    for (pos, &idx) in trunk.iter().enumerate() {
+        let is_last = pos == n - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let child_indent = if is_last { "   " } else { "│  " };
+        push_tree_entry(idx, connector, events, &by_id, &active_set, &mut out);
+        // Collect branches off this trunk node:
+        // 1. If this is a user prompt whose turn outcome (turn_end) is NOT
+        //    on the active path, the active path diverged before the turn
+        //    completed — the original turn_end and its descendants are a
+        //    branch.
+        // 2. Non-active user-prompt children = direct branches (e.g. from
+        //    the old /tree variant that chained off the user prompt).
+        let mut branches: Vec<usize> = Vec::new();
+        if is_user_prompt(&events[idx]) {
+            if let Some(te_idx) = find_turn_outcome(idx, events, &children_by_parent) {
+                if !active_set.contains(&te_idx) {
+                    branches.push(te_idx);
+                }
+            }
+        }
+        let user_branches: Vec<usize> = children_by_parent
+            .get(events[idx].id.as_str())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&i| is_user_prompt(&events[i]) && !active_set.contains(&i))
+            .collect();
+        branches.extend(user_branches);
+        if !branches.is_empty() {
+            render_branch_subtree(
+                &branches,
+                events,
+                &children_by_parent,
+                &by_id,
+                &active_set,
+                child_indent,
+                &mut out,
+            );
+        }
+    }
     out
 }
 
-/// Recursive tree renderer: appends one `TreeEntry` per node (with the
-/// accumulated `prefix` of tree-art characters) then descends into children.
-/// `indices` are the child event indices at this level, in file order.
-fn render_tree_nodes(
+/// Render one branch subtree: a list of sibling user-prompt nodes, each
+/// followed by its agent (turn outcome) and any sub-branches. Recurses so
+/// branches-off-branches nest further, but the common case is one level.
+fn render_branch_subtree(
     indices: &[usize],
     events: &[SessionEvent],
     children_by_parent: &HashMap<&str, Vec<usize>>,
     by_id: &HashMap<&str, usize>,
-    active: &std::collections::HashSet<&str>,
+    active_set: &std::collections::HashSet<usize>,
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
     for (pos, &idx) in indices.iter().enumerate() {
         let is_last = pos == indices.len() - 1;
-        let connector = if is_last { "`- " } else { "|- " };
-        let ev = &events[idx];
-        let (label, prefill, branch_point, child_indices) = match &ev.kind {
-            SessionEventKind::Message(m) if m.role == Role::User => {
-                let prompt = m
-                    .blocks
-                    .iter()
-                    .find_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let bp = ev.parent_id.clone().unwrap_or_default();
-                // The turn's outcome (turn_end or turn_failed) is the first
-                // such event in the descendant chain.
-                let te_idx = find_turn_outcome(idx, events, children_by_parent);
-                // Branched user prompts that chain off THIS user prompt
-                // (from the earlier /tree variant that set branch_hint to
-                // the prompt's own id). The reworked /tree chains off the
-                // parent turn_end instead, so these appear under the agent
-                // node — but old data may have them here.
-                let branched: Vec<usize> = children_by_parent
-                    .get(ev.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .filter(|&i| {
-                        matches!(&events[i].kind, SessionEventKind::Message(m) if m.role == Role::User)
-                    })
-                    .collect();
-                let mut children = Vec::new();
-                if let Some(te) = te_idx {
-                    children.push(te);
-                }
-                children.extend(branched);
-                (format!("user: {}", one_line(&prompt)), prompt, bp, children)
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
+        let full_prefix = format!("{prefix}{connector}");
+        push_tree_entry(idx, &full_prefix, events, by_id, active_set, out);
+        // For a user-prompt node, children = [turn outcome] + [branched
+        // user prompts from the old /tree variant].
+        if is_user_prompt(&events[idx]) {
+            let te_idx = find_turn_outcome(idx, events, children_by_parent);
+            let mut children = Vec::new();
+            if let Some(te) = te_idx {
+                children.push(te);
             }
-            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. } => {
-                let preview = last_assistant_preview(idx, events, by_id);
-                let kind_label = match &ev.kind {
-                    SessionEventKind::TurnFailed { error, .. } => {
-                        format!("{} (failed)", one_line(error))
-                    }
-                    _ => {
-                        if preview.is_empty() {
-                            "(turn end)".to_string()
-                        } else {
-                            preview
-                        }
-                    }
-                };
-                let bp = ev.id.clone();
-                // Children = user prompts that branch off this turn_end.
-                let children: Vec<usize> = children_by_parent
-                    .get(ev.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .filter(|&i| {
-                        matches!(&events[i].kind, SessionEventKind::Message(m) if m.role == Role::User)
-                    })
-                    .collect();
-                (format!("agent: {kind_label}"), String::new(), bp, children)
+            let branched: Vec<usize> = children_by_parent
+                .get(events[idx].id.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&i| is_user_prompt(&events[i]) && i != idx)
+                .collect();
+            children.extend(branched);
+            if !children.is_empty() {
+                render_branch_subtree(
+                    &children,
+                    events,
+                    children_by_parent,
+                    by_id,
+                    active_set,
+                    &child_indent,
+                    out,
+                );
             }
-            _ => continue,
-        };
-        out.push(TreeEntry {
-            prefix: format!("{prefix}{connector}"),
-            label,
-            prefill,
-            branch_point,
-            is_active: active.contains(ev.id.as_str()),
-        });
-        let child_prefix = format!("{prefix}{}", if is_last { "   " } else { "|  " });
-        if !child_indices.is_empty() {
-            render_tree_nodes(
-                &child_indices,
-                events,
-                children_by_parent,
-                by_id,
-                active,
-                &child_prefix,
-                out,
-            );
+        } else {
+            // turn_end / turn_failed: children = user-prompt sub-branches.
+            let children: Vec<usize> = children_by_parent
+                .get(events[idx].id.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&i| is_user_prompt(&events[i]))
+                .collect();
+            if !children.is_empty() {
+                render_branch_subtree(
+                    &children,
+                    events,
+                    children_by_parent,
+                    by_id,
+                    active_set,
+                    &child_indent,
+                    out,
+                );
+            }
         }
     }
 }
 
-/// Walk the descendant chain from `start` (a user-prompt event) to find the
+/// Append one `TreeEntry` for event `idx` with the given prefix.
+fn push_tree_entry(
+    idx: usize,
+    prefix: &str,
+    events: &[SessionEvent],
+    by_id: &HashMap<&str, usize>,
+    active_set: &std::collections::HashSet<usize>,
+    out: &mut Vec<TreeEntry>,
+) {
+    let ev = &events[idx];
+    let (label, prefill, branch_point) = match &ev.kind {
+        SessionEventKind::Message(m) if m.role == Role::User => {
+            let prompt = m
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            (
+                format!("user: {}", one_line(&prompt)),
+                prompt,
+                ev.parent_id.clone().unwrap_or_default(),
+            )
+        }
+        SessionEventKind::TurnEnd { .. } => {
+            let preview = last_assistant_preview(idx, events, by_id);
+            (
+                format!(
+                    "agent: {}",
+                    if preview.is_empty() {
+                        "(turn end)".to_string()
+                    } else {
+                        preview
+                    }
+                ),
+                String::new(),
+                ev.id.clone(),
+            )
+        }
+        SessionEventKind::TurnFailed { error, .. } => {
+            (
+                format!("agent: {} (failed)", one_line(error)),
+                String::new(),
+                ev.id.clone(),
+            )
+        }
+        _ => return,
+    };
+    out.push(TreeEntry {
+        prefix: prefix.to_string(),
+        label,
+        prefill,
+        branch_point,
+        is_active: active_set.contains(&idx),
+    });
+}
+
+/// Whether an event is a displayable tree node (user prompt or turn
+/// outcome). System/assistant/tool/timing events are skipped — they're
+/// intra-turn detail, not branch points.
+fn is_tree_node(ev: &SessionEvent) -> bool {
+    is_user_prompt(ev)
+        || matches!(
+            ev.kind,
+            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. }
+        )
+}
+
+/// Whether an event is a user-prompt message.
+fn is_user_prompt(ev: &SessionEvent) -> bool {
+    matches!(&ev.kind, SessionEventKind::Message(m) if m.role == Role::User)
+}/// Walk the descendant chain from `start` (a user-prompt event) to find the
 /// first `turn_end` or `turn_failed` — the outcome of this turn. Follows the
 /// in-turn chain (assistant → tool → thinking → …), skipping any user-prompt
 /// children that are branches (from the old /tree variant). Returns `None`
