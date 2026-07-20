@@ -251,10 +251,11 @@ struct TreePickerState {
 /// (`user: ...` or `agent: ...`); `prefix` is the ASCII tree art (`|- `,
 /// ``- `, `|  `, `   `); `prefill` is loaded into the input box on confirm
 /// (empty for `turn_end` entries, since those continue rather than re-edit);
-/// `is_active` marks nodes on the shared trunk up to and including the
-/// last branch point (where the user reverted). The continuation after the
-/// branch point and all abandoned branches are unhighlighted — the tree
-/// structure (indentation) shows which path is current.
+/// `is_active` marks nodes on the active path — the conversation currently
+/// displayed in the transcript (root → active leaf). After a revert the
+/// active leaf is the branch point (via `branch_hint`), so rolled-back turns
+/// appear as unhighlighted branches; after continuing, the new turns join
+/// the active path and are highlighted too.
 #[derive(Debug, Clone)]
 struct TreeEntry {
     branch_point: String,
@@ -1881,7 +1882,7 @@ impl App {
                 return;
             }
         };
-        let entries = build_tree_entries(&events);
+        let entries = build_tree_entries(&events, self.branch_hint.as_deref());
         if entries.is_empty() {
             self.push_turn(Turn {
                 prompt: "/tree".to_string(),
@@ -2663,7 +2664,7 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
 /// After each trunk node, non-active user-prompt children are rendered as a
 /// nested subtree (the branch and its descendants). Unicode box-drawing
 /// characters (`├─`, `└─`, `│`) show the structure.
-fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
+fn build_tree_entries(events: &[SessionEvent], leaf_id: Option<&str>) -> Vec<TreeEntry> {
     let mut children_by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&str, usize> = HashMap::new();
     for (i, ev) in events.iter().enumerate() {
@@ -2676,7 +2677,14 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
             }
         }
     }
-    let active_path: Vec<usize> = store::active_path_from_leaf(events);
+    // Use the branch hint (if set) as the active leaf so a reverted-but-
+    // not-yet-continued session shows the rolled-back path as the trunk,
+    // not the file's last event. Without a hint, fall back to the file's
+    // last event (the normal linear-continuation case).
+    let active_path: Vec<usize> = match leaf_id {
+        Some(id) => store::active_path(events, id),
+        None => store::active_path_from_leaf(events),
+    };
     let active_set: std::collections::HashSet<usize> =
         active_path.iter().copied().collect();
 
@@ -2691,13 +2699,18 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
     let n = trunk.len();
     let mut out = Vec::new();
 
-    // Pre-compute branches per trunk node and find the last trunk position
-    // that has branch children. The active branch starts AFTER that point —
-    // only those nodes get is_active. The shared trunk before any divergence
-    // is common to all branches and stays unhighlighted.
-    let mut trunk_branches: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut last_branch_pos: Option<usize> = None;
     for (pos, &idx) in trunk.iter().enumerate() {
+        let is_last = pos == n - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let child_indent = if is_last { "   " } else { "│  " };
+        push_tree_entry(idx, connector, active_set.contains(&idx), events, &by_id, &mut out);
+        // Collect branches off this trunk node:
+        // 1. If this is a user prompt whose turn outcome (turn_end) is NOT
+        //    on the active path, the active path diverged before the turn
+        //    completed — the original turn_end and its descendants are a
+        //    branch.
+        // 2. Non-active user-prompt children = direct branches (e.g. from
+        //    the old /tree variant that chained off the user prompt).
         let mut branches: Vec<usize> = Vec::new();
         if is_user_prompt(&events[idx]) {
             if let Some(te_idx) = find_turn_outcome(idx, events, &children_by_parent) {
@@ -2715,26 +2728,8 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
             .collect();
         branches.extend(user_branches);
         if !branches.is_empty() {
-            last_branch_pos = Some(pos);
-        }
-        trunk_branches[pos] = branches;
-    }
-    let active_end = last_branch_pos;
-
-    // Highlight the shared trunk up to and including the last branch
-    // point (where the user reverted). The continuation after the branch
-    // point stays unhighlighted — the tree structure (indentation) already
-    // shows which path is current.
-    for (pos, &idx) in trunk.iter().enumerate() {
-        let is_last = pos == n - 1;
-        let connector = if is_last { "└─ " } else { "├─ " };
-        let child_indent = if is_last { "   " } else { "│  " };
-        let is_active = active_end.map_or(true, |bp| pos <= bp);
-        push_tree_entry(idx, connector, is_active, events, &by_id, &mut out);
-        let branches = &trunk_branches[pos];
-        if !branches.is_empty() {
             render_branch_subtree(
-                branches,
+                &branches,
                 events,
                 &children_by_parent,
                 &by_id,
