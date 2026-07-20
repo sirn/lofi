@@ -749,25 +749,31 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Read-only information modal (e.g. `/session` output): a centered box
-/// showing the title over the body lines. Dismissed by any key.
+/// showing the title over the body lines, with interior padding and a
+/// trailing hint line. `y` copies the body; any key dismisses.
 fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType};
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
     let Some(info) = &app.info else {
         return;
     };
     let t = app.theme;
     let title = format!(" {} ", info.title);
-    let max_line = info
+    let hint = "y to copy; any key to dismiss";
+    let max_body = info
         .lines
         .iter()
         .map(|l| prim::width(l))
         .max()
         .unwrap_or(0);
-    let inner_w = max_line.max(prim::width(&title));
+    // +2 border +2 padding on each axis.
+    let inner_w = max_body
+        .max(prim::width(hint))
+        .max(prim::width(&title));
     let w = u16::try_from(inner_w + 4)
         .unwrap_or(40)
         .min(area.width);
-    let h = u16::try_from(info.lines.len() + 2)
+    let content_h = info.lines.len() + 2; // body + blank + hint
+    let h = u16::try_from(content_h + 4)
         .unwrap_or(10)
         .min(area.height);
     let vert =
@@ -780,12 +786,22 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
         .border_type(BorderType::Rounded)
+        .padding(Padding::new(1, 1, 1, 1))
         .title(Span::styled(
             title,
             Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
-    let text: Vec<Line> = info.lines.iter().map(|l| Line::from(l.clone())).collect();
-    let para = Paragraph::new(text)
+    let mut lines: Vec<Line> = info
+        .lines
+        .iter()
+        .map(|l| Line::from(l.clone()))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        hint.to_string(),
+        Style::new().fg(t.muted),
+    ));
+    let para = Paragraph::new(lines)
         .block(block)
         .style(Style::default().fg(t.fg));
     f.render_widget(para, popup);

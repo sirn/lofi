@@ -1558,8 +1558,7 @@ impl App {
     /// Copy the current selection to the system clipboard via OSC 52.
     fn yank_selection(&mut self) {
         if let Some(text) = self.selection_text() {
-            Self::osc52(&text);
-            self.yank_notify = Some(Instant::now());
+            self.yank_text(&text);
         }
     }
 
@@ -1567,9 +1566,15 @@ impl App {
     /// Used by Navigate's `y`.
     fn yank_line(&mut self) {
         if let Some(text) = self.current_line_text() {
-            Self::osc52(&text);
-            self.yank_notify = Some(Instant::now());
+            self.yank_text(&text);
         }
+    }
+
+    /// Copy `text` to the system clipboard via OSC 52 and arm the
+    /// "Copied to clipboard" rule-line badge.
+    fn yank_text(&mut self, text: &str) {
+        Self::osc52(text);
+        self.yank_notify = Some(Instant::now());
     }
 
     fn osc52(text: &str) {
@@ -2083,11 +2088,17 @@ impl App {
     }
 
     /// Key dispatch for the read-only information modal ([`InfoModal`]).
-    /// Any key press dismisses it. Returns `true` while the modal is open
-    /// so keys don't fall through to the prompt.
-    fn handle_info_key(&mut self, _k: &KeyEvent) -> bool {
+    /// Any key dismisses it; `y` additionally copies the body to the
+    /// clipboard first (arming the "Copied to clipboard" badge). Returns
+    /// `true` while the modal is open so keys don't fall through to the
+    /// prompt.
+    fn handle_info_key(&mut self, k: &KeyEvent) -> bool {
         if self.info.is_none() {
             return false;
+        }
+        if let KeyCode::Char('y') = k.code {
+            let text = self.info.as_ref().unwrap().lines.join("\n");
+            self.yank_text(&text);
         }
         self.info = None;
         true
