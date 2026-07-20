@@ -251,7 +251,10 @@ struct TreePickerState {
 /// (`user: ...` or `agent: ...`); `prefix` is the ASCII tree art (`|- `,
 /// ``- `, `|  `, `   `); `prefill` is loaded into the input box on confirm
 /// (empty for `turn_end` entries, since those continue rather than re-edit);
-/// `is_active` marks nodes on the current active path (root → leaf).
+/// `is_active` marks nodes on the shared trunk up to and including the
+/// last branch point (where the user reverted). The continuation after the
+/// branch point and all abandoned branches are unhighlighted — the tree
+/// structure (indentation) shows which path is current.
 #[derive(Debug, Clone)]
 struct TreeEntry {
     branch_point: String,
@@ -2685,20 +2688,16 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
         .filter(|&i| is_tree_node(&events[i]))
         .collect();
 
-    let mut out = Vec::new();
     let n = trunk.len();
+    let mut out = Vec::new();
+
+    // Pre-compute branches per trunk node and find the last trunk position
+    // that has branch children. The active branch starts AFTER that point —
+    // only those nodes get is_active. The shared trunk before any divergence
+    // is common to all branches and stays unhighlighted.
+    let mut trunk_branches: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut last_branch_pos: Option<usize> = None;
     for (pos, &idx) in trunk.iter().enumerate() {
-        let is_last = pos == n - 1;
-        let connector = if is_last { "└─ " } else { "├─ " };
-        let child_indent = if is_last { "   " } else { "│  " };
-        push_tree_entry(idx, connector, events, &by_id, &active_set, &mut out);
-        // Collect branches off this trunk node:
-        // 1. If this is a user prompt whose turn outcome (turn_end) is NOT
-        //    on the active path, the active path diverged before the turn
-        //    completed — the original turn_end and its descendants are a
-        //    branch.
-        // 2. Non-active user-prompt children = direct branches (e.g. from
-        //    the old /tree variant that chained off the user prompt).
         let mut branches: Vec<usize> = Vec::new();
         if is_user_prompt(&events[idx]) {
             if let Some(te_idx) = find_turn_outcome(idx, events, &children_by_parent) {
@@ -2716,12 +2715,29 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
             .collect();
         branches.extend(user_branches);
         if !branches.is_empty() {
+            last_branch_pos = Some(pos);
+        }
+        trunk_branches[pos] = branches;
+    }
+    let active_end = last_branch_pos;
+
+    // Highlight the shared trunk up to and including the last branch
+    // point (where the user reverted). The continuation after the branch
+    // point stays unhighlighted — the tree structure (indentation) already
+    // shows which path is current.
+    for (pos, &idx) in trunk.iter().enumerate() {
+        let is_last = pos == n - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let child_indent = if is_last { "   " } else { "│  " };
+        let is_active = active_end.map_or(true, |bp| pos <= bp);
+        push_tree_entry(idx, connector, is_active, events, &by_id, &mut out);
+        let branches = &trunk_branches[pos];
+        if !branches.is_empty() {
             render_branch_subtree(
-                &branches,
+                branches,
                 events,
                 &children_by_parent,
                 &by_id,
-                &active_set,
                 child_indent,
                 &mut out,
             );
@@ -2742,7 +2758,6 @@ fn render_branch_subtree(
     events: &[SessionEvent],
     children_by_parent: &HashMap<&str, Vec<usize>>,
     by_id: &HashMap<&str, usize>,
-    active_set: &std::collections::HashSet<usize>,
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
@@ -2762,7 +2777,7 @@ fn render_branch_subtree(
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
-        push_tree_entry(idx, &format!("{prefix}{connector}"), events, by_id, active_set, out);
+        push_tree_entry(idx, &format!("{prefix}{connector}"), false, events, by_id, out);
         // Sub-branches = children not on this chain.
         let mut sub_branches: Vec<usize> = Vec::new();
         if is_user_prompt(&events[idx]) {
@@ -2786,7 +2801,6 @@ fn render_branch_subtree(
                 events,
                 children_by_parent,
                 by_id,
-                active_set,
                 &child_indent,
                 out,
             );
@@ -2834,9 +2848,9 @@ fn walk_chain(
 fn push_tree_entry(
     idx: usize,
     prefix: &str,
+    is_active: bool,
     events: &[SessionEvent],
     by_id: &HashMap<&str, usize>,
-    active_set: &std::collections::HashSet<usize>,
     out: &mut Vec<TreeEntry>,
 ) {
     let ev = &events[idx];
@@ -2885,7 +2899,7 @@ fn push_tree_entry(
         label,
         prefill,
         branch_point,
-        is_active: active_set.contains(&idx),
+        is_active,
     });
 }
 
