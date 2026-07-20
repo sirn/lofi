@@ -481,6 +481,9 @@ pub(crate) struct App {
     /// Screen rect of the log viewport, stashed at render time for hit-testing
     /// mouse scroll / selection.
     log_rect: Rect,
+    /// The prompt (input) area rect from the last render, so overlays like
+    /// the slash-complete popover can anchor above the cursor.
+    input_rect: Rect,
     /// Plain text of each *visible* log line (the viewport window only),
     /// stashed at render time so mouse selection can map screen coords to
     /// text. Window-relative: index 0 is the top visible line.
@@ -582,6 +585,7 @@ impl App {
             last_kill_was_kill: false,
             ctrl_c_at: None,
             log_rect: Rect::default(),
+            input_rect: Rect::default(),
             log_lines: Vec::new(),
             log_content: Vec::new(),
             log_off: 0,
