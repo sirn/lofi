@@ -42,6 +42,9 @@ the TUI owns the alternate screen, so logs are only emitted when you opt in.
 | `--provider <NAME>` | Select the provider (overrides `default_provider`). |
 | `--model <ID>` | Select a model by `provider/id`, raw id, name, or substring. |
 | `--api-key <KEY>` | Override the selected provider's resolved `api_key` (taken literally). |
+| `-c`, `--continue` | Resume the most recent session for this workspace. |
+| `--resume <ID>` | Resume a specific session by id prefix. |
+| `--no-session` | Do not persist a transcript (ephemeral). |
 
 With no flags, `lofi` launches the interactive TUI against the current working
 directory as the workspace root.
@@ -51,10 +54,10 @@ directory as the workspace root.
 `lofi` reads its user config from `$XDG_CONFIG_HOME/lofi/config.toml` (default
 `~/.config/lofi/config.toml`). This tree is treated as **read-only** — `lofi`
 never writes there — so a config manager (Nix, stow, etc.) can own it
-declaratively. Agent-owned, writable state (the remote-discovery cache, future
-sessions/logs) lives under `$XDG_STATE_HOME/lofi/` (default
+declaratively. Agent-owned, writable state (the remote-discovery cache and
+session transcripts) lives under `$XDG_STATE_HOME/lofi/` (default
 `~/.local/state/lofi/`). The split keeps a managed config tree pristine while
-`lofi` still has a writable home for its cache.
+`lofi` still has a writable home for its cache and history.
 
 ### Value resolution
 
@@ -257,6 +260,46 @@ name = "name"
 context_window = "context_length"
 max_tokens = "top_provider.max_completion_tokens"
 ```
+
+## Session transcripts
+
+`lofi` persists each interactive session as a JSON-lines transcript under
+`$XDG_STATE_HOME/lofi/sessions/<workspace-slug>/`, one `.jsonl` file per
+session. The first line is a `meta` header (`version`, `created`, `cwd`,
+`model`); every subsequent line is one session event. `--no-session` skips
+persistence entirely (an ephemeral session); `--continue` resumes the most
+recent session for the workspace and `--resume <id>` resumes a specific one.
+
+Events form a **tree** via `id` and `parent_id`: each event has a stable id,
+its `parent_id` chains to the previous event, and the **active path** is the
+walk from the file's leaf (the last-appended event) back to the root. Resuming
+rebuilds the agent's in-memory history from the active path alone, so sibling
+branches (alternate turns, failed attempts) do not contaminate the model's
+context.
+
+The event kinds are:
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `message` | `role`, `blocks` | A user/assistant/tool-result message. |
+| `tool_timing` | `tool_call_id`, `elapsed_ms` | Wall-clock duration of a completed tool call (so `took Ns` survives resume). |
+| `thinking_timing` | `elapsed_ms` | Wall-clock duration of a thinking block. |
+| `native_tool` | `parent`, `call_id`, `name`, `args`, `result`, `is_error` | A nested `lofi.<tool>` call inside an `exec` block. |
+| `turn_end` | `label`, `elapsed_ms`, `cost`, `usage` | A completed turn — rendered as `◇ label done in Ns`. |
+| `turn_failed` | `label`, `elapsed_ms`, `error`, `cost`, `usage` | A turn that errored or was cancelled — rendered as a red `◇ label failed in Ns · <error>`. |
+
+Failed and cancelled turns are **recorded, not dropped**: the rounds that ran
+still consumed tokens, so the turn's partial messages, timings, and a
+`turn_failed` marker are written with their accumulated cost/usage folded into
+the status-bar total. The failed turn's content stays on the active path so it
+remains visible on resume (the user can see what was attempted), but
+`messages_from_events` skips it via the `turn_failed` boundary when building
+the agent's history — the model resumes from the prior `turn_end` checkpoint,
+never fed partial or errored content.
+
+Older (v1) transcripts stored bare `Message` JSON with no `id`/`parent_id`;
+`lofi` migrates them in-memory on load by chaining each event to the previous
+one, so existing transcripts continue to resume without conversion.
 
 ## Code mode
 
