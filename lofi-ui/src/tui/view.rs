@@ -525,7 +525,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
 
 /// The footer block: a mode-colored rule, the prompt, a blank, and a gray
 /// usage line, stacked without gaps.
-fn render_footer_block(f: &mut Frame, area: Rect, app: &App) {
+fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     let prompt_h = area.height.saturating_sub(3);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -535,6 +535,7 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &App) {
     ])
     .split(area);
     render_rule(f, chunks[0], app);
+    app.input_rect = chunks[1];
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
 }
@@ -623,21 +624,16 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// Slash-command autocomplete popover: a bottom-left popup anchored just
-/// above the footer (rule + prompt + info), listing commands that start
-/// with the current input. `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc`
-/// dismisses.
+/// Slash-command autocomplete popover: a popup listing commands that
+/// start with the current input, anchored just above the prompt cursor.
+/// `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc` dismisses.
 fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(sc) = &app.slash_complete else { return; };
     let t = app.theme;
     let n = sc.candidates.len().min(8);
     let h = u16::try_from(n + 2).unwrap_or(10);
-    // Footer height = input_lines + 3 (rule + blank + info), matching
-    // `render`'s VStack. Anchor the popover just above it.
-    let input_h = u16::try_from(app.input_lines(area.width as usize).max(1)).unwrap_or(u16::MAX);
-    let footer_h = input_h.saturating_add(3);
-    let bottom = area.height.saturating_sub(footer_h);
+    // Width: longest "cmd  desc" plus borders, capped to the screen.
     let w = u16::try_from(
         SLASH_COMMANDS
             .iter()
@@ -648,15 +644,26 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     )
     .unwrap_or(40)
     .min(area.width);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(bottom.saturating_sub(h)),
-        Constraint::Length(h),
-    ])
-    .split(area);
-    let popup = vert[2];
-    let horiz = Layout::horizontal([Constraint::Length(w), Constraint::Min(0)]).split(popup);
-    let popup = horiz[0];
+    // Anchor horizontally at the cursor's column within the prompt area,
+    // so the popover tracks the cursor as the user types. The 2-cell `❯ `
+    // prefix is added by render_input; the cursor x is relative to the
+    // content, so add 2. Clamp so the popover stays on screen.
+    let content_width = app.input_rect.width.saturating_sub(2) as usize;
+    let (cursor_row, cursor_x) = app.input_cursor_pos(content_width);
+    let cursor_screen_x = app
+        .input_rect
+        .x
+        .saturating_add(2)
+        .saturating_add(u16::try_from(cursor_x).unwrap_or(u16::MAX));
+    let cursor_screen_y = app
+        .input_rect
+        .y
+        .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
+    // Bottom of the popover = the row just above the cursor's row.
+    let bottom_y = cursor_screen_y;
+    let popup_y = bottom_y.saturating_sub(h);
+    let popup_x = cursor_screen_x.min(area.width.saturating_sub(w));
+    let popup = Rect::new(popup_x, popup_y, w, h);
     f.render_widget(Clear, popup);
     let cmd_style = Style::new().fg(t.fg);
     let desc_style = Style::new().fg(t.subtle);
