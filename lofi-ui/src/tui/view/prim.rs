@@ -206,6 +206,79 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
     out
 }
 
+/// Span-aware word-wrap of a styled [`Line`] to `max_w` display cells,
+/// preserving per-span styles and all whitespace (unlike [`wrap`], which
+/// collapses spaces for flow text). Breaks at the last space that fits; a
+/// single token wider than `max_w` is broken on a wide-char boundary.
+/// Empty input yields one empty line. Used for info-modal bodies so the
+/// pre-wrap row count (for the scrollbar) and the rendered output agree.
+pub fn wrap_line_styled(line: &Line<'static>, max_w: usize) -> Vec<Line<'static>> {
+    if max_w == 0 {
+        return vec![line.clone()];
+    }
+    // Flatten into (char, style) cells once.
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            cells.push((ch, span.style));
+        }
+    }
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut i = 0;
+    while i < cells.len() {
+        let mut w = 0usize;
+        let mut j = i;
+        let mut last_space: Option<usize> = None;
+        while j < cells.len() {
+            let cw = cells[j].0.width().unwrap_or(0);
+            if w + cw > max_w {
+                break;
+            }
+            w += cw;
+            if cells[j].0 == ' ' {
+                last_space = Some(j + 1);
+            }
+            j += 1;
+        }
+        let end = if j < cells.len() {
+            last_space.filter(|&s| s > i).unwrap_or(j)
+        } else {
+            j
+        };
+        out.push(cells_to_line(&cells[i..end]));
+        i = end;
+    }
+    if out.is_empty() {
+        out.push(Line::from(""));
+    }
+    out
+}
+
+/// Merge a run of (char, style) cells into a [`Line`], fusing adjacent
+/// cells that share a style into one span.
+fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut cur: Option<Style> = None;
+    for &(ch, st) in cells {
+        if cur != Some(st) {
+            if let Some(s) = cur.take() {
+                if !buf.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut buf), s));
+                }
+            }
+            cur = Some(st);
+        }
+        buf.push(ch);
+    }
+    if let Some(s) = cur.take() {
+        if !buf.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut buf), s));
+        }
+    }
+    Line::from(spans)
+}
+
 /// Break `word` into `max_w`-wide pieces, pushing all but the last to `out`
 /// and returning `(last_piece, its_width)`. Never splits a wide char.
 fn break_wide(word: &str, max_w: usize, out: &mut Vec<String>) -> (String, usize) {
@@ -400,5 +473,44 @@ mod tests {
             .build();
         assert_eq!(line.width(), 12);
         assert_eq!(spans_of(&line), "L    C     R");
+    }
+
+    #[test]
+    fn wrap_line_styled_preserves_indent_and_styles() {
+        let key = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let val = Style::new().fg(Color::Blue);
+        let line = Line::from(vec![
+            Span::styled("  hi    ".to_string(), key),
+            Span::styled("hello world".to_string(), val),
+        ]);
+        // Fits in 30: one line, both spans kept with their styles.
+        let one = wrap_line_styled(&line, 30);
+        assert_eq!(one.len(), 1);
+        assert_eq!(spans_of(&one[0]), "  hi    hello world");
+        assert_eq!(one[0].spans.len(), 2);
+        assert_eq!(one[0].spans[0].style, key);
+        assert_eq!(one[0].spans[1].style, val);
+    }
+
+    #[test]
+    fn wrap_line_styled_wraps_at_space_preserving_width() {
+        let line = Line::from(Span::raw("  aa bb cc dd".to_string()));
+        // Width 7: "  aa bb" (7) fits, break before "cc".
+        let wrapped = wrap_line_styled(&line, 7);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(spans_of(&wrapped[0]), "  aa bb");
+        assert_eq!(spans_of(&wrapped[1]), "cc dd");
+        // each visual line fits the width
+        for l in &wrapped {
+            assert!(l.width() <= 7);
+        }
+    }
+
+    #[test]
+    fn wrap_line_styled_empty_yields_one_blank_line() {
+        let line = Line::from("");
+        let wrapped = wrap_line_styled(&line, 10);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(spans_of(&wrapped[0]), "");
     }
 }
