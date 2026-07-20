@@ -3583,6 +3583,16 @@ fn handle_event(
                 app.slash_complete_down();
                 return;
             }
+            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
+            // Input-mode cursor keys.
+            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.slash_complete_down();
+                return;
+            }
+            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.slash_complete_up();
+                return;
+            }
             KeyCode::Tab => {
                 app.slash_complete_accept();
                 return;
