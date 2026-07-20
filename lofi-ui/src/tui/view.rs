@@ -136,6 +136,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     if app.picker.is_some() {
         render_picker(f, area, app);
     }
+    if app.tree_picker.is_some() {
+        render_tree_picker(f, area, app);
+    }
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -543,7 +546,8 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let chip_w = prim::width(&chip);
     let tail = "──";
     let tail_w = prim::width(tail);
-    // Left side keeps the `──` lead; the yank badge (if active) follows it.
+    // Left side keeps the `──` lead; the yank / branch badges (if active)
+    // follow it. Quit takes precedence as a warning.
     let mut spans: Vec<Span<'static>> = vec![Span::styled("──", Style::new().fg(color))];
     if let Some(badge) = app.quit_badge() {
         spans.push(Span::styled(
@@ -554,6 +558,13 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(badge) = app.branch_badge() {
+        // Branch is informational (subtle, not warn-colored) since it's a
+        // staged action, not a confirmation prompt.
+        spans.push(Span::styled(
+            format!(" {badge} "),
+            Style::new().fg(t.fg).bg(t.muted).add_modifier(Modifier::BOLD),
         ));
     }
     let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
@@ -603,6 +614,51 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
                 .border_type(BorderType::Rounded)
                 .title(Span::styled(
                     " Resume a session ",
+                    Style::new().fg(app.theme.primary).add_modifier(Modifier::BOLD),
+                )),
+        )
+        .style(Style::default().fg(app.theme.fg))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(
+        list,
+        popup,
+        &mut ListState::default().with_selected(Some(picker.selected)),
+    );
+}
+
+/// '/tree' branch-picker overlay: a centered popup listing the session's
+/// user-prompt events. Picking one feeds the prompt back into the input and
+/// sets the branch hint so the next run starts as a sibling of that prompt.
+/// Each row shows the selected index + a one-line preview (multi-line prompts
+/// collapse with ⏎). Mirrors the visual shape of [`render_picker`] but the
+/// items come from [`crate::tui::TreeEntry`] not session summaries.
+fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    let Some(picker) = &app.tree_picker else { return; };
+    let h = u16::try_from(picker.entries.len().min(12) + 2).unwrap_or(14);
+    let w = area.width.min(80);
+    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
+    let horiz = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).split(vert[1]);
+    let popup = horiz[1];
+    f.render_widget(Clear, popup);
+    let items: Vec<ListItem> = picker
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            // Collapse multi-line prompts to a single row with ⏎ markers so
+            // the list stays one line per entry; the full text goes back into
+            // the input box on confirm regardless.
+            let preview = e.prompt.replace('\n', " ⏎ ");
+            ListItem::new(format!("{i:>2}  {preview}"))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            WidgetBlock::bordered()
+                .border_type(BorderType::Rounded)
+                .title(Span::styled(
+                    " Branch from a turn (edit and resend) ↑/↓ ↑↓ enter esc ",
                     Style::new().fg(app.theme.primary).add_modifier(Modifier::BOLD),
                 )),
         )
