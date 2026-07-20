@@ -563,11 +563,12 @@ impl Agent {
                 }],
             });
         }
-        // Checkpoint after seeding the user turn: if the receiver goes away
-        // mid-round (e.g. after the assistant tool-use turn but before its
-        // tool results), roll back so the caller-owned history is never left
-        // in a protocol-invalid partial state.
-        let checkpoint = messages.len();
+        // Previously a `checkpoint = messages.len()` was captured here so a
+        // cancel/receiver-drop could `messages.truncate(checkpoint)` and roll
+        // back the partial turn. Failed and cancelled turns are now recorded
+        // as branches (see `TurnOutcome`), so the caller's history is left in
+        // place for the recorder to write — the active-path walk on resume
+        // handles excluding the failed content from the agent's context.
         if !emit(Some(&tx), AgentEvent::TurnStart { prompt: prompt_for_event }).await {
             return Ok(());
         }

@@ -344,6 +344,19 @@ and final, and keep intermediates in-sandbox.
 | `Esc` | Clear the input box. |
 | `Up` / `Down` | Scroll the message log. |
 
+### Slash commands
+
+| Command | Action |
+| --- | --- |
+| `/help` | Show the keybindings + commands reference. |
+| `/clear` | Drop all turns from the log (the transcript file is untouched). |
+| `/new` | Start a fresh session file on the next prompt. |
+| `/resume` | Open a picker of past sessions for this workspace and resume one. |
+| `/tree` | Open a branch picker over this session's prompts; picking one feeds its text back into the input and branches the next run off that prompt (edit and resend). |
+| `/session` | Print the session path, message count, and model. |
+| `/verbose` | Toggle verbose tool detail in `exec` blocks. |
+| `/quit` | Exit. |
+
 ## Lint strictness
 
 The workspace denies `clippy::unwrap_used`, `clippy::expect_used`,
@@ -352,3 +365,10 @@ crates. Non-test code propagates errors with `?` / `let-else` and writes to
 stdout via `std::io::stdout().write_all` (never `println!`); the TUI renders
 through ratatui, not stdout. Test modules `allow(clippy::unwrap_used)` so
 assertions stay readable.
+
+## Acknowledgements
+
+lofi builds on ideas from several earlier projects:
+
+- **[pi-fabric](https://github.com/monotykamary/pi-fabric)** — for the full code mode concept that inspired lofi's single-tool `exec` approach.
+- **[pi](https://github.com/earendil-works/pi)** — for the agent loop architecture that shaped lofi's run loop and subagent design.
