@@ -481,8 +481,9 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
     let content_w = w.saturating_sub(2);
     // In Navigate/Select the prompt is inert: dim it and hide the cursor so
-    // the transcript cursor is the focus.
-    let active = app.mode == Mode::Input;
+    // the transcript cursor is the focus. A centered modal (info, /resume,
+    // /tree) likewise hides the cursor — it owns input while open.
+    let active = app.mode == Mode::Input && !app.modal_open();
     let prompt = Style::new().fg(if active { user_indicator(t) } else { t.subtle });
     let text_style = Style::new().fg(if active { t.fg } else { t.muted });
 
@@ -645,18 +646,45 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     };
     let t = app.theme;
     let total = picker.entries.len();
+    let title = " Resume a session ";
+    let items: Vec<ListItem> = picker
+        .entries
+        .iter()
+        .map(|e| {
+            let id = e.id();
+            ListItem::new(format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model))
+        })
+        .collect();
+    let content_w = picker
+        .entries
+        .iter()
+        .map(|e| {
+            prim::width(&format!(
+                "{}  ({} msgs, {})",
+                e.id(),
+                e.message_count,
+                e.meta.model
+            ))
+        })
+        .max()
+        .unwrap_or(0);
+    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+        .unwrap_or(40)
+        .min(area.width);
     let h = u16::try_from(total.min(12) + 2)
         .unwrap_or(14)
         .min(area.height);
-    let w = area.width.min(72);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
-    let horiz = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).split(vert[1]);
+    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+        .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " Resume a session ",
+            title,
             Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
@@ -669,14 +697,6 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     } else {
         inner
     };
-    let items: Vec<ListItem> = picker
-        .entries
-        .iter()
-        .map(|e| {
-            let id = e.id();
-            ListItem::new(format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model))
-        })
-        .collect();
     let list = List::new(items)
         .style(Style::default().fg(t.fg))
         .highlight_style(Style::default().bg(t.selection).fg(t.fg));
@@ -930,15 +950,29 @@ fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = &app.tree_picker else { return; };
     let t = app.theme;
     let total = picker.entries.len();
+    let title = " Roll back to a turn  ↑/↓ j/k enter esc ";
+    let content_w = picker
+        .entries
+        .iter()
+        .map(|e| prim::width(&e.prefix) + prim::width(&e.label))
+        .max()
+        .unwrap_or(0);
+    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+        .unwrap_or(40)
+        .min(area.width);
     let rows = total.min(20);
     let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
-    let popup = vert[1];
+    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+        .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
+    let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " Roll back to a turn  ↑/↓ j/k enter esc ",
+            title,
             Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
