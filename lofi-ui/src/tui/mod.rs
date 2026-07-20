@@ -2796,9 +2796,12 @@ fn active_path_from_index(
     path
 }
 
-/// Render branch subtrees: each root's linear chain is rendered flat at
-/// this indentation level; only actual sub-branches (divergences within a
-/// branch) create further indentation.
+/// Render branch subtrees. Each root is rendered as its own subtree:
+/// the root's linear chain (root → turn outcome → next user prompt → …)
+/// sits under the root's connector at this indentation level, and sibling
+/// roots are siblings of each other — not flattened into one list. Only
+/// actual sub-branches (divergences within a chain) create further
+/// indentation.
 fn render_branch_subtree(
     roots: &[usize],
     indices: &[store::EventIndex],
@@ -2808,46 +2811,50 @@ fn render_branch_subtree(
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
-    let mut flat: Vec<usize> = Vec::new();
-    let mut chain_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for &root in roots {
-        for idx in walk_chain(root, indices, &children_by_parent) {
-            flat.push(idx);
-            chain_set.insert(idx);
-        }
-    }
-    let n = flat.len();
-    for (pos, &idx) in flat.iter().enumerate() {
+    let n = roots.len();
+    for (pos, &root) in roots.iter().enumerate() {
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
-        push_tree_entry(
-            idx, &format!("{prefix}{connector}"), false,
-            indices, by_id, path, out,
-        );
-        let mut sub_branches: Vec<usize> = Vec::new();
-        if indices[idx].kind == store::IndexKind::UserPrompt {
-            if let Some(te_idx) = find_turn_outcome(idx, indices, &children_by_parent) {
-                if !chain_set.contains(&te_idx) {
-                    sub_branches.push(te_idx);
+        // Chain = this root + its linear descendants (flat at this level,
+        // under the root's connector).
+        let chain = walk_chain(root, indices, children_by_parent);
+        let chain_set: std::collections::HashSet<usize> = chain.iter().copied().collect();
+        let cn = chain.len();
+        for (cpos, &idx) in chain.iter().enumerate() {
+            let cprefix = if cpos == 0 {
+                format!("{prefix}{connector}")
+            } else {
+                let cis_last = cpos == cn - 1;
+                format!("{child_indent}{}", if cis_last { "└─ " } else { "├─ " })
+            };
+            let sub_indent = format!("{child_indent}{}", if cpos == cn - 1 { "   " } else { "│  " });
+            push_tree_entry(idx, &cprefix, false, indices, by_id, path, out);
+            let mut sub_branches: Vec<usize> = Vec::new();
+            if indices[idx].kind == store::IndexKind::UserPrompt {
+                if let Some(te_idx) = find_turn_outcome(idx, indices, children_by_parent) {
+                    if !chain_set.contains(&te_idx) {
+                        sub_branches.push(te_idx);
+                    }
                 }
             }
-        }
-        let user_children: Vec<usize> = children_by_parent
-            .get(indices[idx].id.as_str())
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|&i| {
-                indices[i].kind == store::IndexKind::UserPrompt && !chain_set.contains(&i)
-            })
-            .collect();
-        sub_branches.extend(user_children);
-        if !sub_branches.is_empty() {
-            render_branch_subtree(
-                &sub_branches, indices, &children_by_parent, &by_id, path,
-                &child_indent, out,
-            );
+            let user_children: Vec<usize> = children_by_parent
+                .get(indices[idx].id.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&i| {
+                    indices[i].kind == store::IndexKind::UserPrompt
+                        && !chain_set.contains(&i)
+                })
+                .collect();
+            sub_branches.extend(user_children);
+            if !sub_branches.is_empty() {
+                render_branch_subtree(
+                    &sub_branches, indices, &children_by_parent, &by_id, path,
+                    &sub_indent, out,
+                );
+            }
         }
     }
 }
