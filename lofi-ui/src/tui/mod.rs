@@ -297,23 +297,23 @@ fn info_section(t: Theme, label: &str) -> Line<'static> {
     ))
 }
 
-/// `  key  value` row: key bold in `fg`, value muted, key padded to a fixed
+/// `key  value` row: key bold in `fg`, value muted, key padded to a fixed
 /// column so the values line up. Longer keys just overflow the column.
 fn info_kv(t: Theme, key: &str, value: &str) -> Line<'static> {
     const COL: usize = 12;
     let pad = COL.saturating_sub(key.chars().count());
     Line::from(vec![
         Span::styled(
-            format!("  {}{}", key, " ".repeat(pad)),
+            format!("{}{}", key, " ".repeat(pad)),
             Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::new().fg(t.muted)),
     ])
 }
 
-/// A plain muted note line (no key column).
+/// A plain muted note line (no key column, flush left).
 fn info_note(t: Theme, text: &str) -> Line<'static> {
-    Line::from(Span::styled(format!("  {}", text), Style::new().fg(t.muted)))
+    Line::from(Span::styled(text.to_string(), Style::new().fg(t.muted)))
 }
 
 /// Severity of a transient rule-line notification (see [`App::notify`]).
@@ -2207,6 +2207,14 @@ impl App {
     /// Key dispatch for the read-only information modal ([`InfoModal`]).
     /// `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/`PgDn`) scroll the
     /// body; `y` copies the body to the clipboard (the modal stays open so
+    /// Whether a centered modal (info, `/resume` picker, `/tree` picker) is
+    /// open. While true the prompt cursor is hidden and paste is ignored.
+    /// The slash-complete popover is intentionally excluded — it's inline
+    /// and you're still typing into the prompt.
+    fn modal_open(&self) -> bool {
+        self.info.is_some() || self.picker.is_some() || self.tree_picker.is_some()
+    }
+
     /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
     /// swallowed. Returns `true` while the modal is open so keys don't fall
     /// through to the prompt.
@@ -2220,39 +2228,50 @@ impl App {
                 self.info = None;
             }
             KeyCode::Char('y') => {
-                let text = self
-                    .info
-                    .as_ref()
-                    .unwrap()
-                    .lines
-                    .iter()
-                    .map(|l| {
-                        l.spans
-                            .iter()
-                            .map(|s| s.content.as_ref())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.yank_text(&text);
+                if let Some(info) = self.info.as_ref() {
+                    let text = info
+                        .lines
+                        .iter()
+                        .map(|l| {
+                            l.spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.yank_text(&text);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.info.as_mut().unwrap().scroll_down();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_down();
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.info.as_mut().unwrap().scroll_up();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_up();
+                }
             }
             KeyCode::Char('n') if ctrl => {
-                self.info.as_mut().unwrap().scroll_down();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_down();
+                }
             }
             KeyCode::Char('p') if ctrl => {
-                self.info.as_mut().unwrap().scroll_up();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_up();
+                }
             }
             KeyCode::PageDown => {
-                self.info.as_mut().unwrap().scroll_page_down();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_page_down();
+                }
             }
             KeyCode::PageUp => {
-                self.info.as_mut().unwrap().scroll_page_up();
+                if let Some(i) = self.info.as_mut() {
+                    i.scroll_page_up();
+                }
             }
             _ => {}
         }
@@ -3856,8 +3875,9 @@ fn handle_event(
         return;
     }
     if let Event::Paste(s) = ev {
-        // Paste only types into the prompt; ignored in Navigate/Select.
-        if app.mode == Mode::Input {
+        // Paste only types into the prompt; ignored in Navigate/Select or
+        // while a centered modal is open (the modal owns input then).
+        if app.mode == Mode::Input && !app.modal_open() {
             app.sel = None;
             app.insert_str(s);
         }
@@ -4947,6 +4967,63 @@ mod tests {
         let mut run = None;
         handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
         assert!(a.info.is_none());
+    }
+
+    #[test]
+    fn paste_blocked_while_modal_open() {
+        let mut a = app();
+        let mut run = None;
+        a.slash_command("/help");
+        assert!(a.modal_open());
+        // Paste is ignored while the modal owns input.
+        handle_event(&Event::Paste("pasted".to_string()), &mut a, None, &mut run);
+        assert_eq!(a.input, "");
+        // Dismiss, then paste lands in the prompt.
+        handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+        handle_event(&Event::Paste("pasted".to_string()), &mut a, None, &mut run);
+        assert_eq!(a.input, "pasted");
+    }
+
+    #[test]
+    fn tree_picker_is_centered() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = app();
+        a.tree_picker = Some(TreePickerState {
+            entries: vec![
+                TreeEntry {
+                    branch_point: "x".into(),
+                    label: "agent: hi".into(),
+                    prefix: "`- ".into(),
+                    prefill: String::new(),
+                    is_active: true,
+                },
+                TreeEntry {
+                    branch_point: "y".into(),
+                    label: "user: yo".into(),
+                    prefix: "|- ".into(),
+                    prefill: String::new(),
+                    is_active: false,
+                },
+            ],
+            selected: 0,
+        });
+        let backend = TestBackend::new(80, 22);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+        let buf = term.backend().buffer();
+        // Top border row of the modal carries the 'R' of "Roll back".
+        let top_y = (0..22)
+            .find(|&y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+                    .contains('R')
+            })
+            .expect("tree modal border found");
+        // 2 entries => height 4; bottom-anchored would put the border at y=18,
+        // centered at ~9. Insist on centered.
+        assert!(top_y < 15, "tree modal should be centered, got top_y={top_y}");
     }
 
     #[test]
