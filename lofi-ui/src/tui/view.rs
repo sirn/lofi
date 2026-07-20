@@ -640,6 +640,7 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = &app.picker else {
         return;
     };
+    let t = app.theme;
     let h = u16::try_from(picker.entries.len().min(12) + 2).unwrap_or(14);
     let w = area.width.min(72);
     let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
@@ -660,11 +661,11 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
                 .border_type(BorderType::Rounded)
                 .title(Span::styled(
                     " Resume a session ",
-                    Style::new().fg(app.theme.primary).add_modifier(Modifier::BOLD),
+                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
                 )),
         )
-        .style(Style::default().fg(app.theme.fg))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(Style::default().fg(t.fg))
+        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
     f.render_stateful_widget(
         list,
         popup,
@@ -736,7 +737,7 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
                 )),
         )
         .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
     f.render_stateful_widget(
         list,
         popup,
@@ -782,7 +783,7 @@ fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
                 )),
         )
         .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
     f.render_stateful_widget(
         list,
         popup,
