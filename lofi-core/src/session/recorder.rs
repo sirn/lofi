@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use lofi_types::{Message, NativeToolRecord, SessionEvent, Usage};
+use lofi_types::{Message, NativeToolRecord, SessionEvent, SessionEventKind, Usage};
 
 use crate::session::store;
 use lofi_error::Result;
@@ -54,17 +54,36 @@ pub struct TurnSummary {
 pub struct SessionRecorder {
     path: std::path::PathBuf,
     label: String,
+    /// The entry id to branch this turn from. `None` appends to the file's
+    /// current active leaf (linear continuation); `Some(id)` starts a new
+    /// branch as a sibling of `id`'s existing children.
+    parent_hint: Option<String>,
     flushed: bool,
 }
 
 impl SessionRecorder {
     /// Wrap a transcript path + the run label (`provider/model · level`) used
-    /// for the `SessionEvent::TurnEnd` marker.
+    /// for the `SessionEvent::TurnEnd` marker. The turn appends to the file's
+    /// active leaf (no branching).
     #[must_use]
     pub fn new(path: std::path::PathBuf, label: String) -> Self {
         Self {
             path,
             label,
+            parent_hint: None,
+            flushed: false,
+        }
+    }
+
+    /// Like [`new`](Self::new) but branches the turn off `parent_hint` instead
+    /// of appending to the active leaf. Used by the agent when the user
+    /// resumes from a selected entry in the tree picker.
+    #[must_use]
+    pub fn with_parent(path: std::path::PathBuf, label: String, parent_hint: String) -> Self {
+        Self {
+            path,
+            label,
+            parent_hint: Some(parent_hint),
             flushed: false,
         }
     }
@@ -100,29 +119,52 @@ impl SessionRecorder {
         {
             return Ok(None);
         }
-        let mut events: Vec<SessionEvent> =
-            messages.iter().cloned().map(SessionEvent::Message).collect();
+        let mut events: Vec<SessionEvent> = messages
+            .iter()
+            .cloned()
+            .map(|m| SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(m),
+            })
+            .collect();
         for rec in &summary.native_tools {
-            events.push(SessionEvent::NativeTool(rec.clone()));
+            events.push(SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::NativeTool(rec.clone()),
+            });
         }
         for (id, ms) in &summary.tool_elapsed {
-            events.push(SessionEvent::ToolTiming {
-                id: id.clone(),
-                elapsed_ms: *ms,
+            events.push(SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::ToolTiming {
+                    tool_call_id: id.clone(),
+                    elapsed_ms: *ms,
+                },
             });
         }
         for ms in &summary.thinking_elapsed {
-            events.push(SessionEvent::ThinkingTiming { elapsed_ms: *ms });
-        }
-        if finished {
-            events.push(SessionEvent::TurnEnd {
-                label: self.label.clone(),
-                elapsed_ms: summary.elapsed_ms,
-                cost: summary.cost,
-                usage: summary.usage,
+            events.push(SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::ThinkingTiming { elapsed_ms: *ms },
             });
         }
-        let (start, end) = store::append_events(&self.path, &events)?;
+        if finished {
+            events.push(SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    label: self.label.clone(),
+                    elapsed_ms: summary.elapsed_ms,
+                    cost: summary.cost,
+                    usage: summary.usage,
+                },
+            });
+        }
+        let (start, end) = store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
         if end > start {
             Ok(Some((start, end)))
         } else {
@@ -159,7 +201,7 @@ mod tests {
     }
 
     fn header() -> &'static [u8] {
-        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n"
+        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n"
     }
 
     fn summary(elapsed_ms: u64) -> TurnSummary {
@@ -171,7 +213,7 @@ mod tests {
             thinking_elapsed: vec![12],
             native_tools: vec![NativeToolRecord {
                 parent: "t1".into(),
-                id: 0,
+                call_id: 0,
                 name: "bash".into(),
                 args: "ls".into(),
                 result: "file".into(),
@@ -215,14 +257,14 @@ mod tests {
         // Expected order: 3 messages, native tool, tool timing, thinking
         // timing, turn end.
         let mut i = 0;
-        assert!(matches!(events[i], SessionEvent::Message(_)));
+        assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
-        assert!(matches!(events[i], SessionEvent::Message(_)));
+        assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
-        assert!(matches!(events[i], SessionEvent::Message(_)));
+        assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
-        match &events[i] {
-            SessionEvent::NativeTool(rec) => {
+        match &events[i].kind {
+            SessionEventKind::NativeTool(rec) => {
                 assert_eq!(rec.name, "bash");
                 assert_eq!(rec.parent, "t1");
                 assert_eq!(rec.result, "file");
@@ -230,21 +272,21 @@ mod tests {
             other => panic!("expected native tool, got {other:?}"),
         }
         i += 1;
-        match &events[i] {
-            SessionEvent::ToolTiming { id, elapsed_ms } => {
-                assert_eq!(id, "t1");
+        match &events[i].kind {
+            SessionEventKind::ToolTiming { tool_call_id, elapsed_ms } => {
+                assert_eq!(tool_call_id, "t1");
                 assert_eq!(*elapsed_ms, 7);
             }
             other => panic!("expected tool timing, got {other:?}"),
         }
         i += 1;
-        match &events[i] {
-            SessionEvent::ThinkingTiming { elapsed_ms } => assert_eq!(*elapsed_ms, 12),
+        match &events[i].kind {
+            SessionEventKind::ThinkingTiming { elapsed_ms } => assert_eq!(*elapsed_ms, 12),
             other => panic!("expected thinking timing, got {other:?}"),
         }
         i += 1;
-        match &events[i] {
-            SessionEvent::TurnEnd { label, elapsed_ms, cost, .. } => {
+        match &events[i].kind {
+            SessionEventKind::TurnEnd { label, elapsed_ms, cost, .. } => {
                 assert_eq!(label, "m");
                 assert_eq!(*elapsed_ms, 100);
                 assert!((cost - 0.01).abs() < 1e-9);
@@ -252,6 +294,13 @@ mod tests {
             other => panic!("expected turn end, got {other:?}"),
         }
         assert_eq!(events.len(), i + 1);
+        // Every flushed event got an id and chains to the previous one
+        // (first event's parent is None — root of the file).
+        assert!(!events[0].id.is_empty());
+        assert!(events[0].parent_id.is_none());
+        for w in events.windows(2) {
+            assert_eq!(w[1].parent_id.as_deref(), Some(w[0].id.as_str()));
+        }
         let _ = range;
     }
 
@@ -267,7 +316,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, SessionEvent::TurnEnd { .. }))
+                .any(|e| matches!(e.kind, SessionEventKind::TurnEnd { .. }))
         );
     }
 
