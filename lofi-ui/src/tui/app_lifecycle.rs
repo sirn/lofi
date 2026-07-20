@@ -1,0 +1,362 @@
+use super::*;
+
+impl App {
+    fn new(model_label: String, thinking: ThinkingLevel, ctx_limit: u64) -> Self {
+        let thinking_label = (thinking != ThinkingLevel::Off)
+            .then(|| format!(" · {}", thinking.as_str()));
+        Self {
+            turns: Vec::new(),
+            input: String::new(),
+            input_cursor: 0,
+            history: Arc::new(Mutex::new(Vec::new())),
+            history_nav: Vec::new(),
+            history_idx: None,
+            input_stash: String::new(),
+            model_label,
+            thinking_label,
+            status_usage: None,
+            ctx_limit: if ctx_limit > 0 { ctx_limit } else { DEFAULT_CTX_LIMIT },
+            cost: 0.0,
+            turn_cost: 0.0,
+            turn_has_round_usage: false,
+            branch_hint: None,
+            total_in: 0,
+            total_out: 0,
+            run: None,
+            run_start: None,
+            retry: None,
+            pinned: true,
+            top_line: 0,
+            last_base: 0,
+            verbose: false,
+            should_quit: false,
+            session: SessionState {
+                store: None,
+                path: None,
+                cwd: PathBuf::new(),
+            },
+            picker: None,
+            tree_picker: None,
+            info: None,
+            slash_complete: None,
+            no_models_hint: None,
+            theme: Theme::default(),
+            kill_ring: String::new(),
+            last_kill_was_kill: false,
+            ctrl_c_at: None,
+            log_rect: Rect::default(),
+            input_rect: Rect::default(),
+            log_lines: Vec::new(),
+            log_content: Vec::new(),
+            log_off: 0,
+            input_scroll: 0,
+            sel: None,
+            mode: Mode::Input,
+            yank_notify: None,
+            notify: None,
+            nav_cursor: 0,
+            nav_col: 0,
+            select_anchor: (0, 0),
+            log_total: 0,
+            last_turn_height: 0,
+            log_view_h: 0,
+            frozen_render: FrozenCache::new(),
+            frozen_heights: Vec::new(),
+            turn_byte_ranges: Vec::new(),
+            render_epoch: 0,
+            frozen_epoch: 0,
+        }
+    }
+
+    /// Label written into the transcript header (model + resolved level).
+    fn session_model(&self) -> String {
+        format!(
+            "{}{}",
+            self.model_label,
+            self.thinking_label.as_deref().unwrap_or("")
+        )
+    }
+
+    /// Set the explicit branch point for the next run. A UI gesture (e.g.
+    /// resuming from a selected entry in the tree picker) calls this with the
+    /// target entry's id; the next run branches off that id as a sibling of
+    /// its existing children instead of appending to the active leaf. The
+    /// hint is consumed by the run launcher, so a single gesture applies to a
+    /// single turn and a subsequent run without a gesture continues
+    /// linearly.
+    fn branch_from(&mut self, id: String) {
+        self.branch_hint = Some(id);
+    }
+
+    /// Fold an [`AgentEvent`] into the current turn's blocks / status.
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    fn apply_event(&mut self, ev: AgentEvent) {
+        // TurnStart is the turn boundary: push a fresh turn. Unlike the other
+        // arms, it does not assume a current turn exists — it creates one.
+        if let AgentEvent::TurnStart { prompt } = ev {
+            self.push_turn(Turn {
+                prompt,
+                blocks: Vec::new(),
+            });
+            // Reset the per-turn accumulators: the live stream feeds these
+            // via `RoundUsage` events, and `TurnEnd` folds them once.
+            self.turn_cost = 0.0;
+            self.turn_has_round_usage = false;
+            return;
+        }
+        // Status-only events the turn builder doesn't own.
+        match ev {
+            AgentEvent::RetryStart { attempt, max_attempts, delay_ms, error } => {
+                self.retry = Some(RetryState {
+                    attempt,
+                    max_attempts,
+                    deadline: Instant::now() + Duration::from_millis(delay_ms),
+                    error,
+                });
+                return;
+            }
+            AgentEvent::RetryEnd { success, .. } => {
+                self.retry = None;
+                if !success {
+                    // The retry budget was exhausted; the triggering error
+                    // surfaces via the subsequent `Error` event from the
+                    // engine, so no block is pushed here.
+                }
+                return;
+            }
+            AgentEvent::TurnCommitted { byte_start, byte_end } => {
+                // The just-finished turn is now durably in the transcript
+                // file over this byte range. Record it so the turn becomes
+                // file-backed when the next prompt freezes it.
+                if let Some(r) = self.turn_byte_ranges.last_mut() {
+                    *r = Some((byte_start, byte_end));
+                }
+                return;
+            }
+            AgentEvent::RoundUsage { cost, usage } => {
+                // Per-round refresh of the context gauge and cost counter.
+                // `cost` is the turn's cumulative cost so far; track it in
+                // `turn_cost` (folded into `cost` at `TurnEnd`) so the
+                // footer can show a live running total. Tokens accumulate
+                // directly into the session totals; `TurnEnd` skips
+                // re-adding them when `turn_has_round_usage` is set.
+                self.turn_cost = cost;
+                self.turn_has_round_usage = true;
+                self.total_in += usage.input_tokens;
+                self.total_out += usage.output_tokens;
+                self.status_usage = Some(usage);
+                return;
+            }
+            AgentEvent::TurnEnd { cost, usage, .. } => {
+                // Totals are owned by the App, not the turn builder. On the
+                // live path `RoundUsage` already applied this turn's tokens
+                // and `turn_cost` holds its cumulative cost; fold `turn_cost`
+                // and skip the bundled totals. On the resume path (no
+                // `RoundUsage` events) apply the bundled totals as before.
+                if self.turn_has_round_usage {
+                    self.cost += self.turn_cost;
+                } else {
+                    self.cost += cost;
+                    self.total_in += usage.input_tokens;
+                    self.total_out += usage.output_tokens;
+                    self.status_usage = Some(usage);
+                }
+                self.turn_cost = 0.0;
+                self.turn_has_round_usage = false;
+            }
+            AgentEvent::TurnFailed { cost, usage, .. } => {
+                // A failed turn's consumed tokens count honestly. Same
+                // fold logic as `TurnEnd`: the live path already applied
+                // per-round tokens via `RoundUsage` and `turn_cost` holds
+                // the cumulative cost; the resume path applies the bundled
+                // totals. `status_usage` updates either way so the gauge
+                // reflects the failed turn's last round.
+                if self.turn_has_round_usage {
+                    self.cost += self.turn_cost;
+                    self.status_usage = Some(usage);
+                } else {
+                    self.cost += cost;
+                    self.total_in += usage.input_tokens;
+                    self.total_out += usage.output_tokens;
+                    self.status_usage = Some(usage);
+                }
+                self.turn_cost = 0.0;
+                self.turn_has_round_usage = false;
+            }
+            _ => {}
+        }
+        // Everything else (and the block-building part of `TurnEnd`) goes
+        // through the shared turn builder, so live and resume share one path.
+        apply_event_to_turns(&mut self.turns, ev);
+    }
+
+    fn run_finished(&mut self) {
+        if let Some(turn) = self.turns.last_mut() {
+            finalize_open_thinking(turn);
+        }
+        // The turn-end marker (label, elapsed, cost, usage) arrives as an
+        // `AgentEvent::TurnEnd` emitted by the engine, which also writes it
+        // to the transcript — so there is nothing to stamp or persist here.
+        self.run_start = None;
+        self.run = None;
+        self.retry = None;
+    }
+
+    /// Invalidate the frozen-turn cache. Call whenever `turns` is replaced
+    /// wholesale (resume, `/new`, `/clear`); incremental `push` does not need
+    /// it — [`ensure_frozen`] freezes the newly-superseded turn on its own.
+    fn bump_render_epoch(&mut self) {
+        self.render_epoch = self.render_epoch.wrapping_add(1);
+    }
+
+    /// Push a turn, keeping `turn_byte_ranges` parallel to `turns`.
+    fn push_turn(&mut self, turn: Turn) {
+        self.turns.push(turn);
+        self.turn_byte_ranges.push(None);
+    }
+
+    /// Insert a turn at `idx`, keeping `turn_byte_ranges` parallel.
+    fn insert_turn(&mut self, idx: usize, turn: Turn) {
+        self.turns.insert(idx, turn);
+        self.turn_byte_ranges.insert(idx, None);
+    }
+
+    /// Reconstruct a frozen turn's blocks. If the turn still holds its blocks
+    /// in memory (ephemeral session, or not yet frozen), clone them. Otherwise
+    /// re-parse the turn's byte range from the transcript file. On any read or
+    /// parse failure the turn's prompt is preserved with empty blocks.
+    fn materialize_turn(&self, idx: usize) -> Turn {
+        if let Some(turn) = self.turns.get(idx) {
+            if !turn.blocks.is_empty() {
+                return turn.clone();
+            }
+        }
+        let prompt = self
+            .turns
+            .get(idx)
+            .map(|t| t.prompt.clone())
+            .unwrap_or_default();
+        let empty = Turn {
+            prompt,
+            blocks: Vec::new(),
+        };
+        let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
+            return empty;
+        };
+        let Some(path) = &self.session.path else {
+            return empty;
+        };
+        let bytes = {
+            use std::io::{Read, Seek, SeekFrom};
+            let Ok(mut f) = std::fs::File::open(path) else {
+                return empty;
+            };
+            if f.seek(SeekFrom::Start(start)).is_err() {
+                return empty;
+            }
+            let mut buf =
+                Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
+            if f.take(end - start).read_to_end(&mut buf).is_err() {
+                return empty;
+            }
+            buf
+        };
+        let events: Vec<SessionEvent> = String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| lofi_core::session::store::parse_event(l).ok())
+            .collect();
+        turns_from_session_events(&events)
+            .into_iter()
+            .next()
+            .unwrap_or(empty)
+    }
+
+    /// Ensure frozen turn `idx`'s rendered lines are in the bounded cache,
+    /// materializing from `turns` or the transcript file on a miss.
+    /// `ensure_frozen` must have already recorded the turn's height.
+    fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
+        if !self.frozen_render.contains(idx) {
+            let theme = self.theme;
+            let turn = self.materialize_turn(idx);
+            let lines = {
+                let cx = view::component::Cx {
+                    app: self,
+                    theme,
+                    width,
+                    active_turn: false,
+                };
+                view::blocks::render_turn_lines(&cx, &turn)
+            };
+            self.frozen_render.insert(idx, lines);
+        }
+    }
+
+    /// Sync the frozen-turn cache to the current `turns`. Frozen turns are all
+    /// but the last (the last is the live, mutable one rebuilt each frame).
+    /// On a wholesale replacement (`bump_render_epoch`) the cache is dropped;
+    /// otherwise newly-superseded turns are rendered once, their height
+    /// recorded permanently in `frozen_heights`, and their (heavy) styled
+    /// lines entered into the bounded [`FrozenCache`] (oldest evicted). Heights
+    /// are kept for every frozen turn so the viewport can be located and the
+    /// scroll total computed without holding all rendered lines in memory.
+    fn ensure_frozen(&mut self, width: usize) {
+        if self.frozen_epoch != self.render_epoch {
+            self.frozen_render.clear();
+            self.frozen_heights.clear();
+            self.frozen_epoch = self.render_epoch;
+        }
+        let n = self.turns.len();
+        let target = n.saturating_sub(1);
+        while self.frozen_heights.len() < target {
+            let idx = self.frozen_heights.len();
+            let theme = self.theme;
+            let turn = self.materialize_turn(idx);
+            let lines = {
+                let cx = view::component::Cx {
+                    app: self,
+                    theme,
+                    width,
+                    active_turn: false,
+                };
+                view::blocks::render_turn_lines(&cx, &turn)
+            };
+            self.frozen_heights.push(lines.len());
+            self.frozen_render.insert(idx, lines);
+        }
+        // Defensive: turns shrank without an epoch bump.
+        if self.frozen_heights.len() > target {
+            self.frozen_heights.truncate(target);
+            // Drop any cached entries beyond the new frozen range.
+            self.frozen_render
+                .map
+                .retain(|idx, _| *idx < target);
+            self.frozen_render.order.retain(|idx| *idx < target);
+        }
+    }
+
+    fn run_active(&self) -> bool {
+        self.run.is_some()
+    }
+
+    fn spinner_frame(&self) -> usize {
+        self.run.unwrap_or(0)
+    }
+
+    /// The active retry state, if the agent is waiting out a backoff.
+    #[must_use]
+    fn retry_state(&self) -> Option<&RetryState> {
+        self.retry.as_ref()
+    }
+
+    /// `model` or `model · level` — the label shown on the working / turn-end
+    /// lines. Mirrors [`session_model`].
+    fn run_label(&self) -> String {
+        self.session_model()
+    }
+
+    /// Elapsed since the current run started; zero when idle.
+    fn run_elapsed(&self) -> Duration {
+        self.run_start.map(|s| s.elapsed()).unwrap_or_default()
+    }
+}
