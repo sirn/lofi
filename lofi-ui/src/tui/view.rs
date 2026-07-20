@@ -574,7 +574,7 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     if app.verbose {
         right.push(Span::styled(
             " VERBOSE ",
-            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+            Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
     right.push(Span::styled(
