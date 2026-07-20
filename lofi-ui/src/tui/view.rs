@@ -541,11 +541,10 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Mode-colored rule line. The left edge keeps the `──` lead followed by
-/// bracketed notification tags (the yank/quit badges) — this side is
-/// reserved for transient and interactive notifications. The right edge
-/// carries the `[VERBOSE]` tag (while tool detail is expanded) and the
-/// mode chip (` INPUT ` / ` NAV `) with its `──` tail; dashes fill the
-/// middle.
+/// notification badges (the yank/quit tags) — this side is reserved for
+/// transient and interactive notifications. The right edge carries the
+/// ` VERBOSE ` tag (while tool detail is expanded) and the mode chip
+/// (` INPUT ` / ` NAV `) with its `──` tail; dashes fill the middle.
 fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let (label, color) = app.mode_badge();
@@ -554,27 +553,27 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let tail = "──";
     let bold = Modifier::BOLD;
 
-    // Left: leading `──` then bracketed notification tags. Quit takes
-    // precedence as a warning.
+    // Left: leading `──` then notification badges. Quit takes precedence
+    // as a warning.
     let mut spans: Vec<Span<'static>> = vec![Span::styled("──", Style::new().fg(color))];
     if let Some(badge) = app.quit_badge() {
         spans.push(Span::styled(
-            format!("[{badge}]"),
+            format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(badge) = app.yank_badge() {
         spans.push(Span::styled(
-            format!("[{badge}]"),
+            format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
     }
     let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
-    // Right: optional `[VERBOSE]` tag, the mode chip, and the `──` tail.
+    // Right: optional ` VERBOSE ` tag, the mode chip, and the `──` tail.
     let mut right: Vec<Span<'static>> = Vec::new();
     if app.verbose {
         right.push(Span::styled(
-            "[VERBOSE]",
+            " VERBOSE ",
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
     }
