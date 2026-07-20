@@ -2682,11 +2682,18 @@ fn build_tree_entries(
         }
     }
     let active_path: Vec<usize> = match leaf_id {
-        Some(id) => active_path_from_index(indices, &by_id, id),
+        Some(id) if !id.is_empty() => active_path_from_index(indices, &by_id, id),
+        // `leaf_id` is `None` (normal linear continuation) or `Some("")`
+        // (rolled back to before the root prompt). For `None`, walk from
+        // the file's last event. For `Some("")`, the active path is
+        // empty — the trunk loop below renders nothing, and we instead
+        // treat the root events as branch roots so the whole tree is
+        // visible (nothing highlighted).
         None => indices
             .last()
             .map(|ix| active_path_from_index(indices, &by_id, &ix.id))
             .unwrap_or_default(),
+        Some(_) => Vec::new(),
     };
     let active_set: std::collections::HashSet<usize> =
         active_path.iter().copied().collect();
@@ -2730,6 +2737,39 @@ fn build_tree_entries(
             render_branch_subtree(
                 &branches, indices, &children_by_parent, &by_id, path,
                 child_indent, &mut out,
+            );
+        }
+    }
+    // Rolled back to before the root prompt: the trunk is empty, so
+    // render every top-level tree node (a tree node whose nearest
+    // tree-node ancestor — walking up the parent chain — is absent) as a
+    // branch. Nothing is active. The file's root may be a system message
+    // (not a tree node), so we can't just take parent_id.is_none().
+    if trunk.is_empty() && out.is_empty() {
+        let roots: Vec<usize> = indices
+            .iter()
+            .enumerate()
+            .filter(|&(i, ix)| {
+                if !is_tree_node(&ix.kind) {
+                    return false;
+                }
+                // Walk up the parent chain; this is a top-level tree node
+                // iff no ancestor is a tree node.
+                let mut cur = ix.parent_id.as_deref();
+                while let Some(pid) = cur {
+                    let Some(&pidx) = by_id.get(pid) else { break };
+                    if is_tree_node(&indices[pidx].kind) {
+                        return false;
+                    }
+                    cur = indices[pidx].parent_id.as_deref();
+                }
+                true
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !roots.is_empty() {
+            render_branch_subtree(
+                &roots, indices, &children_by_parent, &by_id, path, "", &mut out,
             );
         }
     }
@@ -4443,6 +4483,77 @@ mod tests {
         // One visible turn (turn 1); turn 2 is rolled back out of view.
         assert_eq!(a.turns.len(), 1);
         assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    }
+
+    #[test]
+    fn tree_revert_to_root_then_reopens() {
+        // Reverting to the first user prompt (root, no parent) sets
+        // branch_hint to "" — the active path is empty. Reopening /tree
+        // must still show every turn as an unhighlighted branch, not
+        // "no branch points in this session yet".
+        use lofi_core::session::store::SessionStore;
+        use lofi_types::{ContentBlock, Role};
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("s"));
+        let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+        let kinds = [
+            SessionEventKind::Message(Message {
+                role: Role::System,
+                blocks: vec![ContentBlock::Text { text: "sys".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "first".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "second".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "world".into() }],
+            }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        ];
+        let mut batch: Vec<SessionEvent> = kinds
+            .into_iter()
+            .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+            .collect();
+        store::append_events(&path, &mut batch, None).unwrap();
+
+        let mut a = app();
+        a.session.path = Some(path.clone());
+        a.session.cwd = std::path::PathBuf::from("/x");
+        // First /tree: select the root user prompt (entry 0) and revert.
+        // Its branch_point is its parent (the system message), so the
+        // active path becomes just the system message — the transcript is
+        // empty (no visible turns) but branch_hint is the system id.
+        assert!(a.slash_command("/tree"));
+        a.tree_picker.as_mut().unwrap().selected = 0;
+        a.tree_picker_confirm();
+        assert!(a.branch_hint.is_some());
+        assert_eq!(a.turns.len(), 0); // rolled back to before any user turn
+        assert_eq!(a.input, "first");
+        // Reopen /tree: all four nodes must appear, none active.
+        assert!(a.slash_command("/tree"));
+        let picker = a.tree_picker.as_ref().expect("picker reopened");
+        assert_eq!(picker.entries.len(), 4);
+        assert!(picker.entries.iter().all(|e| !e.is_active));
     }
 
     #[test]
