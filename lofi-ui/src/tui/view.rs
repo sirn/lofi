@@ -546,8 +546,8 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let chip_w = prim::width(&chip);
     let tail = "──";
     let tail_w = prim::width(tail);
-    // Left side keeps the `──` lead; the yank / branch badges (if active)
-    // follow it. Quit takes precedence as a warning.
+    // Left side keeps the `──` lead; the yank badge (if active) follows it.
+    // Quit takes precedence as a warning.
     let mut spans: Vec<Span<'static>> = vec![Span::styled("──", Style::new().fg(color))];
     if let Some(badge) = app.quit_badge() {
         spans.push(Span::styled(
@@ -558,13 +558,6 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(Modifier::BOLD),
-        ));
-    } else if let Some(badge) = app.branch_badge() {
-        // Branch is informational (subtle, not warn-colored) since it's a
-        // staged action, not a confirmation prompt.
-        spans.push(Span::styled(
-            format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.muted).add_modifier(Modifier::BOLD),
         ));
     }
     let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
@@ -645,20 +638,14 @@ fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         .entries
         .iter()
         .enumerate()
-        .map(|(i, e)| {
-            // Collapse multi-line prompts to a single row with ⏎ markers so
-            // the list stays one line per entry; the full text goes back into
-            // the input box on confirm regardless.
-            let preview = e.prompt.replace('\n', " ⏎ ");
-            ListItem::new(format!("{i:>2}  {preview}"))
-        })
+        .map(|(i, e)| ListItem::new(format!("{i:>2}  {}", e.label)))
         .collect();
     let list = List::new(items)
         .block(
             WidgetBlock::bordered()
                 .border_type(BorderType::Rounded)
                 .title(Span::styled(
-                    " Branch from a turn (edit and resend) ↑/↓ ↑↓ enter esc ",
+                    " Roll back to a turn  ↑/↓ j/k enter esc ",
                     Style::new().fg(app.theme.primary).add_modifier(Modifier::BOLD),
                 )),
         )

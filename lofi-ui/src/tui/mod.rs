@@ -232,25 +232,29 @@ struct PickerState {
     selected: usize,
 }
 
-/// State for the '/tree' branch-picker overlay. Lists the user-prompt events
-/// in the active session so the user can branch a new turn off a chosen one
-/// (Pi-style "edit a turn and resend"). Confirming an entry feeds its prompt
-/// text back into the input box (so the user can tweak it) and sets the
-/// `branch_hint` so the next run starts as a sibling of that prompt rather
-/// than appending to the active leaf. Items are chronological; `selected`
-/// starts at the last (most recent) entry.
+/// State for the '/tree' branch-picker overlay. Lists the branch points in
+/// the active session — every user prompt ("edit and resend") and every
+/// `turn_end` ("continue from after this turn") — so the user can roll the
+/// transcript back to any point, Pi-style. Confirming an entry rebuilds the
+/// visible turns and history from the rolled-back active path, sets the
+/// `branch_hint` so the next run chains off the chosen point, and (for
+/// user-prompt entries) prefills the input with the original prompt text.
+/// Items are chronological; `selected` starts at the last entry.
 #[derive(Debug, Clone)]
 struct TreePickerState {
     entries: Vec<TreeEntry>,
     selected: usize,
 }
 
-/// One row in the '/tree' picker: the event `id` to branch from and the
-/// prompt preview shown in the list.
+/// One row in the '/tree' picker. `branch_point` is the event id the next
+/// run chains off (becomes the new turn's parent); `label` is the list row;
+/// `prefill` is loaded into the input box on confirm (empty for `turn_end`
+/// entries, since those continue rather than re-edit).
 #[derive(Debug, Clone)]
 struct TreeEntry {
-    id: String,
-    prompt: String,
+    branch_point: String,
+    label: String,
+    prefill: String,
 }
 
 /// A bounded FIFO cache of rendered frozen turns, keyed by turn index.
@@ -1707,7 +1711,7 @@ impl App {
 
     fn push_help(&mut self) {
         let help = "Keys\n  Enter        send  ·  Alt+Enter / Ctrl+J  newline\n  ↑ / ↓        move line, recall at edge  ·  Ctrl+↑/↓  move across lines\n  PgUp/PgDn    scroll a page (Input) · move cursor a page (Nav/Select)\n  Tab          switch mode: Input ↔ Navigate / back from Select
-  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        branch from a past turn (edit + resend)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit";
+  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        roll back to a past turn (edit + resend, or continue)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit";
         self.push_turn(Turn {
             prompt: "/help".to_string(),
             blocks: vec![Block::Text(help.to_string())],
@@ -1870,11 +1874,11 @@ impl App {
                 return;
             }
         };
-        let entries = user_prompt_entries(&events);
+        let entries = tree_entries(&events);
         if entries.is_empty() {
             self.push_turn(Turn {
                 prompt: "/tree".to_string(),
-                blocks: vec![Block::Text("no user prompts in this session yet".into())],
+                blocks: vec![Block::Text("no branch points in this session yet".into())],
             });
             return;
         }
@@ -1900,8 +1904,11 @@ impl App {
         self.tree_picker = None;
     }
 
-    /// Confirm the hovered entry: branch the next run off that prompt's event
-    /// id and load its text into the input box so the user can edit and resend.
+    /// Confirm the hovered entry: roll the transcript back to the chosen
+    /// branch point, set the branch hint so the next run chains off it, and
+    /// (for "edit and resend" entries) load the original prompt into the
+    /// input box. The visual rollback replaces the old "branch ready" badge —
+    /// the user sees the conversation up to the branch point immediately.
     fn tree_picker_confirm(&mut self) {
         let Some(picker) = self.tree_picker.take() else {
             return;
@@ -1909,9 +1916,57 @@ impl App {
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
-        self.input = entry.prompt;
-        self.input_cursor = self.input.chars().count();
-        self.branch_from(entry.id);
+        let Some(path) = self.session.path.clone() else {
+            return;
+        };
+        // Reload events from disk (the picker was built from a snapshot; the
+        // file is the source of truth for the active-path walk).
+        let events = match store::load(&path) {
+            Ok((_meta, events, _offsets, _size)) => events,
+            Err(e) => {
+                self.push_turn(Turn {
+                    prompt: "/tree".to_string(),
+                    blocks: vec![Block::Error(format!("load session for /tree: {e}"))],
+                });
+                return;
+            }
+        };
+        self.rollback_to(&events, &entry.branch_point);
+        self.branch_from(entry.branch_point);
+        if !entry.prefill.is_empty() {
+            self.input = entry.prefill;
+            self.input_cursor = self.input.chars().count();
+        }
+    }
+
+    /// Rebuild the visible turns and the agent's message history from the
+    /// active path root → `leaf_id` (inclusive), discarding everything after
+    /// that point from the in-memory view. Cost/usage are reset and
+    /// re-accumulated from the replayed `turn_end` events. Byte ranges are
+    /// dropped: after a rollback the visible turns are rendered from
+    /// in-memory blocks, not the file-backed frozen-turn cache (the cache is
+    /// invalidated by `bump_render_epoch`). The on-disk file is untouched —
+    /// the rolled-back branches remain and are reachable via `/tree` again.
+    fn rollback_to(&mut self, events: &[SessionEvent], leaf_id: &str) {
+        let path = store::active_path(events, leaf_id);
+        let rolled_back: Vec<SessionEvent> =
+            path.iter().map(|&i| events[i].clone()).collect();
+        let messages = messages_from_events(&rolled_back);
+        if let Ok(mut m) = self.history.lock() {
+            *m = messages;
+        }
+        self.turns = Vec::new();
+        self.turn_byte_ranges = Vec::new();
+        self.cost = 0.0;
+        self.total_in = 0;
+        self.total_out = 0;
+        self.status_usage = None;
+        for ev in replay_session_events(&rolled_back) {
+            self.apply_event(ev);
+        }
+        self.bump_render_epoch();
+        self.pinned = true;
+        self.top_line = 0;
     }
 
     /// Header line: `lofi` wordmark at the left, the working directory
@@ -2002,14 +2057,6 @@ impl App {
             Some(t) if t.elapsed() < QUIT_DOUBLE_PRESS => Some("Press Ctrl-C again to quit"),
             _ => None,
         }
-    }
-
-    /// Text for the "branching" badge shown on the input rule while a
-    /// `/tree` branch point is staged (between confirming the picker and the
-    /// next run consuming the hint) so the user knows a resend will branch
-    /// rather than append. `None` once the run launcher clears `branch_hint`.
-    pub(crate) fn branch_badge(&self) -> Option<&'static str> {
-        self.branch_hint.is_some().then_some("branch ready")
     }
 
     /// Footer cost, shown on the right edge of the usage line. Includes the
@@ -2602,32 +2649,83 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
 /// turn's content stays on the active path so the UI can render it, but the
 /// agent's history skips it. We walk leaf-first and toggle a `skipping`
 /// flag at the `TurnFailed` boundary, clearing it at the prior `TurnEnd`.
-/// Collect every user-prompt event in the active session's event log, in file
-/// order, as [`TreeEntry`]s for the '/tree' picker. Each entry's `id` is the
-/// branch point (the new turn chains off it as a sibling), and `prompt` is a
-/// one-line preview fed back into the input on confirm so the user can edit
-/// and resend. All events are scanned (not just the active path) so sibling
-/// branches from prior `/tree` gestures are reachable too.
-fn user_prompt_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
+/// Build the '/tree' picker entries from the active session's event log, in
+/// file order. Two kinds of branch point are offered:
+/// - Every `turn_end` → "continue from after this turn". The next run chains
+///   off the `turn_end` (a continuation, not a sibling). Input stays empty.
+/// - Every user-prompt `Message` (except the first, whose parent is the root
+///   and can't be branched from with the current recorder) → "edit and resend".
+///   The next run chains off the prompt's *parent* (the prior `turn_end`),
+///   making the new turn a sibling. The original prompt text is loaded into
+///   the input box for editing.
+/// All events are scanned (not just the active path) so sibling branches from
+/// prior `/tree` gestures are reachable too. `last_assistant` tracks the most
+/// recent assistant text so `turn_end` rows carry a meaningful preview.
+fn tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
     let mut out = Vec::new();
+    let mut last_assistant: Option<String> = None;
     for ev in events {
-        if let SessionEventKind::Message(m) = &ev.kind {
-            if m.role != Role::User {
-                continue;
+        match &ev.kind {
+            SessionEventKind::Message(m) => {
+                if m.role == Role::Assistant {
+                    if let Some(text) = m.blocks.iter().find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    }) {
+                        last_assistant = Some(text.to_string());
+                    }
+                } else if m.role == Role::User {
+                    let prompt = m.blocks.iter().find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    });
+                    if let (Some(prompt), Some(parent_id)) = (prompt, &ev.parent_id) {
+                        // Skip the very first prompt (parent is the root) —
+                        // branching off the root isn't supported by the
+                        // recorder's `with_parent` (it requires a real id).
+                        if !parent_id.is_empty() {
+                            out.push(TreeEntry {
+                                branch_point: parent_id.clone(),
+                                label: format!("✎ {}", one_line(&prompt)),
+                                prefill: prompt,
+                            });
+                        }
+                    }
+                }
             }
-            let prompt = m.blocks.iter().find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            });
-            if let Some(prompt) = prompt {
+            SessionEventKind::TurnEnd { .. } => {
+                let preview = last_assistant
+                    .as_deref()
+                    .map(one_line)
+                    .unwrap_or_default();
                 out.push(TreeEntry {
-                    id: ev.id.clone(),
-                    prompt,
+                    branch_point: ev.id.clone(),
+                    label: format!("↳ {}", if preview.is_empty() {
+                        "(turn end)".to_string()
+                    } else {
+                        preview
+                    }),
+                    prefill: String::new(),
                 });
             }
+            _ => {}
         }
     }
     out
+}
+
+/// Collapse a prompt/response preview to a single line (newlines → ⏎) and
+/// trim to a display-friendly width so each picker row is one line.
+fn one_line(s: &str) -> String {
+    const MAX: usize = 60;
+    let collapsed = s.replace('\n', " ⏎ ");
+    if collapsed.chars().count() <= MAX {
+        collapsed
+    } else {
+        let mut out: String = collapsed.chars().take(MAX).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
@@ -3972,52 +4070,83 @@ mod tests {
     }
 
     #[test]
-    fn tree_opens_confirms_branch_hint_and_loads_prompt() {
-        // Write a session file with a user-prompt event, point the App at
-        // it, and exercise the /tree lifecycle: open -> confirm. Confirming
-        // sets the branch hint to the picked event's id and loads the
-        // prompt text into the input box.
+    fn tree_opens_rolls_back_and_prefills_prompt() {
+        // Build a two-turn session: user1 → assistant1 → turn_end1 →
+        // user2 → assistant2 → turn_end2. The picker should offer three
+        // branch points: "after turn 1" (turn_end1), "edit turn 2"
+        // (user2, prefilled), and "after turn 2" (turn_end2). Confirming
+        // the "edit turn 2" entry rolls the transcript back to turn 1,
+        // prefills the input with user2's text, and sets the branch hint
+        // to turn_end1's id (so the resend is a sibling of user2).
         use lofi_core::session::store::SessionStore;
         use lofi_types::{ContentBlock, Role};
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("s"));
         let path = store.create(std::path::Path::new("/x"), "m").unwrap();
-        // Two user prompts to branch from.
-        let two_prompts = [
+        let kinds = [
             SessionEventKind::Message(Message {
                 role: Role::User,
-                blocks: vec![ContentBlock::Text { text: "first prompt".into() }],
+                blocks: vec![ContentBlock::Text { text: "first".into() }],
             }),
             SessionEventKind::Message(Message {
-                role: Role::User,
-                blocks: vec![ContentBlock::Text { text: "second prompt".into() }],
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "hello".into() }],
             }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "second".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "world".into() }],
+            }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
         ];
-        let mut batch: Vec<SessionEvent> = two_prompts
+        let mut batch: Vec<SessionEvent> = kinds
             .into_iter()
             .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
             .collect();
         store::append_events(&path, &mut batch, None).unwrap();
+        // Read back the ids so the test can assert against them.
+        let (_meta, events, _o, _s) = store::load(&path).unwrap();
+        let turn_end1_id = events[2].id.clone();
 
         let mut a = app();
         a.session.path = Some(path);
         a.session.cwd = std::path::PathBuf::from("/x");
         assert!(a.slash_command("/tree"));
         let picker = a.tree_picker.as_ref().expect("picker opened");
-        assert_eq!(picker.entries.len(), 2);
-        // Default selection is the last (most recent) entry.
-        assert_eq!(picker.selected, 1);
-        // Move up to the first prompt, confirm.
-        a.tree_picker_up();
-        let expected_id =
-            a.tree_picker.as_ref().unwrap().entries[0].id.clone();
-        let expected_prompt =
-            a.tree_picker.as_ref().unwrap().entries[0].prompt.clone();
+        // turn_end1 (↳ hello), user2 (✎ second), turn_end2 (↳ world).
+        assert_eq!(picker.entries.len(), 3);
+        assert_eq!(picker.selected, 2); // defaults to the last entry
+        // Find the "edit turn 2" entry (prefill = "second").
+        let edit_idx = picker
+            .entries
+            .iter()
+            .position(|e| e.prefill == "second")
+            .unwrap();
+        a.tree_picker.as_mut().unwrap().selected = edit_idx;
         a.tree_picker_confirm();
-        // Confirm loads the prompt back into input and sets the branch hint.
+        // Confirm rolls back: the visible turns drop to just turn 1
+        // (user "first" + assistant "hello" + turn_end), the input is
+        // prefilled with "second", and the branch hint is turn_end1's id.
         assert!(a.tree_picker.is_none());
-        assert_eq!(a.input, expected_prompt);
-        assert_eq!(a.branch_hint.as_deref(), Some(expected_id.as_str()));
+        assert_eq!(a.input, "second");
+        assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
+        // One visible turn (turn 1); turn 2 is rolled back out of view.
+        assert_eq!(a.turns.len(), 1);
+        assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
     }
 
     #[test]

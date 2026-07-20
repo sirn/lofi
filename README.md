@@ -352,7 +352,7 @@ and final, and keep intermediates in-sandbox.
 | `/clear` | Drop all turns from the log (the transcript file is untouched). |
 | `/new` | Start a fresh session file on the next prompt. |
 | `/resume` | Open a picker of past sessions for this workspace and resume one. |
-| `/tree` | Open a branch picker over this session's prompts; picking one feeds its text back into the input and branches the next run off that prompt (edit and resend). |
+| `/tree` | Open a rollback picker over this session's turns. `✎` entries roll back to before a user prompt and prefill the input (edit and resend); `↳` entries roll back to after a turn and leave the input empty (continue from here). The next run branches off the chosen point. |
 | `/session` | Print the session path, message count, and model. |
 | `/verbose` | Toggle verbose tool detail in `exec` blocks. |
 | `/quit` | Exit. |
