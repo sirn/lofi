@@ -69,16 +69,21 @@ sessions/logs) lives under `$XDG_STATE_HOME/lofi/` (default
 
 A provider's `base_url` is the **host root** (e.g. `https://api.openai.com`).
 The full endpoint URL each model POSTs to is built by joining `base_url` with
-the `path` of the selected api-type mapping (see below). The provider never
+the `path` of the selected `api_types` entry (see below). The provider never
 appends a hardcoded suffix — the path is explicit in the config, with sensible
 defaults (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) when
 omitted.
 
-### `api_type` — protocol and endpoint routing
+### `api_type` and `api_types` — protocol and endpoint routing
 
-Each provider has an `api_type` table mapping a remote api-type string to the
-lofi wire protocol and the endpoint path. The common case is a single-protocol
-provider, which can be written as a scalar:
+Each provider has a scalar `api_type` naming its default protocol (an internal
+api id, e.g. `openai-completions`) and an optional `api_types` table keyed by
+the same internal ids, carrying the endpoint `path` and optional pricing-field
+overrides. Static models, per-model `api_type` overrides, and auto-discovered
+models all resolve through the same table: look up `api_types[key]`, take its
+`path` (defaulting to the protocol's standard path), join onto `base_url`.
+
+The common case is a single-protocol provider, which needs only the scalar:
 
 ```toml
 [providers.openai]
@@ -86,31 +91,27 @@ base_url = "https://api.openai.com"
 api_type = "openai-completions"
 ```
 
-This is shorthand for a one-entry table keyed by `chat_completions` (the
-default api-type key). The full table form is for proxies that route one host
-to several upstream APIs:
+The full table is for proxies that route one host to several upstream APIs.
+Keys are the internal api ids (kebab-case):
 
 ```toml
 [providers.proxy]
 base_url = "https://proxy.example.com"
-default_api_type = "chat_completions"
+api_type = "openai-completions"
 
-[providers.proxy.api_type.chat_completions]
-api = "openai-completions"
+[providers.proxy.api_types."openai-completions"]
 path = "/v1/chat/completions"      # optional; defaults to /v1/chat/completions
 
-[providers.proxy.api_type.responses]
-api = "openai-responses"
+[providers.proxy.api_types."openai-responses"]
 path = "/v1/responses"             # optional; defaults to /v1/responses
 
-[providers.proxy.api_type.messages]
-api = "anthropic-messages"
+[providers.proxy.api_types."anthropic-messages"]
 path = "/v1/messages"              # optional; defaults to /v1/messages
 ```
 
-`default_api_type` names the key used when a model does not report its own
-api-type (static models, or discovered models with no `preferred_api` field).
-It defaults to `chat_completions`.
+A static model overrides its protocol with `api_type = "openai-responses"`;
+the override is resolved through `api_types` exactly like a discovered
+model's `preferred_api`.
 
 ### Example: OpenAI Chat Completions
 
@@ -164,13 +165,15 @@ are cached to `$XDG_STATE_HOME/lofi/discovery.json` and reused when the remote
 fetch fails.
 
 The endpoint URL is `auto_models.models_url` when set; otherwise it is derived
-from the default api-type mapping's `path` (the version prefix plus `/models`,
-e.g. `/v1/models`). Each discovered model's `api` and endpoint `base_url` are
-resolved from the provider's `api_type` table — keyed by the `api_type_field`
-value the endpoint reports (e.g. `preferred_api`), falling back to
-`default_api_type`. Pricing is read via the mapping's `pricing_field_mappings`
-(falling back to the provider-level default) and scaled by the provider's
-`pricing_convention`.
+from the default `api_types` entry's `path` (the version prefix plus
+`/models`, e.g. `/v1/models`). Each discovered model's `api_type` is read
+from the field named by `api_type_field` (e.g. `preferred_api`), translated
+through `auto_models.api_type_mappings` (the endpoint's own vocabulary → lofi
+internal id), and resolved through the provider's `api_types` table like any
+static model. When `api_type_field` is unset, discovered models inherit the
+provider's default `api_type`. Pricing is read via the resolved api-type's
+`pricing_field_mappings` (falling back to the provider-level default) and
+scaled by the provider's `pricing_convention`.
 
 ```toml
 [providers.openai]
@@ -181,13 +184,21 @@ api_key = "$OPENAI_API_KEY"
 [providers.openai.auto_models]
 enabled = true
 # models_url defaults to {base_url}/v1/models
-api_type_field = "preferred_api"   # optional; field naming the per-model api-type
+api_type_field = "preferred_api"   # optional; field naming the remote api-type
+
+# Remote vocabulary → internal api id. Only needed when the endpoint
+# reports its own strings instead of lofi's internal ids.
+[providers.openai.auto_models.api_type_mappings]
+chat_completions = "openai-completions"
+# messages = "anthropic-messages"
+# responses = "openai-responses"
 
 [providers.openai.pricing_field_mappings]   # optional; defaults shown
 input = "pricing.prompt"
 output = "pricing.completion"
 cache_read = "pricing.input_cache_read"
 cache_write = "pricing.input_cache_write"
+# per_request = "pricing.request"   # optional; flat per-request cost path
 ```
 
 ### Config schema reference
@@ -196,38 +207,55 @@ cache_write = "pricing.input_cache_write"
 default_provider = "openai"      # optional
 default_model = "openai/gpt-4o"  # optional; "provider/id" or bare id
 
+[agent]                          # optional; global defaults
+thinking_level = "medium"        # optional
+thinking_levels = ["low", "medium", "high", "xhigh"]  # optional
+
 [providers.<name>]
 base_url = "..."                 # host root; optional (defaults per api_type)
-api_type = "..."                 # scalar or table; see above
-default_api_type = "..."         # optional; defaults to "chat_completions"
-api_key = "..."                   # optional; resolved per the rules above
-env_name = "..."                  # optional; env var for the api key
-headers = { "x-custom" = "..." }  # optional; values resolved
-no_auth = false                   # optional; omit auth headers
+api_type = "openai-completions"  # default protocol (internal api id)
+api_key = "..."                  # optional; resolved per the rules above
+env_name = "..."                 # optional; env var for the api key
+headers = { "x-custom" = "..." } # optional; values resolved
+no_auth = false                  # optional; omit auth headers
+thinking_level = "medium"        # optional; per-provider default
+thinking_levels = [...]          # optional; per-provider
+pricing_convention = "per_token" # optional; per_token | per_million
 
-[providers.<name>.api_type.<key>] # optional; per-endpoint override
-api = "openai_completions" | "openai_responses" | "anthropic_messages"
-path = "/v1/chat/completions"     # optional; defaults per api
+[providers.<name>.api_types."<api-id>"]  # optional; per-endpoint override
+path = "/v1/chat/completions"    # optional; defaults per api-id
+
+[providers.<name>.api_types."<api-id>".pricing_field_mappings]  # optional
+input = "..."; output = "..."; cache_read = "..."; cache_write = "..."; per_request = "..."
 
 [providers.<name>.pricing_field_mappings]  # optional; defaults shown above
-input = "..."
-output = "..."
-cache_read = "..."
-cache_write = "..."
-
-# pricing_convention = "per_token" | "per_million"  # optional; default per_token
+input = "..."; output = "..."; cache_read = "..."; cache_write = "..."; per_request = "..."
 
 [providers.<name>.models]        # optional; static models, keyed by id
-"<id>" = { name = "...", reasoning = bool, supports_image = bool,
-            context_window = u64, max_tokens = u64,
-            thinking_levels = ["low","medium","high","xhigh"],
-            input_price = f64, output_price = f64,
-            cache_read_price = f64, cache_write_price = f64 }
+"<id>" = { name = "...", api_type = "openai-responses", reasoning = bool,
+            supports_image = bool, context_window = u64, max_tokens = u64,
+            thinking_level = "medium", thinking_levels = [...],
+            base_url = "...", input_price = f64, output_price = f64,
+            cache_read_price = f64, cache_write_price = f64,
+            per_request_price = f64 }
 
 [providers.<name>.auto_models]   # optional; remote discovery
 enabled = true
 models_url = "..."               # optional; defaults to {base_url}/v1/models
-api_type_field = "..."           # optional
+path = "data"                   # optional; default "data"
+api_type_field = "preferred_api" # optional; field naming the remote api-type
+auth = true                     # optional; default true
+thinking_levels = [...]          # optional; inherited by discovered models
+thinking_level = "medium"        # optional
+ttl_seconds = 300               # optional; default 300
+
+[providers.<name>.auto_models.api_type_mappings]  # optional
+"<remote-value>" = "<internal-api-id>"
+
+[providers.<name>.auto_models.field_mappings]  # optional; defaults shown
+name = "name"
+context_window = "context_length"
+max_tokens = "top_provider.max_completion_tokens"
 ```
 
 ## Code mode

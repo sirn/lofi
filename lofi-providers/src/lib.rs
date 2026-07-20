@@ -281,23 +281,24 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use lofi_types::{Api, ApiTypeMapping, PricingFieldMappings, PricingConvention, ProviderConfig};
+    use lofi_types::{
+        Api, ApiTypeMapping, PricingFieldMappings, PricingConvention, ProviderConfig,
+    };
 
     fn cfg() -> ProviderConfig {
         ProviderConfig {
-            api_type: {
+            api_type: Some(Api::OpenAiCompletions),
+            api_types: {
                 let mut m = indexmap::IndexMap::new();
                 m.insert(
-                    "chat_completions".to_string(),
+                    "openai-completions".to_string(),
                     ApiTypeMapping {
-                        api: Api::OpenAiCompletions,
                         path: None,
                         pricing_field_mappings: None,
                     },
                 );
                 m
             },
-            default_api_type: None,
             base_url: Some("https://api.example.com".to_string()),
             pricing_convention: PricingConvention::PerToken,
             pricing_field_mappings: PricingFieldMappings::default(),
@@ -308,6 +309,7 @@ mod tests {
             auto_models: None,
             no_auth: false,
             thinking_level: None,
+            thinking_levels: Vec::new(),
         }
     }
 
@@ -362,9 +364,9 @@ mod tests {
             Api::AnthropicMessages,
         ] {
             let mut c = cfg();
-            // Route the default key to the dispatched api so `open` receives
-            // the matching `Api`.
-            c.api_type.get_mut("chat_completions").unwrap().api = api;
+            // Set the provider's default api so `open` receives the matching
+            // `Api`.
+            c.api_type = Some(api);
             assert!(open(api, &c).is_ok());
         }
     }

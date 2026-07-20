@@ -15,7 +15,7 @@ use futures::StreamExt;
 use lofi_providers::ir::assemble_message;
 use lofi_providers::open;
 use lofi_types::{
-    Api, ApiTypeMapping, ContentBlock, Message, Model, PricingFieldMappings,
+    Api, ContentBlock, Message, Model, PricingFieldMappings,
     PricingConvention, ProviderConfig, Role, StreamingEvent, Usage,
 };
 
@@ -55,27 +55,19 @@ fn model_for(api: Api, base_url: &str) -> Model {
         output_price: None,
         cache_read_price: None,
         cache_write_price: None,
+        per_request_price: None,
     }
 }
 
 /// Build a `ProviderConfig` pointed at `base_url` with a dummy key. The
-/// `api_type` table routes the default key to `api`, and the provider's
-/// `base_url` is the mock server root; per-model endpoint URLs are not set
-/// on the model, so the provider POSTs to `base_url` verbatim and the mock
+/// provider's default `api` is set directly, and the provider's `base_url`
+/// is the mock server root; per-model endpoint URLs are not set on the
+/// model, so the provider POSTs to `base_url` verbatim and the mock
 /// registers the full endpoint path.
 fn cfg(api: Api, base_url: String) -> ProviderConfig {
-    let mut mappings = indexmap::IndexMap::new();
-    mappings.insert(
-        "chat_completions".to_string(),
-        ApiTypeMapping {
-            api,
-            path: None,
-            pricing_field_mappings: None,
-        },
-    );
     ProviderConfig {
-        api_type: mappings,
-        default_api_type: None,
+        api_type: Some(api),
+        api_types: indexmap::IndexMap::new(),
         base_url: Some(base_url),
         pricing_convention: PricingConvention::PerToken,
         pricing_field_mappings: PricingFieldMappings::default(),
@@ -86,6 +78,7 @@ fn cfg(api: Api, base_url: String) -> ProviderConfig {
         auto_models: None,
         no_auth: false,
         thinking_level: None,
+        thinking_levels: Vec::new(),
     }
 }
 

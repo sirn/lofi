@@ -327,6 +327,12 @@ impl TurnStats {
                 + usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write_rate
                 + usage.output_tokens as f64 / 1_000_000.0 * op;
         }
+        // A flat per-request cost is billed once per round, independent of
+        // token pricing. A round is one provider call, so multi-round turns
+        // accumulate one per-request charge per round.
+        if let Some(pr) = model.per_request_price {
+            self.cost += pr;
+        }
     }
 
     /// Snapshot the turn's accumulators for the session recorder. The order
@@ -1658,6 +1664,7 @@ mod tests {
             output_price: None,
             cache_read_price: None,
             cache_write_price: None,
+            per_request_price: None,
         }
     }
 
@@ -1992,7 +1999,7 @@ use indexmap::IndexMap;
     fn mc() -> ModelConfig {
         ModelConfig {
             name: None,
-            api: None,
+            api_type: None,
             reasoning: None,
             supports_image: None,
             context_window: None,
@@ -2009,6 +2016,7 @@ use indexmap::IndexMap;
             output_price: None,
             cache_read_price: None,
             cache_write_price: None,
+            per_request_price: None,
         }
     }
 
@@ -2040,16 +2048,15 @@ use indexmap::IndexMap;
     ) -> ProviderConfig {
         let mut mappings = IndexMap::new();
         mappings.insert(
-            "chat_completions".to_string(),
+            api.as_str().to_string(),
             ApiTypeMapping {
-                api,
                 path: None,
                 pricing_field_mappings: None,
             },
         );
         ProviderConfig {
-            api_type: mappings,
-            default_api_type: None,
+            api_type: Some(api),
+            api_types: mappings,
             base_url: Some("https://api.example.com".to_string()),
             pricing_convention: PricingConvention::PerToken,
             pricing_field_mappings: PricingFieldMappings::default(),
@@ -2060,6 +2067,7 @@ use indexmap::IndexMap;
             auto_models: None,
             no_auth: false,
             thinking_level,
+            thinking_levels: Vec::new(),
         }
     }
 
@@ -2340,6 +2348,7 @@ use indexmap::IndexMap;
             output_price: Some(2.0),
             cache_read_price: Some(0.1),
             cache_write_price: Some(0.5),
+            per_request_price: None,
         };
         let mut stats = TurnStats::new();
         stats.add_usage(
@@ -2373,6 +2382,7 @@ use indexmap::IndexMap;
             output_price: Some(2.0),
             cache_read_price: None,
             cache_write_price: None,
+            per_request_price: None,
         };
         let mut stats = TurnStats::new();
         stats.add_usage(
