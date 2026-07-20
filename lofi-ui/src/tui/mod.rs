@@ -2067,9 +2067,10 @@ impl App {
     }
 
     /// Unified key dispatch for list-style modal overlays (`/resume` and
-    /// `/tree`). `↑/↓` or `j`/`k` move the selection, `Enter` confirms,
-    /// `Esc`/`q` cancels. Returns `true` if a modal handled the key (so the
-    /// caller skips normal Input-mode processing).
+    /// `/tree`). `↑/↓` or `j`/`k` or `Ctrl+N`/`Ctrl+P` move the selection
+    /// (clamped); `Tab`/`Shift+Tab` cycle with wrap-around; `Enter`
+    /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
+    /// key (so the caller skips normal Input-mode processing).
     fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         /// Which overlay slot is active, for per-slot confirm/cancel.
         enum Slot { Picker, Tree }
@@ -2080,22 +2081,26 @@ impl App {
         } else {
             return false;
         };
+        let len = self.active_modal_mut().map_or(0, |m| m.len());
+        // Confirm/cancel (and the single-item Tab shortcut) take `&mut self`
+        // (or take the picker) and are handled before borrowing the modal for
+        // navigation.
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(m) = self.active_modal_mut() {
-                    if m.selected() > 0 {
-                        m.set_selected(m.selected() - 1);
-                    }
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(m) = self.active_modal_mut() {
-                    if m.selected() + 1 < m.len() {
-                        m.set_selected(m.selected() + 1);
-                    }
-                }
-            }
             KeyCode::Enter => match slot {
+                Slot::Picker => {
+                    if let Some(picker) = self.picker.take() {
+                        self.picker_confirm_inner(picker);
+                    }
+                }
+                Slot::Tree => {
+                    if let Some(picker) = self.tree_picker.take() {
+                        self.tree_picker_confirm_inner(picker);
+                    }
+                }
+            },
+            // With a single entry, Tab/Shift+Tab confirm outright instead of
+            // cycling (a no-op) — same as pressing Enter.
+            KeyCode::Tab | KeyCode::BackTab if len == 1 => match slot {
                 Slot::Picker => {
                     if let Some(picker) = self.picker.take() {
                         self.picker_confirm_inner(picker);
@@ -2113,6 +2118,41 @@ impl App {
             },
             _ => {}
         }
+        if (matches!(slot, Slot::Picker) && self.picker.is_none())
+            || (matches!(slot, Slot::Tree) && self.tree_picker.is_none())
+        {
+            // Confirm/cancel consumed the overlay; nothing left to navigate.
+            return true;
+        }
+        let Some(m) = self.active_modal_mut() else { return true };
+        if len == 0 {
+            return true;
+        }
+        let s = m.selected();
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                m.set_selected(if s > 0 { s - 1 } else { 0 });
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                m.set_selected(if s + 1 < len { s + 1 } else { s });
+            }
+            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
+            // popover and the Input-mode cursor keys.
+            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                m.set_selected(if s + 1 < len { s + 1 } else { s });
+            }
+            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                m.set_selected(if s > 0 { s - 1 } else { 0 });
+            }
+            // Tab/Shift+Tab cycle with wrap-around (last ↔ first).
+            KeyCode::Tab => {
+                m.set_selected((s + 1) % len);
+            }
+            KeyCode::BackTab => {
+                m.set_selected(if s == 0 { len - 1 } else { s - 1 });
+            }
+            _ => {}
+        }
         true
     }
 
@@ -2127,9 +2167,9 @@ impl App {
     }
 
     /// Unified key dispatch for the slash-command autocomplete popover.
-    /// `↑/↓` or `Ctrl+N`/`Ctrl+P` move the selection (clamped); `Tab`
-    /// moves down with wrap-around (last → first); `Enter` accepts the
-    /// selection (auto-completes); `Esc` dismisses. Unlike
+    /// `↑/↓` or `Ctrl+N`/`Ctrl+P` move the selection (clamped); `Tab`/
+    /// `Shift+Tab` cycle with wrap-around (last ↔ first); `Enter` accepts
+    /// the selection (auto-completes); `Esc` dismisses. Unlike
     /// [`handle_modal_key`], `j`/`k`/`q` are not intercepted — the popover
     /// floats over a text input, so those must stay printable. Returns
     /// `true` if the popover handled the key.
@@ -2137,10 +2177,17 @@ impl App {
         if self.slash_complete.is_none() {
             return false;
         }
-        // Accept/dismiss take `&mut self` and are handled before borrowing
-        // the popover for navigation.
+        let len = self.slash_complete.as_ref().map_or(0, |p| p.len());
+        // Accept/dismiss (and the single-item Tab shortcut) take `&mut self`
+        // and are handled before borrowing the popover for navigation.
         match k.code {
             KeyCode::Enter => {
+                self.slash_complete_accept();
+                return true;
+            }
+            // With a single candidate, Tab/Shift+Tab accept it outright
+            // instead of cycling (a no-op) — same as pressing Enter.
+            KeyCode::Tab | KeyCode::BackTab if len == 1 => {
                 self.slash_complete_accept();
                 return true;
             }
@@ -2154,34 +2201,31 @@ impl App {
         else {
             return false;
         };
-        let len = popover.len();
         if len == 0 {
             return false;
         }
+        let s = popover.selected();
         match k.code {
             KeyCode::Up => {
-                let s = popover.selected();
                 popover.set_selected(if s > 0 { s - 1 } else { 0 });
             }
             KeyCode::Down => {
-                let s = popover.selected();
                 popover.set_selected(if s + 1 < len { s + 1 } else { s });
             }
             // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
             // Input-mode cursor keys.
             KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                let s = popover.selected();
                 popover.set_selected(if s + 1 < len { s + 1 } else { s });
             }
             KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                let s = popover.selected();
                 popover.set_selected(if s > 0 { s - 1 } else { 0 });
             }
-            // Tab moves down with wrap-around (last → first), like Ctrl+N
-            // but cycling instead of clamping.
+            // Tab/Shift+Tab cycle with wrap-around (last ↔ first).
             KeyCode::Tab => {
-                let s = popover.selected();
                 popover.set_selected((s + 1) % len);
+            }
+            KeyCode::BackTab => {
+                popover.set_selected(if s == 0 { len - 1 } else { s - 1 });
             }
             _ => return false,
         }
@@ -4700,6 +4744,26 @@ mod tests {
     }
 
     #[test]
+    fn slash_complete_single_item_tab_accepts() {
+        // "/tr" matches only /tree, so Tab/Shift+Tab accept it outright
+        // instead of cycling (a no-op on a single candidate).
+        let mut a = app();
+        let mut run = None;
+        a.input = "/tr".to_string();
+        a.refresh_slash_complete();
+        assert_eq!(a.slash_complete.as_ref().unwrap().candidates.len(), 1);
+        handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
+        assert_eq!(a.input, "/tree");
+        assert!(a.slash_complete.is_none());
+        // Same for Shift+Tab on a single candidate.
+        a.input = "/tr".to_string();
+        a.refresh_slash_complete();
+        handle_event(&plain_key(KeyCode::BackTab), &mut a, None, &mut run);
+        assert_eq!(a.input, "/tree");
+        assert!(a.slash_complete.is_none());
+    }
+
+    #[test]
     fn tree_no_session_pushes_error() {
         let mut a = app();
         // No session.path set — ephemeral. /tree rejects with an error turn
@@ -4788,6 +4852,81 @@ mod tests {
         // One visible turn (turn 1); turn 2 is rolled back out of view.
         assert_eq!(a.turns.len(), 1);
         assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    }
+
+    #[test]
+    fn modal_tab_cycles_with_wraparound() {
+        // /tree on a two-turn session yields 4 entries, defaulting to the
+        // last (index 3). Tab wraps forward (3 -> 0); Shift+Tab wraps back
+        // (0 -> 3); Ctrl+N/Ctrl+P clamp at the edges.
+        use lofi_core::session::store::SessionStore;
+        use lofi_types::{ContentBlock, Role};
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("s"));
+        let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+        let kinds = [
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "first".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "second".into() }],
+            }),
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: "world".into() }],
+            }),
+            SessionEventKind::TurnEnd {
+                label: "m".into(),
+                elapsed_ms: 100,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        ];
+        let mut batch: Vec<SessionEvent> = kinds
+            .into_iter()
+            .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+            .collect();
+        store::append_events(&path, &mut batch, None).unwrap();
+        let mut a = app();
+        a.session.path = Some(path);
+        a.session.cwd = std::path::PathBuf::from("/x");
+        assert!(a.slash_command("/tree"));
+        let len = a.tree_picker.as_ref().unwrap().entries.len();
+        assert_eq!(len, 4);
+        assert_eq!(a.tree_picker.as_ref().unwrap().selected, 3);
+        let mut run = None;
+        // Tab wraps forward: last (3) -> first (0).
+        handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
+        assert_eq!(a.tree_picker.as_ref().unwrap().selected, 0);
+        // Shift+Tab wraps back: first (0) -> last (3).
+        handle_event(&plain_key(KeyCode::BackTab), &mut a, None, &mut run);
+        assert_eq!(a.tree_picker.as_ref().unwrap().selected, 3);
+        // Ctrl+N moves forward (clamped, no wrap): 0 -> 1.
+        handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
+        assert_eq!(a.tree_picker.as_ref().unwrap().selected, 0);
+        handle_event(
+            &Event::Key(crossterm::event::KeyEvent::new_with_kind(
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            &mut a,
+            None,
+            &mut run,
+        );
+        assert_eq!(a.tree_picker.as_ref().unwrap().selected, 1);
     }
 
     #[test]
