@@ -619,26 +619,33 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// '/tree' branch-picker overlay: a centered popup listing the session's
-/// user-prompt events. Picking one feeds the prompt back into the input and
-/// sets the branch hint so the next run starts as a sibling of that prompt.
-/// Each row shows the selected index + a one-line preview (multi-line prompts
-/// collapse with ⏎). Mirrors the visual shape of [`render_picker`] but the
-/// items come from [`crate::tui::TreeEntry`] not session summaries.
+/// '/tree' branch-picker overlay: a popup showing the session's event tree
+/// rendered with ASCII tree art (`|-`, ``- `, `|  `). `user:` nodes roll
+/// back to before the prompt (edit and resend); `agent:` nodes roll back to
+/// after the turn (continue from here). Nodes on the active path are
+/// highlighted so the current branch is visible at a glance.
 fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(picker) = &app.tree_picker else { return; };
-    let h = u16::try_from(picker.entries.len().min(12) + 2).unwrap_or(14);
-    let w = area.width.min(80);
+    let rows = picker.entries.len().min(20);
+    let h = u16::try_from(rows + 2).unwrap_or(22);
     let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
-    let horiz = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).split(vert[1]);
-    let popup = horiz[1];
+    let popup = vert[1];
     f.render_widget(Clear, popup);
+    let t = app.theme;
+    let tree_art = Style::new().fg(t.subtle);
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker
         .entries
         .iter()
-        .enumerate()
-        .map(|(i, e)| ListItem::new(format!("{i:>2}  {}", e.label)))
+        .map(|e| {
+            let label_style = if e.is_active { active_style } else { inactive_style };
+            ListItem::new(Line::from(vec![
+                Span::styled(e.prefix.clone(), tree_art),
+                Span::styled(e.label.clone(), label_style),
+            ]))
+        })
         .collect();
     let list = List::new(items)
         .block(
@@ -646,10 +653,10 @@ fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
                 .border_type(BorderType::Rounded)
                 .title(Span::styled(
                     " Roll back to a turn  ↑/↓ j/k enter esc ",
-                    Style::new().fg(app.theme.primary).add_modifier(Modifier::BOLD),
+                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
                 )),
         )
-        .style(Style::default().fg(app.theme.fg))
+        .style(Style::default().fg(t.fg))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(
         list,
