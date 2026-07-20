@@ -2733,8 +2733,12 @@ fn build_tree_entries(events: &[SessionEvent]) -> Vec<TreeEntry> {
 /// Render one branch subtree: a list of sibling user-prompt nodes, each
 /// followed by its agent (turn outcome) and any sub-branches. Recurses so
 /// branches-off-branches nest further, but the common case is one level.
+/// Render branch subtrees using the same flat-trunk principle as the main
+/// tree: each branch root's linear chain (root → turn outcome → next user
+/// prompt → …) is rendered flat at this indentation level. Only actual
+/// sub-branches (divergences within a branch) create further indentation.
 fn render_branch_subtree(
-    indices: &[usize],
+    roots: &[usize],
     events: &[SessionEvent],
     children_by_parent: &HashMap<&str, Vec<usize>>,
     by_id: &HashMap<&str, usize>,
@@ -2742,61 +2746,88 @@ fn render_branch_subtree(
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
-    for (pos, &idx) in indices.iter().enumerate() {
-        let is_last = pos == indices.len() - 1;
-        let connector = if is_last { "└─ " } else { "├─ " };
-        let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
-        let full_prefix = format!("{prefix}{connector}");
-        push_tree_entry(idx, &full_prefix, events, by_id, active_set, out);
-        // For a user-prompt node, children = [turn outcome] + [branched
-        // user prompts from the old /tree variant].
-        if is_user_prompt(&events[idx]) {
-            let te_idx = find_turn_outcome(idx, events, children_by_parent);
-            let mut children = Vec::new();
-            if let Some(te) = te_idx {
-                children.push(te);
-            }
-            let branched: Vec<usize> = children_by_parent
-                .get(events[idx].id.as_str())
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&i| is_user_prompt(&events[i]) && i != idx)
-                .collect();
-            children.extend(branched);
-            if !children.is_empty() {
-                render_branch_subtree(
-                    &children,
-                    events,
-                    children_by_parent,
-                    by_id,
-                    active_set,
-                    &child_indent,
-                    out,
-                );
-            }
-        } else {
-            // turn_end / turn_failed: children = user-prompt sub-branches.
-            let children: Vec<usize> = children_by_parent
-                .get(events[idx].id.as_str())
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&i| is_user_prompt(&events[i]))
-                .collect();
-            if !children.is_empty() {
-                render_branch_subtree(
-                    &children,
-                    events,
-                    children_by_parent,
-                    by_id,
-                    active_set,
-                    &child_indent,
-                    out,
-                );
-            }
+    // Walk each root's linear chain, flattening all chain nodes into one
+    // list at this level. `chain_set` lets us distinguish chain nodes
+    // (continuations) from sub-branches (divergences).
+    let mut flat: Vec<usize> = Vec::new();
+    let mut chain_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &root in roots {
+        for idx in walk_chain(root, events, children_by_parent) {
+            flat.push(idx);
+            chain_set.insert(idx);
         }
     }
+    let n = flat.len();
+    for (pos, &idx) in flat.iter().enumerate() {
+        let is_last = pos == n - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
+        push_tree_entry(idx, &format!("{prefix}{connector}"), events, by_id, active_set, out);
+        // Sub-branches = children not on this chain.
+        let mut sub_branches: Vec<usize> = Vec::new();
+        if is_user_prompt(&events[idx]) {
+            if let Some(te_idx) = find_turn_outcome(idx, events, children_by_parent) {
+                if !chain_set.contains(&te_idx) {
+                    sub_branches.push(te_idx);
+                }
+            }
+        }
+        let user_children: Vec<usize> = children_by_parent
+            .get(events[idx].id.as_str())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&i| is_user_prompt(&events[i]) && !chain_set.contains(&i))
+            .collect();
+        sub_branches.extend(user_children);
+        if !sub_branches.is_empty() {
+            render_branch_subtree(
+                &sub_branches,
+                events,
+                children_by_parent,
+                by_id,
+                active_set,
+                &child_indent,
+                out,
+            );
+        }
+    }
+}
+
+/// Walk the linear chain from `start`: user → turn outcome → next user
+/// prompt → …, following the first user-prompt child at each turn_end and
+/// the turn outcome at each user prompt. Stops at cycles or dead ends.
+/// This is the "spine" of a branch — nodes on it render flat; siblings
+/// not on it are sub-branches.
+fn walk_chain(
+    start: usize,
+    events: &[SessionEvent],
+    children_by_parent: &HashMap<&str, Vec<usize>>,
+) -> Vec<usize> {
+    let mut chain = vec![start];
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(start);
+    let mut cur = start;
+    loop {
+        let next = if is_user_prompt(&events[cur]) {
+            find_turn_outcome(cur, events, children_by_parent)
+        } else {
+            children_by_parent
+                .get(events[cur].id.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .find(|&i| is_user_prompt(&events[i]))
+        };
+        match next {
+            Some(n) if visited.insert(n) => {
+                chain.push(n);
+                cur = n;
+            }
+            _ => break,
+        }
+    }
+    chain
 }
 
 /// Append one `TreeEntry` for event `idx` with the given prefix.
