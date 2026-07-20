@@ -1624,18 +1624,9 @@ impl App {
         // Folded tool bodies are baked into the frozen-render cache at freeze
         // time, so a toggle must invalidate it — otherwise only the live
         // (last) turn would react and earlier turns would keep the preview.
+        // The state itself surfaces as the `[VERBOSE]` tag on the rule line
+        // rather than a chat turn, so toggling stays out of the transcript.
         self.bump_render_epoch();
-        self.push_turn(Turn {
-            prompt: "/verbose".to_string(),
-            blocks: vec![Block::Text(
-                if self.verbose {
-                    "tool detail: expanded"
-                } else {
-                    "tool detail: preview"
-                }
-                .to_string(),
-            )],
-        });
     }
 
     /// Multi-line scroll for the mouse wheel; negative scrolls up (towards
@@ -5004,8 +4995,14 @@ mod tests {
     fn verbose_toggles() {
         let mut a = app();
         assert!(!a.verbose);
+        let before = a.turns.len();
         a.toggle_verbose();
         assert!(a.verbose);
+        // Verbose state surfaces on the rule line, not as a chat turn.
+        assert_eq!(a.turns.len(), before);
+        a.toggle_verbose();
+        assert!(!a.verbose);
+        assert_eq!(a.turns.len(), before);
     }
 
     #[test]
