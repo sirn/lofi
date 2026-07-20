@@ -73,6 +73,22 @@ const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 /// reports no `context_window`. A reported non-zero value is always used as-is.
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
 
+/// The slash commands offered by the autocomplete popover, in display
+/// order. Kept in sync with [`App::slash_command`]. Each entry is
+/// `(command, short description)`; the description is shown muted to the
+/// right of the command in the popover.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/clear", "clear the transcript log"),
+    ("/exit", "exit lofi"),
+    ("/help", "show keybindings and commands"),
+    ("/new", "start a fresh session"),
+    ("/quit", "exit lofi"),
+    ("/resume", "pick a past session to resume"),
+    ("/session", "show session info"),
+    ("/tree", "roll back to a past turn"),
+    ("/verbose", "toggle tool detail"),
+];
+
 /// A native tool call (`lofi.bash`/`lofi.read`/…) observed inside an `exec`
 /// block, surfaced so the UI can render each one under its parent exec.
 #[derive(Debug, Clone)]
@@ -229,6 +245,18 @@ impl SessionConfig {
 #[derive(Debug, Clone)]
 struct PickerState {
     entries: Vec<SessionEntry>,
+    selected: usize,
+}
+
+/// Slash-command autocomplete popover state. Active while the input is a
+/// prefix of one or more entries in [`SLASH_COMMANDS`] (e.g. `/`, `/tr`);
+/// dismissed by `Esc`, a non-matching edit, or selecting a candidate with
+/// `Tab`. `↑/↓` or `j`/`k` move the selection.
+#[derive(Debug, Clone)]
+struct SlashComplete {
+    /// Indices into [`SLASH_COMMANDS`] of the matching candidates, in the
+    /// order they appear there.
+    candidates: Vec<usize>,
     selected: usize,
 }
 
@@ -436,6 +464,9 @@ pub(crate) struct App {
     picker: Option<PickerState>,
     /// '/tree' overlay state, when open. See [`TreePickerState`].
     tree_picker: Option<TreePickerState>,
+    /// Slash-command autocomplete popover, active while the input is a
+    /// prefix of a known command.
+    slash_complete: Option<SlashComplete>,
     /// Hint shown in the log when no model is configured; `None` in normal runs.
     no_models_hint: Option<String>,
     theme: Theme,
@@ -544,6 +575,7 @@ impl App {
             },
             picker: None,
             tree_picker: None,
+            slash_complete: None,
             no_models_hint: None,
             theme: Theme::default(),
             kill_ring: String::new(),
@@ -1554,6 +1586,7 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.history_idx = None;
+        self.slash_complete = None;
     }
 
     fn toggle_verbose(&mut self) {
@@ -1753,9 +1786,71 @@ impl App {
         }
     }
 
+    /// Recompute the slash-command autocomplete popover from the current
+    /// input. The popover is active while the input is a non-empty prefix
+    /// of one or more [`SLASH_COMMANDS`] entries (e.g. `/`, `/tr`). A bare
+    /// `/` matches everything; once the full command is typed exactly, the
+    /// popover dismisses (nothing left to complete). Preserves the selected
+    /// candidate when it's still in the new match set.
+    fn refresh_slash_complete(&mut self) {
+        let input = self.input.as_str();
+        if !input.starts_with('/') || input.is_empty() {
+            self.slash_complete = None;
+            return;
+        }
+        // Don't offer completion once the user has typed a full command plus
+        // trailing text (e.g. `/help foo`) — there's nothing to complete.
+        let candidates: Vec<usize> = SLASH_COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, (cmd, _))| cmd.starts_with(input))
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() || (candidates.len() == 1 && SLASH_COMMANDS[candidates[0]].0 == input) {
+            self.slash_complete = None;
+            return;
+        }
+        // Preserve the selection if the previously-selected command is still
+        // a candidate; otherwise reset to the first match.
+        let prev = self.slash_complete.as_ref().and_then(|sc| {
+            sc.candidates
+                .get(sc.selected)
+                .and_then(|&idx| candidates.iter().position(|&c| c == idx))
+        });
+        let selected = prev.unwrap_or(0);
+        self.slash_complete = Some(SlashComplete { candidates, selected });
+    }
+
+    /// Accept the selected autocomplete candidate: replace the input with
+    /// the command, position the cursor at the end, and dismiss the popover.
+    fn slash_complete_accept(&mut self) {
+        if let Some(sc) = self.slash_complete.take() {
+            if let Some(&idx) = sc.candidates.get(sc.selected) {
+                self.input = SLASH_COMMANDS[idx].0.to_string();
+                self.input_cursor = self.input.chars().count();
+            }
+        }
+        self.slash_complete = None;
+    }
+
+    fn slash_complete_up(&mut self) {
+        if let Some(sc) = self.slash_complete.as_mut() {
+            if sc.selected > 0 {
+                sc.selected -= 1;
+            }
+        }
+    }
+
+    fn slash_complete_down(&mut self) {
+        if let Some(sc) = self.slash_complete.as_mut() {
+            if sc.selected + 1 < sc.candidates.len() {
+                sc.selected += 1;
+            }
+        }
+    }
+
     fn push_help(&mut self) {
-        let help = "Keys\n  Enter        send  ·  Alt+Enter / Ctrl+J  newline\n  ↑ / ↓        move line, recall at edge  ·  Ctrl+↑/↓  move across lines\n  PgUp/PgDn    scroll a page (Input) · move cursor a page (Nav/Select)\n  Tab          switch mode: Input ↔ Navigate / back from Select
-  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        roll back to a past turn (edit + resend, or continue)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit";
+        let help = "Keys\n  Enter        send  ·  Alt+Enter / Ctrl+J  newline\n  ↑ / ↓        move line, recall at edge  ·  Ctrl+↑/↓  move across lines\n  PgUp/PgDn    scroll a page (Input) · move cursor a page (Nav/Select)\n  Tab          switch mode: Input ↔ Navigate / back from Select\n  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        roll back to a past turn (edit + resend, or continue)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit\nSlash commands autocomplete: type / then ↑/↓ and Tab to complete";
         self.push_turn(Turn {
             prompt: "/help".to_string(),
             blocks: vec![Block::Text(help.to_string())],
@@ -3458,18 +3553,49 @@ fn handle_event(
 
     if k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::ALT) {
         app.insert_newline();
+        app.refresh_slash_complete();
         return;
     }
     // Ctrl+J is a newline in readline / Emacs; treat it like Alt+Enter.
     if k.code == KeyCode::Char('j') && k.modifiers.contains(KeyModifiers::CONTROL) {
         app.insert_newline();
+        app.refresh_slash_complete();
         return;
+    }
+    // Slash-command autocomplete popover intercepts navigation/accept/dismiss
+    // keys while active. Typing and other edits fall through to the normal
+    // Input handlers and re-filter the popover via `refresh_slash_complete`.
+    if app.slash_complete.is_some() {
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k')
+                if !k.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                app.slash_complete_up();
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if !k.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                app.slash_complete_down();
+                return;
+            }
+            KeyCode::Tab => {
+                app.slash_complete_accept();
+                return;
+            }
+            KeyCode::Esc => {
+                app.slash_complete = None;
+                return;
+            }
+            _ => {}
+        }
     }
     match k.code {
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
             app.history_idx = None;
+            app.slash_complete = None;
             if app.slash_command(&prompt) {
                 return;
             }
@@ -3590,6 +3716,10 @@ fn handle_event(
         }
         _ => {}
     }
+    // Re-filter the autocomplete popover after any input edit. Commands that
+    // `return` early (newline, autocomplete accept/dismiss) call
+    // `refresh_slash_complete` themselves or clear the popover directly.
+    app.refresh_slash_complete();
 }
 
 /// Ctrl+C: cancel an active run; otherwise clear a non-empty draft, or quit
@@ -4446,6 +4576,38 @@ mod tests {
 
         assert!(a.slash_command("/quit"));
         assert!(a.should_quit);
+    }
+
+    #[test]
+    fn slash_complete_filters_and_accepts() {
+        let mut a = app();
+        // "/" matches all commands.
+        a.input = "/".to_string();
+        a.refresh_slash_complete();
+        let sc = a.slash_complete.as_ref().expect("popover open");
+        assert_eq!(sc.candidates.len(), SLASH_COMMANDS.len());
+        // "/tr" filters to just /tree.
+        a.input = "/tr".to_string();
+        a.refresh_slash_complete();
+        let sc = a.slash_complete.as_ref().expect("popover open");
+        assert_eq!(sc.candidates, vec![7]); // /tree is index 7
+        // Typing the full command dismisses (nothing left to complete).
+        a.input = "/tree".to_string();
+        a.refresh_slash_complete();
+        assert!(a.slash_complete.is_none());
+        // Non-command input dismisses.
+        a.input = "hello".to_string();
+        a.refresh_slash_complete();
+        assert!(a.slash_complete.is_none());
+        // Accept replaces the input with the selected candidate.
+        a.input = "/".to_string();
+        a.refresh_slash_complete();
+        a.slash_complete_down(); // index 1 = /exit
+        a.slash_complete_down(); // index 2 = /help
+        a.slash_complete_accept();
+        assert_eq!(a.input, "/help");
+        assert_eq!(a.input_cursor, a.input.len());
+        assert!(a.slash_complete.is_none());
     }
 
     #[test]

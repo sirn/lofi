@@ -23,6 +23,7 @@ use ratatui::Frame;
 
 use crate::tui::theme::{active_indicator, user_indicator};
 use crate::tui::{App, Mode, SPINNER};
+use crate::tui::SLASH_COMMANDS;
 
 pub(crate) mod blocks;
 pub(crate) mod component;
@@ -138,6 +139,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.tree_picker.is_some() {
         render_tree_picker(f, area, app);
+    }
+    if app.slash_complete.is_some() {
+        render_slash_complete(f, area, app);
     }
 }
 
@@ -616,6 +620,72 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         list,
         popup,
         &mut ListState::default().with_selected(Some(picker.selected)),
+    );
+}
+
+/// Slash-command autocomplete popover: a bottom-left popup anchored just
+/// above the footer (rule + prompt + info), listing commands that start
+/// with the current input. `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc`
+/// dismisses.
+fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    let Some(sc) = &app.slash_complete else { return; };
+    let t = app.theme;
+    let n = sc.candidates.len().min(8);
+    let h = u16::try_from(n + 2).unwrap_or(10);
+    // Footer height = input_lines + 3 (rule + blank + info), matching
+    // `render`'s VStack. Anchor the popover just above it.
+    let input_h = u16::try_from(app.input_lines(area.width as usize).max(1)).unwrap_or(u16::MAX);
+    let footer_h = input_h.saturating_add(3);
+    let bottom = area.height.saturating_sub(footer_h);
+    let w = u16::try_from(
+        SLASH_COMMANDS
+            .iter()
+            .map(|(cmd, desc)| cmd.len() + 2 + desc.len())
+            .max()
+            .unwrap_or(20)
+            + 4,
+    )
+    .unwrap_or(40)
+    .min(area.width);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(bottom.saturating_sub(h)),
+        Constraint::Length(h),
+    ])
+    .split(area);
+    let popup = vert[2];
+    let horiz = Layout::horizontal([Constraint::Length(w), Constraint::Min(0)]).split(popup);
+    let popup = horiz[0];
+    f.render_widget(Clear, popup);
+    let cmd_style = Style::new().fg(t.fg);
+    let desc_style = Style::new().fg(t.subtle);
+    let items: Vec<ListItem> = sc
+        .candidates
+        .iter()
+        .map(|&idx| {
+            let (cmd, desc) = SLASH_COMMANDS[idx];
+            ListItem::new(Line::from(vec![
+                Span::styled(cmd.to_string(), cmd_style),
+                Span::styled(format!("  {desc}"), desc_style),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            WidgetBlock::bordered()
+                .border_type(BorderType::Rounded)
+                .title(Span::styled(
+                    " Commands ",
+                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+                )),
+        )
+        .style(Style::default().fg(t.fg))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(
+        list,
+        popup,
+        &mut ListState::default().with_selected(Some(sc.selected)),
     );
 }
 
