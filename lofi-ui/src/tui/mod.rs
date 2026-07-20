@@ -2488,17 +2488,37 @@ fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
 
 /// Extract the conversation messages from a transcript event log, for the
 /// agent's in-memory history on resume.
+///
+/// Walks the active path (leaf -> root) so a resumed session continues from
+/// the active branch, excluding siblings. A `TurnFailed` marker means the
+/// messages between it and the previous `TurnEnd` (the failed turn's
+/// partial content) must NOT be fed to the model on resume — the failed
+/// turn's content stays on the active path so the UI can render it, but the
+/// agent's history skips it. We walk leaf-first and toggle a `skipping`
+/// flag at the `TurnFailed` boundary, clearing it at the prior `TurnEnd`.
 fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
-    // Walk the active path (leaf -> root) so a resumed session continues
-    // from the active branch, excluding siblings. The path is root-first,
-    // which is the order messages should be fed to the model.
-    store::active_path_from_leaf(events)
-        .into_iter()
-        .filter_map(|i| match &events[i].kind {
-            SessionEventKind::Message(m) => Some(m.clone()),
-            _ => None,
-        })
-        .collect()
+    let path = store::active_path_from_leaf(events);
+    let mut out: Vec<Message> = Vec::new();
+    let mut skipping = false;
+    // Iterate leaf-first so the `TurnFailed` boundary is seen before its
+    // ancestors; `path` is root-first, so reverse.
+    for &i in path.iter().rev() {
+        match &events[i].kind {
+            SessionEventKind::TurnFailed { .. } => {
+                skipping = true;
+            }
+            SessionEventKind::TurnEnd { .. } => {
+                skipping = false;
+            }
+            SessionEventKind::Message(m) if !skipping => {
+                out.push(m.clone());
+            }
+            _ => {}
+        }
+    }
+    // `out` is leaf-first; reverse to root-first for the model.
+    out.reverse();
+    out
 }
 
 struct RunHandle {
@@ -3989,24 +4009,24 @@ mod tests {
         }
     }
 
-    #[test]
+#[test]
     fn messages_from_events_excludes_failed_turn_branch() {
         // Build a tree: root chain [user1, assistant1, TurnEnd1], then a
-        // failed branch off TurnEnd1: [user2, assistant2_partial, ...,
-        // TurnFailed] where TurnFailed.parent_id = TurnEnd1 (the checkpoint),
-        // NOT the failed turn's last message. The active-path walk must skip
-        // the failed branch's messages and continue from TurnEnd1.
+        // failed turn chained linearly off TurnEnd1: [user2, assistant2,
+        // TurnFailed]. The TurnFailed marker is the active leaf. The active
+        // path INCLUDES the failed turn's messages (so the UI can render
+        // them), but `messages_from_events` must EXCLUDE them from the
+        // agent's history via the TurnFailed boundary — the model resumes
+        // from the checkpoint (TurnEnd1), not the failed partial content.
         use lofi_core::session::store::{active_path_from_leaf, last_event_id};
         use std::path::Path;
 
-        // Simulate the recorder's on-disk output via a scratch file so we
-        // get real id/parent_id chaining (mirrors what append_events does).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n").unwrap();
 
         // First (successful) turn: two messages + a TurnEnd, chained from
-        // the root (parent_hint None) so append_events assigns linear ids.
+        // the root so append_events assigns linear ids.
         let mut t1_events: Vec<SessionEvent> = [
             SessionEventKind::Message(user("hi")),
             SessionEventKind::Message(assistant("hello")),
@@ -4021,58 +4041,46 @@ mod tests {
         .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
         .collect();
         store::append_events(&path, &mut t1_events, None).unwrap();
-        // The checkpoint is the first turn's TurnEnd (now the file's leaf).
         let checkpoint = last_event_id(&path).unwrap().unwrap();
 
-        // Second (failed) turn: messages chain off the checkpoint; the
-        // TurnFailed marker ALSO branches off the checkpoint (passed as the
-        // marker batch's parent_hint), mirroring the recorder's
-        // flush(Failed) logic. Empty ids/parents let append_events do the
-        // chaining.
+        // Second (failed) turn: messages + TurnFailed marker, all chained
+        // linearly off the checkpoint (parent_hint = checkpoint), mirroring
+        // the recorder's flush(Failed) which does NOT branch the marker.
         let mut t2_events: Vec<SessionEvent> = [
             SessionEventKind::Message(user("oops")),
             SessionEventKind::Message(assistant("partial")),
-        ]
-        .into_iter()
-        .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
-        .collect();
-        store::append_events(&path, &mut t2_events, Some(&checkpoint)).unwrap();
-
-        // Append the TurnFailed marker branched off the checkpoint.
-        let mut failed_marker = vec![SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::TurnFailed {
+            SessionEventKind::TurnFailed {
                 label: "m".into(),
                 elapsed_ms: 5,
                 error: "boom".into(),
                 cost: 0.01,
                 usage: Usage::default(),
             },
-        }];
-        store::append_events(&path, &mut failed_marker, Some(&checkpoint)).unwrap();
+        ]
+        .into_iter()
+        .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+        .collect();
+        store::append_events(&path, &mut t2_events, Some(&checkpoint)).unwrap();
 
         let (_meta, events, _, _) = store::load(&path).unwrap();
-        // The active leaf is the TurnFailed marker.
+        // The active leaf is the TurnFailed marker; the active path includes
+        // the failed turn's messages (they're ancestors of TurnFailed).
         let path_idx = active_path_from_leaf(&events);
-        // Walking leaf -> root: TurnFailed -> TurnEnd1 -> assistant1 -> user1.
-        // The failed turn's user("oops")/assistant("partial") messages are a
-        // SIBLING branch off the checkpoint and must NOT appear on the path.
-        assert_eq!(path_idx.len(), 4, "active path excludes failed branch");
+        assert_eq!(path_idx.len(), 6, "active path includes failed turn's msgs");
         assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "hi")));
         assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
-        assert!(matches!(events[path_idx[2]].kind, SessionEventKind::TurnEnd { .. }));
-        assert!(matches!(events[path_idx[3]].kind, SessionEventKind::TurnFailed { .. }));
+        assert!(matches!(&events[path_idx[2]].kind, SessionEventKind::TurnEnd { .. }));
+        assert!(matches!(&events[path_idx[3]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "oops")));
+        assert!(matches!(&events[path_idx[4]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
+        assert!(matches!(&events[path_idx[5]].kind, SessionEventKind::TurnFailed { .. }));
 
         // messages_from_events yields only the checkpoint's messages,
-        // excluding the failed turn.
+        // excluding the failed turn's messages via the TurnFailed boundary.
         let msgs = messages_from_events(&events);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[1].role, Role::Assistant);
-    }
-
-    #[test]
+    }    #[test]
     fn compact_count_formats() {
         assert_eq!(compact_count(0), "0");
         assert_eq!(compact_count(500), "500");

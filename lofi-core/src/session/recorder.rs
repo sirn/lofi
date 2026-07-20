@@ -17,7 +17,8 @@
 
 use std::path::Path;
 
-use lofi_types::{Message, NativeToolRecord, SessionEvent, SessionEventKind, Usage};
+use lofi_types::{Message, NativeToolRecord, SessionEvent, SessionEventKind,
+    Usage};
 
 use crate::session::store;
 use lofi_error::Result;
@@ -31,13 +32,14 @@ pub enum TurnOutcome {
     /// The turn ended in a non-retryable error or was cancelled — write a
     /// `TurnFailed` marker carrying the error message. The turn's messages
     /// and timings are still written so the failed attempt is visible in the
-    /// tree; the marker's `parent_id` points at the turn's checkpoint so the
-    /// active-path walk excludes the failed branch from the agent's history.
+    /// tree and its consumed tokens are honestly accounted for;
+    /// `messages_from_events` then skips the failed turn's messages when
+    /// building the agent's history on resume (so the model is not fed
+    /// partial/errored content) while the UI still renders them.
     Failed(String),
     /// The turn was abandoned before it produced anything worth recording —
     /// write no terminal marker (and the flush's empty-input short-circuit
-    /// applies). Kept as a distinct state so the engine can signal "cancel
-    /// with nothing to show" without synthesizing an error string.
+    /// applies).
     Cancelled,
 }
 
@@ -113,12 +115,13 @@ impl SessionRecorder {
     /// `messages` is the slice of conversation messages produced this turn
     /// (user prompt, assistant turns, tool-result turns), in order. `outcome`
     /// selects the terminal marker: [`TurnOutcome::Finished`] writes a
-    /// `TurnEnd`, [`TurnOutcome::Failed`] writes a `TurnFailed` whose
-    /// `parent_id` is the turn's checkpoint (so the active-path walk excludes
-    /// the failed branch from the agent's history), and
-    /// [`TurnOutcome::Cancelled`] writes no marker. `summary` carries the
-    /// engine's timing/cost/native-tool accumulators that become
-    /// `ToolTiming`/`ThinkingTiming`/`NativeTool`/terminal events.
+    /// `TurnEnd`, [`TurnOutcome::Failed`] writes a `TurnFailed` (chained
+    /// linearly off the turn's last message, just like `TurnEnd`, so the
+    /// failed turn's content stays on the active path and remains visible on
+    /// resume; `messages_from_events` then skips that content when building
+    /// the agent's history), and [`TurnOutcome::Cancelled`] writes no marker.
+    /// `summary` carries the engine's timing/cost/native-tool accumulators
+    /// that become `ToolTiming`/`ThinkingTiming`/`NativeTool`/terminal events.
     ///
     /// # Errors
     /// Propagates [`lofi_error::Error`] from disk write/serialization.
@@ -141,15 +144,6 @@ impl SessionRecorder {
         {
             return Ok(None);
         }
-        // Capture the checkpoint id (the file's current last event) before
-        // appending, so a `TurnFailed` marker can branch off it — making the
-        // failed turn's messages a side branch that the active-path walk
-        // skips on resume. When a `parent_hint` is set (an explicit branch)
-        // the checkpoint is the hint itself.
-        let checkpoint_id = match self.parent_hint.as_deref() {
-            Some(id) => Some(id.to_string()),
-            None => store::last_event_id(&self.path)?,
-        };
         let mut events: Vec<SessionEvent> = messages
             .iter()
             .cloned()
@@ -197,13 +191,15 @@ impl SessionRecorder {
                 });
             }
             TurnOutcome::Failed(error) => {
-                // Branch the marker off the checkpoint so the active-path
-                // walk excludes the failed turn's messages. The messages
-                // themselves chain linearly off the checkpoint (their own
-                // branch), so they remain visible in the tree.
+                // Chain linearly off the turn's last message (same as
+                // `TurnEnd`) so the failed turn's content stays on the active
+                // path and remains visible on resume. The agent-history walk
+                // in `messages_from_events` skips the failed turn's messages
+                // via the `TurnFailed` boundary, so the model is not fed
+                // partial/errored content.
                 events.push(SessionEvent {
                     id: String::new(),
-                    parent_id: checkpoint_id.clone(),
+                    parent_id: None,
                     kind: SessionEventKind::TurnFailed {
                         label: self.label.clone(),
                         elapsed_ms: summary.elapsed_ms,
@@ -392,12 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn flush_with_turn_failed_branches_marker_off_checkpoint() {
+    fn flush_with_turn_failed_chains_linearly_off_last_message() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        // First turn: a completed user -> assistant exchange, so the file has
-        // a checkpoint (the TurnEnd) to branch the failed turn from.
+        // First turn: a completed user -> assistant exchange.
         let mut rec1 = SessionRecorder::new(path.clone(), "m".into());
         rec1
             .flush(
@@ -413,13 +408,11 @@ mod tests {
                 },
             )
             .unwrap();
-        let (_meta, base, _, _) = store::load(&path).unwrap();
-        // The checkpoint is the last event of the first turn (the TurnEnd).
-        let checkpoint = base.last().unwrap().id.clone();
 
-        // Second turn: failed. Its messages chain off the checkpoint; the
-        // TurnFailed marker ALSO branches off the checkpoint, making the
-        // failed turn's messages a side branch.
+        // Second turn: failed. Its messages + TurnFailed marker chain
+        // linearly off the first turn's TurnEnd (same shape as a successful
+        // turn), so the failed turn's content stays on the active path and
+        // remains visible on resume.
         let mut rec2 = SessionRecorder::new(path.clone(), "m".into());
         rec2
             .flush(
@@ -436,12 +429,20 @@ mod tests {
             )
             .unwrap();
         let (_meta, events, _, _) = store::load(&path).unwrap();
-        // Find the TurnFailed marker.
+        // The TurnFailed marker's parent is the failed turn's last message,
+        // NOT the checkpoint — so the failed turn's content is on the active
+        // path (visible) and messages_from_events skips it via the boundary.
         let failed = events
             .iter()
             .find(|e| matches!(e.kind, SessionEventKind::TurnFailed { .. }))
             .expect("TurnFailed marker written");
-        assert_eq!(failed.parent_id.as_deref(), Some(checkpoint.as_str()));
+        let last_msg = events
+            .iter()
+            .find(|e| matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::Assistant
+                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "partial")))
+            )
+            .expect("failed turn assistant message present");
+        assert_eq!(failed.parent_id.as_deref(), Some(last_msg.id.as_str()));
         match &failed.kind {
             SessionEventKind::TurnFailed { error, cost, .. } => {
                 assert_eq!(error, "boom");
@@ -449,14 +450,5 @@ mod tests {
             }
             _ => unreachable!(),
         }
-        // The failed turn's first message also chains off the checkpoint
-        // (its parent is the checkpoint, not the previous failed-turn
-        // message), confirming both are siblings rooted at the checkpoint.
-        let failed_first_msg = events
-            .iter()
-            .find(|e| matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
-                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "second"))))
-            .expect("failed turn user message present");
-        assert_eq!(failed_first_msg.parent_id.as_deref(), Some(checkpoint.as_str()));
     }
 }
