@@ -65,6 +65,8 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const TICK_MS: u64 = 60;
 /// How long the "Copied to clipboard" badge stays on the footer rule.
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
+/// How long a slash-command notification stays on the rule line.
+const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Maximum height (content lines) the input box grows to before clipping.
 const MAX_INPUT_LINES: usize = 8;
 /// Window for a double `C-c` on an empty prompt to register as quit.
@@ -246,6 +248,24 @@ impl SessionConfig {
 struct PickerState {
     entries: Vec<SessionEntry>,
     selected: usize,
+}
+
+/// Severity of a transient rule-line notification (see [`App::notify`]).
+/// Maps to a background color: Info → muted, Warn → warn, Error → error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotifyKind {
+    Info,
+    Warn,
+    Error,
+}
+
+/// A transient slash-command notification shown on the rule line's left
+/// edge. Auto-expires after [`NOTIFY_TTL`].
+#[derive(Debug, Clone)]
+struct Notify {
+    msg: String,
+    kind: NotifyKind,
+    at: Instant,
 }
 
 /// Slash-command autocomplete popover state. Active while the input is a
@@ -533,6 +553,11 @@ pub(crate) struct App {
     /// When the yank-to-clipboard badge was last triggered; shown on the
     /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
+    /// Transient status/error notification from a slash command (e.g.
+    /// `/session` with no session, `/tree` with no session file, an unknown
+    /// command). Surfaced on the rule line's left edge instead of as a chat
+    /// turn so command feedback doesn't pollute the transcript.
+    notify: Option<Notify>,
     /// Absolute index of the transcript line under the Navigate/Select cursor.
     nav_cursor: usize,
     /// Character column (absolute char index in the cursor line) under the
@@ -619,6 +644,7 @@ impl App {
             sel: None,
             mode: Mode::Input,
             yank_notify: None,
+            notify: None,
             nav_cursor: 0,
             nav_col: 0,
             select_anchor: (0, 0),
@@ -1779,7 +1805,7 @@ impl App {
                 true
             }
             "/session" => {
-                self.push_session_info();
+                self.show_session_info();
                 true
             }
             "/resume" => {
@@ -1795,12 +1821,10 @@ impl App {
                 true
             }
             _ if cmd.starts_with('/') => {
-                self.push_turn(Turn {
-                    prompt: cmd.to_string(),
-                    blocks: vec![Block::Error(format!(
-                        "unknown command: {cmd} (try /help)"
-                    ))],
-                });
+                self.notify(
+                    NotifyKind::Error,
+                    format!("unknown command: {cmd} (try /help)"),
+                );
                 true
             }
             _ => false,
@@ -1878,20 +1902,17 @@ impl App {
         });
     }
 
-    fn push_session_info(&mut self) {
+    fn show_session_info(&mut self) {
         let info = match &self.session.path {
             Some(p) => format!(
-                "session: {}\nmessages: {}\nmodel: {}",
+                "session: {} · {} msgs · {}",
                 p.display(),
                 self.history.lock().map_or(0, |m| m.len()),
                 self.session_model(),
             ),
             None => "no session file (ephemeral or not yet started)".to_string(),
         };
-        self.push_turn(Turn {
-            prompt: "/session".to_string(),
-            blocks: vec![Block::Text(info)],
-        });
+        self.notify(NotifyKind::Info, info);
     }
 
     /// '/new': drop the transcript and start a fresh session file on the next
@@ -1911,18 +1932,18 @@ impl App {
     /// Populate the '/resume' picker with sessions for this workspace.
     fn open_picker(&mut self) {
         let Some(store) = &self.session.store else {
-            self.push_turn(Turn {
-                prompt: "/resume".to_string(),
-                blocks: vec![Block::Error("sessions are disabled (--no-session)".into())],
-            });
+            self.notify(
+                NotifyKind::Warn,
+                "sessions are disabled (--no-session)",
+            );
             return;
         };
         match store.list_for_cwd(&self.session.cwd) {
             Ok(entries) if entries.is_empty() => {
-                self.push_turn(Turn {
-                    prompt: "/resume".to_string(),
-                    blocks: vec![Block::Text("no saved sessions for this workspace".into())],
-                });
+                self.notify(
+                    NotifyKind::Info,
+                    "no saved sessions for this workspace",
+                );
             }
             Ok(entries) => {
                 self.picker = Some(PickerState {
@@ -1931,10 +1952,7 @@ impl App {
                 });
             }
             Err(e) => {
-                self.push_turn(Turn {
-                    prompt: "/resume".to_string(),
-                    blocks: vec![Block::Error(format!("list sessions: {e}"))],
-                });
+                self.notify(NotifyKind::Error, format!("list sessions: {e}"));
             }
         }
     }
@@ -1994,10 +2012,10 @@ impl App {
     /// a sibling of that prompt rather than appending to the active leaf.
     fn open_tree_picker(&mut self) {
         let Some(path) = &self.session.path else {
-            self.push_turn(Turn {
-                prompt: "/tree".to_string(),
-                blocks: vec![Block::Error("no session file (ephemeral or --no-session)".into())],
-            });
+            self.notify(
+                NotifyKind::Error,
+                "no session file (ephemeral or --no-session)",
+            );
             return;
         };
         // Lightweight index scan (id + parent_id + kind only — no
@@ -2006,19 +2024,16 @@ impl App {
         let indices = match store::load_index(path) {
             Ok((_meta, indices, _size)) => indices,
             Err(e) => {
-                self.push_turn(Turn {
-                    prompt: "/tree".to_string(),
-                    blocks: vec![Block::Error(format!("load session for /tree: {e}"))],
-                });
+                self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
                 return;
             }
         };
         let entries = build_tree_entries(&indices, self.branch_hint.as_deref(), path);
         if entries.is_empty() {
-            self.push_turn(Turn {
-                prompt: "/tree".to_string(),
-                blocks: vec![Block::Text("no branch points in this session yet".into())],
-            });
+            self.notify(
+                NotifyKind::Info,
+                "no branch points in this session yet",
+            );
             return;
         }
         let selected = entries.len().saturating_sub(1);
@@ -2042,10 +2057,7 @@ impl App {
         let events = match store::load(&path) {
             Ok((_meta, events, _offsets, _size)) => events,
             Err(e) => {
-                self.push_turn(Turn {
-                    prompt: "/tree".to_string(),
-                    blocks: vec![Block::Error(format!("load session for /tree: {e}"))],
-                });
+                self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
                 return;
             }
         };
@@ -2349,6 +2361,26 @@ impl App {
     pub(crate) fn quit_badge(&self) -> Option<&'static str> {
         match self.ctrl_c_at {
             Some(t) if t.elapsed() < QUIT_DOUBLE_PRESS => Some("Press Ctrl-C again to quit"),
+            _ => None,
+        }
+    }
+
+    /// Post a transient slash-command notification on the rule line's left
+    /// edge. Replaces any prior notification. Use instead of pushing a chat
+    /// turn for short status/error feedback so the transcript stays clean.
+    fn notify(&mut self, kind: NotifyKind, msg: impl Into<String>) {
+        self.notify = Some(Notify {
+            msg: msg.into(),
+            kind,
+            at: Instant::now(),
+        });
+    }
+
+    /// The active notification's message and severity, or `None` once it has
+    /// expired ([`NOTIFY_TTL`]).
+    pub(crate) fn notify_badge(&self) -> Option<(&str, NotifyKind)> {
+        match &self.notify {
+            Some(n) if n.at.elapsed() < NOTIFY_TTL => Some((&n.msg, n.kind)),
             _ => None,
         }
     }
@@ -3595,6 +3627,13 @@ async fn run_loop(
                     }
                     dirty = true;
                 }
+                // Slash-command notifications expire on their own.
+                if let Some(n) = app.notify.as_ref() {
+                    if n.at.elapsed() >= NOTIFY_TTL {
+                        app.notify = None;
+                    }
+                    dirty = true;
+                }
             }
         }
 
@@ -4667,13 +4706,19 @@ mod tests {
         assert_eq!(a.turns.len(), 1);
         assert!(matches!(a.turns[0].blocks[0], Block::Text(_)));
 
+        // Unknown commands notify on the rule line instead of pushing a turn.
         assert!(a.slash_command("/nope"));
-        assert!(matches!(a.turns.last().unwrap().blocks[0], Block::Error(_)));
+        assert_eq!(a.turns.len(), 1);
+        let (msg, kind) = a.notify_badge().expect("unknown command notified");
+        assert_eq!(kind, NotifyKind::Error);
+        assert!(msg.contains("unknown command"));
 
-        // /resume with no store pushes an error block, no picker.
+        // /resume with no store notifies (warn) and opens no picker.
         assert!(a.slash_command("/resume"));
         assert!(a.picker.is_none());
-        assert!(matches!(a.turns.last().unwrap().blocks[0], Block::Error(_)));
+        let (msg, kind) = a.notify_badge().expect("/resume notified");
+        assert_eq!(kind, NotifyKind::Warn);
+        assert!(msg.contains("disabled"));
 
         assert!(a.slash_command("/new"));
         assert!(a.turns.is_empty());
@@ -4681,6 +4726,17 @@ mod tests {
 
         assert!(a.slash_command("/quit"));
         assert!(a.should_quit);
+    }
+
+    #[test]
+    fn session_info_notifies() {
+        let mut a = app();
+        // No session path: info notification, no transcript turn.
+        assert!(a.slash_command("/session"));
+        assert!(a.turns.is_empty());
+        let (msg, kind) = a.notify_badge().expect("/session notified");
+        assert_eq!(kind, NotifyKind::Info);
+        assert!(msg.contains("no session file"));
     }
 
     #[test]
@@ -4757,11 +4813,13 @@ mod tests {
     #[test]
     fn tree_no_session_pushes_error() {
         let mut a = app();
-        // No session.path set — ephemeral. /tree rejects with an error turn
+        // No session.path set — ephemeral. /tree notifies on the rule line
         // and leaves no overlay.
         assert!(a.slash_command("/tree"));
         assert!(a.tree_picker.is_none());
-        assert!(matches!(a.turns.last().unwrap().blocks[0], Block::Error(_)));
+        let (msg, kind) = a.notify_badge().expect("/tree notified");
+        assert_eq!(kind, NotifyKind::Error);
+        assert!(msg.contains("no session file"));
         assert!(a.branch_hint.is_none());
     }
 

@@ -22,7 +22,7 @@ use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::theme::{active_indicator, user_indicator};
-use crate::tui::{App, Mode, SPINNER};
+use crate::tui::{App, Mode, NotifyKind, SPINNER};
 use crate::tui::SLASH_COMMANDS;
 
 pub(crate) mod blocks;
@@ -540,11 +540,14 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_info(f, chunks[3], app);
 }
 
-/// Mode-colored rule line. The left edge keeps the `──` lead followed by
-/// notification badges (the yank/quit tags) — this side is reserved for
-/// transient and interactive notifications. The right edge carries the
-/// ` VERBOSE ` tag (while tool detail is expanded) and the mode chip
-/// (` INPUT ` / ` NAV `) with its `──` tail; dashes fill the middle.
+/// Mode-colored rule line. The left edge keeps the `──` lead followed by a
+/// notification badge — quit/yank confirmations, or a transient
+/// slash-command notification (status or error from `/session`, `/tree`,
+/// `/resume`, unknown commands, …). This side is reserved for transient
+/// and interactive notifications. The right edge carries the ` VERBOSE `
+/// tag (while tool detail is expanded) and the mode chip (` INPUT ` /
+/// ` NAV `) with its `──` tail; dashes fill the middle. A long
+/// notification is truncated with `…` so the right side always fits.
 fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let (label, color) = app.mode_badge();
@@ -552,22 +555,6 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     let chip = format!(" {label} ");
     let tail = "──";
     let bold = Modifier::BOLD;
-
-    // Left: leading `──` then notification badges. Quit takes precedence
-    // as a warning.
-    let mut spans: Vec<Span<'static>> = vec![Span::styled("──", Style::new().fg(color))];
-    if let Some(badge) = app.quit_badge() {
-        spans.push(Span::styled(
-            format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
-        ));
-    } else if let Some(badge) = app.yank_badge() {
-        spans.push(Span::styled(
-            format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
-        ));
-    }
-    let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
     // Right: optional ` VERBOSE ` tag, the mode chip, and the `──` tail.
     let mut right: Vec<Span<'static>> = Vec::new();
@@ -583,6 +570,50 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
     ));
     right.push(Span::styled(tail, Style::new().fg(color)));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
+
+    // Left: leading `──` then one notification badge (quit > yank > notify).
+    let lead = "──";
+    let lead_w = prim::width(lead);
+    let min_dashes = 2;
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(lead, Style::new().fg(color))];
+    if let Some(badge) = app.quit_badge() {
+        spans.push(Span::styled(
+            format!(" {badge} "),
+            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
+        ));
+    } else if let Some(badge) = app.yank_badge() {
+        spans.push(Span::styled(
+            format!(" {badge} "),
+            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+        ));
+    } else if let Some((msg, kind)) = app.notify_badge() {
+        let bg = match kind {
+            NotifyKind::Info => t.muted,
+            NotifyKind::Warn => t.warn,
+            NotifyKind::Error => t.error,
+        };
+        // Reserve room for the right side and at least `min_dashes`; the
+        // remaining width caps the badge (wrapping spaces + message).
+        let avail = w
+            .saturating_sub(lead_w)
+            .saturating_sub(right_w)
+            .saturating_sub(min_dashes)
+            .saturating_sub(2);
+        if avail >= 1 {
+            let body = if prim::width(msg) > avail {
+                let mut s = prim::truncate(msg, avail.saturating_sub(1));
+                s.push('…');
+                s
+            } else {
+                msg.to_string()
+            };
+            spans.push(Span::styled(
+                format!(" {body} "),
+                Style::new().fg(t.fg).bg(bg).add_modifier(bold),
+            ));
+        }
+    }
+    let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
     let dashes = "─".repeat(w.saturating_sub(left_w).saturating_sub(right_w));
     spans.push(Span::styled(dashes, Style::new().fg(color)));
