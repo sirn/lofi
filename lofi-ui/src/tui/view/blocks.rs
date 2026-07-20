@@ -68,6 +68,9 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             Block::TurnEnd { label, elapsed } => {
                 stack.push(TurnEnd { label: label.clone(), elapsed: *elapsed });
             }
+            Block::TurnFailed { label, elapsed, error } => {
+                stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error: error.clone() });
+            }
         }
     }
     stack.lines(cx)
@@ -566,6 +569,31 @@ impl Component for TurnEnd {
             vec![
                 Span::styled(self.label.clone(), Style::new().fg(t.muted)),
                 Span::styled(done, Style::new().fg(t.subtle)),
+            ],
+            vec![],
+        )]
+    }
+}
+
+/// Turn-failed separator: `<label> failed in Ns · <error>` in the error
+/// tint. Mirrors [`TurnEnd`] but signals the turn did not complete; the
+/// turn's partial content precedes it on the same branch.
+struct TurnFailed {
+    label: String,
+    elapsed: Duration,
+    error: String,
+}
+
+impl Component for TurnFailed {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let dur = prim::fmt_duration(self.elapsed);
+        let failed = format!(" failed in {dur} · {}", self.error);
+        vec![prim::render(
+            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.error))],
+            vec![
+                Span::styled(self.label.clone(), Style::new().fg(t.error)),
+                Span::styled(failed, Style::new().fg(t.error)),
             ],
             vec![],
         )]

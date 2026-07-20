@@ -309,9 +309,15 @@ pub fn append_events(
         Some(id) => Some(id.to_string()),
         None => last_event_id(path)?,
     };
+    // Assign a fresh id to each event. `parent_id` is auto-filled only when
+    // the event did not set one explicitly — the recorder uses an explicit
+    // `parent_id` on a `TurnFailed` marker to branch it off the turn's
+    // checkpoint instead of off the preceding message.
     for ev in events.iter_mut() {
         ev.id = short_id();
-        ev.parent_id = parent.clone();
+        if ev.parent_id.is_none() {
+            ev.parent_id = parent.clone();
+        }
         parent = Some(ev.id.clone());
     }
     let byte_start = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -332,11 +338,12 @@ pub fn append_events(
 
 /// Read the `id` of the last event line in `path`, or `None` if the file has
 /// no events (only a header, or empty). Used by [`append_events`] to chain a
-/// continuation onto the active leaf.
+/// continuation onto the active leaf, and by the recorder to branch a
+/// `TurnFailed` marker off the turn's checkpoint.
 ///
 /// # Errors
 /// Returns [`Error::Io`] on a read failure other than the file not existing.
-fn last_event_id(path: &Path) -> Result<Option<String>> {
+pub fn last_event_id(path: &Path) -> Result<Option<String>> {
     use std::io::{BufRead, BufReader};
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
