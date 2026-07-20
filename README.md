@@ -352,3 +352,10 @@ crates. Non-test code propagates errors with `?` / `let-else` and writes to
 stdout via `std::io::stdout().write_all` (never `println!`); the TUI renders
 through ratatui, not stdout. Test modules `allow(clippy::unwrap_used)` so
 assertions stay readable.
+
+## Acknowledgements
+
+lofi builds on ideas from several earlier projects:
+
+- **[pi-fabric](https://github.com/monotykamary/pi-fabric)** — for the full code mode concept that inspired lofi's single-tool `exec` approach.
+- **[pi](https://github.com/earendil-works/pi)** — for the agent loop architecture that shaped lofi's run loop and subagent design.
