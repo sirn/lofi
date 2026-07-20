@@ -16,7 +16,7 @@
 )]
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
@@ -644,12 +644,31 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let t = app.theme;
-    let h = u16::try_from(picker.entries.len().min(12) + 2).unwrap_or(14);
+    let total = picker.entries.len();
+    let h = u16::try_from(total.min(12) + 2)
+        .unwrap_or(14)
+        .min(area.height);
     let w = area.width.min(72);
     let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
     let horiz = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Resume a session ",
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    let need_sb = total > inner.height as usize;
+    let content = if need_sb {
+        Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        inner
+    };
     let items: Vec<ListItem> = picker
         .entries
         .iter()
@@ -659,21 +678,15 @@ fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .block(
-            WidgetBlock::bordered()
-                .border_type(BorderType::Rounded)
-                .title(Span::styled(
-                    " Resume a session ",
-                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-                )),
-        )
         .style(Style::default().fg(t.fg))
         .highlight_style(Style::default().bg(t.selection).fg(t.fg));
-    f.render_stateful_widget(
-        list,
-        popup,
-        &mut ListState::default().with_selected(Some(picker.selected)),
-    );
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_widget(block, popup);
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+    }
 }
 
 /// Slash-command autocomplete popover: a popup listing commands that
@@ -717,6 +730,23 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     let popup_x = cursor_screen_x.min(area.width.saturating_sub(w));
     let popup = Rect::new(popup_x, popup_y, w, h);
     f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Commands ",
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    let total = sc.candidates.len();
+    let need_sb = total > inner.height as usize;
+    let content = if need_sb {
+        Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        inner
+    };
     let cmd_style = Style::new().fg(t.fg);
     let desc_style = Style::new().fg(t.subtle);
     let items: Vec<ListItem> = sc
@@ -731,51 +761,108 @@ fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .block(
-            WidgetBlock::bordered()
-                .border_type(BorderType::Rounded)
-                .title(Span::styled(
-                    " Commands ",
-                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-                )),
-        )
         .style(Style::default().fg(t.fg))
         .highlight_style(Style::default().bg(t.selection).fg(t.fg));
-    f.render_stateful_widget(
-        list,
-        popup,
-        &mut ListState::default().with_selected(Some(sc.selected)),
-    );
+    let mut state = ListState::default().with_selected(Some(sc.selected));
+    f.render_widget(block, popup);
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+    }
 }
 
-/// Read-only information modal (e.g. `/session` output): a centered box
-/// showing the title over the body lines, with interior padding and a
-/// trailing hint line. `y` copies the body; any key dismisses.
-fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
+/// A 1-cell-wide vertical scrollbar drawn in `track`. `position` is the
+/// top visible row, `visible` the viewport height, `total` the full row
+/// count. The thumb is sized proportional to `visible/total` and positioned
+/// by `position`; nothing is drawn when everything fits.
+fn render_scrollbar(
+    f: &mut Frame,
+    track: Rect,
+    position: usize,
+    visible: usize,
+    total: usize,
+    track_color: Color,
+    thumb_color: Color,
+) {
+    if total == 0 || visible >= total || track.height == 0 {
+        return;
+    }
+    let h = track.height as usize;
+    let thumb_h = ((visible * h) / total).clamp(1, h);
+    let max_pos = total.saturating_sub(visible);
+    let max_top = h.saturating_sub(thumb_h);
+    let thumb_top = if max_pos == 0 {
+        0
+    } else {
+        (position * max_top) / max_pos
+    };
+    let buf = f.buffer_mut();
+    for y in 0..h {
+        let cell = &mut buf[(track.x, track.y + y as u16)];
+        let is_thumb = y >= thumb_top && y < thumb_top + thumb_h;
+        cell.set_char(if is_thumb { '█' } else { '│' });
+        cell.set_fg(if is_thumb { thumb_color } else { track_color });
+    }
+}
+
+/// Pre-wrap `lines` to `width` display cells, never emitting an empty
+/// run (a blank source line yields one empty string).
+fn wrap_info_lines(lines: &[String], width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for l in lines {
+        let mut lw = prim::wrap(l, width);
+        if lw.is_empty() {
+            lw = vec![String::new()];
+        }
+        out.extend(lw);
+    }
+    out
+}
+
+/// Read-only, scrollable information modal (`/help`, `/session`): a
+/// centered box showing the title over the body, with a trailing hint
+/// line. Body lines are pre-wrapped to the available width so long lines
+/// never clip horizontally; when the body exceeds the viewport, a
+/// scrollbar appears and `j`/`k`/`↑`/`↓`/`Ctrl+N`/`Ctrl+P`/`PgUp`/`PgDn`
+/// scroll it. `y` copies the body; `Esc`/`q`/`Enter` dismiss.
+fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType};
-    let Some(info) = &app.info else {
+    let t = app.theme;
+    let Some(info) = app.info.as_mut() else {
         return;
     };
-    let t = app.theme;
     let title = format!(" {} ", info.title);
-    let hint = "y to copy / any key to dismiss";
-    let max_body = info
-        .lines
-        .iter()
-        .map(|l| prim::width(l))
-        .max()
-        .unwrap_or(0);
-    // +2 border on each axis.
-    let inner_w = max_body
-        .max(prim::width(hint))
-        .max(prim::width(&title));
+    // Pre-wrap body to the available width (terminal-bounded) so long
+    // lines (e.g. /help) never clip horizontally. When the body will
+    // overflow, reserve a scrollbar gutter and re-wrap one cell narrower.
+    let max_w = area.width.saturating_sub(2) as usize;
+    let max_body = info.lines.iter().map(|l| prim::width(l)).max().unwrap_or(0);
+    let inner_w = max_body.min(max_w).max(prim::width(&title));
+    let max_body_h = (area.height as usize).saturating_sub(3);
+    let wrapped = wrap_info_lines(&info.lines, inner_w.max(1));
+    let need_sb = wrapped.len() > max_body_h;
+    let (body_w, wrapped) = if need_sb {
+        let bw = inner_w.saturating_sub(1).max(1);
+        (bw, wrap_info_lines(&info.lines, bw))
+    } else {
+        (inner_w, wrapped)
+    };
+    let total = wrapped.len();
+    let view_h = total.min(max_body_h);
+    let h = u16::try_from(view_h + 3).unwrap_or(10).min(area.height);
+    // Publish scroll geometry for the key handler; clamp any stale offset.
+    info.total = total;
+    info.view_h = view_h;
+    if info.scroll > info.max_scroll() {
+        info.scroll = info.max_scroll();
+    }
+    let scroll = info.scroll;
+
     let w = u16::try_from(inner_w + 2)
         .unwrap_or(40)
         .min(area.width);
-    let content_h = info.lines.len() + 1; // body + hint
-    let h = u16::try_from(content_h + 2) // +2 border
-        .unwrap_or(10)
-        .min(area.height);
+
     let vert =
         Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
             .split(area);
@@ -790,23 +877,49 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
             title,
             Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
-    let key_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
-    let dim_style = Style::new().fg(t.muted);
-    let mut lines: Vec<Line> = info
-        .lines
-        .iter()
-        .map(|l| Line::from(l.clone()))
-        .collect();
-    lines.push(Line::from(vec![
-        Span::styled("y", key_style),
-        Span::styled(" to copy / ", dim_style),
-        Span::styled("any key", key_style),
-        Span::styled(" to dismiss", dim_style),
-    ]));
-    let para = Paragraph::new(lines)
-        .block(block)
+    let inner = block.inner(popup);
+    let body_w = u16::try_from(body_w).unwrap_or(inner.width);
+    let body_rect = Rect {
+        width: body_w,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let hint_rect = Rect {
+        y: body_rect.bottom(),
+        width: body_w,
+        height: 1,
+        ..inner
+    };
+    f.render_widget(block, popup);
+
+    let body_lines: Vec<Line> = wrapped.iter().map(|l| Line::from(l.clone())).collect();
+    let body = Paragraph::new(body_lines)
+        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
         .style(Style::default().fg(t.fg));
-    f.render_widget(para, popup);
+    f.render_widget(body, body_rect);
+
+    let key_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+    let dim = Style::new().fg(t.muted);
+    let mut hint_spans: Vec<Span<'static>> = Vec::new();
+    if need_sb {
+        hint_spans.push(Span::styled("j/k", key_style));
+        hint_spans.push(Span::styled(" to scroll · ", dim));
+    }
+    hint_spans.push(Span::styled("y", key_style));
+    hint_spans.push(Span::styled(" to copy · ", dim));
+    hint_spans.push(Span::styled("q", key_style));
+    hint_spans.push(Span::styled(" to dismiss", dim));
+    f.render_widget(Paragraph::new(Line::from(hint_spans)), hint_rect);
+
+    if need_sb {
+        let track = Rect::new(
+            inner.right().saturating_sub(1),
+            inner.y,
+            1,
+            inner.height.saturating_sub(1),
+        );
+        render_scrollbar(f, track, scroll, view_h, total, t.subtle, t.muted);
+    }
 }
 
 /// '/tree' branch-picker overlay: a popup showing the session's event tree
@@ -817,12 +930,29 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &App) {
 fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(picker) = &app.tree_picker else { return; };
-    let rows = picker.entries.len().min(20);
-    let h = u16::try_from(rows + 2).unwrap_or(22);
+    let t = app.theme;
+    let total = picker.entries.len();
+    let rows = total.min(20);
+    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
     let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).split(area);
     let popup = vert[1];
     f.render_widget(Clear, popup);
-    let t = app.theme;
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Roll back to a turn  ↑/↓ j/k enter esc ",
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    let need_sb = total > inner.height as usize;
+    let content = if need_sb {
+        Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        inner
+    };
     let tree_art = Style::new().fg(t.subtle);
     let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let inactive_style = Style::new().fg(t.fg);
@@ -838,19 +968,13 @@ fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .block(
-            WidgetBlock::bordered()
-                .border_type(BorderType::Rounded)
-                .title(Span::styled(
-                    " Roll back to a turn  ↑/↓ j/k enter esc ",
-                    Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-                )),
-        )
         .style(Style::default().fg(t.fg))
         .highlight_style(Style::default().bg(t.selection).fg(t.fg));
-    f.render_stateful_widget(
-        list,
-        popup,
-        &mut ListState::default().with_selected(Some(picker.selected)),
-    );
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_widget(block, popup);
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+    }
 }

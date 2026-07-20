@@ -250,12 +250,43 @@ struct PickerState {
     selected: usize,
 }
 
-/// A read-only information modal (e.g. `/session` output): a centered box
-/// showing `title` over `lines`. Dismissed by any key press.
+/// A read-only, scrollable information modal (e.g. `/help`, `/session`
+/// output): a centered box showing `title` over `lines`. Navigation uses
+/// the modal keys — `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/
+/// `PgDn`) scroll; `y` copies the body; `Esc`/`q`/`Enter` dismiss.
+///
+/// `scroll` is the top visible wrapped-line index; `total` and `view_h`
+/// are filled by the renderer each frame so the key handler can clamp and
+/// page without knowing the terminal size itself.
 #[derive(Debug, Clone)]
 struct InfoModal {
     title: String,
     lines: Vec<String>,
+    scroll: usize,
+    total: usize,
+    view_h: usize,
+}
+
+impl InfoModal {
+    fn max_scroll(&self) -> usize {
+        self.total.saturating_sub(self.view_h)
+    }
+
+    fn scroll_down(&mut self) {
+        self.scroll = (self.scroll + 1).min(self.max_scroll());
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+    }
+
+    fn scroll_page_down(&mut self) {
+        self.scroll = (self.scroll + self.view_h.max(1)).min(self.max_scroll());
+    }
+
+    fn scroll_page_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(self.view_h.max(1));
+    }
 }
 
 /// Severity of a transient rule-line notification (see [`App::notify`]).
@@ -1813,7 +1844,7 @@ impl App {
                 true
             }
             "/help" => {
-                self.push_help();
+                self.show_help();
                 true
             }
             "/new" => {
@@ -1910,11 +1941,14 @@ impl App {
         }
     }
 
-    fn push_help(&mut self) {
+    fn show_help(&mut self) {
         let help = "Keys\n  Enter        send  ·  Alt+Enter / Ctrl+J  newline\n  ↑ / ↓        move line, recall at edge  ·  Ctrl+↑/↓  move across lines\n  PgUp/PgDn    scroll a page (Input) · move cursor a page (Nav/Select)\n  Tab          switch mode: Input ↔ Navigate / back from Select\n  Esc          clear input\n  Ctrl+C       Input: cancel run · clear · 2× quit  ·  Nav/Select: back to Input + latest  ·  Ctrl+D  del-char / quit on empty\nNavigate      Tab to enter · j/k or ↑/↓ scroll · h/l or ←/→ move col · 0/^/$ · w/b/e · g/G top/bottom · [ ] jump turns · v select · y yank line · i back\nSelect        move extends selection · y or Enter yank → Input · Tab or Esc back\nCommands\n  /help        this help  ·  /clear  clear log\n  /new         start a fresh session  ·  /resume  pick a past session\n  /tree        roll back to a past turn (edit + resend, or continue)\n  /session     show session info  ·  /verbose  toggle tool detail\n  /quit        exit\nSlash commands autocomplete: type / then ↑/↓ and Tab to complete";
-        self.push_turn(Turn {
-            prompt: "/help".to_string(),
-            blocks: vec![Block::Text(help.to_string())],
+        self.info = Some(InfoModal {
+            title: "Help".to_string(),
+            lines: help.split('\n').map(str::to_string).collect(),
+            scroll: 0,
+            total: 0,
+            view_h: 0,
         });
     }
 
@@ -1930,6 +1964,9 @@ impl App {
         self.info = Some(InfoModal {
             title: "Session".to_string(),
             lines,
+            scroll: 0,
+            total: 0,
+            view_h: 0,
         });
     }
 
@@ -2088,19 +2125,44 @@ impl App {
     }
 
     /// Key dispatch for the read-only information modal ([`InfoModal`]).
-    /// Any key dismisses it; `y` additionally copies the body to the
-    /// clipboard first (arming the "Copied to clipboard" badge). Returns
-    /// `true` while the modal is open so keys don't fall through to the
-    /// prompt.
+    /// `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/`PgDn`) scroll the
+    /// body; `y` copies the body to the clipboard (the modal stays open so
+    /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
+    /// swallowed. Returns `true` while the modal is open so keys don't fall
+    /// through to the prompt.
     fn handle_info_key(&mut self, k: &KeyEvent) -> bool {
         if self.info.is_none() {
             return false;
         }
-        if let KeyCode::Char('y') = k.code {
-            let text = self.info.as_ref().unwrap().lines.join("\n");
-            self.yank_text(&text);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                self.info = None;
+            }
+            KeyCode::Char('y') => {
+                let text = self.info.as_ref().unwrap().lines.join("\n");
+                self.yank_text(&text);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.info.as_mut().unwrap().scroll_down();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.info.as_mut().unwrap().scroll_up();
+            }
+            KeyCode::Char('n') if ctrl => {
+                self.info.as_mut().unwrap().scroll_down();
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.info.as_mut().unwrap().scroll_up();
+            }
+            KeyCode::PageDown => {
+                self.info.as_mut().unwrap().scroll_page_down();
+            }
+            KeyCode::PageUp => {
+                self.info.as_mut().unwrap().scroll_page_up();
+            }
+            _ => {}
         }
-        self.info = None;
         true
     }
 
@@ -4741,12 +4803,13 @@ mod tests {
         assert!(a.turns.is_empty());
 
         a.slash_command("/help");
-        assert_eq!(a.turns.len(), 1);
-        assert!(matches!(a.turns[0].blocks[0], Block::Text(_)));
+        assert!(a.turns.is_empty());
+        assert!(a.info.is_some());
+        a.info = None;
 
         // Unknown commands notify on the rule line instead of pushing a turn.
         assert!(a.slash_command("/nope"));
-        assert_eq!(a.turns.len(), 1);
+        assert!(a.turns.is_empty());
         let (msg, kind) = a.notify_badge().expect("unknown command notified");
         assert_eq!(kind, NotifyKind::Error);
         assert!(msg.contains("unknown command"));
@@ -4782,6 +4845,41 @@ mod tests {
         // Any key dismisses it.
         let mut run = None;
         handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+        assert!(a.info.is_none());
+    }
+
+    #[test]
+    fn help_modal_scrolls_and_dismisses() {
+        let mut a = app();
+        let mut run = None;
+        assert!(a.slash_command("/help"));
+        assert!(a.turns.is_empty());
+        // Render once so the modal publishes its scroll geometry
+        // (total/view_h) for the key handler.
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(64, 18);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+        let total = a.info.as_ref().unwrap().total;
+        let view_h = a.info.as_ref().unwrap().view_h;
+        assert!(total > view_h, "help should overflow the viewport");
+        // j scrolls down, k back up.
+        handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+        assert_eq!(a.info.as_ref().unwrap().scroll, 1);
+        for _ in 0..5 {
+            handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+        }
+        assert_eq!(a.info.as_ref().unwrap().scroll, 6);
+        handle_event(&plain_key(KeyCode::Char('k')), &mut a, None, &mut run);
+        assert_eq!(a.info.as_ref().unwrap().scroll, 5);
+        // Scrolling clamps at the bottom.
+        for _ in 0..total {
+            handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+        }
+        assert_eq!(a.info.as_ref().unwrap().scroll, total - view_h);
+        // q dismisses.
+        handle_event(&plain_key(KeyCode::Char('q')), &mut a, None, &mut run);
         assert!(a.info.is_none());
     }
 
