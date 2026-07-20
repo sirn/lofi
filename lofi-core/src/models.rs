@@ -289,18 +289,19 @@ fn static_models(providers: &IndexMap<String, ProviderConfig>) -> Vec<Model> {
 /// Map a [`ModelConfig`] into a resolved [`Model`] under provider `name`.
 ///
 /// `id` is the map key from the provider's `models` table. The effective
-/// `api` is the per-model override when set, else the provider's default
-/// [`Api`]. The `base_url` is the per-model override when set, else the
-/// endpoint URL resolved from the provider's `api_type` table (the default
-/// api-type mapping's `path` joined onto the provider `base_url`). The
-/// effective thinking level is left at the default ([`ThinkingLevel::Off`]);
-/// the agent resolves and overrides it at selection time.
+/// `api` is resolved from the model's `api_type` key override (or the
+/// provider's default `api_type`) via [`ProviderConfig::resolve_api`]. The
+/// `base_url` is the per-model override when set, else the endpoint URL
+/// resolved by joining the provider `base_url` with the `api_types[key].path`
+/// (defaulting to [`Api::default_path`]). The effective thinking level is
+/// left at the default ([`ThinkingLevel::Off`]); the agent resolves and
+/// overrides it at selection time.
 fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConfig) -> Model {
-    let api = mc.api.unwrap_or_else(|| pcfg.default_api());
+    let api = pcfg.resolve_api(mc.api_type.as_deref());
     let base_url = mc
         .base_url
         .clone()
-        .unwrap_or_else(|| resolve_model_base_url(pcfg, None));
+        .unwrap_or_else(|| resolve_model_base_url(pcfg, mc.api_type.as_deref()));
     Model {
         id: id.to_string(),
         name: mc.name.clone().unwrap_or_else(|| id.to_string()),
@@ -316,20 +317,21 @@ fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConf
         output_price: mc.output_price,
         cache_read_price: mc.cache_read_price,
         cache_write_price: mc.cache_write_price,
+        per_request_price: mc.per_request_price,
     }
 }
 
 /// Resolve a model's endpoint URL by joining the provider `base_url` (host
-/// root) with the `path` of the api-type mapping selected by `remote_api_type`
-/// (or the provider's default api-type). When the provider has no `base_url`,
-/// the default base URL for the resolved [`Api`] is used. The mapping `path`
-/// defaults to [`Api::default_path`] when unset.
-fn resolve_model_base_url(pcfg: &ProviderConfig, remote_api_type: Option<&str>) -> String {
+/// root) with the `api_types[key].path` selected by `api_type` (or the
+/// provider's default). When the provider has no `base_url`, the default
+/// base URL for the resolved [`Api`] is used. The mapping `path` defaults
+/// to [`Api::default_path`] when unset.
+fn resolve_model_base_url(pcfg: &ProviderConfig, api_type: Option<&str>) -> String {
     let base = pcfg
         .base_url
         .as_deref()
-        .unwrap_or_else(|| pcfg.default_api().default_base_url());
-    let path = pcfg.resolve_path(remote_api_type);
+        .unwrap_or_else(|| pcfg.resolve_api(api_type).default_base_url());
+    let path = pcfg.resolve_path(api_type);
     join_base_url(Some(base), &path)
 }
 
@@ -365,8 +367,8 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.name.is_none() {
         dst.name = src.name.clone();
     }
-    if dst.api.is_none() {
-        dst.api = src.api;
+    if dst.api_type.is_none() {
+        dst.api_type = src.api_type.clone();
     }
     if dst.reasoning.is_none() {
         dst.reasoning = src.reasoning;
@@ -400,6 +402,9 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     }
     if dst.cache_write_price.is_none() {
         dst.cache_write_price = src.cache_write_price;
+    }
+    if dst.per_request_price.is_none() {
+        dst.per_request_price = src.per_request_price;
     }
 }
 

@@ -348,22 +348,29 @@ pub struct Model {
     /// are billed at this rate instead of the input rate.
     #[serde(default)]
     pub cache_write_price: Option<f64>,
+    /// Flat per-request cost (USD). Billed once per turn regardless of token
+    /// counts.
+    #[serde(default)]
+    pub per_request_price: Option<f64>,
 }
 
 /// A model entry declared statically in TOML.
 ///
 /// The model id is the key of the `models` map in [`ProviderConfig`], so it
-/// is not repeated here.
+/// is not repeated here. Auto-discovery produces entries of the same shape,
+/// filling every field it can read from the `/v1/models` endpoint and
+/// leaving the rest `None`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// Optional display name; defaults to the id when absent.
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional per-model API override (used by `auto_models` to route one
-    /// provider to several upstream APIs). Defaults to the provider's
-    /// `api_type`.
+    /// Optional per-model api-type key override (an internal [`Api`] id,
+    /// e.g. `openai-responses`). Resolved against the provider's `api_types`
+    /// table exactly like a discovered model's `preferred_api`. Defaults to
+    /// the provider's `api_type`.
     #[serde(default)]
-    pub api: Option<Api>,
+    pub api_type: Option<String>,
     /// Whether the model exposes a reasoning trace.
     #[serde(default)]
     pub reasoning: Option<bool>,
@@ -385,9 +392,8 @@ pub struct ModelConfig {
     /// Optional per-model default thinking level.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    /// Per-model endpoint base override (auto-discovered models behind a proxy
-    /// that routes one base URL to several upstream APIs). When unset the
-    /// provider's `base_url` is used.
+    /// Per-model endpoint URL override. When unset the URL is resolved by
+    /// joining the provider `base_url` with the `api_types[key].path`.
     #[serde(default)]
     pub base_url: Option<String>,
     /// Input price per 1M tokens (USD). When set, the TUI accumulates a cost
@@ -407,73 +413,32 @@ pub struct ModelConfig {
     /// through to the input rate.
     #[serde(default)]
     pub cache_write_price: Option<f64>,
+    /// Flat per-request cost (USD). Billed once per turn regardless of token
+    /// counts; most token-priced models leave this unset.
+    #[serde(default)]
+    pub per_request_price: Option<f64>,
 }
-
-/// Default `api_type` key used when `default_api_type` is unset, and the key
-/// a scalar `api_type = "..."` expands into.
-const DEFAULT_API_TYPE_KEY: &str = "chat_completions";
 
 fn default_auto_models_path() -> String {
     "data".to_string()
-}
-
-/// Deserialize a provider's `api_type` field, accepting either a scalar
-/// api identifier (e.g. `"openai-completions"`) — the common single-protocol
-/// case, expanded into a one-entry map keyed by the default api-type key —
-/// or a full table mapping api-type strings to [`ApiTypeMapping`]s. A scalar
-/// is the shorthand for "this provider speaks one protocol"; the table form
-/// is for proxies routing one base URL to several upstream APIs.
-fn deserialize_api_type<'de, D>(deserializer: D) -> Result<IndexMap<String, ApiTypeMapping>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-    struct ApiTypeVisitor;
-    impl<'de> de::Visitor<'de> for ApiTypeVisitor {
-        type Value = IndexMap<String, ApiTypeMapping>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("an api identifier or a table of api-type mappings")
-        }
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            let api = Api::parse(v).ok_or_else(|| {
-                E::custom(format!("unknown api_type: {v}"))
-            })?;
-            let mut m = IndexMap::new();
-            m.insert(
-                DEFAULT_API_TYPE_KEY.to_string(),
-                ApiTypeMapping {
-                    api,
-                    path: None,
-                    pricing_field_mappings: None,
-                },
-            );
-            Ok(m)
-        }
-        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            IndexMap::<String, ApiTypeMapping>::deserialize(de::value::MapAccessDeserializer::new(&mut map))
-        }
-    }
-    deserializer.deserialize_any(ApiTypeVisitor)
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Per-API-type mapping for a provider: maps a remote api-type string
-/// (e.g. `chat_completions`, reported by the models endpoint) to the lofi
-/// [`Api`], the full endpoint `path` joined onto the provider's `base_url`,
-/// and the pricing-field paths the endpoint uses. Lives on the provider so
-/// one endpoint can route to several upstream APIs (e.g. an OpenAI-compatible
-/// proxy) for **both** static and auto-discovered models — there is no
-/// auto-models-specific override.
+/// Per-api-type endpoint configuration: the endpoint `path` joined onto the
+/// provider `base_url`, and optional pricing-field overrides. Keyed by the
+/// internal [`Api`] identifier (e.g. `openai-completions`), so the `api`
+/// itself is derived from the key — the mapping only carries the bits that
+/// vary per endpoint within one provider. Lives on the provider and applies
+/// to **both** static and auto-discovered models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiTypeMapping {
-    pub api: Api,
     /// Full endpoint path joined onto the provider `base_url` (e.g.
-    /// `/v1/chat/completions`). Defaults to [`Api::default_path`] for `api`
-    /// when unset. The provider POSTs to the joined URL verbatim; no further
-    /// suffix is appended in code.
+    /// `/v1/chat/completions`). Defaults to [`Api::default_path`] for the
+    /// key's [`Api`] when unset. The provider POSTs to the joined URL
+    /// verbatim; no further suffix is appended in code.
     #[serde(default)]
     pub path: Option<String>,
     /// Dot-notation paths to the per-model pricing fields in a discovered
@@ -483,17 +448,68 @@ pub struct ApiTypeMapping {
     pub pricing_field_mappings: Option<PricingFieldMappings>,
 }
 
+/// Maps a remote api-type vocabulary (the strings a `/v1/models` endpoint
+/// reports, e.g. `chat_completions`, `messages`) to lofi's internal
+/// [`Api`] identifiers. Lives on [`AutoModelsConfig`] because only
+/// auto-discovery needs to translate the endpoint's own strings; static
+/// models use the internal id directly.
+pub type ApiTypeMappings = HashMap<String, Api>;
+
+/// Where to read each non-pricing [`ModelConfig`] field from in a discovered
+/// `/v1/models` entry. All paths are dot-notation JSON pointers into the
+/// entry object. `reasoning` and `supports_image` are not mapped here — they
+/// are inferred from the entry's `supported_parameters` array (a model
+/// supports reasoning if the array contains `"reasoning"`, images if it
+/// contains `"image"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldMappings {
+    /// Path to the display name. Defaults to `name`.
+    #[serde(default = "default_field_name")]
+    pub name: String,
+    /// Path to the context window size in tokens (u64). Defaults to
+    /// `context_length`.
+    #[serde(default = "default_field_context_window")]
+    pub context_window: String,
+    /// Path to the max output tokens (u64). Defaults to
+    /// `top_provider.max_completion_tokens`.
+    #[serde(default = "default_field_max_tokens")]
+    pub max_tokens: String,
+}
+
+fn default_field_name() -> String {
+    "name".to_string()
+}
+
+fn default_field_context_window() -> String {
+    "context_length".to_string()
+}
+
+fn default_field_max_tokens() -> String {
+    "top_provider.max_completion_tokens".to_string()
+}
+
+impl Default for FieldMappings {
+    fn default() -> Self {
+        Self {
+            name: default_field_name(),
+            context_window: default_field_context_window(),
+            max_tokens: default_field_max_tokens(),
+        }
+    }
+}
+
 /// Auto-discovery of models from an OpenAI-style `/v1/models` endpoint.
 ///
 /// When `enabled`, the provider's model list is fetched at startup from
-/// `models_url` (default `{base_url}/models`), mapped into [`ModelConfig`]
+/// `models_url` (default `{base_url}/v1/models`), mapped into [`ModelConfig`]
 /// entries, and merged with the provider's static `models` (static wins on
 /// `id` collision). lofi has no built-in model catalog, so discovered models
 /// inherit thinking levels from this config rather than from a base model.
 ///
-/// API-type routing, endpoint paths, and pricing-field mappings live on the
-/// provider ([`ProviderConfig`]) and apply to both static and discovered
-/// models; this block only governs the discovery fetch itself.
+/// Endpoint paths and pricing-field mappings live on the provider
+/// ([`ProviderConfig`]) and apply to both static and discovered models; this
+/// block only governs the discovery fetch itself plus the translation from
+/// the endpoint's own api-type vocabulary to lofi's internal ids.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModelsConfig {
     /// Master switch; when `false` the block is ignored.
@@ -504,18 +520,29 @@ pub struct AutoModelsConfig {
     #[serde(default = "default_true")]
     pub auth: bool,
     /// Full models endpoint URL. When omitted, the fetch targets
-    /// `{base_url}/models`.
+    /// `{base_url}/v1/models`.
     #[serde(default)]
     pub models_url: Option<String>,
     /// JSON pointer-ish path (dot-separated) to the array of models in the
     /// response; defaults to `data`.
     #[serde(default = "default_auto_models_path")]
     pub path: String,
-    /// Field name in each model entry naming the api-type hint (e.g.
-    /// `preferred_api`). The value is looked up in the provider's
-    /// `api_type_mappings`.
+    /// Field name in each model entry naming the remote api-type (e.g.
+    /// `preferred_api`). The value is translated through
+    /// [`Self::api_type_mappings`] to an internal [`Api`] id and stored on
+    /// the discovered [`ModelConfig`] as its `api_type` key. When unset,
+    /// discovered models inherit the provider's default `api_type`.
     #[serde(default)]
     pub api_type_field: Option<String>,
+    /// Remote api-type vocabulary → internal [`Api`] id. Only consulted when
+    /// [`Self::api_type_field`] is set. A remote value with no mapping falls
+    /// back to the provider's default `api_type`.
+    #[serde(default)]
+    pub api_type_mappings: ApiTypeMappings,
+    /// Where to read each non-pricing [`ModelConfig`] field from in a
+    /// discovered entry. Defaults to the OpenRouter-style layout.
+    #[serde(default)]
+    pub field_mappings: FieldMappings,
     /// Thinking levels exposed by discovered models.
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
@@ -558,6 +585,10 @@ pub struct PricingFieldMappings {
     /// Path to the cache-write cost (e.g. `pricing.input_cache_write`).
     #[serde(default)]
     pub cache_write: Option<String>,
+    /// Path to a flat per-request cost (e.g. `pricing.request`). Most
+    /// token-priced models leave this unset.
+    #[serde(default)]
+    pub per_request: Option<String>,
 }
 
 impl Default for PricingFieldMappings {
@@ -567,6 +598,7 @@ impl Default for PricingFieldMappings {
             output: Some("pricing.completion".to_string()),
             cache_read: Some("pricing.input_cache_read".to_string()),
             cache_write: Some("pricing.input_cache_write".to_string()),
+            per_request: None,
         }
     }
 }
@@ -574,22 +606,23 @@ impl Default for PricingFieldMappings {
 /// A provider entry in the config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    /// API-type routing table: maps a remote api-type string (e.g.
-    /// `chat_completions`, as reported by the models endpoint) to the lofi
-    /// [`Api`], the endpoint `path`, and per-endpoint pricing-field paths.
-    /// Applies to **both** static and auto-discovered models — one provider
-    /// can span several upstream APIs behind a single base URL. Accepts either
-    /// a scalar api identifier (shorthand for a single-protocol provider,
-    /// expanded into a one-entry map keyed by `chat_completions`) or a full
-    /// table. When the map is empty, the provider defaults to
-    /// [`Api::OpenAiCompletions`].
-    #[serde(default, deserialize_with = "deserialize_api_type")]
-    pub api_type: IndexMap<String, ApiTypeMapping>,
-    /// Key into `api_type` used when a model reports no api-type (static
-    /// models, or discovered models with no `preferred_api` field). When
-    /// `None`, the loader defaults to `chat_completions`.
+    /// Default api-type key (an internal [`Api`] id, e.g.
+    /// `openai-completions`) used by models that do not name their own.
+    /// Defaults to [`Api::OpenAiCompletions`] (`openai-completions`) when
+    /// unset. A per-model `api_type` override or an auto-discovered
+    /// `preferred_api` resolves against [`Self::api_types`] using the same
+    /// key.
     #[serde(default)]
-    pub default_api_type: Option<String>,
+    pub api_type: Option<Api>,
+    /// Per-api-type endpoint routing table, keyed by internal [`Api`] id.
+    /// Each entry carries the endpoint `path` (joined onto `base_url`) and
+    /// optional pricing-field overrides. Applies to **both** static and
+    /// auto-discovered models — resolution looks up `api_types[key]`, takes
+    /// its `path` (defaulting to [`Api::default_path`] for the key's [`Api`]),
+    /// and joins onto `base_url`. A minimal single-protocol provider can
+    /// omit this and rely on the defaults.
+    #[serde(default)]
+    pub api_types: IndexMap<String, ApiTypeMapping>,
     /// Base URL (host root, e.g. `https://api.openai.com`) for the provider's
     /// API. When omitted, defaults to [`Api::default_base_url`] for the
     /// default api-type's [`Api`]. The full endpoint URL is built by joining
@@ -640,52 +673,65 @@ pub struct ProviderConfig {
     /// CLI `:level` nor the model's own `thinking_level` selects one.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
+    /// Per-provider thinking levels, in priority order. Models under this
+    /// provider without their own `thinking_levels` inherit this list. Empty
+    /// means the provider does not constrain levels (the agent default
+    /// applies).
+    #[serde(default)]
+    pub thinking_levels: Vec<ThinkingLevel>,
 }
 
 impl ProviderConfig {
-    /// The default api-type key (`chat_completions`) used when the provider
-    /// does not name one. Resolved against `api_type` at load time, so a
-    /// provider whose only entry is keyed differently should set
-    /// `default_api_type` explicitly.
-    #[must_use]
-    pub fn default_api_type_key(&self) -> &str {
-        self.default_api_type.as_deref().unwrap_or(DEFAULT_API_TYPE_KEY)
-    }
-
-    /// The default [`Api`] for this provider — the `api` of the
-    /// `default_api_type` entry, or [`Api::OpenAiCompletions`] when the
-    /// routing table is empty.
+    /// The default [`Api`] for this provider — the scalar `api_type` when
+    /// set, else [`Api::OpenAiCompletions`].
     #[must_use]
     pub fn default_api(&self) -> Api {
-        self.api_type
-            .get(self.default_api_type_key())
-            .map(|m| m.api)
-            .unwrap_or(Api::OpenAiCompletions)
+        self.api_type.unwrap_or(Api::OpenAiCompletions)
     }
 
-    /// Resolve a model's [`Api`] from an optional remote api-type string,
-    /// falling back to the provider's default api-type entry, and finally to
-    /// [`Self::default_api`].
+    /// The default api-type key (internal id string) for this provider — the
+    /// scalar `api_type`'s id when set, else the constant default
+    /// (`openai-completions`). Used to look up [`Self::api_types`] for models
+    /// that do not name their own api-type.
     #[must_use]
-    pub fn resolve_api(&self, remote_api_type: Option<&str>) -> Api {
-        remote_api_type
-            .and_then(|k| self.api_type.get(k))
-            .or_else(|| self.api_type.get(self.default_api_type_key()))
-            .map(|m| m.api)
+    pub fn default_api_type_key(&self) -> String {
+        self.default_api().as_str().to_string()
+    }
+
+    /// Resolve a model's [`Api`] from an optional api-type key (a per-model
+    /// override or a discovered `preferred_api` already translated to an
+    /// internal id). Falls back to the provider's default [`Api`] when the
+    /// key is unset or unrecognized.
+    #[must_use]
+    pub fn resolve_api(&self, api_type: Option<&str>) -> Api {
+        api_type
+            .and_then(Api::parse)
             .unwrap_or_else(|| self.default_api())
     }
 
-    /// Resolve a model's endpoint `path` for a remote api-type string (or the
-    /// default), defaulting to [`Api::default_path`] for the resolved [`Api`]
-    /// when the mapping does not set one.
+    /// Resolve a model's endpoint `path` for an api-type key (or the default),
+    /// defaulting to [`Api::default_path`] for the resolved [`Api`] when the
+    /// mapping does not set one.
     #[must_use]
-    pub fn resolve_path(&self, remote_api_type: Option<&str>) -> String {
-        let mapping = remote_api_type
-            .and_then(|k| self.api_type.get(k))
-            .or_else(|| self.api_type.get(self.default_api_type_key()));
-        mapping
+    pub fn resolve_path(&self, api_type: Option<&str>) -> String {
+        let default_key = self.default_api_type_key();
+        let key = api_type.unwrap_or(&default_key);
+        self.api_types
+            .get(key)
             .and_then(|m| m.path.clone())
-            .unwrap_or_else(|| self.resolve_api(remote_api_type).default_path().to_string())
+            .unwrap_or_else(|| self.resolve_api(api_type).default_path().to_string())
+    }
+
+    /// Resolve the pricing-field mappings for an api-type key, falling back to
+    /// the provider-level default when the mapping does not carry its own.
+    #[must_use]
+    pub fn resolve_pricing_fields(&self, api_type: Option<&str>) -> &PricingFieldMappings {
+        let default_key = self.default_api_type_key();
+        let key = api_type.unwrap_or(&default_key);
+        self.api_types
+            .get(key)
+            .and_then(|m| m.pricing_field_mappings.as_ref())
+            .unwrap_or(&self.pricing_field_mappings)
     }
 }
 
@@ -697,6 +743,12 @@ pub struct AgentConfig {
     /// resolution time when `None`.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
+    /// Global thinking levels, in priority order. Providers and models
+    /// without their own `thinking_levels` inherit this list. Empty means
+    /// the agent does not constrain levels (the model/provider default
+    /// applies).
+    #[serde(default)]
+    pub thinking_levels: Vec<ThinkingLevel>,
 }
 
 /// Top-level config tree parsed from `config.toml`.
@@ -822,19 +874,8 @@ mod tests {
         providers.insert(
             "openai".to_string(),
             ProviderConfig {
-                api_type: {
-                    let mut m = IndexMap::new();
-                    m.insert(
-                        "chat_completions".to_string(),
-                        ApiTypeMapping {
-                            api: Api::OpenAiCompletions,
-                            path: None,
-                            pricing_field_mappings: None,
-                        },
-                    );
-                    m
-                },
-                default_api_type: None,
+                api_type: Some(Api::OpenAiCompletions),
+                api_types: IndexMap::new(),
                 base_url: Some("https://api.openai.com".to_string()),
                 pricing_convention: PricingConvention::PerToken,
                 pricing_field_mappings: PricingFieldMappings::default(),
@@ -847,7 +888,7 @@ mod tests {
                         "gpt-4o".to_string(),
                         ModelConfig {
                             name: None,
-                            api: None,
+                            api_type: None,
                             reasoning: None,
                             supports_image: Some(true),
                             context_window: Some(128_000),
@@ -859,6 +900,7 @@ mod tests {
                             output_price: None,
                             cache_read_price: None,
                             cache_write_price: None,
+                            per_request_price: None,
                         },
                     );
                     m
@@ -866,6 +908,7 @@ mod tests {
                 auto_models: None,
                 no_auth: false,
                 thinking_level: None,
+                thinking_levels: Vec::new(),
             },
         );
         let cfg = Config {
