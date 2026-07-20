@@ -289,18 +289,19 @@ fn static_models(providers: &IndexMap<String, ProviderConfig>) -> Vec<Model> {
 /// Map a [`ModelConfig`] into a resolved [`Model`] under provider `name`.
 ///
 /// `id` is the map key from the provider's `models` table. The effective
-/// `api` is the per-model override when set, else the provider's default
-/// [`Api`]. The `base_url` is the per-model override when set, else the
-/// endpoint URL resolved from the provider's `api_type` table (the default
-/// api-type mapping's `path` joined onto the provider `base_url`). The
-/// effective thinking level is left at the default ([`ThinkingLevel::Off`]);
-/// the agent resolves and overrides it at selection time.
+/// `api` is resolved from the model's `api_type` key override (or the
+/// provider's default `api_type`) via [`ProviderConfig::resolve_api`]. The
+/// `base_url` is the per-model override when set, else the endpoint URL
+/// resolved by joining the provider `base_url` with the `api_types[key].path`
+/// (defaulting to [`Api::default_path`]). The effective thinking level is
+/// left at the default ([`ThinkingLevel::Off`]); the agent resolves and
+/// overrides it at selection time.
 fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConfig) -> Model {
-    let api = mc.api.unwrap_or_else(|| pcfg.default_api());
+    let api = pcfg.resolve_api(mc.api_type.as_deref());
     let base_url = mc
         .base_url
         .clone()
-        .unwrap_or_else(|| resolve_model_base_url(pcfg, None));
+        .unwrap_or_else(|| resolve_model_base_url(pcfg, mc.api_type.as_deref()));
     Model {
         id: id.to_string(),
         name: mc.name.clone().unwrap_or_else(|| id.to_string()),
@@ -316,20 +317,21 @@ fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConf
         output_price: mc.output_price,
         cache_read_price: mc.cache_read_price,
         cache_write_price: mc.cache_write_price,
+        per_request_price: mc.per_request_price,
     }
 }
 
 /// Resolve a model's endpoint URL by joining the provider `base_url` (host
-/// root) with the `path` of the api-type mapping selected by `remote_api_type`
-/// (or the provider's default api-type). When the provider has no `base_url`,
-/// the default base URL for the resolved [`Api`] is used. The mapping `path`
-/// defaults to [`Api::default_path`] when unset.
-fn resolve_model_base_url(pcfg: &ProviderConfig, remote_api_type: Option<&str>) -> String {
+/// root) with the `api_types[key].path` selected by `api_type` (or the
+/// provider's default). When the provider has no `base_url`, the default
+/// base URL for the resolved [`Api`] is used. The mapping `path` defaults
+/// to [`Api::default_path`] when unset.
+fn resolve_model_base_url(pcfg: &ProviderConfig, api_type: Option<&str>) -> String {
     let base = pcfg
         .base_url
         .as_deref()
-        .unwrap_or_else(|| pcfg.default_api().default_base_url());
-    let path = pcfg.resolve_path(remote_api_type);
+        .unwrap_or_else(|| pcfg.resolve_api(api_type).default_base_url());
+    let path = pcfg.resolve_path(api_type);
     join_base_url(Some(base), &path)
 }
 
@@ -365,8 +367,8 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.name.is_none() {
         dst.name = src.name.clone();
     }
-    if dst.api.is_none() {
-        dst.api = src.api;
+    if dst.api_type.is_none() {
+        dst.api_type = src.api_type.clone();
     }
     if dst.reasoning.is_none() {
         dst.reasoning = src.reasoning;
@@ -400,6 +402,9 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     }
     if dst.cache_write_price.is_none() {
         dst.cache_write_price = src.cache_write_price;
+    }
+    if dst.per_request_price.is_none() {
+        dst.per_request_price = src.per_request_price;
     }
 }
 
@@ -491,16 +496,31 @@ fn json_num(v: &Value) -> Option<f64> {
         .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
+/// Read a JSON value as `u64`, accepting either a number or a numeric
+/// string. Floats are floored.
+fn json_u64(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_f64().map(|f| f as u64))
+        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+}
+
 /// Navigate `body` to the array at `am.path` and map each entry to an
-/// `(id, ModelConfig)` pair. The per-model `api` and endpoint `base_url` are
-/// resolved from the provider's `api_type` routing table keyed by the
-/// `api_type_field` value (falling back to the provider's default api-type),
-/// so one provider can span several upstream APIs. Pricing is read via the
-/// mapping's `pricing_field_mappings` (falling back to the provider-level
-/// default) and scaled by the provider's `pricing_convention`. Discovered
-/// models inherit `thinking_levels`/`thinking_level` from the `auto_models`
-/// config (lofi has no built-in model catalog); `reasoning` is inferred as
-/// true when any thinking levels are declared.
+/// `(id, ModelConfig)` pair. The per-model `api_type` is read from the
+/// field named by `am.api_type_field` (e.g. `preferred_api`), translated
+/// through `am.api_type_mappings` (remote vocabulary → internal [`Api`] id),
+/// and stored as the model's `api_type` key so it resolves through the
+/// provider's `api_types` table exactly like a static model's override.
+/// When `api_type_field` is unset or the remote value has no mapping, the
+/// model inherits the provider's default `api_type`.
+///
+/// Pricing is read via the resolved api-type's `pricing_field_mappings`
+/// (falling back to the provider-level default) and scaled by the provider's
+/// `pricing_convention`. Non-pricing fields are read via `am.field_mappings`.
+/// `reasoning` and `supports_image` are inferred from the entry's
+/// `supported_parameters` array; discovered models inherit
+/// `thinking_levels`/`thinking_level` from the `auto_models` config (lofi
+/// has no built-in model catalog), defaulting to the standard four-level
+/// ladder when the endpoint reports `reasoning` support.
 fn parse_auto_models(
     pcfg: &ProviderConfig,
     am: &AutoModelsConfig,
@@ -517,7 +537,7 @@ fn parse_auto_models(
         // `preferred_api` may be a string or an array (some providers return
         // `["responses"]`); take the first element either way so each model
         // routes to its real upstream API instead of the block default.
-        let preferred = am
+        let remote_api = am
             .api_type_field
             .as_deref()
             .and_then(|field| entry.get(field))
@@ -526,25 +546,21 @@ fn parse_auto_models(
                     .map(str::to_string)
                     .or_else(|| v.as_array().and_then(|a| a.first()).and_then(Value::as_str).map(str::to_string))
             });
-        let api = pcfg.resolve_api(preferred.as_deref());
-        let base_url = resolve_model_base_url(pcfg, preferred.as_deref());
-        // Per-endpoint pricing-field override, falling back to the provider
-        // default.
-        let fields = preferred
+        // Translate the remote vocabulary to an internal api id; an
+        // unmapped value falls back to the provider's default.
+        let api_type = remote_api
             .as_deref()
-            .and_then(|k| pcfg.api_type.get(k))
-            .or_else(|| pcfg.api_type.get(pcfg.default_api_type_key()))
-            .and_then(|m| m.pricing_field_mappings.as_ref())
-            .unwrap_or(&pcfg.pricing_field_mappings);
-        let display_name = entry
-            .get("name")
+            .and_then(|r| am.api_type_mappings.get(r))
+            .map(|api| api.id().to_string());
+        let fields = pcfg.resolve_pricing_fields(api_type.as_deref());
+        let base_url = resolve_model_base_url(pcfg, api_type.as_deref());
+        let display_name = navigate(entry, &am.field_mappings.name)
             .and_then(Value::as_str)
             .map(str::to_string);
-        let context_window = entry.get("context_length").and_then(Value::as_u64);
-        let max_tokens = entry
-            .get("top_provider")
-            .and_then(|tp| tp.get("max_completion_tokens"))
-            .and_then(Value::as_u64);
+        let context_window = navigate(entry, &am.field_mappings.context_window)
+            .and_then(json_u64);
+        let max_tokens = navigate(entry, &am.field_mappings.max_tokens)
+            .and_then(json_u64);
         let scale = match pcfg.pricing_convention {
             PricingConvention::PerToken => 1_000_000.0,
             PricingConvention::PerMillion => 1.0,
@@ -559,10 +575,14 @@ fn parse_auto_models(
         let output_price = price(&fields.output);
         let cache_read_price = price(&fields.cache_read);
         let cache_write_price = price(&fields.cache_write);
-        let supports_reasoning = entry
+        let per_request_price = price(&fields.per_request);
+        let supported_params = entry
             .get("supported_parameters")
-            .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().any(|p| p.as_str() == Some("reasoning")));
+            .and_then(Value::as_array);
+        let supports_reasoning =
+            supported_params.is_some_and(|a| a.iter().any(|p| p.as_str() == Some("reasoning")));
+        let supports_image =
+            supported_params.is_some_and(|a| a.iter().any(|p| p.as_str() == Some("image")));
         let thinking_levels = if !am.thinking_levels.is_empty() {
             am.thinking_levels.clone()
         } else if supports_reasoning {
@@ -579,9 +599,9 @@ fn parse_auto_models(
             id.to_string(),
             ModelConfig {
                 name: display_name,
-                api: Some(api),
+                api_type,
                 reasoning: Some(!thinking_levels.is_empty()),
-                supports_image: None,
+                supports_image: Some(supports_image),
                 context_window,
                 max_tokens,
                 thinking_levels,
@@ -591,6 +611,7 @@ fn parse_auto_models(
                 output_price,
                 cache_read_price,
                 cache_write_price,
+                per_request_price,
             },
         ));
     }
@@ -660,11 +681,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use lofi_types::{ApiTypeMapping, PricingFieldMappings};
+    use lofi_types::{ApiTypeMapping, FieldMappings, PricingFieldMappings};
 
-    fn mapping(api: Api) -> ApiTypeMapping {
+    fn mapping() -> ApiTypeMapping {
         ApiTypeMapping {
-            api,
             path: None,
             pricing_field_mappings: None,
         }
@@ -672,10 +692,10 @@ mod tests {
 
     fn pcfg(api: Api, models: IndexMap<String, ModelConfig>) -> ProviderConfig {
         let mut mappings = IndexMap::new();
-        mappings.insert("chat_completions".to_string(), mapping(api));
+        mappings.insert(api.id().to_string(), mapping());
         ProviderConfig {
-            api_type: mappings,
-            default_api_type: None,
+            api_type: Some(api),
+            api_types: mappings,
             base_url: Some("https://api.example.com".to_string()),
             pricing_convention: PricingConvention::PerToken,
             pricing_field_mappings: PricingFieldMappings::default(),
@@ -686,6 +706,7 @@ mod tests {
             auto_models: None,
             no_auth: false,
             thinking_level: None,
+            thinking_levels: Vec::new(),
         }
     }
 
@@ -694,7 +715,7 @@ mod tests {
             id.to_string(),
             ModelConfig {
                 name: None,
-                api: None,
+                api_type: None,
                 reasoning: None,
                 supports_image: None,
                 context_window: None,
@@ -706,6 +727,7 @@ mod tests {
                 output_price: None,
                 cache_read_price: None,
                 cache_write_price: None,
+                per_request_price: None,
             },
         )
     }
@@ -889,13 +911,20 @@ mod tests {
             ]
         });
         let mut p = pcfg(Api::OpenAiCompletions, IndexMap::new());
-        p.api_type.insert("messages".to_string(), mapping(Api::AnthropicMessages));
+        p.api_types.insert(
+            "anthropic-messages".to_string(),
+            ApiTypeMapping { path: None, pricing_field_mappings: None },
+        );
         let am = AutoModelsConfig {
             enabled: true,
             auth: true,
             models_url: None,
             path: "data".to_string(),
             api_type_field: Some("preferred_api".to_string()),
+            api_type_mappings: HashMap::from([
+                ("messages".to_string(), Api::AnthropicMessages),
+            ]),
+            field_mappings: FieldMappings::default(),
             thinking_levels: vec![ThinkingLevel::Medium],
             thinking_level: None,
             ttl_seconds: None,
@@ -904,11 +933,11 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].0, "remote-1");
         assert_eq!(models[0].1.name.as_deref(), Some("Remote One"));
-        assert_eq!(models[0].1.api, Some(Api::AnthropicMessages));
+        assert_eq!(models[0].1.api_type.as_deref(), Some("anthropic-messages"));
         assert_eq!(models[0].1.thinking_levels, vec![ThinkingLevel::Medium]);
         assert!(models[0].1.reasoning.unwrap_or(false));
-        // base_url resolved from the messages mapping's default path
-        // (/v1/messages) joined onto the provider base_url.
+        // base_url resolved from the anthropic-messages mapping's default
+        // path (/v1/messages) joined onto the provider base_url.
         assert_eq!(
             models[0].1.base_url.as_deref(),
             Some("https://api.example.com/v1/messages")
@@ -938,6 +967,8 @@ mod tests {
             models_url: None,
             path: "data".to_string(),
             api_type_field: None,
+            api_type_mappings: HashMap::new(),
+            field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
             ttl_seconds: None,
@@ -965,6 +996,8 @@ mod tests {
             models_url: None,
             path: "data".to_string(),
             api_type_field: None,
+            api_type_mappings: HashMap::new(),
+            field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
             ttl_seconds: None,
@@ -985,12 +1018,13 @@ mod tests {
             ]
         });
         let mut p = pcfg(Api::OpenAiCompletions, IndexMap::new());
-        p.api_type.get_mut("chat_completions").unwrap().pricing_field_mappings =
+        p.api_types.get_mut("openai-completions").unwrap().pricing_field_mappings =
             Some(PricingFieldMappings {
                 input: Some("cost.in".to_string()),
                 output: Some("cost.out".to_string()),
                 cache_read: None,
                 cache_write: None,
+                per_request: None,
             });
         let am = AutoModelsConfig {
             enabled: true,
@@ -998,6 +1032,8 @@ mod tests {
             models_url: None,
             path: "data".to_string(),
             api_type_field: None,
+            api_type_mappings: HashMap::new(),
+            field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
             ttl_seconds: None,
@@ -1032,6 +1068,8 @@ mod tests {
             models_url: Some("http://127.0.0.1:1/v1/models".to_string()),
             path: "data".to_string(),
             api_type_field: None,
+            api_type_mappings: HashMap::new(),
+            field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
             ttl_seconds: Some(0),
