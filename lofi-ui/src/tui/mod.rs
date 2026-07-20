@@ -3360,7 +3360,7 @@ fn handle_event(
             KeyCode::Up => app.picker_up(),
             KeyCode::Down => app.picker_down(),
             KeyCode::Enter => app.picker_confirm(),
-            KeyCode::Esc => app.picker_cancel(),
+            KeyCode::Esc | KeyCode::Char('q') => app.picker_cancel(),
             _ => {}
         }
         return;
@@ -3371,7 +3371,7 @@ fn handle_event(
             KeyCode::Up | KeyCode::Char('k') => app.tree_picker_up(),
             KeyCode::Down | KeyCode::Char('j') => app.tree_picker_down(),
             KeyCode::Enter => app.tree_picker_confirm(),
-            KeyCode::Esc => app.tree_picker_cancel(),
+            KeyCode::Esc | KeyCode::Char('q') => app.tree_picker_cancel(),
             _ => {}
         }
         return;
