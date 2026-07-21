@@ -337,6 +337,7 @@ async fn run_retries_transient_provider_errors() {
         .with_retry(crate::retry::RetryPolicy {
             max_retries: 3,
             base_delay: Duration::from_millis(1),
+            ..Default::default()
         });
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
@@ -388,6 +389,7 @@ async fn run_does_not_retry_non_transient_errors() {
         .with_retry(crate::retry::RetryPolicy {
             max_retries: 3,
             base_delay: Duration::from_millis(1),
+            ..Default::default()
         });
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
@@ -505,6 +507,7 @@ fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry)
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        retry: lofi_types::RetryConfig::default(),
         default_provider: None,
         default_model: None,
         providers,
@@ -627,6 +630,7 @@ fn select_model_uses_default_model_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        retry: lofi_types::RetryConfig::default(),
         default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
@@ -653,6 +657,7 @@ fn select_model_uses_default_provider_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: None,
         providers,
@@ -679,6 +684,7 @@ fn select_model_default_model_overrides_default_provider() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
@@ -705,6 +711,7 @@ fn select_model_explicit_query_overrides_defaults() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,

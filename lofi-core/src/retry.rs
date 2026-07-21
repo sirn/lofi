@@ -13,17 +13,23 @@ use lofi_error::Error;
 use regex::{Regex, RegexBuilder};
 
 /// Default cap on retry attempts (not counting the initial try).
-pub const DEFAULT_MAX_RETRIES: u32 = 3;
+pub const DEFAULT_MAX_RETRIES: u32 = 10;
 /// Base delay for the first retry; subsequent retries double it.
 pub const DEFAULT_BASE_DELAY: Duration = Duration::from_secs(2);
+/// Per-retry delay ceiling; the exponential backoff clamps here so a long
+/// retry tail under persistent transient errors waits in bounded steps.
+pub const DEFAULT_MAX_DELAY: Duration = Duration::from_mins(1);
 
 /// Per-call retry budget and backoff schedule.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     /// Maximum retry attempts after the initial try.
     pub max_retries: u32,
-    /// Base delay; attempt N (1-indexed) waits `base * 2^(N-1)`.
+    /// Base delay; attempt N (1-indexed) waits `base * 2^(N-1)`, clamped to
+    /// `max_delay`.
     pub base_delay: Duration,
+    /// Per-retry delay ceiling the exponential backoff never exceeds.
+    pub max_delay: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -31,17 +37,33 @@ impl Default for RetryPolicy {
         Self {
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: DEFAULT_BASE_DELAY,
+            max_delay: DEFAULT_MAX_DELAY,
+        }
+    }
+}
+
+impl From<lofi_types::RetryConfig> for RetryPolicy {
+    fn from(c: lofi_types::RetryConfig) -> Self {
+        Self {
+            max_retries: c.max_retries,
+            base_delay: Duration::from_millis(c.base_delay_ms),
+            max_delay: Duration::from_millis(c.max_delay_ms),
         }
     }
 }
 
 impl RetryPolicy {
-    /// Delay before the Nth retry (1-indexed): `base * 2^(n-1)`.
+    /// Delay before the Nth retry (1-indexed): `base * 2^(n-1)`, clamped to
+    /// `max_delay` so a long retry tail waits in bounded steps.
     #[must_use]
     pub fn delay_for(&self, attempt: u32) -> Duration {
         // Saturating shift so a very high attempt number can't overflow.
         let shift = attempt.saturating_sub(1).min(20);
-        self.base_delay.checked_mul(1u32 << shift).unwrap_or(self.base_delay)
+        let raw = self
+            .base_delay
+            .checked_mul(1u32 << shift)
+            .unwrap_or(self.base_delay);
+        raw.min(self.max_delay)
     }
 
     /// Whether `attempt` (already-attempted retries) is still within budget.
@@ -214,20 +236,40 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles() {
+    fn backoff_doubles_and_clamps() {
         let p = RetryPolicy::default();
         assert_eq!(p.delay_for(1), Duration::from_secs(2));
         assert_eq!(p.delay_for(2), Duration::from_secs(4));
         assert_eq!(p.delay_for(3), Duration::from_secs(8));
-        // Saturates rather than overflowing.
-        assert_eq!(p.delay_for(20), p.delay_for(20));
+        // 2 * 2^5 = 64s, clamped to the 60s ceiling.
+        assert_eq!(p.delay_for(6), Duration::from_mins(1));
+        // The ceiling holds for the whole tail.
+        assert_eq!(p.delay_for(20), Duration::from_mins(1));
     }
 
     #[test]
     fn can_retry_respects_budget() {
         let p = RetryPolicy::default();
         assert!(p.can_retry(0));
-        assert!(p.can_retry(2));
-        assert!(!p.can_retry(3));
+        assert!(p.can_retry(9));
+        // Default budget is 10 retries (after the initial try).
+        assert!(!p.can_retry(10));
+    }
+
+    #[test]
+    fn from_retry_config() {
+        let p = RetryPolicy::from(lofi_types::RetryConfig {
+            max_retries: 5,
+            base_delay_ms: 500,
+            max_delay_ms: 10_000,
+        });
+        assert_eq!(p.max_retries, 5);
+        assert_eq!(p.base_delay, Duration::from_millis(500));
+        assert_eq!(p.max_delay, Duration::from_secs(10));
+        // 500ms * 2^4 = 8s, under the 10s ceiling.
+        assert_eq!(p.delay_for(5), Duration::from_secs(8));
+        // 500ms * 2^5 = 16s, clamped to 10s.
+        assert_eq!(p.delay_for(6), Duration::from_secs(10));
+        assert!(!p.can_retry(5));
     }
 }
