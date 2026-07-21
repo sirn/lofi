@@ -130,7 +130,6 @@ impl App {
         lines.push(info_kv(t, "Enter", "send"));
         lines.push(info_kv(t, "Alt+Enter", "newline (Ctrl+J)"));
         lines.push(info_kv(t, "↑ / ↓", "move line; recall at edge"));
-        lines.push(info_kv(t, "Ctrl+↑/↓", "move across lines"));
         lines.push(info_kv(t, "PgUp/PgDn", "scroll page (Input); move cursor page (Nav)"));
         lines.push(info_kv(t, "Tab", "switch mode: Input ↔ Navigate"));
         lines.push(info_kv(t, "Esc", "clear input"));
