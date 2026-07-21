@@ -14,6 +14,14 @@ use std::path::PathBuf;
 
 use lofi_error::{Error, Result};
 
+/// Tests that mutate the process-global `XDG_STATE_HOME` / `LOFI_STATE_HOME`
+/// env vars acquire this lock for their whole duration. The vars are
+/// process-global, so parallel test threads otherwise interleave their
+/// `set_var`/`remove_var` and race on the assertions. Shared with the
+/// `models` tests that also point `XDG_STATE_HOME` at a temp dir.
+#[cfg(test)]
+pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Resolve the agent-owned state directory.
 ///
 /// Precedence: `$LOFI_STATE_HOME` (used as the base, with `lofi` appended),
@@ -89,6 +97,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn paths_under_xdg_state_home() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
         // `dirs::state_dir` honors `XDG_STATE_HOME` on Linux; point it at a
         // temp dir so the test is hermetic and does not touch the real state
         // tree.
@@ -110,6 +119,7 @@ mod tests {
     /// acting as the base with `lofi` appended.
     #[test]
     fn lofi_state_home_overrides_xdg() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("lofi_state_test_lofi_override");
         // Set both: LOFI_STATE_HOME must win.
         std::env::set_var("XDG_STATE_HOME", "/this/should/not/be/used");

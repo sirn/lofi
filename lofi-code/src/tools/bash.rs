@@ -36,12 +36,13 @@ impl BuiltinTools {
             .unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
         let dur = Duration::from_millis(timeout_ms);
 
-        // `bash` is intentionally host-level: it
-        // runs the user's project commands and is *not* a security sandbox.
-        // The two real risks a model-controlled shell poses here — leaking
-        // inherited credentials and leaving orphans on timeout — are handled
-        // below: secret-like env vars are scrubbed from the child, and the
-        // child runs in its own process group (`process_group(0)`) so a
+        // `bash` is intentionally host-level: it runs the user's project
+        // commands and is *not* a security sandbox. The child env is resolved
+        // up front from the `bash` config: by default a minimal baseline
+        // (`PATH`/`HOME`/locale) so inherited credentials never reach a
+        // model-run shell, with `pass_env`/`env_file` opting specific vars
+        // back in — whose values are redacted from the captured output below.
+        // The child runs in its own process group (`process_group(0)`) so a
         // timeout or cancellation can kill the *entire* tree — background
         // children and grandchildren included — rather than just the `sh`
         // leader. The `PgrpKillGuard` makes that robust against early return
@@ -54,11 +55,7 @@ impl BuiltinTools {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        for (k, _) in std::env::vars() {
-            if looks_secret(&k) {
-                command.env_remove(&k);
-            }
-        }
+        self.bash_env.apply(&mut command);
 
         let mut child = command.spawn()?;
         // `process_group(0)` makes the child its own session/group leader,
@@ -103,7 +100,12 @@ impl BuiltinTools {
                 let mut merged = out_bytes;
                 merged.extend_from_slice(&err_bytes);
                 let pipe_capped = out_truncated || err_truncated;
-                let full = String::from_utf8_lossy(&merged).into_owned();
+                // Scrub approved secret values before the output is truncated,
+                // logged to the tmp file, or returned to the model — so a
+                // command may *use* a secret without its value landing in the
+                // transcript or the bash log.
+                let mut full = String::from_utf8_lossy(&merged).into_owned();
+                self.bash_env.redact(&mut full);
                 let output = self.format_bash_output(&full, pipe_capped);
                 Ok(json!({
                     "ok": status.success(),

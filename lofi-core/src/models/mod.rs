@@ -419,6 +419,8 @@ mod tests {
     fn config_with(providers: IndexMap<String, ProviderConfig>) -> Config {
         Config {
             agent: lofi_types::AgentConfig::default(),
+            compaction: lofi_types::CompactionConfig::default(),
+            bash: lofi_types::BashConfig::default(),
             default_provider: None,
             default_model: None,
             providers,
@@ -718,6 +720,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn load_async_uses_cache_when_remote_unreachable() {
+        // Serialize against the state-dir tests that also mutate
+        // XDG_STATE_HOME (process-global env var).
+        let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("XDG_STATE_HOME");
         std::env::set_var("XDG_STATE_HOME", dir.path());

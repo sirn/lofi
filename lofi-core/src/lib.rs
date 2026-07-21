@@ -7,6 +7,7 @@
 //! in `lofi-ui`.
 
 pub mod agent;
+pub mod compact;
 pub mod config_loader;
 pub mod models;
 pub mod retry;
@@ -15,6 +16,7 @@ pub mod state;
 pub mod subagent;
 
 pub use agent::{build_agent, exec_input_code_and_label, exec_result_display, select_model, Agent, AgentEvent, SessionCommit};
+pub use compact::{compact, compacted_history, Compaction, CompactOptions, HANDOFF_PREAMBLE};
 pub use lofi_error::{Error, Result};
 pub use lofi_types::{Config, SessionEvent};
 pub use models::ModelRegistry;

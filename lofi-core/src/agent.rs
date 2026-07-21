@@ -34,8 +34,9 @@ use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
-use lofi_code::{exec, AgentFn, ExecCtx, ExecOptions, ToolEvent};
+use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, ToolEvent};
 use lofi_error::{Error, Result};
+use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;
 use lofi_providers::ir::codec::assemble_message;
 use lofi_providers::{open, Provider};
@@ -230,11 +231,18 @@ pub struct Agent {
     retry: crate::retry::RetryPolicy,
     system_prompt: String,
     max_output_tokens: Option<u64>,
+    /// Hard-cap reserve for mid-run force-compaction: a round whose input
+    /// tokens exceed `model.context_window - reserved` triggers a
+    /// `ContextPressure` stop. 0 disables the hard cap.
+    reserved_context_tokens: u64,
+    /// Resolved `bash` child-env policy + output-redaction set.
+    bash_env: BashEnv,
 }
 
 impl Agent {
     /// Construct a new agent.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Box<dyn Provider>,
         model: Model,
@@ -242,7 +250,10 @@ impl Agent {
         tmp_dir: PathBuf,
         system_prompt: String,
         max_output_tokens: Option<u64>,
+        reserved_context_tokens: u64,
+        bash: &BashConfig,
     ) -> Self {
+        let bash_env = BashEnv::from_config(bash);
         Self {
             provider: Arc::from(provider),
             model,
@@ -251,6 +262,8 @@ impl Agent {
             retry: crate::retry::RetryPolicy::default(),
             system_prompt,
             max_output_tokens,
+            reserved_context_tokens,
+            bash_env,
         }
     }
 
@@ -258,6 +271,20 @@ impl Agent {
     #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// The mid-run hard-cap threshold: a round whose input tokens exceed this
+    /// triggers a `ContextPressure` force-stop. `None` when the reserve is 0
+    /// or the model has no context window, disabling the hard cap.
+    #[must_use]
+    pub fn hard_compact_threshold(&self) -> Option<u64> {
+        if self.reserved_context_tokens == 0 {
+            return None;
+        }
+        self.model
+            .context_window
+            .filter(|&w| w > self.reserved_context_tokens)
+            .map(|w| w - self.reserved_context_tokens)
     }
 
     /// The workspace root file operations are confined to.
@@ -331,4 +358,3 @@ async fn emit(tx: Option<&Sender<AgentEvent>>, ev: AgentEvent) -> bool {
     }
     true
 }
-

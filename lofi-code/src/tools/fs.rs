@@ -17,17 +17,7 @@ pub(super) fn default_tmp_dir() -> PathBuf {
     dir
 }
 
-/// Heuristic for env vars that carry credentials and should not be inherited
-/// by model-controlled shell commands.
-pub(super) fn looks_secret(name: &str) -> bool {
-    let u = name.to_ascii_uppercase();
-    u.contains("API_KEY")
-        || u.contains("SECRET")
-        || u.contains("PASSWORD")
-        || u.contains("CREDENTIAL")
-        || u.contains("_TOKEN")
-        || u == "TOKEN"
-}
+
 
 /// Resolve `p` against `root`, rejecting escapes.
 ///

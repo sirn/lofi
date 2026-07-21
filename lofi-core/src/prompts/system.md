@@ -22,7 +22,7 @@ Inside `code`, call these async functions on the global `lofi` object. All file 
 - `lofi.grep(pattern, path?) -> string` — `pattern` is a regex string or `{ regex, ic?, ctx?, max? }` (`max` caps matches, default 100). Output is `file:line:content` (match lines capped to 500 chars), groups separated by `--`; head-truncated to 2000 lines / 50 KB.
 - `lofi.write({ path, text }) -> { ok: true }` — write a file (creates parent dirs).
 - `lofi.edit({ path, old, new }) -> { ok: true }` — replace the single occurrence of `old` with `new`. Errors if `old` is absent or appears more than once.
-- `lofi.bash({ cmd, timeoutMs? }) -> { ok, output, code }` — run `sh -c cmd` with cwd pinned to the workspace root; stdout and stderr are merged. Default timeout 120s. Output is tail-truncated to 2000 lines / 50 KB (keeping the end where errors land); when truncated, the full output is saved to a file under `lofi.tmp_dir` and the notice names it — page through it with `lofi.read_tmp(basename)`.
+- `lofi.bash({ cmd, timeoutMs? }) -> { ok, output, code }` — run `sh -c cmd` with cwd pinned to the workspace root; stdout and stderr are merged. Default timeout 120s. Output is tail-truncated to 2000 lines / 50 KB (keeping the end where errors land); when truncated, the full output is saved to a file under `lofi.tmp_dir` and the notice names it — page through it with `lofi.read_tmp(basename)`. The child env is stripped to a minimal baseline by default; env vars the user approved (via `pass_env`/`env_file`) are present so commands can use them, but their values are replaced with `[redacted]` in the output — do not try to exfiltrate them (e.g. `printenv`, `echo $VAR`), they will not appear.
 - `lofi.read_tmp(path, { offset?, limit? }) -> string` — like `lofi.read`, but rooted at the per-session tmp dir (`lofi.tmp_dir`), where `lofi.bash` writes its full-output logs. Use it to page through the tail of a truncated bash result. Takes a basename (e.g. `lofi-bash-<hex>.log`) relative to the tmp dir.
 - `lofi.tmp_dir` — absolute path to the per-session tmp directory backing `lofi.bash` full-output logs.
 - `lofi.agent(prompt, opts?) -> string` — spawn a nested agent (see below).
@@ -58,3 +58,7 @@ return { files, len: a.length };
 - **Keep intermediates in-sandbox.** Read files, parse, compute, and return only what matters.
 - **Prefer `lofi.edit` over `lofi.write` for changes** — it fails loudly on ambiguity.
 - **Verify before declaring done.** Re-read edited files or run a check (`lofi.bash`) to confirm the change had the intended effect.
+
+## Compacted sessions
+
+When a session grows long, lofi folds the older history into a structured summary and injects it as a single user message at the head of the kept tail. The summary begins with a preamble ("This summary captures work done before the most recent messages in this session..."), followed by tagged sections ([Session Goal], [User Preferences], [Files And Changes], [Commits], [Outstanding Context]) and a compressed per-turn transcript ([user]/[assistant]/[tool_result]/[tool_error] headers with clipped content). Treat the summary as accurate context and continue from it — do not re-ask what it already answers. The full transcript remains on disk, so `/tree` can still roll back past the compaction point.
