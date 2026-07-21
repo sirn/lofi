@@ -38,7 +38,7 @@ the TUI owns the alternate screen, so logs are only emitted when you opt in.
 | Flag | Description |
 | --- | --- |
 | `-p`, `--print <PROMPT>` | Run one non-interactive turn and stream assistant text to stdout. |
-| `--list-models` | Print `provider/id — name` lines and exit. |
+| `--list-models` | Print `provider/id — name` lines (with a `·img` marker for image-capable models) and exit. |
 | `--list-sessions` | Print saved sessions for this workspace and exit. |
 | `--model <SPEC>` | Select the model as `provider/model[:level]`. |
 | `-c`, `--continue` | Resume the most recent session for this workspace. |

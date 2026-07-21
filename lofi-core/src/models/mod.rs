@@ -281,7 +281,13 @@ impl ModelRegistry {
         let mut lines: Vec<String> = self
             .models
             .iter()
-            .map(|m| format!("{} — {}", qualified(m), m.name))
+            .map(|m| {
+                let mut s = format!("{} — {}", qualified(m), m.name);
+                if m.supports_image {
+                    s.push_str("  ·img");
+                }
+                s
+            })
             .collect();
         lines.sort();
         lines.join("\n")
@@ -617,6 +623,22 @@ mod tests {
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let out = reg.list_models_print();
         assert_eq!(out, "openai/gpt-4o — GPT 4o");
+    }
+
+    #[test]
+    fn list_models_print_marks_image_support() {
+        let mut providers = IndexMap::new();
+        let mut m = IndexMap::new();
+        let mut gpt4o = mc_named("gpt-4o", "GPT 4o").1;
+        gpt4o.supports_image = Some(true);
+        m.insert("gpt-4o".to_string(), gpt4o);
+        m.insert("gpt-4o-mini".to_string(), mc("gpt-4o-mini").1);
+        providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, m));
+        let reg = ModelRegistry::load(&config_with(providers)).unwrap();
+        let out = reg.list_models_print();
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "openai/gpt-4o — GPT 4o  ·img");
+        assert_eq!(lines[1], "openai/gpt-4o-mini — gpt-4o-mini");
     }
 
     #[test]

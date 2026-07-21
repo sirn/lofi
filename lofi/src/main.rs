@@ -1,7 +1,7 @@
 //! lofi binary entry point.
 //!
 //! A thin clap CLI that dispatches into the lofi crates:
-//! - `--list-models` prints `provider/id — name` lines and exits;
+//! - `--list-models` prints `provider/id — name` lines (with a `·img` marker for image-capable models) and exits;
 //! - `--list-sessions` prints saved sessions for the workspace and exits;
 //! - `--print <prompt>` runs one non-interactive turn via [`lofi_ui::run_print`];
 //! - otherwise the interactive TUI is launched via [`lofi_ui::run_interactive`].
@@ -29,7 +29,7 @@ struct Cli {
     /// Run one non-interactive turn and stream the assistant text to stdout.
     #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
-    /// List configured models as `provider/id — name` and exit.
+    /// List configured models as `provider/id — name` (with a `·img` marker for image-capable models) and exit.
     #[arg(long)]
     list_models: bool,
     /// List saved sessions for this workspace and exit.
@@ -156,7 +156,7 @@ fn format_ts(ms: u64) -> String {
 }
 
 /// Load config, build the registry (with remote discovery + static fallback),
-/// and write `provider/id — name` lines to stdout.
+/// and write `provider/id — name` lines (with a `·img` marker for image-capable models) to stdout.
 async fn list_models(_cli: &Cli) -> anyhow::Result<()> {
     let config_path =
         lofi_core::config_loader::user_config_path().context("resolve user config path")?;
