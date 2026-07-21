@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod compact;
+pub mod recall;
 pub mod config_loader;
 pub mod models;
 pub mod retry;

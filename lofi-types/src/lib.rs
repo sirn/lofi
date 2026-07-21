@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+pub mod recall;
+
 /// Provider wire protocol used to talk to a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Api {
@@ -338,6 +340,12 @@ pub enum SessionEventKind {
         /// into the summary. The empty string means compact-all (nothing
         /// kept).
         first_kept_entry_id: String,
+        /// Event ids `[first, last]` of the summarized range on the active
+        /// path — every live message folded into this summary. `/recall`
+        /// with `scope:compaction:N` resolves these to global message
+        /// indices and searches within the range. Empty strings mean
+        /// compact-all collapsed the whole live list.
+        summarized_range: [String; 2],
         /// How many live messages were folded into the summary (for the
         /// visible marker on resume).
         summarized: usize,
