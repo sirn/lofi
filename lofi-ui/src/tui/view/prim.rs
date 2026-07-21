@@ -166,6 +166,10 @@ pub fn truncate(s: &str, max_w: usize) -> String {
 /// word wider than `max_w` (e.g. a long CJK run with no spaces) is broken
 /// mid-word on a wide-char boundary. Empty input yields a single empty
 /// string so callers always emit at least one line.
+///
+/// Whitespace is collapsed as flow text: runs of spaces become a single
+/// space and lines are trimmed. Styled, whitespace-preserving wrapping
+/// lives in [`wrap_line_styled`]; both share [`wrap_cells`].
 pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
     let mut out = Vec::new();
     for line in s.split('\n') {
@@ -173,32 +177,19 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
             out.push(line.to_string());
             continue;
         }
-        let mut cur = String::new();
-        let mut cur_w = 0usize;
-        for word in line.split(' ') {
-            let ww = word.width();
-            let add = if cur.is_empty() { ww } else { cur_w + 1 + ww };
-            if add > max_w && !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-                if ww > max_w {
-                    // Word itself overflows: break it on a wide-char boundary.
-                    let (piece, w) = break_wide(word, max_w, &mut out);
-                    cur = piece;
-                    cur_w = w;
-                } else {
-                    cur = word.to_string();
-                    cur_w = ww;
-                }
-            } else {
-                if !cur.is_empty() {
-                    cur.push(' ');
-                    cur_w += 1;
-                }
-                cur.push_str(word);
-                cur_w += ww;
-            }
+        // Collapse whitespace runs (flow text): drop the empties that
+        // `split(' ')` yields for runs, then rejoin with single spaces.
+        let cells: Vec<(char, Style)> = line
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|c| (c, Style::default()))
+            .collect();
+        for group in wrap_cells(&cells, max_w) {
+            out.push(group.iter().map(|(c, _)| *c).collect());
         }
-        out.push(cur);
     }
     if out.is_empty() {
         out.push(String::new());
@@ -206,29 +197,20 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
     out
 }
 
-/// Span-aware word-wrap of a styled [`Line`] to `max_w` display cells,
-/// preserving per-span styles and all whitespace (unlike [`wrap`], which
-/// collapses spaces for flow text). Breaks at the last space that fits; a
-/// single token wider than `max_w` is broken on a wide-char boundary.
-/// Empty input yields one empty line. Used for info-modal bodies so the
-/// pre-wrap row count (for the scrollbar) and the rendered output agree.
-pub fn wrap_line_styled(line: &Line<'static>, max_w: usize) -> Vec<Line<'static>> {
-    if max_w == 0 {
-        return vec![line.clone()];
-    }
-    // Flatten into (char, style) cells once.
-    let cells: Vec<(char, Style)> = line
-        .spans
-        .iter()
-        .flat_map(|span| span.content.chars().map(move |ch| (ch, span.style)))
-        .collect();
+/// Shared greedy word-wrap core: break a styled cell run into `max_w`-wide
+/// visual rows. Fills each row greedily, breaking at the last space that
+/// fits; a token wider than `max_w` is hard-broken on a char boundary
+/// (never splitting a wide char). The break space is dropped so
+/// continuation rows start flush. Returns slices into `cells`, one per
+/// row; empty input yields a single empty slice.
+fn wrap_cells(cells: &[(char, Style)], max_w: usize) -> Vec<&[(char, Style)]> {
     let n = cells.len();
-    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut out: Vec<&[(char, Style)]> = Vec::new();
     let mut start = 0;
     while start < n {
         let mut w = 0usize;
         let mut k = start;
-        let mut break_at = start; // index of a space we may break at
+        let mut break_at = start;
         while k < n {
             let cw = cells[k].0.width().unwrap_or(0);
             if w + cw > max_w {
@@ -244,21 +226,44 @@ pub fn wrap_line_styled(line: &Line<'static>, max_w: usize) -> Vec<Line<'static>
             n
         } else if cells[k].0 == ' ' {
             k // boundary space: break here, drop it
+        } else if break_at > start {
+            break_at // last whitespace: word-wrap there
         } else {
-            break_at
+            k // no whitespace to break at: hard-break at max_w
         };
-        // Never emit an empty line (a char wider than max_w): advance one.
+        // A single char wider than max_w can't be split — emit it anyway.
         if end <= start {
             end = start + 1;
         }
-        out.push(cells_to_line(&cells[start..end]));
-        // Skip the single break space so continuation lines have no indent.
+        out.push(&cells[start..end]);
+        // Skip the single break space so continuation rows start flush.
         start = if end < n && cells[end].0 == ' ' { end + 1 } else { end };
     }
     if out.is_empty() {
-        out.push(Line::from(""));
+        out.push(&cells[0..0]);
     }
     out
+}
+
+/// Span-aware word-wrap of a styled [`Line`] to `max_w` display cells,
+/// preserving per-span styles and all whitespace (unlike [`wrap`], which
+/// collapses spaces for flow text). Breaks at the last space that fits; a
+/// single token wider than `max_w` is broken on a wide-char boundary.
+/// Empty input yields one empty line. Used for info-modal bodies so the
+/// pre-wrap row count (for the scrollbar) and the rendered output agree.
+pub fn wrap_line_styled(line: &Line<'static>, max_w: usize) -> Vec<Line<'static>> {
+    if max_w == 0 {
+        return vec![line.clone()];
+    }
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(move |ch| (ch, span.style)))
+        .collect();
+    wrap_cells(&cells, max_w)
+        .iter()
+        .map(|group| cells_to_line(group))
+        .collect()
 }
 
 /// Merge a run of (char, style) cells into a [`Line`], fusing adjacent
@@ -286,22 +291,7 @@ fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Break `word` into `max_w`-wide pieces, pushing all but the last to `out`
-/// and returning `(last_piece, its_width)`. Never splits a wide char.
-fn break_wide(word: &str, max_w: usize, out: &mut Vec<String>) -> (String, usize) {
-    let mut piece = String::new();
-    let mut w = 0;
-    for c in word.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw > max_w && !piece.is_empty() {
-            out.push(std::mem::take(&mut piece));
-            w = 0;
-        }
-        piece.push(c);
-        w += cw;
-    }
-    (piece, w)
-}
+
 
 /// Format a duration compactly: `12s` past ten seconds, `3.4s` below.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -483,6 +473,25 @@ mod tests {
     }
 
     #[test]
+    fn wrap_collapses_whitespace_and_wraps() {
+        // Flow text: runs of spaces collapse, lines wrap at word boundaries.
+        let w = wrap("  aa   bb   cc dd", 7);
+        assert_eq!(w, vec!["aa bb", "cc dd"]);
+    }
+
+    #[test]
+    fn wrap_breaks_long_word_at_width() {
+        // A spaceless token longer than the width breaks at max_w chunks.
+        let w = wrap("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(w, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
+
+    #[test]
+    fn wrap_empty_yields_one_blank_line() {
+        assert_eq!(wrap("", 10), vec![""]);
+    }
+
+    #[test]
     fn wrap_line_styled_preserves_indent_and_styles() {
         let key = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
         let val = Style::new().fg(Color::Blue);
@@ -519,5 +528,23 @@ mod tests {
         let wrapped = wrap_line_styled(&line, 10);
         assert_eq!(wrapped.len(), 1);
         assert_eq!(spans_of(&wrapped[0]), "");
+    }
+
+    #[test]
+    fn wrap_line_styled_breaks_long_word_at_width() {
+        // A spaceless value longer than the width must break at max_w
+        // chunks, not one char per line.
+        let line = Line::from(vec![
+            Span::raw("key ".to_string()),
+            Span::raw("abcdefghijklmnopqrstuvwxyz".to_string()),
+        ]);
+        let wrapped = wrap_line_styled(&line, 10);
+        assert_eq!(spans_of(&wrapped[0]), "key");
+        assert_eq!(spans_of(&wrapped[1]), "abcdefghij");
+        assert_eq!(spans_of(&wrapped[2]), "klmnopqrst");
+        assert_eq!(spans_of(&wrapped[3]), "uvwxyz");
+        for l in &wrapped {
+            assert!(l.width() <= 10);
+        }
     }
 }

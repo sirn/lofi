@@ -81,8 +81,7 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(sc) = &app.slash_complete else { return; };
     let t = app.theme;
-    let n = sc.candidates.len().min(8);
-    let h = u16::try_from(n + 2).unwrap_or(10);
+    let n_max = sc.candidates.len().min(8);
     // Width: longest "cmd  desc" plus borders, capped to the screen.
     let w = u16::try_from(
         SLASH_COMMANDS
@@ -109,6 +108,15 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         .input_rect
         .y
         .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
+    // The popover sits above the cursor; cap its height to the rows
+    // available there so it never overflows the screen on short terminals.
+    // If not even a bordered single row fits, skip rendering entirely.
+    let avail_above = cursor_screen_y.min(area.height) as usize;
+    let n = n_max.min(avail_above.saturating_sub(2));
+    if n == 0 {
+        return;
+    }
+    let h = u16::try_from(n + 2).unwrap_or(10);
     // Bottom of the popover = the row just above the cursor's row.
     let bottom_y = cursor_screen_y;
     let popup_y = bottom_y.saturating_sub(h);
