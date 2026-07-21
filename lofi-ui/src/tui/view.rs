@@ -221,6 +221,17 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         None
     };
+    // Capture the cursor's previous viewport row so the viewport can be
+    // re-anchored to keep the cursor on that row after the re-wrap. Content
+    // tracking preserves the cursor's character, but the lines between the
+    // viewport top and cursor re-wrap to a different count, which would
+    // otherwise drift the cursor's row by 1-2 lines on a widen. Pinning the
+    // row lets the viewport follow the cursor instead.
+    let nav_row = if width_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
+        Some(app.nav_cursor.saturating_sub(app.log_off))
+    } else {
+        None
+    };
     // Sync the frozen-turn cache (all turns but the last) before reading it.
     app.ensure_frozen(w);
     let theme = app.theme;
@@ -271,6 +282,13 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // find the line whose content offset matches the captured anchor.
     if let Some(anchor) = nav_anchor {
         app.reseat_nav_cursor(anchor, &last_lines, w);
+    }
+    // Keep the cursor on its previous viewport row: the re-seat above put it
+    // on its content character; shift the viewport top to match so the cursor
+    // doesn't drift when the intervening lines re-wrap. Clamped to `base` so a
+    // pinned (tail-following) view stays at the bottom.
+    if let Some(row) = nav_row {
+        app.top_line = app.nav_cursor.saturating_sub(row).min(base);
     }
     app.last_base = base;
     let mut off = if app.pinned { base } else { app.top_line.min(base) };

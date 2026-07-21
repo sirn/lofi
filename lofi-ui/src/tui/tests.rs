@@ -2609,3 +2609,5 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
         "cursor should clamp to the bottom edge on height shrink"
     );
 }
+
+
