@@ -69,7 +69,15 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
                 stack.push(TurnEnd { label: label.clone(), elapsed: *elapsed });
             }
             Block::TurnFailed { label, elapsed, error } => {
-                stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error: error.clone() });
+                // A provider stream error is emitted twice: once as
+                // AgentEvent::Error (rendered as a fatal line via ErrorLine)
+                // and again here as the turn's `error` ("provider error:
+                // <msg>"). When the turn already carries a fatal-error
+                // block the message is already on screen, so drop it here to
+                // avoid duplicating it below the `failed in Ns` header.
+                let has_fatal = turn.blocks.iter().any(|b| matches!(b, Block::Error(_)));
+                let error = if has_fatal { String::new() } else { error.clone() };
+                stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error });
             }
             Block::Compaction { summarized, kept, summary } => {
                 stack.push(CompactionLine {
@@ -559,8 +567,9 @@ impl Component for ErrorLine<'_> {
 
 // ── Turn-end rule ─────────────────────────────────────────────────────────
 
-/// Turn-end separator: `<label> done in Ns` followed by a dash
-/// fill to the content width. Appended to a turn when its run finishes.
+/// Turn-end separator: `<label> done in Ns`. Appended to a turn when
+/// its run finishes. Carries only model, level, and duration so the line
+/// never overflows; nothing is wrapped below it.
 struct TurnEnd {
     label: String,
     elapsed: Duration,
@@ -582,9 +591,16 @@ impl Component for TurnEnd {
     }
 }
 
-/// Turn-failed separator: `<label> failed in Ns · <error>` in the error
-/// tint. Mirrors [`TurnEnd`] but signals the turn did not complete; the
-/// turn's partial content precedes it on the same branch.
+/// Turn-failed separator. Line 1 carries model, level, and duration only
+/// (`◇ <label> failed in Ns`) so the status never overflows; the provider
+/// error is wrapped below it, indented and word-broken with a wide-char
+/// fallback. Mirrors [`TurnEnd`] but signals the turn did not complete;
+/// the turn's partial content precedes it on the same branch.
+///
+/// When the error is empty the failure was already surfaced as a fatal `✗`
+/// line (see [`ErrorLine`]) earlier in the turn, so nothing is repeated
+/// below the header. The builder drops the text in that case rather than
+/// rendering a redundant copy.
 struct TurnFailed {
     label: String,
     elapsed: Duration,
@@ -595,15 +611,38 @@ impl Component for TurnFailed {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
-        let failed = format!(" failed in {dur} · {}", self.error);
-        vec![prim::render(
+        let failed = format!(" failed in {dur}");
+        let mut out = vec![prim::render(
             vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.error))],
             vec![
                 Span::styled(self.label.clone(), Style::new().fg(t.error)),
                 Span::styled(failed, Style::new().fg(t.error)),
             ],
             vec![],
-        )]
+        )];
+        let err = self.error.trim();
+        if !err.is_empty() {
+            // Wrap below the header so a long provider error isn't clipped
+            // at the terminal edge. Indented to align under the label;
+            // blank source lines are preserved as blank wrapped lines.
+            let indent = "    ";
+            let content_w = cx.width.saturating_sub(indent.len());
+            for raw in err.split('\n') {
+                let line = raw.trim_end();
+                if line.is_empty() {
+                    out.push(prim::rblank());
+                } else {
+                    for seg in prim::wrap(line, content_w) {
+                        out.push(prim::render(
+                            vec![Span::raw(indent)],
+                            vec![Span::styled(seg, Style::new().fg(t.error))],
+                            vec![],
+                        ));
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

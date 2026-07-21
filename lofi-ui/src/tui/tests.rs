@@ -1194,6 +1194,71 @@ fn join_rendered(text: &ratatui::text::Text<'static>) -> String {
 }
 
 #[test]
+fn turn_failed_wraps_error_below_header() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![Block::TurnFailed {
+            label: "openai/gpt-4o · medium".to_string(),
+            elapsed: Duration::from_secs(12),
+            error: "the provider returned a 503 with a very long service-unavailable message that must wrap".to_string(),
+        }],
+    });
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 40, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    // Line 0 is the status header: model, level, duration only — the error
+    // must not appear inline there (it used to, and got clipped).
+    let header: String = rls[0].line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(header.contains("failed in"), "header missing status: {header}");
+    assert!(header.contains("openai/gpt-4o"), "header missing label: {header}");
+    assert!(!header.contains("503"), "header must not carry the error inline: {header}");
+    // The error text lives on later, indented lines that each fit the column.
+    let body: String = rls[1..]
+        .iter()
+        .flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(body.contains("503"), "wrapped error missing from body: {body}");
+    for rl in &rls[1..] {
+        assert!(rl.line.width() <= 40, "body line overflows: {}", rl.line.width());
+    }
+}
+
+#[test]
+fn turn_failed_dedups_after_fatal_error_block() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    let msg = "stream interrupted by upstream gateway";
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![
+            Block::Error(msg.to_string()),
+            Block::TurnFailed {
+                label: "openai/gpt-4o · medium".to_string(),
+                elapsed: Duration::from_secs(3),
+                error: format!("provider error: {msg}"),
+            },
+        ],
+    });
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 80, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    // The provider emits the error twice on a stream failure — as a fatal
+    // `✗` line and again in the TurnFailed marker. The dedup must collapse
+    // them so the message appears exactly once across the rendered turn.
+    let all: String = rls
+        .iter()
+        .flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(all.matches("stream interrupted").count(), 1, "dedup failed: {all}");
+}
+
+#[test]
 fn footer_shows_model_and_thinking() {
     let a = App::new("openai/gpt-5.6-sol".to_string(), ThinkingLevel::XHigh, 0, lofi_types::CompactionConfig::default());
     let r: String = a
