@@ -280,16 +280,22 @@ impl App {
         // `active_turn = false`) when present, else a re-render at the old
         // width. The last turn is never frozen, so it always re-renders with
         // the live `active_turn` to match the previous frame.
-        let offset = if last {
+        //
+        // The anchor is the cursor's exact content-char position — the line's
+        // cumulative content start plus the cursor's column mapped into the
+        // content — so both the line and `nav_col` can be re-seated onto the
+        // same character after the re-wrap (an absolute line index or a
+        // line-start offset alone would drift the cell).
+        let char_pos = if last {
             let v = self.render_turn_at(k, self.frozen_width, self.run_active());
-            content_offset(&v, intra)
+            cursor_char_pos(&v, intra, self.nav_col)
         } else if let Some(v) = self.frozen_render.get(k) {
-            content_offset(v, intra)
+            cursor_char_pos(v, intra, self.nav_col)
         } else {
             let v = self.render_turn_at(k, self.frozen_width, false);
-            content_offset(&v, intra)
+            cursor_char_pos(&v, intra, self.nav_col)
         };
-        Some((k, offset))
+        Some((k, char_pos))
     }
 
     /// Re-seat the cursor on its previous content line after a re-wrap: find
@@ -302,22 +308,26 @@ impl App {
         last_lines: &[view::RenderLine],
         width: usize,
     ) {
-        let (k, c) = anchor;
+        let (k, char_pos) = anchor;
         let n = self.turns.len();
         if k >= n {
             return;
         }
         let last = k + 1 == n;
-        let j = if last {
-            line_at_content_offset(last_lines, c)
+        // Find the (new-width) line containing `char_pos` and the display
+        // column that lands on that character, so the cell cursor stays on the
+        // same content char instead of drifting to the new line's start.
+        let seated = if last {
+            reseat_at(last_lines, char_pos)
         } else if let Some(v) = self.frozen_render.get(k) {
-            line_at_content_offset(v, c)
+            reseat_at(v, char_pos)
         } else {
             let v = self.render_turn_at(k, width, false);
-            line_at_content_offset(&v, c)
+            reseat_at(&v, char_pos)
         };
-        if let Some(j) = j {
+        if let Some((j, col)) = seated {
             self.nav_cursor = self.turn_start_line(k).saturating_add(j);
+            self.nav_col = col;
             if self.mode == Mode::Select {
                 self.sel = Some(self.select_sel());
             }
@@ -575,6 +585,33 @@ impl App {
 /// turn's rendered lines. Blanks contribute zero, so separators don't shift it.
 fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
     lines.iter().take(intra).map(view::RenderLine::content_len).sum()
+}
+
+/// Cursor's content-char position within a turn: the line's cumulative content
+/// start offset plus the cursor's column mapped into that line's selectable
+/// content (decoration stripped, clamped to the content length).
+pub(super) fn cursor_char_pos(lines: &[view::RenderLine], intra: usize, nav_col: usize) -> usize {
+    let start = content_offset(lines, intra);
+    match lines.get(intra) {
+        Some(rl) => {
+            let clen = rl.content_len();
+            let col = nav_col.saturating_sub(rl.content.0).min(clen);
+            start + col
+        }
+        None => start,
+    }
+}
+
+/// Re-seat onto `char_pos`: the line whose cumulative content start is the
+/// largest not exceeding it, and the display column (decoration + offset into
+/// that line) that lands on the character. Returns `None` only for empty input.
+fn reseat_at(lines: &[view::RenderLine], char_pos: usize) -> Option<(usize, usize)> {
+    let j = line_at_content_offset(lines, char_pos)?;
+    let start = content_offset(lines, j);
+    let rl = lines.get(j)?;
+    let clen = rl.content_len();
+    let col = char_pos.saturating_sub(start).min(clen);
+    Some((j, rl.content.0 + col))
 }
 
 /// Index of the line whose cumulative content start offset is the largest not
