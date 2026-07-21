@@ -93,8 +93,9 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
 
 // ── User message ─────────────────────────────────────────────────────────
 
-/// A user message: the prompt soft-wrapped with a `▌` lead on the first
-/// line and a 2-space indent on continuations. No background fill.
+/// A user message: the prompt soft-wrapped with a `▌` lead on every row
+/// so the indicator spans the whole message (not just the first line). No
+/// background fill.
 struct UserMessage<'a> {
     prompt: &'a str,
 }
@@ -107,15 +108,12 @@ impl Component for UserMessage<'_> {
         let lead = Style::new().fg(user_indicator(t));
         let body = Style::new().fg(t.fg);
         let mut out = Vec::new();
-        for (i, seg) in prim::wrap(self.prompt, content_w).iter().enumerate() {
-            let prefix = if i == 0 {
-                Span::styled("▌ ", lead)
-            } else {
-                Span::raw("  ")
-            };
+        for seg in prim::wrap(self.prompt, content_w) {
+            // The `▌` lead spans every wrapped row of the prompt (not just
+            // the first), so a multi-line user message reads as one block.
             out.push(prim::rline(
-                vec![prefix],
-                vec![Span::styled(seg.clone(), body)],
+                vec![Span::styled("▌ ", lead)],
+                vec![Span::styled(seg, body)],
             ));
         }
         out
