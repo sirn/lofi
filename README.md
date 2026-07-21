@@ -258,6 +258,36 @@ ttl_seconds = 300               # optional; default 300
 name = "name"
 context_window = "context_length"
 max_tokens = "top_provider.max_completion_tokens"
+
+[compaction]                    # optional; compaction settings
+reserved_context_tokens = 20000  # hard cap: a run crossing `window - reserved`
+                               #   mid-turn is force-stopped, compacted, and
+                               #   silently continued.
+min_messages_between_hard_compacts = 6  # min agent messages between two
+                               #   force-compacts; a re-cross within this
+                               #   window errors out instead of looping.
+
+[compaction.auto]              # optional; speculative soft caps
+enable = true                  # optional; default true
+max_context_tokens = 150000    # optional; absolute cap, lowers the threshold
+context_ratio = 0.75           # optional; fraction of window, lowers the threshold
+
+[bash]                        # optional; child-process environment for lofi.bash
+strip_env = true              # default. Strip the inherited env down to a
+                               #   minimal baseline (PATH, HOME, locale) so
+                               #   inherited credentials never reach a
+                               #   model-run shell. `false` inherits the full
+                               #   parent env (trust opt-out).
+pass_env = ["GITHUB_TOKEN"]   # optional; names copied from the parent env into
+                               #   the child. Their VALUES are redacted
+                               #   (`[redacted]`) from command output so a
+                               #   command may use a secret without it leaking
+                               #   into the transcript. Empty by default.
+env_file = "~/.config/lofi/secrets.env"  # optional; KEY=VALUE file loaded into
+                               #   the child env (overrides pass_env). `~` is
+                               #   expanded; keep it outside the workspace so
+                               #   lofi.read/edit/write cannot reach it. Values
+                               #   are redacted from output. None by default.
 ```
 
 ## Session transcripts
@@ -349,7 +379,7 @@ and final, and keep intermediates in-sandbox.
 | --- | --- |
 | `/help` | Show the keybindings + commands reference. |
 | `/clear` | Drop all turns from the log (the transcript file is untouched). |
-| `/new` | Start a fresh session file on the next prompt. |
+| `/compact` | Fold the older history into a structured summary, keeping the most recent turn. The summary is injected into the agent's context in place of the folded messages; the full transcript stays on disk. Two auto-triggers: a **hard cap** force-stops a run mid-turn when context crosses `window - reserved_context_tokens`, compacts, and silently continues (gated by `min_messages_between_hard_compacts` so a re-cross too soon after a compact errors out instead of looping); a **soft cap** compacts at `agent_settled` when context is above the optional `[compaction.auto]` threshold. Refused when there is too little to fold. |
 | `/resume` | Open a picker of past sessions for this workspace and resume one. |
 | `/tree` | Open a rollback picker over this session's turns. `✎` entries roll back to before a user prompt and prefill the input (edit and resend); `↳` entries roll back to after a turn and leave the input empty (continue from here). The next run branches off the chosen point. |
 | `/session` | Print the session path, message count, and model. |

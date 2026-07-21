@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use lofi_code::{compile_ts, exec, AgentFn, AgentRequest, ExecCtx, ExecOptions, ToolEvent};
+use lofi_code::{compile_ts, exec, AgentFn, AgentRequest, BashEnv, ExecCtx, ExecOptions, ToolEvent};
 use serde_json::{json, Value};
 
 /// Build an `ExecCtx` rooted at `root` with no named strings and a stub
@@ -26,6 +26,7 @@ fn ctx(root: &Path) -> ExecCtx {
         strings: HashMap::new(),
         agent: None,
         on_tool_event: None,
+        bash_env: BashEnv::default(),
     }
 }
 
@@ -153,6 +154,7 @@ async fn strings_exposed_as_lofi_strings() {
         strings,
         agent: None,
         on_tool_event: None,
+        bash_env: BashEnv::default(),
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -231,6 +233,7 @@ async fn agent_call_emits_tool_events() {
         strings: HashMap::new(),
         agent: Some(agent),
         on_tool_event: Some(cb),
+        bash_env: BashEnv::default(),
     };
     let src = "const r = await lofi.agent('do stuff'); return r;";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();

@@ -30,6 +30,9 @@ pub enum IndexKind {
     AssistantMessage,
     TurnEnd,
     TurnFailed,
+    /// An offline compaction marker. A tree node so `/tree` can revert to
+    /// the pre-compaction state (selecting it rolls back to its parent).
+    Compaction,
     Other,
 }
 
@@ -120,6 +123,7 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             },
             "turn_end" => IndexKind::TurnEnd,
             "turn_failed" => IndexKind::TurnFailed,
+            "compaction" => IndexKind::Compaction,
             _ => IndexKind::Other,
         };
         prev_id = Some(id.clone());
