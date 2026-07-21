@@ -238,6 +238,92 @@ impl App {
         self.top_line = new_top.min(base);
     }
 
+    /// Render turn `idx` at `width` without touching the frozen cache. Used to
+    /// (re)compute a content anchor for the cursor at the old or new width.
+    fn render_turn_at(&self, idx: usize, width: usize, active_turn: bool) -> Vec<view::RenderLine> {
+        let theme = self.theme;
+        let turn = self.materialize_turn(idx);
+        let cx = view::component::Cx {
+            app: self,
+            theme,
+            width,
+            active_turn,
+        };
+        view::blocks::render_turn_lines(&cx, &turn)
+    }
+
+    /// Capture the Navigate cursor's content anchor — its turn index and the
+    /// cumulative selectable-content char offset of its line's start within
+    /// that turn — so the cursor can be re-seated on the same content line
+    /// after a re-wrap. The content text is unchanged by a width change, so a
+    /// content offset is a stable anchor where an absolute line index is not.
+    ///
+    /// Must run *before* `ensure_frozen` clears the old-width frozen cache.
+    pub(super) fn nav_content_anchor(&self) -> Option<(usize, usize)> {
+        let n = self.turns.len();
+        if n == 0 {
+            return None;
+        }
+        let cur = self.nav_cursor;
+        // Largest turn whose start line is at or below the cursor.
+        let mut k = 0;
+        for i in 0..n {
+            if self.turn_start_line(i) <= cur {
+                k = i;
+            } else {
+                break;
+            }
+        }
+        let intra = cur.saturating_sub(self.turn_start_line(k));
+        let last = k + 1 == n;
+        // Old-width lines: the frozen cache (exact — rendered with
+        // `active_turn = false`) when present, else a re-render at the old
+        // width. The last turn is never frozen, so it always re-renders with
+        // the live `active_turn` to match the previous frame.
+        let offset = if last {
+            let v = self.render_turn_at(k, self.frozen_width, self.run_active());
+            content_offset(&v, intra)
+        } else if let Some(v) = self.frozen_render.get(k) {
+            content_offset(v, intra)
+        } else {
+            let v = self.render_turn_at(k, self.frozen_width, false);
+            content_offset(&v, intra)
+        };
+        Some((k, offset))
+    }
+
+    /// Re-seat the cursor on its previous content line after a re-wrap: find
+    /// the line in the (new-width) turn whose cumulative content offset is the
+    /// largest not exceeding the captured anchor. `last_lines` is the freshly
+    /// rendered last turn at the new width.
+    pub(super) fn reseat_nav_cursor(
+        &mut self,
+        anchor: (usize, usize),
+        last_lines: &[view::RenderLine],
+        width: usize,
+    ) {
+        let (k, c) = anchor;
+        let n = self.turns.len();
+        if k >= n {
+            return;
+        }
+        let last = k + 1 == n;
+        let j = if last {
+            line_at_content_offset(last_lines, c)
+        } else if let Some(v) = self.frozen_render.get(k) {
+            line_at_content_offset(v, c)
+        } else {
+            let v = self.render_turn_at(k, width, false);
+            line_at_content_offset(&v, c)
+        };
+        if let Some(j) = j {
+            self.nav_cursor = self.turn_start_line(k).saturating_add(j);
+            if self.mode == Mode::Select {
+                self.sel = Some(self.select_sel());
+            }
+        }
+    }
+
     /// First transcript line of turn `i` (0-based). Turns are laid out as
     /// `turn0, blank, turn1, blank, ...`, so turn `i` starts at the sum of all
     /// preceding turn heights plus one blank separator per preceding turn.
@@ -483,4 +569,26 @@ impl App {
         self.top_line = 0;
         self.bump_render_epoch();
     }
+}
+
+/// Cumulative selectable-content char offset of line `intra`'s start within a
+/// turn's rendered lines. Blanks contribute zero, so separators don't shift it.
+fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
+    lines.iter().take(intra).map(view::RenderLine::content_len).sum()
+}
+
+/// Index of the line whose cumulative content start offset is the largest not
+/// exceeding `c` — i.e. the line containing the `c`-th content char. This is
+/// the same content line across a re-wrap.
+fn line_at_content_offset(lines: &[view::RenderLine], c: usize) -> Option<usize> {
+    let mut acc = 0usize;
+    let mut found = None;
+    for (i, rl) in lines.iter().enumerate() {
+        if acc > c {
+            break;
+        }
+        found = Some(i);
+        acc += rl.content_len();
+    }
+    found
 }
