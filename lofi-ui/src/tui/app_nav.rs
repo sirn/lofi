@@ -252,7 +252,8 @@ impl App {
         view::blocks::render_turn_lines(&cx, &turn)
     }
 
-    /// Capture the Navigate cursor's content anchor — its turn index and the
+    
+/// Capture the Navigate cursor's content anchor — its turn index and the
     /// cumulative selectable-content char offset of its line's start within
     /// that turn — so the cursor can be re-seated on the same content line
     /// after a re-wrap. The content text is unchanged by a width change, so a
@@ -333,6 +334,7 @@ impl App {
             }
         }
     }
+
 
     /// First transcript line of turn `i` (0-based). Turns are laid out as
     /// `turn0, blank, turn1, blank, ...`, so turn `i` starts at the sum of all
