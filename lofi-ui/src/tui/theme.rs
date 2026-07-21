@@ -33,8 +33,7 @@ pub(crate) struct Theme {
     pub inline_bg: Color,
     /// Filled background of the footer panel (prompt + stats).
     pub panel_bg: Color,
-    /// Thin rule above the footer panel, one step above `panel_bg`.
-    pub rule: Color,
+    
     /// Mouse-selection highlight background in the log.
     pub selection: Color,
     /// Background of the Navigate cursor line in the log.
@@ -72,7 +71,7 @@ impl Theme {
             surface: Color::Indexed(235),   // user-message / input bg
             inline_bg: Color::Indexed(236),
             panel_bg: Color::Indexed(232),     // near-black footer panel
-            rule: Color::Indexed(233),     // one step above panel_bg
+            
             
             selection: Color::Indexed(238),        // one step above surface
             cursor_line: Color::Indexed(234),      // faint bar under the nav cursor

@@ -34,7 +34,7 @@ use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
-use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, ToolEvent};
+use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;

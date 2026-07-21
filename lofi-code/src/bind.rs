@@ -14,9 +14,11 @@ pub(super) fn bind_tools<'js>(
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
     agent: Option<AgentFn>,
+    recall: Option<RecallFn>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_agent_tool(ctx, lofi, tools, agent)?;
+    bind_recall_tool(ctx, lofi, recall)?;
     Ok(())
 }
 
@@ -368,4 +370,79 @@ fn tool_result(res: std::result::Result<Json, Error>) -> rquickjs::Result<JsonV>
             message: Some(e.to_string()),
         }),
     }
+}
+
+/// Bind `lofi.recall({ query?, scope?, page?, expand? })` — session-history
+/// search (including messages a compaction folded away). Delegates to the
+/// `RecallFn` supplied by `lofi-core`, which owns the transcript.
+fn bind_recall_tool<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    recall: Option<RecallFn>,
+) -> rquickjs::Result<()> {
+    let recall = match recall {
+        Some(r) => r,
+        None => {
+            lofi.set(
+                "recall",
+                Function::new(ctx.clone(), Async(move |_: Opt<Value>| {
+                    async move {
+                        Ok::<JsonV, rquickjs::Error>(JsonV(json!({
+                            "text": "recall unavailable: no session file for this session.",
+                            "status": "unavailable",
+                        })))
+                    }
+                }))?,
+            )?;
+            return Ok(());
+        }
+    };
+    lofi.set(
+        "recall",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Opt<Value>| {
+                let recall = recall.clone();
+                let args = args.0.map(|v| js_to_json(&v)).unwrap_or(serde_json::Value::Null);
+                async move {
+                    let req = parse_recall_args(args);
+                    let outcome = recall(&req);
+                    Ok::<JsonV, rquickjs::Error>(JsonV(json!({
+                        "text": outcome.text,
+                        "status": outcome.status,
+                    })))
+                }
+            }),
+        )?,
+    )?;
+    Ok(())
+}
+
+/// Parse `lofi.recall`'s argument object into a `RecallRequest`.
+fn parse_recall_args(json: serde_json::Value) -> lofi_types::recall::RecallRequest {
+    use lofi_types::recall::{CompactionTarget, RecallRequest, RecallScope};
+    let _ = json.clone();
+    // json already an owned serde_json::Value
+    let Some(obj) = json.as_object() else { return RecallRequest::default(); };
+    let query = obj.get("query").and_then(serde_json::Value::as_str).map(|s| s.to_string());
+    let page = obj.get("page").and_then(serde_json::Value::as_u64).map_or(1, |n| n.max(1) as usize);
+    let expand: Vec<usize> = obj
+        .get("expand")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())
+        .unwrap_or_default();
+    let scope = match obj.get("scope").and_then(serde_json::Value::as_str) {
+        Some("all") => RecallScope::All,
+        Some("lineage") => RecallScope::Lineage,
+        Some("latest") => RecallScope::Compaction(CompactionTarget::Latest),
+        Some(s) if s.starts_with("compaction:") => {
+            let n = s.strip_prefix("compaction:").unwrap_or("");
+            match n.parse::<usize>() {
+                Ok(i) => RecallScope::Compaction(CompactionTarget::Index(i)),
+                Err(_) => RecallScope::Lineage,
+            }
+        }
+        _ => RecallScope::Lineage,
+    };
+    RecallRequest { query, scope, page, expand }
 }

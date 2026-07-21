@@ -943,6 +943,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         SessionEventKind::Compaction {
             summary: "summary".into(),
             first_kept_entry_id: String::new(),
+            summarized_range: [String::new(), String::new()],
             summarized: 3,
             kept: 1,
         },
@@ -1477,6 +1478,7 @@ fn messages_from_events_prepends_compaction_summary() {
         SessionEventKind::Compaction {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: String::new(), // patched after append
+            summarized_range: [String::new(), String::new()],
             summarized: 1,
             kept: 2,
         },

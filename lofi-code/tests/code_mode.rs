@@ -26,6 +26,7 @@ fn ctx(root: &Path) -> ExecCtx {
         strings: HashMap::new(),
         agent: None,
         on_tool_event: None,
+            recall: None,
         bash_env: BashEnv::default(),
     }
 }
@@ -154,6 +155,7 @@ async fn strings_exposed_as_lofi_strings() {
         strings,
         agent: None,
         on_tool_event: None,
+            recall: None,
         bash_env: BashEnv::default(),
     };
     let res = exec(
@@ -233,6 +235,7 @@ async fn agent_call_emits_tool_events() {
         strings: HashMap::new(),
         agent: Some(agent),
         on_tool_event: Some(cb),
+        recall: None,
         bash_env: BashEnv::default(),
     };
     let src = "const r = await lofi.agent('do stuff'); return r;";

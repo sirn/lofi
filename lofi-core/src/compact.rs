@@ -90,6 +90,12 @@ pub struct Compaction {
     /// SessionEventKind::Compaction marker so a resumed session rebuilds
     /// the same compacted history. None when nothing was kept (compact-all).
     pub first_kept_event_id: Option<String>,
+    /// Event ids `[first, last]` of the summarized range — every live
+    /// message folded into this summary. Recorded in the marker so
+    /// `/recall scope:compaction:N` can resolve the range to global message
+    /// indices and search within it. `None` only when the live list was
+    /// empty (compact refused earlier); in practice always `Some`.
+    pub summarized_range: Option<[String; 2]>,
 }
 
 /// Options for compact.
@@ -198,12 +204,26 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     let kept_count = live.len().saturating_sub(plan.summarized);
     let kept_messages: Vec<Message> = live[plan.summarized..].iter().map(|lm| lm.message.clone()).collect();
 
+    // The summarized range is `live[0 .. plan.summarized]`. Recorded as
+    // event ids so `/recall scope:compaction:N` can resolve it to global
+    // message indices without re-deriving the cut. Compact-all (summarized
+    // == live.len()) collapses the whole live list; the range still spans
+    // first..last.
+    let summarized_range: Option<[String; 2]> = if plan.summarized > 0 {
+        let first = live[0].event_id.clone();
+        let last = live[plan.summarized - 1].event_id.clone();
+        Some([first, last])
+    } else {
+        None
+    };
+
     Some(Compaction {
         summary,
         kept_messages,
         summarized_count: plan.summarized,
         kept_count,
         first_kept_event_id: plan.first_kept_event_id,
+        summarized_range,
     })
 }
 

@@ -26,6 +26,10 @@ impl App {
                 self.compact_now();
                 true
             }
+            "/recall" => {
+                self.recall_now(cmd);
+                true
+            }
             "/quit" | "/exit" => {
                 self.should_quit = true;
                 true
@@ -160,6 +164,7 @@ impl App {
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
+        lines.push(info_kv(t, "/recall [query]", "search session history (incl. compacted)"));
         lines.push(info_kv(t, "/new", "start a fresh session"));
         lines.push(info_kv(t, "/resume", "pick a past session"));
         lines.push(info_kv(t, "/tree", "roll back to a past turn"));
