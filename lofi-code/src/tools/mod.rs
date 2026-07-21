@@ -428,6 +428,11 @@ mod tests {
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["code"], json!(0));
         assert!(v["output"].as_str().unwrap().contains("hello"));
+        assert_eq!(v["command"], json!("echo hello"));
+        assert_eq!(v["directory"], json!(tools.root().display().to_string()));
+        assert_eq!(v["signal"], Value::Null);
+        assert_eq!(v["status"], json!("exited"));
+        assert!(v["duration_ms"].as_u64().is_some());
     }
 
     #[tokio::test]
@@ -448,6 +453,22 @@ mod tests {
         assert_eq!(v["ok"], json!(false));
         assert_eq!(v["output"], json!("<timeout>"));
         assert_eq!(v["code"], Value::Null);
+        assert_eq!(v["status"], json!("timeout"));
+        assert_eq!(v["duration_ms"], json!(50));
+        assert_eq!(v["signal"], Value::Null);
+        assert_eq!(v["command"], json!("sleep 5"));
+    }
+
+    #[tokio::test]
+    async fn bash_signal_death_reports_signal() {
+        // `kill -9 $$` terminates the shell with SIGKILL (9); the result
+        // carries the signal number and a null exit code.
+        let (_dir, tools) = tools();
+        let v = tools.bash(json!({ "cmd": "kill -9 $$" })).await.unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["code"], Value::Null);
+        assert_eq!(v["signal"], json!(9));
+        assert_eq!(v["status"], json!("signaled"));
     }
 
     #[tokio::test]
