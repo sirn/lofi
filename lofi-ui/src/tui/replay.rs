@@ -418,9 +418,14 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
     out
 }
 
-pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
+pub(super) fn messages_from_events(
+    events: &[SessionEvent],
+    edit: &lofi_types::EditConfig,
+) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
-    let mut out: Vec<Message> = Vec::new();
+    // Kept tail as (event_id, message) pairs so `edit_tail` can embed the
+    // event id in its recall-recoverable stubs.
+    let mut out: Vec<(String, Message)> = Vec::new();
     let mut skipping = false;
     // The compaction summary, captured when the Compaction marker is seen
     // and prepended to the result so it leads the history (matching
@@ -453,7 +458,7 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
                 skipping = false;
             }
             SessionEventKind::Message(m) if !skipping => {
-                out.push(m.clone());
+                out.push((events[i].id.clone(), m.clone()));
                 if let Some(b) = &boundary {
                     if b == &events[i].id {
                         break;
@@ -465,10 +470,22 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     }
     // `out` is leaf-first; reverse to root-first for the model.
     out.reverse();
+    // Apply tiered-retention context editing to the kept tail when a
+    // compaction is in effect (a boundary was set). This mirrors what
+    // `compact_now` did at compact time, so a resumed/rolled-back session
+    // rebuilds the same lightweight, recall-recoverable prefix instead of the
+    // verbatim on-disk tail. When no compaction has run (no boundary), the
+    // tail is carried verbatim — matching the live path before the first
+    // compact. Cache-safe: resume/rollback already breaks any prefix cache.
+    let mut messages: Vec<Message> = if boundary.is_some() {
+        lofi_core::context_edit::edit_tail(&out, edit)
+    } else {
+        out.into_iter().map(|(_, m)| m).collect()
+    };
     // The summary leads: it is the oldest context (the folded prefix), so it
     // must come before the kept tail and any post-compaction continuation.
     if let Some(s) = summary_msg {
-        out.insert(0, s);
+        messages.insert(0, s);
     }
-    out
+    messages
 }

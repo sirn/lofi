@@ -23,7 +23,7 @@ pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
-pub mod read_tmp;
+pub mod bash_read;
 pub mod truncate;
 pub mod util;
 pub mod write;
@@ -65,7 +65,7 @@ const MAX_GREP_VISITED: usize = 65_536;
 pub struct BuiltinTools {
     root: PathBuf,
     /// Per-session tmp directory for full-output logs and other
-    /// agent-produced artifacts. Sandbox `read_tmp` is rooted here.
+    /// agent-produced artifacts. Sandbox `bash_read` is rooted here.
     tmp_dir: PathBuf,
     /// Optional sink for native tool-call events (Start/End per call).
     tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
@@ -152,30 +152,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_tmp_reads_from_tmp_dir() {
+    async fn bash_read_reads_from_tmp_dir() {
         let (_dir, tools) = tools();
         std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
-        let v = tools.read_tmp("log.txt", None, None).await.unwrap();
+        let v = tools.bash_read("log.txt", None, None).await.unwrap();
         assert_eq!(v, json!("first\nsecond\nthird"));
     }
 
     #[tokio::test]
-    async fn read_tmp_offset_and_limit() {
+    async fn bash_read_offset_and_limit() {
         let (_dir, tools) = tools();
         let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
         std::fs::write(tools.tmp_dir().join("big.log"), content).unwrap();
-        let v = tools.read_tmp("big.log", Some(3), Some(2)).await.unwrap();
+        let v = tools.bash_read("big.log", Some(3), Some(2)).await.unwrap();
         let s = v.as_str().unwrap();
         assert!(s.starts_with("line2\nline3"));
         assert!(s.contains("6 more lines in file. Use offset=5 to continue."));
     }
 
     #[tokio::test]
-    async fn read_tmp_rejects_workspace_escape() {
+    async fn bash_read_rejects_workspace_escape() {
         let (_dir, tools) = tools();
         // The tmp dir is separate from the workspace root; a path that
         // escapes the tmp dir is rejected.
-        let err = tools.read_tmp("../escape", None, None).await.unwrap_err();
+        let err = tools.bash_read("../escape", None, None).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));
     }
 

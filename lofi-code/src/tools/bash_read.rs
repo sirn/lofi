@@ -5,20 +5,22 @@ use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Read a file under the per-session tmp dir as a UTF-8 string.
+    /// Read the full output of a bash result by handle, rooted at the
+    /// per-session tmp dir.
     ///
-    /// This is the paging companion to `lofi.bash`'s full-output logs: when
-    /// bash output is tail-truncated, the full text is written to the session
-    /// tmp dir and `lofi.read_tmp` is how the model retrieves the rest. It
-    /// has the same `offset`/`limit` semantics and head-truncation as
-    /// `lofi.read`, just rooted at the tmp dir instead of the workspace.
+    /// The paging companion to `lofi.bash`: when bash output is tail-
+    /// truncated, the full text is written to the session tmp dir and
+    /// `lofi.bash_read` is how the model retrieves the rest (and later, how it
+    /// reads background/async bash results). It has the same `offset`/`limit`
+    /// semantics and head-truncation as `lofi.read`, just rooted at the tmp
+    /// dir instead of the workspace.
     ///
     /// # Errors
     /// Returns [`Error::Tool`] if the path escapes the tmp dir, the file
     /// cannot be read, or `offset` is beyond the end of the file.
-    pub async fn read_tmp(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<Value> {
+    pub async fn bash_read(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<Value> {
         let resolved = resolve_under(&self.tmp_dir, path)?;
-        reject_non_regular(&format!("read_tmp {path}"), &resolved)?;
+        reject_non_regular(&format!("bash_read {path}"), &resolved)?;
         let label = path.to_string();
         let offset = offset.unwrap_or(1).max(1);
         let text = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
@@ -31,15 +33,15 @@ impl BuiltinTools {
             Ok(String::from_utf8_lossy(slice).into_owned())
         })
         .await
-        .map_err(|e| Error::Tool(format!("read_tmp {label}: {e}")))?
-        .map_err(|e| Error::Tool(format!("read_tmp {label}: {e}")))?;
+        .map_err(|e| Error::Tool(format!("bash_read {label}: {e}")))?
+        .map_err(|e| Error::Tool(format!("bash_read {label}: {e}")))?;
 
         let all_lines: Vec<&str> = text.split('\n').collect();
         let total_file_lines = all_lines.len();
         let start = (offset as usize).saturating_sub(1);
         if start >= all_lines.len() {
             return Err(Error::Tool(format!(
-                "read_tmp {label}: offset {offset} is beyond end of file ({total_file_lines} lines total)"
+                "bash_read {label}: offset {offset} is beyond end of file ({total_file_lines} lines total)"
             )));
         }
         let selected = if let Some(lim) = limit {

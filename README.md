@@ -272,6 +272,12 @@ enable = true                  # optional; default true
 max_context_tokens = 150000    # optional; absolute cap, lowers the threshold
 context_ratio = 0.75           # optional; fraction of window, lowers the threshold
 
+[compaction.edit]              # optional; tiered-retention context editing
+enabled = true                 #   applied to the kept tail at each compact
+keep_results = 6               #   tool-result blocks kept verbatim (recent)
+keep_thinking = 2             #   thinking blocks kept verbatim (recent)
+keep_calls = 6                #   tool-call `code` blocks kept verbatim
+
 [bash]                        # optional; child-process environment for lofi.bash
 strip_env = true              # default. Strip the inherited env down to a
                                #   minimal baseline (PATH, HOME, locale) so
@@ -379,11 +385,11 @@ and final, and keep intermediates in-sandbox.
 | --- | --- |
 | `/help` | Show the keybindings + commands reference. |
 | `/clear` | Drop all turns from the log (the transcript file is untouched). |
-| `/compact` | Fold the older history into a structured summary, keeping the most recent turn. The summary is injected into the agent's context in place of the folded messages; the full transcript stays on disk. Two auto-triggers: a **hard cap** force-stops a run mid-turn when context crosses `window - reserved_context_tokens`, compacts, and silently continues (gated by `min_messages_between_hard_compacts` so a re-cross too soon after a compact errors out instead of looping); a **soft cap** compacts at `agent_settled` when context is above the optional `[compaction.auto]` threshold. Refused when there is too little to fold. |
+| `/compact` | Fold the older history into a structured summary, keeping the most recent turn. The summary is injected into the agent's context in place of the folded messages; the full transcript stays on disk. Two auto-triggers: a **hard cap** force-stops a run mid-turn when context crosses `window - reserved_context_tokens`, compacts, and silently continues (gated by `min_messages_between_hard_compacts` so a re-cross too soon after a compact errors out instead of looping); a **soft cap** compacts at `agent_settled` when context is above the optional `[compaction.auto]` threshold. Refused when there is too little to fold. **Tiered retention** (`[compaction.edit]`, default on): at each compact the kept tail is elided — old tool results and tool-call code become `lofi.result`-recoverable stubs, old thinking is dropped, assistant prose is always kept — so the new prefix is ~75–86% lighter and the next compact fires far later. Cache-safe: it rides the prefix rebuild compaction already pays; between compacts the tail is append-only and caches normally. |
 | `/resume` | Open a picker of past sessions for this workspace and resume one. |
 | `/tree` | Open a rollback picker over this session's turns. `✎` entries roll back to before a user prompt and prefill the input (edit and resend); `↳` entries roll back to after a turn and leave the input empty (continue from here). The next run branches off the chosen point. |
 | `/session` | Print the session path, message count, and model. |
-| `/verbose` | Toggle verbose tool detail in `exec` blocks. |
+| `/recall [query]` | Search the full session transcript — including messages a `/compact` folded away — and render the matches inline in the log. With no query, browse the most recent entries. Scopes: `scope:lineage` (default, active branch), `scope:all` (whole session), `scope:compaction:N` / `scope:compaction:latest` (within one compaction's summarized range). Search supports regex (`hook|inject`) and multi-word BM25 ranking; `page:N` pages results. The model reaches the same engine via the `lofi.recall` native tool. |
 | `/quit` | Exit. |
 
 ## Lint strictness
