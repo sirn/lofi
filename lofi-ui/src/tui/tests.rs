@@ -2476,39 +2476,55 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
 /// row* (the viewport re-anchor keeps the viewport at ~its previous content, so
 /// the same row is ~the same line).
 #[test]
-fn resize_pins_nav_cursor_to_its_viewport_row() {
+fn resize_keeps_nav_cursor_on_same_content_line() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut a = app();
+    // A prompt long enough to wrap to several lines at both widths.
+    let prompt =
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
+            .repeat(2);
     a.turns.push(Turn {
-        prompt: "word ".repeat(3000),
+        prompt,
         blocks: Vec::new(),
     });
     push_turn(&mut a); // turn[1] keeps turn[0] frozen.
     a.mode = Mode::Navigate;
 
-    // Render narrow; place the cursor a few rows into the viewport.
-    let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
+    // Narrow render; place the cursor on a line well inside turn 0.
+    let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    let total_narrow = a.log_total;
-    assert!(total_narrow > a.log_view_h, "transcript overflows the viewport");
-    a.nav_cursor = a.log_off + 4;
+    // Place the cursor on a line well inside turn 0 and capture the cumulative
+    // content-char offset of its start — the stable anchor across a re-wrap.
+    let (intra, c) = {
+        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let intra = 4.min(narrow.len().saturating_sub(1));
+        let c: usize = narrow.iter().take(intra).map(view::RenderLine::content_len).sum();
+        (intra, c)
+    };
+    a.nav_cursor = a.turn_start_line(0) + intra;
     a.nav_show_cursor();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    let row_narrow = a.nav_cursor - a.log_off;
-    assert_eq!(row_narrow, 4);
 
-    // Widen: the re-wrap shrinks `total`, but the cursor stays at the same
-    // viewport row instead of snapping to the bottom or drifting proportionally.
-    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    // Widen: line boundaries move, but the cursor must stay on the wide line
+    // that contains the same content char (offset `c`).
+    let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    assert!(a.log_total < total_narrow, "wider viewport re-wraps to fewer lines");
-    assert_eq!(a.nav_cursor - a.log_off, row_narrow, "cursor row should be preserved");
-    assert!(a.nav_cursor < a.log_total.saturating_sub(1), "not clamped to the last line");
+    let (start, len, on_screen) = {
+        let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+        let new_intra = a.nav_cursor - a.turn_start_line(0);
+        assert!(new_intra < wide.len(), "cursor should land within turn 0");
+        let start: usize = wide.iter().take(new_intra).map(view::RenderLine::content_len).sum();
+        let len = wide[new_intra].content_len();
+        let on_screen = a.nav_cursor >= a.log_off && a.nav_cursor < a.log_off + a.log_view_h;
+        (start, len, on_screen)
+    };
     assert!(
-        a.nav_cursor >= a.log_off && a.nav_cursor < a.log_off + a.log_view_h,
-        "cursor stays on screen"
+        start <= c && c < start + len,
+        "cursor should be on the wide line containing content offset {c}, got [{start}, {})",
+        start + len
     );
+    assert!(on_screen, "cursor should stay on screen after resize");
 }
 
 /// A height shrink that leaves the cursor's old row past the new viewport must

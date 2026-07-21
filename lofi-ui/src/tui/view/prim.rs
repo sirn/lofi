@@ -94,6 +94,15 @@ pub struct RenderLine {
     pub content: (usize, usize),
 }
 
+impl RenderLine {
+    /// Number of selectable-content chars on this line (excludes decoration
+    /// and trailing padding). Stable across a re-wrap, so the cumulative sum
+    /// up to a line is a content anchor for re-seating the cursor.
+    pub fn content_len(&self) -> usize {
+        self.content.1.saturating_sub(self.content.0)
+    }
+}
+
 fn char_count(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }

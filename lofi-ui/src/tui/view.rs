@@ -213,6 +213,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // so it is re-seated (clamped) on either kind of resize.
     let width_changed = app.frozen_width != w;
     let view_changed = width_changed || app.log_view_h != height;
+    // Before `ensure_frozen` clears the old-width frozen cache, capture the
+    // Navigate cursor's content anchor so it can be re-seated on the same
+    // content line after the re-wrap (an absolute line index would drift).
+    let nav_anchor = if width_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
+        app.nav_content_anchor()
+    } else {
+        None
+    };
     // Sync the frozen-turn cache (all turns but the last) before reading it.
     app.ensure_frozen(w);
     let theme = app.theme;
@@ -258,27 +266,28 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // previous content, so pinning the cursor to its previous *row* within the
     // viewport keeps it on ~the same line. Clamp the row to the new viewport
     // so a height shrink can't push it off-screen.
-    if view_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
-        // `top_line` is stale while pinned (the viewport is held at `base`),
-        // so anchor against the effective viewport top in that case.
-        let vtop = if app.pinned { base } else { app.top_line };
-        let row = app
-            .nav_cursor
-            .saturating_sub(app.log_off)
-            .min(height.saturating_sub(1));
-        app.nav_cursor = vtop.saturating_add(row).min(total.saturating_sub(1));
-        if app.mode == Mode::Select {
-            app.sel = Some(app.select_sel());
-        }
+    // Re-seat the Navigate/Select cursor on its previous *content* line. The
+    // frozen cache and last turn were just re-rendered at the new width, so
+    // find the line whose content offset matches the captured anchor.
+    if let Some(anchor) = nav_anchor {
+        app.reseat_nav_cursor(anchor, &last_lines, w);
     }
     app.last_base = base;
-    let off = if app.pinned { base } else { app.top_line.min(base) };
+    let mut off = if app.pinned { base } else { app.top_line.min(base) };
     app.pinned = off >= base;
     app.log_off = off;
     // Stash the total / viewport height so the Navigate cursor can be clamped
     // and scrolled between events; clamp the cursor if the log shrank.
     app.log_total = total;
     app.log_view_h = height;
+    // After a resize the re-seated cursor (or a height-shrunk viewport) may
+    // have left the cursor off-screen: scroll minimally to bring it to the
+    // nearest edge, keeping it on its content line.
+    if view_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
+        app.nav_show_cursor();
+        off = if app.pinned { base } else { app.top_line.min(base) };
+        app.log_off = off;
+    }
     if app.nav_cursor >= total {
         app.nav_cursor = total.saturating_sub(1);
         if app.mode == Mode::Select {
