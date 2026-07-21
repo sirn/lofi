@@ -291,7 +291,10 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RetryEnd { .. }
                 // Turn boundaries carry no piped output; the prompt itself
                 // is not echoed (the user typed it).
-                | AgentEvent::TurnStart { .. } => Ok(()),
+                | AgentEvent::TurnStart { .. }
+                // Compaction is a TUI-only marker; never produced in
+                // --print mode.
+                | AgentEvent::Compaction { .. } => Ok(()),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),

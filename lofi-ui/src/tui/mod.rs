@@ -73,7 +73,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
-use lofi_core::{Agent, AgentEvent, SessionCommit};
+use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions, SessionCommit};
 use lofi_error::{Error, Result};
 use crate::tui::view::HStack;
 
@@ -98,6 +98,7 @@ const DEFAULT_CTX_LIMIT: u64 = 200_000;
 /// right of the command in the popover.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
+    ("/compact", "fold older history into a summary"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
     ("/new", "start a fresh session"),
@@ -182,6 +183,12 @@ enum Block {
     /// cancelled. The turn's partial messages precede it; the marker is the
     /// leaf of the failed branch.
     TurnFailed { label: String, elapsed: Duration, error: String },
+    /// An offline compaction marker: `◇ compacted N msgs · kept M` in the
+    /// muted tint, appended to the current turn when `/compact` (or the
+    /// auto-trigger) folds the older history into a summary. The summary
+    /// itself is injected into the agent's history, not the visible
+    /// transcript; this block just signals that the fold happened.
+    Compaction { summarized: usize, kept: usize },
 }
 
 /// A user prompt and the blocks produced in response.
@@ -843,6 +850,7 @@ async fn run_loop(
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
                             app.run_finished();
+                            app.maybe_auto_compact();
                         }
                     }
                 }

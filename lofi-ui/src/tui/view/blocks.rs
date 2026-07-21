@@ -71,6 +71,9 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             Block::TurnFailed { label, elapsed, error } => {
                 stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error: error.clone() });
             }
+            Block::Compaction { summarized, kept } => {
+                stack.push(CompactionLine { summarized: *summarized, kept: *kept });
+            }
         }
     }
     stack.lines(cx)
@@ -595,6 +598,29 @@ impl Component for TurnFailed {
                 Span::styled(self.label.clone(), Style::new().fg(t.error)),
                 Span::styled(failed, Style::new().fg(t.error)),
             ],
+            vec![],
+        )]
+    }
+}
+
+/// Compaction marker: `◇ compacted N msgs · kept M` in the muted tint,
+/// appended to a turn when `/compact` (or the auto-trigger) folds the
+/// older history into a summary.
+struct CompactionLine {
+    summarized: usize,
+    kept: usize,
+}
+
+impl Component for CompactionLine {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let body = format!(
+            "compacted {} msgs · kept {}",
+            self.summarized, self.kept
+        );
+        vec![prim::render(
+            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.subtle))],
+            vec![Span::styled(body, Style::new().fg(t.muted))],
             vec![],
         )]
     }
