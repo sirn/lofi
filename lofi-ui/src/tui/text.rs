@@ -120,44 +120,109 @@ pub(super) fn char_index_to_byte(s: &str, row: usize, col: usize) -> usize {
         .map_or(line_end - start, |(i, _)| i)
 }
 
-/// Number of select rows a single logical line occupies when soft-wrapped to
-/// `content_w` cells. Mirrors the wrap loop in [`App::input_select_rows`].
-pub(super) fn count_wrapped_rows(line: &str, content_w: usize) -> usize {
-    if content_w == 0 || line.is_empty() {
-        return 1;
+/// Word-wrap a single logical line of input to `content_w` display cells,
+/// returning the char-index range `[start, end)` of each visual row. This is
+/// the shared core for [`App::input_select_rows`], [`count_wrapped_rows`],
+/// and [`wrap_cursor_pos`], which must agree so the cursor lands exactly
+/// where the text breaks.
+///
+/// Breaks at the last space that fits — the space stays on its row (a
+/// trailing blank cell) so every input char maps one-to-one to a displayed
+/// cell and the cursor's char column is trivial to locate. A token wider
+/// than `content_w` is hard-broken on a char boundary. Empty input yields a
+/// single empty row.
+pub(super) fn wrap_input_ranges(chars: &[char], content_w: usize) -> Vec<(usize, usize)> {
+    let n = chars.len();
+    if n == 0 || content_w == 0 {
+        return vec![(0, n)];
     }
-    let mut rows = 1usize;
-    let mut cur_w = 0usize;
-    for c in line.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if cur_w + cw > content_w && cur_w > 0 {
-            rows += 1;
-            cur_w = 0;
+    let widths: Vec<usize> = chars
+        .iter()
+        .copied()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .collect();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let mut w = 0usize;
+        let mut j = i;
+        let mut last_space: Option<usize> = None;
+        while j < n && w + widths[j] <= content_w {
+            if chars[j] == ' ' {
+                last_space = Some(j);
+            }
+            w += widths[j];
+            j += 1;
         }
-        cur_w += cw;
+        let end = if j == n {
+            n
+        } else if let Some(ls) = last_space {
+            // Break after the last space that fits: the space stays on this
+            // row (trailing blank cell) and the next word starts fresh.
+            ls + 1
+        } else {
+            // No space to break at: hard-break. If even the first char
+            // doesn't fit (a wide char in a narrow column), emit it anyway
+            // so the loop makes progress — the terminal clips the overflow.
+            j.max(i + 1)
+        };
+        ranges.push((i, end));
+        i = end;
     }
-    rows
+    if ranges.is_empty() {
+        ranges.push((0, 0));
+    }
+    ranges
 }
 
-/// Wrap a cursor prefix (the text before the cursor on its logical line) and
-/// return `(sub_rows_before, x_on_final_row)`, matching the wrap loop in
-/// [`App::input_select_rows`] so the cursor lands exactly where the text
-/// would break.
-pub(super) fn wrap_prefix_pos(prefix: &str, content_w: usize) -> (usize, usize) {
+/// Number of select rows a single logical line occupies when soft-wrapped.
+/// Delegates to [`wrap_input_ranges`] so the count can never drift from the
+/// wrap loop the renderer uses.
+pub(super) fn count_wrapped_rows(line: &str, content_w: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    wrap_input_ranges(&chars, content_w).len().max(1)
+}
+
+/// Map a cursor char column on a logical line to `(select_row, x)` by
+/// wrapping the *full* line with the same rules as the renderer. Wrapping
+/// the full line (not just the prefix before the cursor) is required
+/// because a word boundary can fall past the cursor: the cursor sitting on
+/// the first letter of a word that won't fit must already be on the next
+/// row, which a prefix-only wrap cannot know.
+pub(super) fn wrap_cursor_pos(line: &str, col: usize, content_w: usize) -> (usize, usize) {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
     if content_w == 0 {
-        return (0, unicode_width::UnicodeWidthStr::width(prefix));
+        let x = chars
+            .iter()
+            .copied()
+            .take(col)
+            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        return (0, x);
     }
-    let mut sub = 0usize;
-    let mut cur_w = 0usize;
-    for c in prefix.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if cur_w + cw > content_w && cur_w > 0 {
-            sub += 1;
-            cur_w = 0;
+    let ranges = wrap_input_ranges(&chars, content_w);
+    for (sub, &(s, e)) in ranges.iter().enumerate() {
+        // `col <= e` (not `<`) so a cursor at a row's right edge stays on
+        // that row rather than jumping to the next; the next row begins at
+        // `e` and only claims `col > e`.
+        if col <= e {
+            let end = col.min(n);
+            let x: usize = chars[s..end]
+                .iter()
+                .copied()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+            return (sub, x);
         }
-        cur_w += cw;
     }
-    (sub, cur_w)
+    let last = *ranges.last().unwrap_or(&(0, 0));
+    let x: usize = chars[last.0..last.1]
+        .iter()
+        .copied()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    (ranges.len().saturating_sub(1), x)
 }
 
 /// Index of the char whose display column is `col` (i.e. the cursor position

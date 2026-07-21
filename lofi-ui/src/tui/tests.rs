@@ -518,6 +518,44 @@ fn input_lines_counts_logical_lines() {
 }
 
 #[test]
+fn input_wraps_at_word_boundaries() {
+    let mut a = app();
+    a.set_input("hello world foo".to_string());
+    // Word-wrap at width 7: each row ends after the space that precedes a
+    // word too long to fit (a trailing blank cell), so the next word starts
+    // the following row. Character wrapping would have split "hello w".
+    let rows = a.input_select_rows(7);
+    assert_eq!(rows, vec!["hello ", "world ", "foo"]);
+}
+
+#[test]
+fn input_hard_breaks_unbreakable_token() {
+    let mut a = app();
+    a.set_input("supercalifragilistic".to_string());
+    // No spaces to break at: hard-break at the column width.
+    let rows = a.input_select_rows(7);
+    assert_eq!(rows, vec!["superca", "lifragi", "listic"]);
+}
+
+#[test]
+fn input_cursor_tracks_word_wrap_past_cursor() {
+    let mut a = app();
+    a.set_input("hello world".to_string());
+    // "hello world" at width 7 wraps to ["hello ", "world"]: the word
+    // "world" doesn't fit after "hello ", so 'w' starts row 1. The cursor
+    // after the space (col 6) sits at the end of row 0; after 'w' (col 7)
+    // it is on row 1. A prefix-only wrap would misplace the cursor on row 0
+    // because it cannot see that "world" wraps.
+    a.input_cursor = "hello ".len();
+    assert_eq!(a.input_cursor_pos(7), (0, 6));
+    a.input_cursor = "hello w".len();
+    assert_eq!(a.input_cursor_pos(7), (1, 1));
+    // End of line lands at the end of the last row.
+    a.input_cursor = "hello world".len();
+    assert_eq!(a.input_cursor_pos(7), (1, 5));
+}
+
+#[test]
 fn cursor_up_recalls_at_first_cell() {
     let mut a = app();
     a.history_nav.push("first".to_string());
