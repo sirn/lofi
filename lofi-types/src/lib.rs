@@ -321,6 +321,28 @@ pub enum SessionEventKind {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
+    /// An offline compaction marker: `summary` replaces the summarized
+    /// prefix (everything older than `first_kept_entry_id` on the active
+    /// path) and is injected as a single user message at the head of the
+    /// kept tail on resume. Appended to the active leaf by the `/compact`
+    /// command (and the auto-trigger); a resumed session rebuilds the
+    /// compacted history from it. Subsequent turns chain off this entry so
+    /// the active path runs root -> kept tail -> Compaction -> new turns.
+    Compaction {
+        /// The full summary text (preamble + sections + brief transcript).
+        summary: String,
+        /// Event id of the first kept message on the active path. The
+        /// agent-history walk on resume emits the summary, then the kept
+        /// tail, and stops at this id — everything older is already folded
+        /// into the summary. The empty string means compact-all (nothing
+        /// kept).
+        first_kept_entry_id: String,
+        /// How many live messages were folded into the summary (for the
+        /// visible marker on resume).
+        summarized: usize,
+        /// How many messages were kept in the tail.
+        kept: usize,
+    },
 }
 
 /// One append-only line in a session transcript log.
@@ -807,12 +829,104 @@ pub struct AgentConfig {
     pub thinking_levels: Vec<ThinkingLevel>,
 }
 
+/// Compaction settings. Currently governs the auto-compaction trigger
+/// (the offline `/compact` is always available). Mirrors the
+/// `autoCompact` block from pi's hm-smart-compact: the trigger fires only
+/// on the upward crossing of the threshold, so a session hovering above the
+/// threshold is not re-compacted every turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Auto-compaction trigger.
+    #[serde(default)]
+    pub auto: AutoCompactConfig,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self { auto: AutoCompactConfig::default() }
+    }
+}
+
+/// Auto-compaction threshold configuration. The primary trigger is
+/// `reserved_context_tokens`: compaction fires when the latest round's
+/// input tokens exceed `context_window - reserved_context_tokens`, i.e.
+/// when the remaining headroom for the model's response drops below the
+/// reserve. The optional `max_context_tokens` and `context_ratio` caps
+/// lower the threshold further when set (compacting earlier on large
+/// windows); they are inert when unset. The trigger fires only on the
+/// upward crossing of the threshold (hysteresis), so consecutive
+/// above-threshold turns do not each trigger a compaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoCompactConfig {
+    /// Master switch. When `false` auto-compaction is disabled and only
+    /// manual `/compact` runs.
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    /// Tokens to reserve for the model's response. Compaction triggers when
+    /// `context_tokens > context_window - reserved_context_tokens`.
+    /// Defaults to 20_000.
+    #[serde(default = "default_reserved_context_tokens")]
+    pub reserved_context_tokens: u64,
+    /// Optional absolute cap. When set, the threshold is lowered to at most
+    /// this many tokens, so compaction fires earlier on large context
+    /// windows. Inert when unset.
+    #[serde(default)]
+    pub max_context_tokens: Option<u64>,
+    /// Optional fraction of the context window in (0, 1]. When set, the
+    /// threshold is lowered to at most `floor(context_window * ratio)`.
+    /// Inert when unset.
+    #[serde(default)]
+    pub context_ratio: Option<f64>,
+}
+
+fn default_reserved_context_tokens() -> u64 {
+    20_000
+}
+
+impl Default for AutoCompactConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            reserved_context_tokens: default_reserved_context_tokens(),
+            max_context_tokens: None,
+            context_ratio: None,
+        }
+    }
+}
+
+impl AutoCompactConfig {
+    /// Resolve the effective trigger threshold for a context window: the
+    /// reserve-based threshold (`window - reserved`), lowered by the
+    /// optional absolute and ratio caps when they are set. Returns `None`
+    /// when the window is zero or the resolved threshold is not positive.
+    #[must_use]
+    pub fn threshold(&self, context_window: u64) -> Option<u64> {
+        if context_window == 0 {
+            return None;
+        }
+        let mut threshold = context_window.saturating_sub(self.reserved_context_tokens);
+        if let Some(cap) = self.max_context_tokens {
+            threshold = threshold.min(cap);
+        }
+        if let Some(ratio) = self.context_ratio {
+            if ratio > 0.0 && ratio <= 1.0 {
+                threshold = threshold.min((ratio * context_window as f64) as u64);
+            }
+        }
+        (threshold > 0).then_some(threshold)
+    }
+}
+
 /// Top-level config tree parsed from `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// Agent-level defaults.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Compaction settings (auto-compaction trigger). `/compact` itself is
+    /// always available regardless of this block.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     /// Default provider used when `--model` is omitted and no `default_model`
     /// resolves. Overrides the "first available provider" fallback.
     #[serde(default)]

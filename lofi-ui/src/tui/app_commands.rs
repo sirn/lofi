@@ -22,6 +22,10 @@ impl App {
                 self.clear_log();
                 true
             }
+            "/compact" => {
+                self.compact_now();
+                true
+            }
             "/quit" | "/exit" => {
                 self.should_quit = true;
                 true
@@ -155,6 +159,7 @@ impl App {
         lines.push(info_section(t, "Commands"));
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
+        lines.push(info_kv(t, "/compact", "fold older history into a summary"));
         lines.push(info_kv(t, "/new", "start a fresh session"));
         lines.push(info_kv(t, "/resume", "pick a past session"));
         lines.push(info_kv(t, "/tree", "roll back to a past turn"));
@@ -210,6 +215,7 @@ impl App {
         // Reset the footer usage/cost stats so a fresh session doesn't
         // carry over the previous one's context gauge and accumulated cost.
         self.status_usage = None;
+        self.prev_ctx_tokens = None;
         self.cost = 0.0;
         self.turn_cost = 0.0;
         self.turn_has_round_usage = false;
@@ -266,6 +272,7 @@ impl App {
                 self.total_in = 0;
                 self.total_out = 0;
                 self.status_usage = None;
+                self.prev_ctx_tokens = None;
                 for ev in replay_session_events(&events) {
                     self.apply_event(ev);
                 }
@@ -628,6 +635,7 @@ impl App {
         self.total_in = 0;
         self.total_out = 0;
         self.status_usage = None;
+        self.prev_ctx_tokens = None;
         for ev in replay_session_events(&rolled_back) {
             self.apply_event(ev);
         }
