@@ -302,6 +302,9 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
         if !c.thinking_levels.is_empty() {
             s.push_str("  ·thinks");
         }
+        if c.supports_image {
+            s.push_str("  ·img");
+        }
         s
     };
     let content_w = picker

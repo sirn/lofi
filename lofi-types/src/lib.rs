@@ -399,6 +399,8 @@ pub struct ModelChoice {
     pub name: String,
     /// Declared reasoning/thinking levels (empty if the model has none).
     pub thinking_levels: Vec<ThinkingLevel>,
+    /// Whether the model accepts image inputs.
+    pub supports_image: bool,
     /// Context window in tokens, if known.
     pub context_window: Option<u64>,
 }

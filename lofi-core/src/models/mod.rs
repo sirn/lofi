@@ -193,10 +193,12 @@ impl ModelRegistry {
     }
 
     /// The available models as [`ModelChoice`] entries for the `/model`
-    /// picker, each carrying its declared thinking levels.
+    /// picker, each carrying its declared thinking levels and image support.
+    /// Sorted by qualified `provider/id` to match `--list-models`.
     #[must_use]
     pub fn choices(&self) -> Vec<lofi_types::ModelChoice> {
-        self.available()
+        let mut out: Vec<lofi_types::ModelChoice> = self
+            .available()
             .into_iter()
             .map(|m| lofi_types::ModelChoice {
                 thinking_levels: self
@@ -205,12 +207,17 @@ impl ModelRegistry {
                     .and_then(|p| p.models.get(&m.id))
                     .map(|mc| mc.thinking_levels.clone())
                     .unwrap_or_default(),
+                supports_image: m.supports_image,
                 provider: m.provider,
                 id: m.id,
                 name: m.name,
                 context_window: m.context_window,
             })
-            .collect()
+            .collect();
+        // Sort by qualified `provider/id` so the picker matches `--list-models`
+        // output and the current-model lookup is stable across runs.
+        out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
+        out
     }
 
     /// Resolve an exact `provider/id` qualifier to a model.
@@ -569,21 +576,36 @@ mod tests {
     }
 
     #[test]
-    fn choices_carry_thinking_levels() {
-        let mut m = models(&["gpt-4o", "gpt-4o-mini"]);
-        m.get_mut("gpt-4o")
-            .unwrap()
-            .thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+    fn choices_carry_thinking_levels_and_sort() {
+        // Insert in reverse so a missing sort is caught.
+        let mut m = models(&["gpt-4o-mini", "gpt-4o"]);
+        let gpt4o = m.get_mut("gpt-4o").unwrap();
+        gpt4o.thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+        gpt4o.supports_image = Some(true);
         let mut providers = IndexMap::new();
+        // `anthropic` sorts before `openai`, so a provider-only sort would
+        // also misorder if we didn't compare within a provider.
+        providers.insert(
+            "anthropic".to_string(),
+            pcfg(Api::AnthropicMessages, models(&["claude"])),
+        );
         providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, m));
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let choices = reg.choices();
+        // Sorted by qualified `provider/id`.
+        let qualified: Vec<String> =
+            choices.iter().map(|c| format!("{}/{}", c.provider, c.id)).collect();
+        assert_eq!(
+            qualified,
+            vec!["anthropic/claude", "openai/gpt-4o", "openai/gpt-4o-mini"]
+        );
         let by_id: std::collections::HashMap<&str, &lofi_types::ModelChoice> =
             choices.iter().map(|c| (c.id.as_str(), c)).collect();
         assert_eq!(by_id["gpt-4o"].thinking_levels, vec![ThinkingLevel::Medium, ThinkingLevel::High]);
         assert!(by_id["gpt-4o-mini"].thinking_levels.is_empty());
+        assert!(by_id["gpt-4o"].supports_image);
+        assert!(!by_id["gpt-4o-mini"].supports_image);
         assert_eq!(by_id["gpt-4o"].provider, "openai");
-        assert_eq!(by_id["gpt-4o"].id, "gpt-4o");
     }
 
     #[test]

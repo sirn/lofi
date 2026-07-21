@@ -2251,6 +2251,7 @@ fn model_picker_open_preselects_current() {
             id: "claude".into(),
             name: "Claude".into(),
             thinking_levels: vec![ThinkingLevel::Medium],
+            supports_image: false,
             context_window: Some(200_000),
         },
         lofi_types::ModelChoice {
@@ -2258,6 +2259,7 @@ fn model_picker_open_preselects_current() {
             id: "gpt-4o".into(),
             name: String::new(),
             thinking_levels: vec![],
+            supports_image: false,
             context_window: Some(128_000),
         },
     ];
@@ -2288,6 +2290,7 @@ fn model_picker_confirm_sets_pending_switch() {
             id: "claude".into(),
             name: "Claude".into(),
             thinking_levels: vec![],
+            supports_image: false,
             context_window: None,
         },
         lofi_types::ModelChoice {
@@ -2295,6 +2298,7 @@ fn model_picker_confirm_sets_pending_switch() {
             id: "gpt-4o".into(),
             name: String::new(),
             thinking_levels: vec![],
+            supports_image: false,
             context_window: None,
         },
     ];
