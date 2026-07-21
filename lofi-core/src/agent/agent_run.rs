@@ -22,7 +22,7 @@ impl Agent {
             if tx.is_closed() {
                 return Ok(());
             }
-            let finished = match self.run_once_inner(&mut messages, Some(&tx), None).await {
+            let finished = match self.run_once_inner(&mut messages, Some(&tx), None, None, None).await {
                 Ok(f) => f,
                 // A gone receiver is a graceful cancellation, not a provider
                 // error: stop the run cleanly instead of surfacing it.
@@ -96,6 +96,38 @@ impl Agent {
             }
         }
         let mut stats = TurnStats::new();
+        // `lofi.recall` reads the full on-disk transcript (including
+        // compacted-away messages) fresh on each call, so the native tool
+        // sees the same history `/recall` does. Built once from the commit
+        // path; `None` for ephemeral runs (no session file).
+        let recall: Option<RecallFn> = commit.map(|c| {
+            let path = c.path.clone();
+            Arc::new(move |req: &lofi_types::recall::RecallRequest| {
+                match crate::session::store::load(&path) {
+                    Ok((_meta, events, _off, _size)) => crate::recall::recall(&events, req),
+                    Err(_) => lofi_types::recall::RecallOutcome {
+                        text: "recall: session file unreadable.".to_string(),
+                        status: "error".to_string(),
+                    },
+                }
+            }) as RecallFn
+        });
+        let result: Option<ResultFn> = commit.map(|c| {
+            let path = c.path.clone();
+            Arc::new(move |id: &str| -> String {
+                match crate::session::store::load(&path) {
+                    Ok((_meta, events, _off, _size)) => {
+                        match crate::context_edit::recover_event_content(&events, id) {
+                            Some(s) => s,
+                            None => format!(
+                                "no recoverable content for event {id:?} (not a message event, or held no elidable block)."
+                            ),
+                        }
+                    }
+                    Err(_) => "result: session file unreadable.".to_string(),
+                }
+            }) as ResultFn
+        });
         let mut finished_normally = false;
         let mut cancelled = false;
         let mut context_pressure = false;
@@ -107,7 +139,7 @@ impl Agent {
                 break;
             }
             match self
-                .run_once_inner(&mut *messages, Some(&tx), Some(&mut stats))
+                .run_once_inner(&mut *messages, Some(&tx), Some(&mut stats), recall.clone(), result.clone())
                 .await
             {
                 Ok(true) => {
@@ -329,7 +361,7 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None).await
+        self.run_once_inner(messages, None, None, None, None).await
     }
 
     /// Shared core of [`run_once`] with an optional event sender.
@@ -348,6 +380,8 @@ impl Agent {
         messages: &mut Vec<Message>,
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
+        recall: Option<RecallFn>,
+        result: Option<ResultFn>,
     ) -> Result<bool> {
         let schema = exec_tool_schema();
         // Effective output limit: an explicit agent override wins over the
@@ -562,7 +596,7 @@ impl Agent {
             return Ok(true);
         }
 
-        let results = self.execute_tools(&tool_uses, tx, stats).await?;
+        let results = self.execute_tools(&tool_uses, tx, stats, recall.clone(), result.clone()).await?;
 
         // Tool results travel under the dedicated Tool role: each provider
         // converter emits them from its Role::Tool arm (Chat Completions
@@ -586,6 +620,8 @@ impl Agent {
         tool_uses: &[(&str, &str, &serde_json::Value)],
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
+        recall: Option<RecallFn>,
+        result: Option<ResultFn>,
     ) -> Result<Vec<ContentBlock>> {
         let agent_fn = self.make_agent_fn();
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
@@ -737,6 +773,8 @@ impl Agent {
                 tmp_dir: self.tmp_dir.clone(),
                 strings,
                 agent: Some(agent_fn.clone()),
+                recall: recall.clone(),
+                result: result.clone(),
                 on_tool_event: Some(on_tool_event),
                 bash_env: self.bash_env.clone(),
             };

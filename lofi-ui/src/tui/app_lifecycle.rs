@@ -412,7 +412,10 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
-        let opts = CompactOptions::default();
+        let opts = CompactOptions {
+            max_kept_tokens: 0,
+            edit: self.compaction.edit.clone(),
+        };
         let Some(c) = compact(&events, &opts) else {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
@@ -431,6 +434,7 @@ impl App {
                     kind: SessionEventKind::Compaction {
                         summary: c.summary.clone(),
                         first_kept_entry_id: first_kept,
+                        summarized_range: c.summarized_range.unwrap_or_default(),
                         summarized: c.summarized_count,
                         kept: c.kept_count,
                     },
@@ -473,6 +477,49 @@ impl App {
     /// when a soft cap (`max_context_tokens` / `context_ratio`) is set.
     /// The **hard** cap (`reserved_context_tokens`) is enforced mid-run by
     /// the engine (force-compact + force-continue), not here.
+    /// `/recall [query]` — search the full session transcript (including
+    /// messages a compaction folded away) and render the matches inline in
+    /// the log. With no query, browse the most recent entries. Args:
+    /// `scope:all` (whole session) / `scope:lineage` (default, active branch)
+    /// / `scope:compaction:N` or `scope:compaction:latest` (within one
+    /// compaction's summarized range); `page:N` for paged search results.
+    ///
+    /// The user-facing command renders to the log only; the model reaches
+    /// the same engine via the `lofi.recall` native tool.
+    pub(super) fn recall_now(&mut self, line: &str) {
+        use lofi_core::recall::{recall, RecallRequest};
+
+        let raw = line.trim().strip_prefix("/recall").unwrap_or("").trim();
+        let (scope, rest) = parse_recall_args(raw);
+        let page = parse_recall_page(&rest);
+        let query_text = rest
+            .split_whitespace()
+            .filter(|t| !t.starts_with("page:"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let req = RecallRequest {
+            query: (!query_text.is_empty()).then_some(query_text),
+            scope,
+            page,
+            expand: Vec::new(),
+        };
+
+        let Some(events) = self.compaction_events() else {
+            self.notify(NotifyKind::Warn, "no session history yet");
+            return;
+        };
+        let outcome = recall(&events, &req);
+        // Render inline as a read-only turn so the result lives in the log
+        // alongside the conversation; the prompt line echoes the invocation.
+        let prompt = format!("/recall{}{}", if rest.is_empty() { String::new() } else { " ".to_string() }, rest);
+        self.push_turn(Turn {
+            prompt,
+            blocks: vec![Block::Text(outcome.text)],
+        });
+        self.notify(NotifyKind::Info, outcome.status);
+        self.bump_render_epoch();
+    }
+
     pub(super) fn maybe_auto_compact(&mut self) {
         if !self.compaction.auto.enable {
             return;
@@ -553,4 +600,44 @@ impl App {
         }
         Some(events)
     }
+}
+
+/// Parse a `scope:…` directive out of a `/recall` argument string. Returns
+/// the resolved scope and the argument text with the directive removed.
+fn parse_recall_args(raw: &str) -> (lofi_core::recall::RecallScope, String) {
+    use lofi_core::recall::{CompactionTarget, RecallScope};
+    let mut scope = RecallScope::default();
+    let mut cleaned = String::new();
+    for tok in raw.split_whitespace() {
+        if let Some(val) = tok.strip_prefix("scope:") {
+            let val = val.trim();
+            scope = match val {
+                "all" => RecallScope::All,
+                "lineage" => RecallScope::Lineage,
+                "latest" => RecallScope::Compaction(CompactionTarget::Latest),
+                other if other.starts_with("compaction:") => {
+                    let n = other.strip_prefix("compaction:").unwrap_or("");
+                    match n.parse::<usize>() {
+                        Ok(i) => RecallScope::Compaction(CompactionTarget::Index(i)),
+                        Err(_) => RecallScope::Lineage,
+                    }
+                }
+                _ => RecallScope::Lineage,
+            };
+        } else {
+            if !cleaned.is_empty() {
+                cleaned.push(' ');
+            }
+            cleaned.push_str(tok);
+        }
+    }
+    (scope, cleaned)
+}
+
+/// Pull a `page:N` token (1-based) out of the argument string, defaulting to 1.
+fn parse_recall_page(rest: &str) -> usize {
+    rest.split_whitespace()
+        .find_map(|t| t.strip_prefix("page:").and_then(|n| n.parse::<usize>().ok()))
+        .unwrap_or(1)
+        .max(1)
 }

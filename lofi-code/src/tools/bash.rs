@@ -148,7 +148,7 @@ impl BuiltinTools {
     let start_line = t.total_lines.saturating_sub(t.output_lines) + 1;
     let end_line = t.total_lines;
     // Write the full captured output to the session tmp dir so the model can
-    // page through it with `lofi.read_tmp`.
+    // page through it with `lofi.bash_read`.
     let path = match self.write_bash_log(full) {
         Ok(p) => p,
         Err(_) => "<temp file unavailable>".to_string(),
@@ -161,19 +161,19 @@ impl BuiltinTools {
         // Single line exceeded the byte budget.
         let _ = write!(
             out,
-            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Page with lofi.read_tmp(\"{basename}\")]",
+            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Page with lofi.bash_read(\"{basename}\")]",
             format_size(DEFAULT_MAX_BYTES),
         );
     } else if pipe_capped && !t.truncated {
         let _ = write!(
             out,
-            "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Page with lofi.read_tmp(\"{basename}\").]",
+            "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Page with lofi.bash_read(\"{basename}\").]",
             format_size(MAX_BASH_OUTPUT_BYTES)
         );
     } else {
         let _ = write!(
             out,
-            "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Page with lofi.read_tmp(\"{basename}\").]",
+            "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Page with lofi.bash_read(\"{basename}\").]",
             t.total_lines,
             format_size(DEFAULT_MAX_BYTES)
         );

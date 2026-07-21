@@ -71,7 +71,7 @@ pub fn ensure_state_dir() -> Result<PathBuf> {
 
 /// Create a fresh per-session tmp directory under `<state>/tmp/` and return
 /// its path. Used as the backing store for bash full-output logs so the model
-/// can page through truncated output via `lofi.read_tmp`.
+/// can page through truncated output via `lofi.bash_read`.
 ///
 /// # Errors
 /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the

@@ -90,16 +90,26 @@ pub struct Compaction {
     /// SessionEventKind::Compaction marker so a resumed session rebuilds
     /// the same compacted history. None when nothing was kept (compact-all).
     pub first_kept_event_id: Option<String>,
+    /// Event ids `[first, last]` of the summarized range — every live
+    /// message folded into this summary. Recorded in the marker so
+    /// `/recall scope:compaction:N` can resolve the range to global message
+    /// indices and search within it. `None` only when the live list was
+    /// empty (compact refused earlier); in practice always `Some`.
+    pub summarized_range: Option<[String; 2]>,
 }
 
 /// Options for compact.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CompactOptions {
     /// Soft token budget (chars/4) for the kept tail. When the most recent
     /// turn alone exceeds it, the cut is pushed back to a completed
     /// tool-cycle boundary so the oversized turn is partly summarized too.
     /// 0 disables the budget guard.
     pub max_kept_tokens: usize,
+    /// Tiered-retention context editing applied to the kept tail (see
+    /// [`crate::context_edit`]). When `enabled` is false the tail is carried
+    /// verbatim.
+    pub edit: lofi_types::EditConfig,
 }
 
 /// Minimum number of live messages the summarized prefix must contain for a
@@ -182,7 +192,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         return None;
     }
 
-    let plan = plan_cut(&live, *opts);
+    let plan = plan_cut(&live, opts.clone());
     if plan.summarized < MIN_SUMMARIZED {
         return None;
     }
@@ -196,7 +206,27 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     };
 
     let kept_count = live.len().saturating_sub(plan.summarized);
-    let kept_messages: Vec<Message> = live[plan.summarized..].iter().map(|lm| lm.message.clone()).collect();
+    let kept_live = &live[plan.summarized..];
+    let kept_pairs: Vec<(String, Message)> =
+        kept_live.iter().map(|lm| (lm.event_id.clone(), lm.message.clone())).collect();
+    // Apply tiered-retention context editing to the kept tail so the new
+    // prefix is much lighter (old tool results/thinking/tool-call code
+    // elided, recall-recoverable). Cache-safe: this rides the prefix
+    // rebuild compaction already pays.
+    let kept_messages: Vec<Message> = crate::context_edit::edit_tail(&kept_pairs, &opts.edit);
+
+    // The summarized range is `live[0 .. plan.summarized]`. Recorded as
+    // event ids so `/recall scope:compaction:N` can resolve it to global
+    // message indices without re-deriving the cut. Compact-all (summarized
+    // == live.len()) collapses the whole live list; the range still spans
+    // first..last.
+    let summarized_range: Option<[String; 2]> = if plan.summarized > 0 {
+        let first = live[0].event_id.clone();
+        let last = live[plan.summarized - 1].event_id.clone();
+        Some([first, last])
+    } else {
+        None
+    };
 
     Some(Compaction {
         summary,
@@ -204,6 +234,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         summarized_count: plan.summarized,
         kept_count,
         first_kept_event_id: plan.first_kept_event_id,
+        summarized_range,
     })
 }
 
@@ -567,7 +598,7 @@ fn extract_preferences(blocks: &[Block]) -> Vec<String> {
     out
 }
 
-/// Files And Changes from native tool calls: read/read_tmp -> Read,
+/// Files And Changes from native tool calls: read/bash_read -> Read,
 /// edit -> Modified, write -> Created. Dedup; Created drops files already
 /// in Modified.
 fn extract_files(blocks: &[Block]) -> Vec<String> {
@@ -583,7 +614,7 @@ fn extract_files(blocks: &[Block]) -> Vec<String> {
             match rec.name.as_str() {
                 "edit" if !rec.args.is_empty() => { modified.insert(rec.args.clone()); },
                 "write" if !rec.args.is_empty() => { created.insert(rec.args.clone()); },
-                "read" | "read_tmp" if !rec.args.is_empty() => { read.insert(rec.args.clone()); },
+                "read" | "bash_read" if !rec.args.is_empty() => { read.insert(rec.args.clone()); },
                 _ => {}
             }
         }
