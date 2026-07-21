@@ -192,6 +192,27 @@ impl ModelRegistry {
             .collect()
     }
 
+    /// The available models as [`ModelChoice`] entries for the `/model`
+    /// picker, each carrying its declared thinking levels.
+    #[must_use]
+    pub fn choices(&self) -> Vec<lofi_types::ModelChoice> {
+        self.available()
+            .into_iter()
+            .map(|m| lofi_types::ModelChoice {
+                thinking_levels: self
+                    .providers
+                    .get(&m.provider)
+                    .and_then(|p| p.models.get(&m.id))
+                    .map(|mc| mc.thinking_levels.clone())
+                    .unwrap_or_default(),
+                provider: m.provider,
+                id: m.id,
+                name: m.name,
+                context_window: m.context_window,
+            })
+            .collect()
+    }
+
     /// Resolve an exact `provider/id` qualifier to a model.
     #[must_use]
     pub fn resolve(&self, qualified: &str) -> Option<&Model> {
@@ -545,6 +566,24 @@ mod tests {
         assert!(ids.contains(&"m2"));
         assert!(!ids.contains(&"m3"));
         assert!(!ids.contains(&"m4"));
+    }
+
+    #[test]
+    fn choices_carry_thinking_levels() {
+        let mut m = models(&["gpt-4o", "gpt-4o-mini"]);
+        m.get_mut("gpt-4o")
+            .unwrap()
+            .thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+        let mut providers = IndexMap::new();
+        providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, m));
+        let reg = ModelRegistry::load(&config_with(providers)).unwrap();
+        let choices = reg.choices();
+        let by_id: std::collections::HashMap<&str, &lofi_types::ModelChoice> =
+            choices.iter().map(|c| (c.id.as_str(), c)).collect();
+        assert_eq!(by_id["gpt-4o"].thinking_levels, vec![ThinkingLevel::Medium, ThinkingLevel::High]);
+        assert!(by_id["gpt-4o-mini"].thinking_levels.is_empty());
+        assert_eq!(by_id["gpt-4o"].provider, "openai");
+        assert_eq!(by_id["gpt-4o"].id, "gpt-4o");
     }
 
     #[test]

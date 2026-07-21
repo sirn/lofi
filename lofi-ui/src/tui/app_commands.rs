@@ -58,6 +58,10 @@ impl App {
                 self.toggle_verbose();
                 true
             }
+            "/model" => {
+                self.open_model_picker();
+                true
+            }
             _ if cmd.starts_with('/') => {
                 self.notify(
                     NotifyKind::Error,
@@ -304,6 +308,63 @@ impl App {
         }
     }
 
+    /// `/model`: open the model-picker overlay populated from the retained
+    /// `model_choices`. The current model is pre-selected so the user sees
+    /// where they are. No-op (with a notice) when no model is available.
+    pub(super) fn open_model_picker(&mut self) {
+        if self.model_choices.is_empty() {
+            self.notify(
+                NotifyKind::Warn,
+                "no models available (set a provider API key)",
+            );
+            return;
+        }
+        let selected = self
+            .model_choices
+            .iter()
+            .position(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
+            .unwrap_or(0);
+        self.model_picker = Some(ModelPickerState {
+            choices: self.model_choices.clone(),
+            selected,
+        });
+    }
+
+    /// Confirm: hand the selected `provider/model` query to the run loop via
+    /// `pending_model_switch` and close the overlay. The run loop rebuilds
+    /// the agent from the retained registry (it owns the switcher + agent).
+    pub(super) fn model_picker_confirm(&mut self) {
+        if let Some(picker) = self.model_picker.take() {
+            if let Some(choice) = picker.choices.get(picker.selected) {
+                self.pending_model_switch =
+                    Some(format!("{}/{}", choice.provider, choice.id));
+            }
+        }
+    }
+
+    /// Apply a completed model switch: update the label, thinking-level
+    /// suffix, and context-window gauge. Called by the run loop after it
+    /// rebuilds the agent.
+    pub(super) fn apply_model_switch(
+        &mut self,
+        model: &lofi_types::Model,
+        level: ThinkingLevel,
+    ) {
+        self.model_label = format!("{}/{}", model.provider, model.id);
+        self.thinking_label = (level != ThinkingLevel::Off)
+            .then(|| format!(" · {}", level.as_str()));
+        if let Some(cw) = model.context_window {
+            if cw > 0 {
+                self.ctx_limit = cw;
+            }
+        }
+        self.notify(
+            NotifyKind::Info,
+            format!("switched to {}/{}", model.provider, model.id),
+        );
+        self.bump_render_epoch();
+    }
+
     /// '/tree': open the branch-picker overlay over the active session's
     /// event log. Lists every user-prompt event (the natural branch points)
     /// with its preview. Confirmed entry feeds the prompt text back into the
@@ -376,7 +437,7 @@ impl App {
     /// The slash-complete popover is intentionally excluded — it's inline
     /// and you're still typing into the prompt.
     pub(super) fn modal_open(&self) -> bool {
-        self.info.is_some() || self.picker.is_some() || self.tree_picker.is_some()
+        self.info.is_some() || self.picker.is_some() || self.tree_picker.is_some() || self.model_picker.is_some()
     }
 
     /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
@@ -449,11 +510,13 @@ impl App {
     /// key (so the caller skips normal Input-mode processing).
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         /// Which overlay slot is active, for per-slot confirm/cancel.
-        enum Slot { Picker, Tree }
+        enum Slot { Picker, Tree, Model }
         let slot = if self.picker.is_some() {
             Slot::Picker
         } else if self.tree_picker.is_some() {
             Slot::Tree
+        } else if self.model_picker.is_some() {
+            Slot::Model
         } else {
             return false;
         };
@@ -473,6 +536,7 @@ impl App {
                         self.tree_picker_confirm_inner(&picker);
                     }
                 }
+                Slot::Model => self.model_picker_confirm(),
             },
             // With a single entry, Tab/Shift+Tab confirm outright instead of
             // cycling (a no-op) — same as pressing Enter.
@@ -487,15 +551,18 @@ impl App {
                         self.tree_picker_confirm_inner(&picker);
                     }
                 }
+                Slot::Model => self.model_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
                 Slot::Picker => self.picker = None,
                 Slot::Tree => self.tree_picker = None,
+                Slot::Model => self.model_picker = None,
             },
             _ => {}
         }
         if (matches!(slot, Slot::Picker) && self.picker.is_none())
             || (matches!(slot, Slot::Tree) && self.tree_picker.is_none())
+            || (matches!(slot, Slot::Model) && self.model_picker.is_none())
         {
             // Confirm/cancel consumed the overlay; nothing left to navigate.
             return true;
@@ -537,8 +604,10 @@ impl App {
     pub(super) fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
         if self.picker.is_some() {
             self.picker.as_mut().map(|p| p as &mut dyn Modal)
-        } else {
+        } else if self.tree_picker.is_some() {
             self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
+        } else {
+            self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
         }
     }
 

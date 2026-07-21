@@ -387,6 +387,22 @@ pub struct SessionEvent {
     pub kind: SessionEventKind,
 }
 
+/// One selectable model in the `/model` picker. Built from a model
+/// registry's available models.
+#[derive(Debug, Clone)]
+pub struct ModelChoice {
+    /// Provider key in the config.
+    pub provider: String,
+    /// Provider-local model identifier (e.g. `gpt-4o`).
+    pub id: String,
+    /// Human-readable display name.
+    pub name: String,
+    /// Declared reasoning/thinking levels (empty if the model has none).
+    pub thinking_levels: Vec<ThinkingLevel>,
+    /// Context window in tokens, if known.
+    pub context_window: Option<u64>,
+}
+
 /// A model entry as resolved by the registry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {

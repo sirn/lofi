@@ -283,6 +283,86 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
 /// back to before the prompt (edit and resend); `agent:` nodes roll back to
 /// after the turn (continue from here). Nodes on the active path are
 /// highlighted so the current branch is visible at a glance.
+/// `/model` picker: a centered list of available `provider/model` entries.
+/// The current model is highlighted; `↑/↓` or `j`/`k` move, `Enter` switches,
+/// `Esc`/`q` cancels.
+pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    let Some(picker) = &app.model_picker else { return; };
+    let t = app.theme;
+    let total = picker.choices.len();
+    let title = " Switch model  ↑/↓ j/k enter esc ";
+    let active = app.model_label.clone();
+    let row_for = |c: &lofi_types::ModelChoice| {
+        let mut s = format!("{}/{}", c.provider, c.id);
+        if !c.name.is_empty() && c.name != c.id {
+            s.push_str("  ");
+            s.push_str(&c.name);
+        }
+        if !c.thinking_levels.is_empty() {
+            s.push_str("  ·thinks");
+        }
+        s
+    };
+    let content_w = picker
+        .choices
+        .iter()
+        .map(|c| prim::width(&row_for(c)))
+        .max()
+        .unwrap_or(0);
+    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+        .unwrap_or(40)
+        .min(area.width);
+    let rows = total.min(20);
+    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
+    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+        .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
+    let popup = horiz[1];
+    f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            title,
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    let need_sb = total > inner.height as usize;
+    let content = if need_sb {
+        Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        inner
+    };
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
+    let items: Vec<ListItem> = picker
+        .choices
+        .iter()
+        .map(|c| {
+            let is_active = format!("{}/{}", c.provider, c.id) == active;
+            ListItem::new(Span::styled(
+                row_for(c),
+                if is_active { active_style } else { inactive_style },
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_widget(block, popup);
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+    }
+}
+
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(picker) = &app.tree_picker else { return; };

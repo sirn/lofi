@@ -2241,3 +2241,94 @@ fn insert_str_normalizes_line_endings() {
     a.insert_str("a\r\nb\rc");
     assert_eq!(a.input, "a\nb\nc");
 }
+
+#[test]
+fn model_picker_open_preselects_current() {
+    let mut a = app(); // model_label = "openai/gpt-4o"
+    a.model_choices = vec![
+        lofi_types::ModelChoice {
+            provider: "anthropic".into(),
+            id: "claude".into(),
+            name: "Claude".into(),
+            thinking_levels: vec![ThinkingLevel::Medium],
+            context_window: Some(200_000),
+        },
+        lofi_types::ModelChoice {
+            provider: "openai".into(),
+            id: "gpt-4o".into(),
+            name: String::new(),
+            thinking_levels: vec![],
+            context_window: Some(128_000),
+        },
+    ];
+    a.open_model_picker();
+    let picker = a.model_picker.as_ref().unwrap();
+    assert_eq!(picker.choices.len(), 2);
+    // The current model is the second entry.
+    assert_eq!(picker.selected, 1);
+    assert!(a.modal_open());
+}
+
+#[test]
+fn model_picker_open_empty_notifies() {
+    let mut a = app();
+    a.model_choices = Vec::new();
+    a.open_model_picker();
+    assert!(a.model_picker.is_none());
+    // A warn notification is surfaced (not a crash).
+    assert!(a.notify.is_some());
+}
+
+#[test]
+fn model_picker_confirm_sets_pending_switch() {
+    let mut a = app();
+    a.model_choices = vec![
+        lofi_types::ModelChoice {
+            provider: "anthropic".into(),
+            id: "claude".into(),
+            name: "Claude".into(),
+            thinking_levels: vec![],
+            context_window: None,
+        },
+        lofi_types::ModelChoice {
+            provider: "openai".into(),
+            id: "gpt-4o".into(),
+            name: String::new(),
+            thinking_levels: vec![],
+            context_window: None,
+        },
+    ];
+    a.open_model_picker();
+    // Move up to the first entry (anthropic/claude).
+    a.model_picker.as_mut().unwrap().selected = 0;
+    a.model_picker_confirm();
+    assert_eq!(a.pending_model_switch.as_deref(), Some("anthropic/claude"));
+    assert!(a.model_picker.is_none());
+}
+
+#[test]
+fn apply_model_switch_updates_label_and_ctx_limit() {
+    let mut a = app();
+    a.ctx_limit = 0; // falls back to DEFAULT_CTX_LIMIT until a model reports one
+    let model = lofi_types::Model {
+        id: "claude".into(),
+        name: "Claude".into(),
+        provider: "anthropic".into(),
+        api: lofi_types::Api::AnthropicMessages,
+        reasoning: true,
+        thinking: ThinkingLevel::XHigh,
+        supports_image: true,
+        context_window: Some(200_000),
+        max_tokens: None,
+        base_url: None,
+        input_price: None,
+        output_price: None,
+        cache_read_price: None,
+        cache_write_price: None,
+        per_request_price: None,
+    };
+    a.apply_model_switch(&model, ThinkingLevel::XHigh);
+    assert_eq!(a.model_label, "anthropic/claude");
+    assert_eq!(a.thinking_label.as_deref(), Some(" · xhigh"));
+    assert_eq!(a.ctx_limit, 200_000);
+}

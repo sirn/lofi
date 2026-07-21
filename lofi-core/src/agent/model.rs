@@ -41,7 +41,7 @@ pub async fn build_agent(
     config_path: Option<&std::path::Path>,
     model: Option<&str>,
     root: &std::path::Path,
-) -> Result<(Agent, Model, ThinkingLevel, lofi_types::Config)> {
+) -> Result<(Agent, Model, ThinkingLevel, lofi_types::Config, ModelRegistry)> {
     let config_path = match config_path {
         Some(p) => p.to_path_buf(),
         None => crate::config_loader::user_config_path()?,
@@ -56,7 +56,32 @@ pub async fn build_agent(
         }
     };
 
-    let (mut model_obj, level) = select_model(&registry, &config, model)?;
+    let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root)?;
+    Ok((agent, model_obj, level, config, registry))
+}
+
+/// Build an [`Agent`] for a selected model from an already-loaded
+/// [`ModelRegistry`] and [`Config`], reusing an existing agent's per-session
+/// tmp directory, root, system prompt, retry budget, and bash policy when
+/// `existing` is given.
+///
+/// The startup path passes `None` and gets a fresh agent (a new tmp dir).
+/// The `/model` selector passes the live agent so the switch doesn't orphan
+/// `lofi.bash` full-output logs or `lofi.bash_read` state. This is sync and
+/// side-effect-free beyond provider construction, so a switch never blocks
+/// the UI on remote discovery — the registry is retained from startup.
+///
+/// # Errors
+/// Propagates [`Error`] from model resolution, thinking-level validation,
+/// or provider construction.
+pub fn rebuild_agent(
+    existing: Option<&Agent>,
+    registry: &ModelRegistry,
+    config: &lofi_types::Config,
+    model: Option<&str>,
+    root: &std::path::Path,
+) -> Result<(Agent, Model, ThinkingLevel)> {
+    let (mut model_obj, level) = select_model(registry, config, model)?;
     // The effective thinking level is resolved here, not in the registry, so
     // the same cached registry serves runs at different levels.
     model_obj.thinking = level;
@@ -67,18 +92,22 @@ pub async fn build_agent(
         .ok_or_else(|| Error::Config(format!("provider not found: {}", model_obj.provider)))?;
     let provider = open(model_obj.api, provider_cfg)?;
 
-    let agent = Agent::new(
-        provider,
-        model_obj.clone(),
-        root.to_path_buf(),
-        state::create_session_tmp_dir()?,
-        SYSTEM_PROMPT.to_string(),
-        None,
-        config.compaction.reserved_context_tokens,
-        &config.bash,
-    )
-    .with_retry(crate::retry::RetryPolicy::from(config.retry));
-    Ok((agent, model_obj, level, config))
+    let agent = if let Some(a) = existing {
+        a.with_model(provider, model_obj.clone())
+    } else {
+        Agent::new(
+            provider,
+            model_obj.clone(),
+            root.to_path_buf(),
+            state::create_session_tmp_dir()?,
+            SYSTEM_PROMPT.to_string(),
+            None,
+            config.compaction.reserved_context_tokens,
+            &config.bash,
+        )
+        .with_retry(crate::retry::RetryPolicy::from(config.retry))
+    };
+    Ok((agent, model_obj, level))
 }
 
 /// A parsed --model query: provider/model[:level].

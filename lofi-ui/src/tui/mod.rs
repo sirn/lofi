@@ -77,6 +77,50 @@ use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions, S
 use lofi_error::{Error, Result};
 use crate::tui::view::HStack;
 
+/// Retained model registry + config so `/model` can rebuild the agent
+/// mid-session without re-running remote discovery. The registry is taken
+/// from the startup `build_agent` call; `rebuild` is sync and side-effect-free
+/// beyond provider construction, so a switch never blocks the UI on the
+/// network. `choices` backs the `/model` picker.
+pub(crate) struct ModelSwitcher {
+    registry: lofi_core::ModelRegistry,
+    config: lofi_types::Config,
+    root: PathBuf,
+    choices: Vec<lofi_types::ModelChoice>,
+}
+
+impl ModelSwitcher {
+    pub(crate) fn new(
+        registry: lofi_core::ModelRegistry,
+        config: lofi_types::Config,
+        root: PathBuf,
+    ) -> Self {
+        let choices = registry.choices();
+        Self { registry, config, root, choices }
+    }
+
+    /// The selectable models, in registry order.
+    pub(crate) fn choices(&self) -> &[lofi_types::ModelChoice] {
+        &self.choices
+    }
+
+    /// Rebuild the agent for `provider/model[:level]`, reusing `existing`'s
+    /// per-session tmp dir when given.
+    pub(crate) fn rebuild(
+        &self,
+        existing: Option<&Agent>,
+        query: &str,
+    ) -> Result<(Agent, lofi_types::Model, ThinkingLevel)> {
+        lofi_core::rebuild_agent(
+            existing,
+            &self.registry,
+            &self.config,
+            Some(query),
+            &self.root,
+        )
+    }
+}
+
 /// Braille spinner frames, advanced on each tick while a run is active.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
@@ -106,6 +150,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a past session to resume"),
     ("/session", "show session info"),
     ("/tree", "roll back to a past turn"),
+    ("/model", "switch the active model"),
     ("/verbose", "toggle tool detail"),
 ];
 
@@ -435,6 +480,26 @@ impl Modal for TreePickerState {
     }
 }
 
+/// State for the `/model` picker overlay. Owns a snapshot of the available
+/// models ([`App::model_choices`] at open time) so navigation shares the
+/// [`Modal`] dispatch with a correct `len`.
+struct ModelPickerState {
+    choices: Vec<lofi_types::ModelChoice>,
+    selected: usize,
+}
+
+impl Modal for ModelPickerState {
+    fn len(&self) -> usize {
+        self.choices.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
 impl Popover for SlashComplete {
     fn len(&self) -> usize {
         self.candidates.len()
@@ -615,6 +680,14 @@ pub(crate) struct App {
     picker: Option<PickerState>,
     /// '/tree' overlay state, when open. See [`TreePickerState`].
     tree_picker: Option<TreePickerState>,
+    /// `/model` overlay state, when open. See [`ModelPickerState`].
+    model_picker: Option<ModelPickerState>,
+    /// The available models for `/model`, snapshot at startup from the
+    /// retained registry. Empty when no provider has credentials.
+    model_choices: Vec<lofi_types::ModelChoice>,
+    /// A `/model` confirmation hands a `provider/model` query here; the run
+    /// loop rebuilds the agent from the retained registry and clears it.
+    pending_model_switch: Option<String>,
     /// Read-only information modal (e.g. `/session` output), when open.
     info: Option<InfoModal>,
     /// Slash-command autocomplete popover, active while the input is a
@@ -735,6 +808,7 @@ impl Drop for TerminalGuard {
 /// `agent` is `None` when no model is configured: the UI still launches and
 /// shows `no_models_hint` in the log; submitting a prompt re-surfaces the
 /// hint instead of running.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     agent: Option<Agent>,
     model_label: String,
@@ -743,6 +817,7 @@ pub(crate) async fn run(
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
+    switcher: Option<ModelSwitcher>,
 ) -> Result<()> {
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
@@ -766,13 +841,14 @@ pub(crate) async fn run(
         .run_until(async move {
             run_loop(
                 &mut guard,
-                agent.as_ref(),
+                agent,
                 model_label,
                 thinking,
                 session,
                 no_models_hint,
                 ctx_limit,
                 compaction,
+                switcher,
             )
             .await
         })
@@ -783,13 +859,14 @@ pub(crate) async fn run(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_loop(
     guard: &mut TerminalGuard,
-    agent: Option<&Agent>,
+    mut agent: Option<Agent>,
     model_label: String,
     thinking: ThinkingLevel,
     session: SessionConfig,
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
+    switcher: Option<ModelSwitcher>,
 ) -> Result<()> {
     let SessionConfig {
         store,
@@ -799,8 +876,12 @@ async fn run_loop(
         file_size,
         cwd,
     } = session;
+    let model_choices = switcher
+        .as_ref()
+        .map_or(Vec::new(), |s| s.choices().to_vec());
     let edit = compaction.edit.clone();
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
+    app.model_choices = model_choices;
     app.session = SessionState {
         store,
         path,
@@ -889,7 +970,7 @@ async fn run_loop(
                                         "could not compact at the hard cap; cannot continue".to_string(),
                                     );
                                 } else {
-                                    spawn_continue(&mut app, agent, &mut current_run);
+                                    spawn_continue(&mut app, agent.as_ref(), &mut current_run);
                                 }
                             } else {
                                 app.maybe_auto_compact();
@@ -902,7 +983,22 @@ async fn run_loop(
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(ev)) => {
-                        handle_event(&ev, &mut app, agent, &mut current_run);
+                        handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
+                    if let Some(q) = app.pending_model_switch.take() {
+                        match switcher.as_ref().map_or(
+                            Err(lofi_core::Error::Config("no model registry".into())),
+                            |s| s.rebuild(agent.as_ref(), &q),
+                        ) {
+                            Ok((new_agent, model, level)) => {
+                                agent = Some(new_agent);
+                                app.apply_model_switch(&model, level);
+                            }
+                            Err(e) => app.notify(
+                                NotifyKind::Error,
+                                format!("switch model: {e}"),
+                            ),
+                        }
+                    }
                     }
                     Some(Err(e)) => {
                         last_err = Some(format!("input read failed: {e}"));
