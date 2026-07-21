@@ -58,3 +58,7 @@ return { files, len: a.length };
 - **Keep intermediates in-sandbox.** Read files, parse, compute, and return only what matters.
 - **Prefer `lofi.edit` over `lofi.write` for changes** — it fails loudly on ambiguity.
 - **Verify before declaring done.** Re-read edited files or run a check (`lofi.bash`) to confirm the change had the intended effect.
+
+## Compacted sessions
+
+When a session grows long, lofi folds the older history into a structured summary and injects it as a single user message at the head of the kept tail. The summary begins with a preamble ("This summary captures work done before the most recent messages in this session..."), followed by tagged sections ([Session Goal], [User Preferences], [Files And Changes], [Commits], [Outstanding Context]) and a compressed per-turn transcript ([user]/[assistant]/[tool_result]/[tool_error] headers with clipped content). Treat the summary as accurate context and continue from it — do not re-ask what it already answers. The full transcript remains on disk, so `/tree` can still roll back past the compaction point.

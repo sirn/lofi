@@ -321,6 +321,28 @@ pub enum SessionEventKind {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
+    /// An offline compaction marker: `summary` replaces the summarized
+    /// prefix (everything older than `first_kept_entry_id` on the active
+    /// path) and is injected as a single user message at the head of the
+    /// kept tail on resume. Appended to the active leaf by the `/compact`
+    /// command (and the auto-trigger); a resumed session rebuilds the
+    /// compacted history from it. Subsequent turns chain off this entry so
+    /// the active path runs root -> kept tail -> Compaction -> new turns.
+    Compaction {
+        /// The full summary text (preamble + sections + brief transcript).
+        summary: String,
+        /// Event id of the first kept message on the active path. The
+        /// agent-history walk on resume emits the summary, then the kept
+        /// tail, and stops at this id — everything older is already folded
+        /// into the summary. The empty string means compact-all (nothing
+        /// kept).
+        first_kept_entry_id: String,
+        /// How many live messages were folded into the summary (for the
+        /// visible marker on resume).
+        summarized: usize,
+        /// How many messages were kept in the tail.
+        kept: usize,
+    },
 }
 
 /// One append-only line in a session transcript log.

@@ -202,6 +202,9 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::Error(msg));
         }
+        AgentEvent::Compaction { summarized, kept } => {
+            turn.blocks.push(Block::Compaction { summarized, kept });
+        }
         // Status-only events are handled by `App::apply_event` before
         // reaching this builder; they are no-ops here.
         AgentEvent::RetryStart { .. }
@@ -380,6 +383,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 Role::System => {}
             },
             SessionEventKind::NativeTool(_) | SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {}
+            SessionEventKind::Compaction { summarized, kept, .. } => {
+                // The summary is injected into the agent history by
+                // `messages_from_events`, not the visible transcript; the
+                // replay path only renders the marker block.
+                out.push(AgentEvent::Compaction { summarized: *summarized, kept: *kept });
+            }
             SessionEventKind::TurnEnd { label, elapsed_ms, cost, usage, .. } => {
                 out.push(AgentEvent::TurnEnd {
                     label: label.clone(),
@@ -406,10 +415,24 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
     let mut out: Vec<Message> = Vec::new();
     let mut skipping = false;
+    // The compaction boundary: once a Compaction marker is seen leaf-first,
+    // the summary is emitted and the walk stops at this event id, folding
+    // everything older into the summary. `None` while no compaction is in
+    // effect on the active path.
+    let mut boundary: Option<String> = None;
     // Iterate leaf-first so the `TurnFailed` boundary is seen before its
     // ancestors; `path` is root-first, so reverse.
     for &i in path.iter().rev() {
         match &events[i].kind {
+            SessionEventKind::Compaction { summary, first_kept_entry_id, .. } => {
+                if !summary.is_empty() {
+                    out.push(Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text { text: summary.clone() }],
+                    });
+                }
+                boundary = Some(first_kept_entry_id.clone());
+            }
             SessionEventKind::TurnFailed { .. } => {
                 skipping = true;
             }
@@ -418,6 +441,11 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
             }
             SessionEventKind::Message(m) if !skipping => {
                 out.push(m.clone());
+                if let Some(b) = &boundary {
+                    if b == &events[i].id {
+                        break;
+                    }
+                }
             }
             _ => {}
         }

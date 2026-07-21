@@ -174,4 +174,13 @@ pub enum AgentEvent {
         byte_start: u64,
         byte_end: u64,
     },
+    /// An offline compaction ran: `summarized` live messages were folded into
+    /// a structured summary and `kept` remain in the tail. Never produced by
+    /// the agent loop — synthesized by the replay path from a
+    /// `SessionEventKind::Compaction` marker and by the `/compact` command,
+    /// so the live view and a resumed view render the same marker.
+    Compaction {
+        summarized: usize,
+        kept: usize,
+    },
 }

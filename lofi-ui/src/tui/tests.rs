@@ -913,6 +913,86 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
 }
 
 #[test]
+fn tree_shows_compaction_node_and_reverts_before_it() {
+    // user1 -> assistant1 -> turn_end1 -> Compaction -> user2 -> assistant2
+    // -> turn_end2. /tree must list a "compact:" node between turn 1 and
+    // turn 2. Selecting it rolls back to the compaction's parent
+    // (turn_end1), restoring the pre-compaction history (user1 + assistant1)
+    // and leaving the input empty.
+    use lofi_core::session::store::SessionStore;
+    use lofi_types::{ContentBlock, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let kinds = [
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "first".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+        SessionEventKind::Compaction {
+            summary: "summary".into(),
+            first_kept_entry_id: String::new(),
+            summarized: 3,
+            kept: 1,
+        },
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "second".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "world".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut batch: Vec<SessionEvent> = kinds
+        .into_iter()
+        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .collect();
+    store::append_events(&path, &mut batch, None).unwrap();
+    let (_meta, events, _o, _s) = store::load(&path).unwrap();
+    let turn_end1_id = events[2].id.clone();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    // Trunk: user1, agent1, compact, user2, agent2.
+    assert!(picker.entries.iter().any(|e| e.label.starts_with("compact:")));
+    let comp_idx = picker
+        .entries
+        .iter()
+        .position(|e| e.label.starts_with("compact:"))
+        .unwrap();
+    // The compaction node reverts to its parent (turn_end1), prefill empty.
+    assert_eq!(picker.entries[comp_idx].branch_point, turn_end1_id);
+    assert!(picker.entries[comp_idx].prefill.is_empty());
+    a.tree_picker.as_mut().unwrap().selected = comp_idx;
+    a.tree_picker_confirm();
+    // Rolled back to before the compact: only turn 1's messages remain.
+    assert!(a.tree_picker.is_none());
+    assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
+    assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    assert_eq!(a.turns.len(), 1);
+}
+
+#[test]
 fn modal_tab_cycles_with_wraparound() {
     // /tree on a two-turn session yields 4 entries, defaulting to the
     // last (index 3). Tab wraps forward (3 -> 0); Shift+Tab wraps back
