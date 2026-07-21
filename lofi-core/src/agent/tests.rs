@@ -61,6 +61,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         retry: crate::retry::RetryPolicy::default(),
         system_prompt: "sys".to_string(),
         max_output_tokens: None,
+        reserved_context_tokens: 0,
     }
 }
 
@@ -247,6 +248,50 @@ async fn run_once_tool_call_executes_and_appends_result() {
 }
 
 #[tokio::test]
+async fn run_continuation_force_stops_at_hard_cap() {
+    // A tool-use loop whose second round crosses the hard context cap must
+    // force-stop with `ContextPressure` (no `TurnEnd`) and leave the partial
+    // turn's messages in place (ending in a tool result, a matched cycle).
+    let dir = tempdir().unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_round = |input_tokens| {
+        vec![
+            StreamingEvent::ToolUseStart { id: "t1".to_string(), name: "exec".to_string() },
+            StreamingEvent::ToolUseInputDelta { id: "t1".to_string(), delta: tool_input.clone() },
+            StreamingEvent::ToolUseEnd { id: "t1".to_string() },
+            StreamingEvent::Done(Usage { input_tokens, ..Usage::default() }),
+        ]
+    };
+    let agent = Agent {
+        provider: Arc::new(MockProvider { rounds: std::sync::Mutex::new(vec![tool_round(10), tool_round(500)]) }),
+        model: { let mut m = model(); m.context_window = Some(100); m },
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
+        retry: crate::retry::RetryPolicy::default(),
+        system_prompt: "sys".to_string(),
+        max_output_tokens: None,
+        reserved_context_tokens: 20, // hard cap = 100 - 20 = 80
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent.run_continuation(&mut messages, String::new(), tx, None, false).await.unwrap();
+
+    let mut saw_pressure = false;
+    let mut saw_turn_end = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::ContextPressure { .. } => saw_pressure = true,
+            AgentEvent::TurnEnd { .. } => saw_turn_end = true,
+            _ => {}
+        }
+    }
+    assert!(saw_pressure, "expected a ContextPressure event");
+    assert!(!saw_turn_end, "hard-cap stop must not emit TurnEnd");
+    // The partial turn ends in a tool result (matched cycle), kept verbatim.
+    assert_eq!(messages.last().unwrap().role, Role::Tool);
+}
+
+#[tokio::test]
 async fn run_once_tool_error_marks_result_error() {
     let dir = tempdir().unwrap();
     let tool_input =
@@ -294,7 +339,7 @@ async fn run_retries_transient_provider_errors() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None)
+        .run_continuation(&mut messages, "go".to_string(), tx, None, false)
         .await;
     assert!(result.is_ok(), "should recover: {result:?}");
     // Drain events and confirm a RetryStart then RetryEnd(success) fired.
@@ -345,7 +390,7 @@ async fn run_does_not_retry_non_transient_errors() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None)
+        .run_continuation(&mut messages, "go".to_string(), tx, None, false)
         .await;
     assert!(result.is_err(), "non-retryable errors should propagate");
 }
@@ -373,7 +418,7 @@ async fn run_exits_when_receiver_dropped() {
 
 use indexmap::IndexMap;
 use lofi_types::{
-    AgentConfig, ApiTypeMapping, Config, ModelConfig, PricingConvention,
+    AgentConfig, ApiTypeMapping, CompactionConfig, Config, ModelConfig, PricingConvention,
     PricingFieldMappings, ProviderConfig, ThinkingLevel,
 };
 
@@ -456,6 +501,7 @@ fn provider(
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: None,
         default_model: None,
         providers,
@@ -576,6 +622,7 @@ fn select_model_uses_default_model_when_no_query() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
@@ -600,6 +647,7 @@ fn select_model_uses_default_provider_when_no_query() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: None,
         providers,
@@ -624,6 +672,7 @@ fn select_model_default_model_overrides_default_provider() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
@@ -648,6 +697,7 @@ fn select_model_explicit_query_overrides_defaults() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
