@@ -2527,6 +2527,53 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     assert!(on_screen, "cursor should stay on screen after resize");
 }
 
+#[test]
+fn resize_keeps_nav_cursor_cell_on_same_content_char() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let prompt =
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
+            .repeat(2);
+    a.turns.push(Turn {
+        prompt,
+        blocks: Vec::new(),
+    });
+    push_turn(&mut a);
+    a.mode = Mode::Navigate;
+
+    // Narrow render; park the cursor cell mid-content on a line inside turn 0.
+    let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let (intra, nav_col, char_pos) = {
+        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let intra = 4.min(narrow.len().saturating_sub(1));
+        let rl = &narrow[intra];
+        let nav_col = rl.content.0 + (rl.content_len() / 2).max(1);
+        let char_pos = app_nav::cursor_char_pos(narrow, intra, nav_col);
+        (intra, nav_col, char_pos)
+    };
+    a.nav_cursor = a.turn_start_line(0) + intra;
+    a.nav_col = nav_col;
+    a.nav_show_cursor();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+
+    // Widen: the line re-wraps, but the cursor cell must stay on the same
+    // content character (its `nav_col` re-seated onto that char).
+    let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let new_char_pos = {
+        let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+        let new_intra = a.nav_cursor - a.turn_start_line(0);
+        assert!(new_intra < wide.len(), "cursor should land within turn 0");
+        app_nav::cursor_char_pos(wide, new_intra, a.nav_col)
+    };
+    assert_eq!(
+        new_char_pos, char_pos,
+        "cursor cell should stay on the same content char after resize"
+    );
+}
+
 /// A height shrink that leaves the cursor's old row past the new viewport must
 /// clamp it to the bottom edge instead of letting it disappear off-screen.
 #[test]
