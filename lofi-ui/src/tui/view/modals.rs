@@ -366,6 +366,75 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// `/thinking` picker: a centered list of thinking levels offered for the
+/// current model (`off` plus its declared levels). The current level is
+/// highlighted; `↑/↓` or `j`/`k` move, `Enter` switches, `Esc`/`q` cancels.
+pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    let Some(picker) = &app.thinking_picker else { return; };
+    let t = app.theme;
+    let total = picker.levels.len();
+    let title = " Thinking level  ↑/↓ j/k enter esc ";
+    let row_for = |l: &lofi_types::ThinkingLevel| l.as_str().to_string();
+    let content_w = picker
+        .levels
+        .iter()
+        .map(|l| prim::width(&row_for(l)))
+        .max()
+        .unwrap_or(0);
+    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+        .unwrap_or(40)
+        .min(area.width);
+    let rows = total.min(20);
+    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
+    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+        .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
+    let popup = horiz[1];
+    f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            title,
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    let need_sb = total > inner.height as usize;
+    let content = if need_sb {
+        Rect {
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        inner
+    };
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
+    let items: Vec<ListItem> = picker
+        .levels
+        .iter()
+        .map(|l| {
+            let is_active = *l == app.thinking;
+            ListItem::new(Span::styled(
+                row_for(l),
+                if is_active { active_style } else { inactive_style },
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_widget(block, popup);
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+    }
+}
+
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
     let Some(picker) = &app.tree_picker else { return; };
