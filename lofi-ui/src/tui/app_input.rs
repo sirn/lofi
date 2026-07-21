@@ -29,29 +29,19 @@ impl App {
         self.input_scroll = scroll.min(max_top);
     }
 
-    /// Soft-wrap the input to `content_w` display cells, breaking on
-    /// wide-char boundaries (not word boundaries, so the cursor maps
-    /// predictably). Hard `\n` splits always start a new row. Empty input
-    /// yields a single empty row so the prompt always renders one line.
+    /// Soft-wrap the input to `content_w` display cells, breaking at word
+    /// boundaries (falling back to a hard char break for a token wider than
+    /// the column). Hard `\n` splits always start a new row. The shared
+    /// [`wrap_input_ranges`] core also drives [`input_cursor_pos`] so the
+    /// cursor lands exactly where the text breaks. Empty input yields a
+    /// single empty row so the prompt always renders one line.
     pub(super) fn input_select_rows(&self, content_w: usize) -> Vec<String> {
         let mut rows = Vec::new();
         for line in self.input.split('\n') {
-            if content_w == 0 {
-                rows.push(line.to_string());
-                continue;
+            let chars: Vec<char> = line.chars().collect();
+            for (s, e) in wrap_input_ranges(&chars, content_w) {
+                rows.push(chars[s..e].iter().collect());
             }
-            let mut cur = String::new();
-            let mut cur_w = 0usize;
-            for c in line.chars() {
-                let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-                if cur_w + cw > content_w && !cur.is_empty() {
-                    rows.push(std::mem::take(&mut cur));
-                    cur_w = 0;
-                }
-                cur.push(c);
-                cur_w += cw;
-            }
-            rows.push(cur);
         }
         if rows.is_empty() {
             rows.push(String::new());
@@ -72,8 +62,9 @@ impl App {
             vrow += count_wrapped_rows(line, content_w);
         }
         let line = self.input.split('\n').nth(lrow).unwrap_or("");
-        let prefix: String = line.chars().take(lcol).collect();
-        let (sub, x) = wrap_prefix_pos(&prefix, content_w);
+        // Wrap the full logical line (not just the cursor prefix) so a word
+        // boundary past the cursor places it on the right row.
+        let (sub, x) = wrap_cursor_pos(line, lcol, content_w);
         (vrow + sub, x)
     }
 
