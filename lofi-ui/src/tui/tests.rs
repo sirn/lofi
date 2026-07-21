@@ -2573,6 +2573,50 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
         "cursor cell should stay on the same content char after resize"
     );
 }
+#[test]
+fn resize_keeps_nav_cursor_at_its_viewport_row() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    // Enough turns to overflow the viewport at both widths, so the viewport
+    // can scroll and the cursor's row is meaningful.
+    let prompt =
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".to_string();
+    for _ in 0..6 {
+        a.turns.push(Turn {
+            prompt: prompt.clone(),
+            blocks: Vec::new(),
+        });
+        push_turn(&mut a);
+    }
+    a.mode = Mode::Navigate;
+
+    // Narrow render; place the cursor a few rows into the viewport.
+    let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert!(a.log_total > a.log_view_h, "transcript overflows the viewport");
+    // Place the cursor on a content line near the top (turn 2) and park the
+    // viewport so it sits at row 4, unpinned (so the viewport can follow it).
+    let k = 2;
+    let intra = 2.min(a.frozen_render.get(k).unwrap().len().saturating_sub(1));
+    a.nav_cursor = a.turn_start_line(k) + intra;
+    a.pinned = false;
+    a.top_line = a.nav_cursor.saturating_sub(4);
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let row = a.nav_cursor - a.log_off;
+    assert_eq!(row, 4);
+
+    // Widen: the intervening lines re-wrap, but the cursor stays on its
+    // previous viewport row — the viewport follows it instead of drifting.
+    let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert!(a.log_total > a.log_view_h, "still overflows after widen");
+    assert_eq!(
+        a.nav_cursor - a.log_off,
+        row,
+        "cursor viewport row should be preserved across a re-wrap"
+    );
+}
 
 /// A height shrink that leaves the cursor's old row past the new viewport must
 /// clamp it to the bottom edge instead of letting it disappear off-screen.
@@ -2609,3 +2653,5 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
         "cursor should clamp to the bottom edge on height shrink"
     );
 }
+
+
