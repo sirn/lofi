@@ -476,13 +476,23 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         inner
     };
     let tree_art = Style::new().fg(t.subtle);
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker
         .entries
         .iter()
         .map(|e| {
-            let label_style = if e.is_active { active_style } else { inactive_style };
+            // Color by turn kind so user/agent/compact nodes read at a
+            // glance; the active path (the displayed conversation) is bolded.
+            let kind_color = if e.label.starts_with("user:") {
+                t.secondary
+            } else if e.label.starts_with("agent:") {
+                t.info
+            } else {
+                t.muted // compact:
+            };
+            let mut label_style = Style::new().fg(kind_color);
+            if e.is_active {
+                label_style = label_style.add_modifier(Modifier::BOLD);
+            }
             ListItem::new(Line::from(vec![
                 Span::styled(e.prefix.clone(), tree_art),
                 Span::styled(e.label.clone(), label_style),
