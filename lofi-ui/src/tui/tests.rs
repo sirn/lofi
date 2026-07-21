@@ -2427,3 +2427,46 @@ fn frozen_cache_invalidates_on_width_change() {
         "frozen cache should re-wrap at the new width: narrow={h_narrow} wide={h_wide}"
     );
 }
+
+/// Regression for "resize snaps a scrolled-up view to the bottom": a re-wrap
+/// shrinks `total`/`base`, and the carried-over absolute `top_line` can land
+/// past the new bottom, clamping to the bottom and sticky-pinning. The view
+/// must instead keep its previous relative scroll position.
+#[test]
+fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    // A long prompt that wraps to many lines when narrow and far fewer when
+    // wide, so the re-wrap materially shrinks `total`/`base` on resize.
+    a.turns.push(Turn {
+        prompt: "word ".repeat(3000),
+        blocks: Vec::new(),
+    });
+    // turn[1] keeps turn[0] frozen (the last turn is rebuilt each frame).
+    push_turn(&mut a);
+
+    // Render narrow, then scroll up to the middle of the transcript.
+    let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let base_narrow = a.last_base;
+    assert!(base_narrow > 0, "narrow transcript should overflow the viewport");
+    a.pinned = false;
+    a.top_line = base_narrow / 2;
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert!(!a.pinned, "scrolled up, not following the tail");
+    assert_eq!(a.log_off, a.top_line);
+    assert!(a.log_off < a.last_base, "scrolled up, not at the bottom");
+
+    // Resize wider. Without re-anchoring the carried-over `top_line` would
+    // exceed the new (smaller) `base`, clamp to the bottom, and stick
+    // (`pinned = true`). With re-anchoring the view keeps its relative
+    // position and stays scrolled up.
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert!(!a.pinned, "resize should not snap a scrolled-up view to the bottom");
+    assert!(
+        a.log_off < a.last_base,
+        "view should remain scrolled up after resize, not pinned to the bottom"
+    );
+}

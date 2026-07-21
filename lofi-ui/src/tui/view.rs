@@ -205,6 +205,10 @@ fn feed_segment(
 
 fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let w = area.width as usize;
+    // Detect a re-wrap before `ensure_frozen` updates `frozen_width`: the
+    // absolute `top_line` is meaningless across a width change, so it is
+    // re-anchored to the viewport's previous relative position below.
+    let width_changed = app.frozen_width != w;
     // Sync the frozen-turn cache (all turns but the last) before reading it.
     app.ensure_frozen(w);
     let theme = app.theme;
@@ -236,6 +240,15 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let height = area.height as usize;
     let base = total.saturating_sub(height);
     app.log_rect = area;
+    // A re-wrap shifts absolute line indices, so a `top_line` carried over
+    // from the previous width may now point past the new bottom — clamping it
+    // would snap a scrolled-up view to the bottom and stick there (`pinned`).
+    // Re-anchor to the viewport's previous relative position instead. Integer
+    // math floors, so it can't round up to `base` and spuriously pin. A
+    // pinned (tail-following) view is left at the bottom by design.
+    if width_changed && !app.pinned && app.last_base > 0 {
+        app.top_line = ((app.log_off as u64 * base as u64) / app.last_base as u64) as usize;
+    }
     app.last_base = base;
     let off = if app.pinned { base } else { app.top_line.min(base) };
     app.pinned = off >= base;
