@@ -80,6 +80,7 @@ impl App {
             turn_byte_ranges: Vec::new(),
             render_epoch: 0,
             frozen_epoch: 0,
+            frozen_width: 0,
         }
     }
 
@@ -344,11 +345,14 @@ impl App {
     /// lines entered into the bounded [`FrozenCache`] (oldest evicted). Heights
     /// are kept for every frozen turn so the viewport can be located and the
     /// scroll total computed without holding all rendered lines in memory.
+    /// A viewport resize (width change) also drops the cache, since wrapping
+    /// and background padding depend on width.
     pub(super) fn ensure_frozen(&mut self, width: usize) {
-        if self.frozen_epoch != self.render_epoch {
+        if self.frozen_epoch != self.render_epoch || self.frozen_width != width {
             self.frozen_render.clear();
             self.frozen_heights.clear();
             self.frozen_epoch = self.render_epoch;
+            self.frozen_width = width;
         }
         let n = self.turns.len();
         let target = n.saturating_sub(1);

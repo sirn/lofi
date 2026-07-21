@@ -796,6 +796,11 @@ pub(crate) struct App {
     render_epoch: u64,
     /// Epoch captured when `frozen_render` was last built.
     frozen_epoch: u64,
+    /// Viewport width the frozen cache was last built at. A resize changes
+    /// the wrap width, so a mismatch discards the cache just like an epoch
+    /// bump — otherwise background-padded lines keep the old (narrower)
+    /// width after the terminal grows.
+    frozen_width: usize,
 }
 
 struct RunHandle {

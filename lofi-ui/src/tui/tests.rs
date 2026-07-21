@@ -2395,3 +2395,35 @@ fn thinking_picker_confirm_sets_pending_switch() {
     assert_eq!(a.pending_model_switch.as_deref(), Some("openai/gpt-4o:high"));
     assert!(a.thinking_picker.is_none());
 }
+
+/// Regression for "Transcript with background color should resize when
+/// viewport changed": the frozen-render cache must be invalidated on a width
+/// change, not only on a content (epoch) change. Otherwise completed turns
+/// keep their old-width rendering — background padding stays narrow after a
+/// terminal resize. A long prompt wraps to fewer lines at a wider viewport, so
+/// a strictly smaller height after widening proves the cache was rebuilt.
+#[test]
+fn frozen_cache_invalidates_on_width_change() {
+    let mut a = app();
+    // turn[0]: a long prompt that wraps to many lines when narrow.
+    a.turns.push(Turn {
+        prompt: "word ".repeat(30),
+        blocks: Vec::new(),
+    });
+    // turn[1] keeps turn[0] frozen (the last turn is rebuilt each frame).
+    push_turn(&mut a);
+
+    a.ensure_frozen(20);
+    let h_narrow = a.frozen_heights[0];
+    assert!(a.frozen_render.get(0).is_some());
+
+    a.ensure_frozen(100);
+    let h_wide = a.frozen_heights[0];
+    assert!(a.frozen_render.get(0).is_some());
+    // Without width invalidation the cache would keep its narrow rendering
+    // and h_wide would equal h_narrow.
+    assert!(
+        h_wide < h_narrow,
+        "frozen cache should re-wrap at the new width: narrow={h_narrow} wide={h_wide}"
+    );
+}
