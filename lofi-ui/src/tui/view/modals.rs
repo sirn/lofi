@@ -1,5 +1,5 @@
 //! Modal and popover overlays: the resume picker, tree picker, info modal,
-//! and slash-complete popover, plus their shared scrollbar helper.
+//! and slash-complete popover. The scrollbar itself lives in [`prim`].
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -70,7 +70,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
     }
 }
 
@@ -161,40 +161,7 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
-    }
-}
-
-/// A 1-cell-wide vertical scrollbar drawn in `track`. `position` is the
-/// top visible row, `visible` the viewport height, `total` the full row
-/// count. The thumb is sized proportional to `visible/total` and positioned
-/// by `position`; nothing is drawn when everything fits.
-fn render_scrollbar(
-    f: &mut Frame,
-    track: Rect,
-    position: usize,
-    visible: usize,
-    total: usize,
-    track_color: Color,
-    thumb_color: Color,
-) {
-    if total == 0 || visible >= total || track.height == 0 {
-        return;
-    }
-    let h = track.height as usize;
-    let thumb_h = ((visible * h) / total).clamp(1, h);
-    let max_pos = total.saturating_sub(visible);
-    let max_top = h.saturating_sub(thumb_h);
-    let thumb_top = position
-        .checked_mul(max_top)
-        .and_then(|n| n.checked_div(max_pos))
-        .unwrap_or(0);
-    let buf = f.buffer_mut();
-    for y in 0..h {
-        let cell = &mut buf[(track.x, track.y + y as u16)];
-        let is_thumb = y >= thumb_top && y < thumb_top + thumb_h;
-        cell.set_char(if is_thumb { '█' } else { '│' });
-        cell.set_fg(if is_thumb { thumb_color } else { track_color });
+        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
     }
 }
 
@@ -308,7 +275,7 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
             1,
             inner.height.saturating_sub(1),
         );
-        render_scrollbar(f, track, scroll, view_h, total, t.subtle, t.muted);
+        prim::render_scrollbar(f, track, scroll, view_h, total, t.subtle, t.muted);
     }
 }
 
@@ -379,6 +346,6 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
     }
 }

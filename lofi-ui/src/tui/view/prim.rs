@@ -4,8 +4,10 @@
 //! Components compose these into larger units; nothing here knows about
 //! turns or blocks.
 
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::theme::{active_indicator, Theme};
@@ -431,6 +433,42 @@ impl<'a> HStack<'a> {
         }
         out.extend(self.right);
         Line::from(out)
+    }
+}
+
+/// A 1-cell-wide vertical scrollbar drawn in `track`. `position` is the
+/// top visible row, `visible` the viewport height, `total` the full row
+/// count. The thumb is sized proportional to `visible/total` and positioned
+/// by `position`; nothing is drawn when everything fits.
+///
+/// The thumb uses the heavy box-drawing `┃` over a light `│` track — a
+/// thin, calm indicator rather than a solid block.
+pub fn render_scrollbar(
+    f: &mut Frame,
+    track: Rect,
+    position: usize,
+    visible: usize,
+    total: usize,
+    track_color: Color,
+    thumb_color: Color,
+) {
+    if total == 0 || visible >= total || track.height == 0 {
+        return;
+    }
+    let h = track.height as usize;
+    let thumb_h = ((visible * h) / total).clamp(1, h);
+    let max_pos = total.saturating_sub(visible);
+    let max_top = h.saturating_sub(thumb_h);
+    let thumb_top = position
+        .checked_mul(max_top)
+        .and_then(|n| n.checked_div(max_pos))
+        .unwrap_or(0);
+    let buf = f.buffer_mut();
+    for y in 0..h {
+        let cell = &mut buf[(track.x, track.y + y as u16)];
+        let is_thumb = y >= thumb_top && y < thumb_top + thumb_h;
+        cell.set_char(if is_thumb { '┃' } else { '│' });
+        cell.set_fg(if is_thumb { thumb_color } else { track_color });
     }
 }
 
