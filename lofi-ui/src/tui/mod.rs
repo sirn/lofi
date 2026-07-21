@@ -151,6 +151,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show session info"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
+    ("/thinking", "switch the thinking level"),
     ("/verbose", "toggle tool detail"),
 ];
 
@@ -500,6 +501,26 @@ impl Modal for ModelPickerState {
     }
 }
 
+/// State for the `/thinking` picker overlay. Owns the levels offered for the
+/// current model (`off` plus its declared `thinking_levels`, deduped) so
+/// navigation shares the [`Modal`] dispatch with a correct `len`.
+struct ThinkingPickerState {
+    levels: Vec<ThinkingLevel>,
+    selected: usize,
+}
+
+impl Modal for ThinkingPickerState {
+    fn len(&self) -> usize {
+        self.levels.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
 impl Popover for SlashComplete {
     fn len(&self) -> usize {
         self.candidates.len()
@@ -619,6 +640,9 @@ pub(crate) struct App {
     model_label: String,
     /// " · medium"-style suffix, or None when thinking is off.
     thinking_label: Option<String>,
+    /// Current thinking level; the source of `thinking_label` and the
+    /// pre-selection for the `/thinking` picker.
+    thinking: ThinkingLevel,
     /// Most recent turn's usage, for the context-window gauge (input
     /// + output + cache read/write of the latest round = current fill).
     status_usage: Option<Usage>,
@@ -682,6 +706,8 @@ pub(crate) struct App {
     tree_picker: Option<TreePickerState>,
     /// `/model` overlay state, when open. See [`ModelPickerState`].
     model_picker: Option<ModelPickerState>,
+    /// `/thinking` overlay state, when open. See [`ThinkingPickerState`].
+    thinking_picker: Option<ThinkingPickerState>,
     /// The available models for `/model`, snapshot at startup from the
     /// retained registry. Empty when no provider has credentials.
     model_choices: Vec<lofi_types::ModelChoice>,

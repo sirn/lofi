@@ -2335,4 +2335,63 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
     assert_eq!(a.model_label, "anthropic/claude");
     assert_eq!(a.thinking_label.as_deref(), Some(" · xhigh"));
     assert_eq!(a.ctx_limit, 200_000);
+    assert_eq!(a.thinking, ThinkingLevel::XHigh);
+}
+
+#[test]
+fn thinking_picker_open_preselects_current() {
+    let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "openai".into(),
+        id: "gpt-4o".into(),
+        name: String::new(),
+        thinking_levels: vec![ThinkingLevel::Medium, ThinkingLevel::High],
+        supports_image: false,
+        context_window: None,
+    }];
+    a.open_thinking_picker();
+    let picker = a.thinking_picker.as_ref().unwrap();
+    // off first, then the model's declared levels.
+    assert_eq!(
+        picker.levels,
+        vec![ThinkingLevel::Off, ThinkingLevel::Medium, ThinkingLevel::High]
+    );
+    // Medium is the current level.
+    assert_eq!(picker.selected, 1);
+    assert!(a.modal_open());
+}
+
+#[test]
+fn thinking_picker_open_no_levels_notifies() {
+    let mut a = app();
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "openai".into(),
+        id: "gpt-4o".into(),
+        name: String::new(),
+        thinking_levels: vec![],
+        supports_image: false,
+        context_window: None,
+    }];
+    a.open_thinking_picker();
+    assert!(a.thinking_picker.is_none());
+    assert!(a.notify.is_some());
+}
+
+#[test]
+fn thinking_picker_confirm_sets_pending_switch() {
+    let mut a = app(); // model_label = "openai/gpt-4o"
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "openai".into(),
+        id: "gpt-4o".into(),
+        name: String::new(),
+        thinking_levels: vec![ThinkingLevel::Medium, ThinkingLevel::High],
+        supports_image: false,
+        context_window: None,
+    }];
+    a.open_thinking_picker();
+    // Move to High (index 2).
+    a.thinking_picker.as_mut().unwrap().selected = 2;
+    a.thinking_picker_confirm();
+    assert_eq!(a.pending_model_switch.as_deref(), Some("openai/gpt-4o:high"));
+    assert!(a.thinking_picker.is_none());
 }
