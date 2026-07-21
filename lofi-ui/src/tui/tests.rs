@@ -2470,3 +2470,61 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
         "view should remain scrolled up after resize, not pinned to the bottom"
     );
 }
+
+/// Companion to `resize_reanchors_scrolled_up_view_...`: the Navigate cursor
+/// (`nav_cursor`) is also an absolute line index, so a re-wrap used to clamp
+/// it to the last line. It must re-anchor to its previous relative position
+/// and stay on screen.
+#[test]
+fn resize_reanchors_nav_cursor() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: "word ".repeat(3000),
+        blocks: Vec::new(),
+    });
+    push_turn(&mut a); // turn[1] keeps turn[0] frozen.
+    a.mode = Mode::Navigate;
+
+    // Render narrow, place the cursor at the middle of the transcript.
+    let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let total_narrow = a.log_total;
+    assert!(total_narrow > 0, "narrow transcript should overflow the viewport");
+    a.nav_cursor = total_narrow / 2;
+    a.nav_show_cursor();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let cursor_narrow = a.nav_cursor;
+    assert!(cursor_narrow < total_narrow.saturating_sub(1), "cursor mid-transcript, not last");
+
+    // Resize wider: the re-wrap shrinks `total`. Without re-anchoring the
+    // carried-over cursor would exceed the new total and clamp to the last
+    // line; with re-anchoring it keeps its relative position.
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let total_wide = a.log_total;
+    assert!(total_wide < total_narrow, "wider viewport re-wraps to fewer lines");
+    assert!(
+        a.nav_cursor < total_wide.saturating_sub(1),
+        "nav_cursor should be re-anchored, not clamped to the last line: cursor={} total={}",
+        a.nav_cursor,
+        total_wide
+    );
+    // Same relative position as before the resize.
+    let frac_narrow = cursor_narrow as f64 / total_narrow as f64;
+    let frac_wide = a.nav_cursor as f64 / total_wide as f64;
+    assert!(
+        (frac_wide - frac_narrow).abs() < 0.05,
+        "relative cursor position should be preserved: narrow={frac_narrow:.3} wide={frac_wide:.3}"
+    );
+    // Both offsets scale by ~total_wide/total_narrow, so the cursor stays on
+    // screen without an explicit cursor-follow.
+    assert!(
+        a.nav_cursor >= a.log_off && a.nav_cursor < a.log_off + a.log_view_h,
+        "cursor should stay on screen after resize: cursor={} off={} view_h={}",
+        a.nav_cursor,
+        a.log_off,
+        a.log_view_h
+    );
+}
