@@ -362,3 +362,100 @@ impl App {
         self.run_start.map(|s| s.elapsed()).unwrap_or_default()
     }
 }
+
+impl App {
+    /// Run an offline compaction over the current session and fold the older
+    /// history into a structured summary. Replaces the agent history with
+    /// the summary message followed by the kept tail, appends a Compaction
+    /// marker to the transcript (so a resumed session rebuilds the same
+    /// compacted history), renders a marker block on the current turn, and
+    /// posts a notification. Returns true when a compaction actually ran.
+    pub(super) fn compact_now(&mut self) -> bool {
+        let Some(events) = self.compaction_events() else {
+            self.notify(NotifyKind::Warn, "nothing to compact yet");
+            return false;
+        };
+        let opts = CompactOptions::default();
+        let Some(c) = compact(&events, &opts) else {
+            self.notify(NotifyKind::Warn, "nothing to compact yet");
+            return false;
+        };
+        let new_history = compacted_history(&c);
+        if let Ok(mut g) = self.history.lock() {
+            *g = new_history;
+        }
+        // Persist the marker so resume rebuilds the compacted history. The
+        // marker chains off the active leaf; subsequent turns chain off it.
+        if let Some(path) = self.session.path.clone() {
+            if let Some(first_kept) = c.first_kept_event_id.clone() {
+                let mut ev = SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::Compaction {
+                        summary: c.summary.clone(),
+                        first_kept_entry_id: first_kept,
+                        summarized: c.summarized_count,
+                        kept: c.kept_count,
+                    },
+                };
+                let _ = store::append_events(&path, std::slice::from_mut(&mut ev), None);
+            }
+        }
+        // Render the marker. Attach to the last turn when one exists; push a
+        // fresh turn otherwise (e.g. compaction invoked before any turn).
+        if self.turns.is_empty() {
+            self.push_turn(Turn {
+                prompt: String::new(),
+                blocks: vec![Block::Compaction { summarized: c.summarized_count, kept: c.kept_count }],
+            });
+        } else {
+            self.apply_event(AgentEvent::Compaction { summarized: c.summarized_count, kept: c.kept_count });
+        }
+        // The context gauge's last reading reflects the pre-compaction fill;
+        // drop it so the auto-trigger does not re-fire on the same crossing
+        // and the gauge waits for the next round's real (smaller) usage.
+        self.status_usage = None;
+        self.bump_render_epoch();
+        self.notify(
+            NotifyKind::Info,
+            format!("compacted {} msgs · kept {}", c.summarized_count, c.kept_count),
+        );
+        true
+    }
+
+    /// Auto-compact when the latest round's input tokens exceed three
+    /// quarters of the context window. Called after a run finishes. The
+    /// status-usage clear in `compact_now` prevents re-firing on the same
+    /// crossing.
+    pub(super) fn maybe_auto_compact(&mut self) {
+        let Some(usage) = self.status_usage else { return };
+        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
+        let threshold = limit.saturating_mul(3) / 4;
+        if usage.input_tokens > threshold {
+            self.compact_now();
+        }
+    }
+
+    /// Gather the active-path events for compaction: load the transcript
+    /// (so native tool records are available) when a session file exists,
+    /// otherwise synthesize a linear event log from the in-memory history.
+    /// Returns None when the history is empty.
+    fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
+        if let Some(path) = &self.session.path {
+            return store::load(path).ok().map(|(_meta, events, _off, _size)| events);
+        }
+        let msgs = self.history.lock().ok()?;
+        if msgs.is_empty() {
+            return None;
+        }
+        let mut events = Vec::with_capacity(msgs.len());
+        for (i, m) in msgs.iter().enumerate() {
+            events.push(SessionEvent {
+                id: i.to_string(),
+                parent_id: if i == 0 { None } else { Some((i - 1).to_string()) },
+                kind: SessionEventKind::Message(m.clone()),
+            });
+        }
+        Some(events)
+    }
+}

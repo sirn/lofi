@@ -760,7 +760,7 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
-    assert_eq!(sc.candidates, vec![7]); // /tree is index 7
+    assert_eq!(sc.candidates, vec![8]); // /tree is index 8
     // Typing the full command dismisses (nothing left to complete).
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
@@ -772,8 +772,9 @@ fn slash_complete_filters_and_accepts() {
     // Accept replaces the input with the selected candidate.
     a.input = "/".to_string();
     a.refresh_slash_complete();
-    a.slash_complete_down(); // index 1 = /exit
-    a.slash_complete_down(); // index 2 = /help
+    a.slash_complete_down(); // index 1 = /compact
+    a.slash_complete_down(); // index 2 = /exit
+    a.slash_complete_down(); // index 3 = /help
     a.slash_complete_accept();
     assert_eq!(a.input, "/help");
     assert_eq!(a.input_cursor, a.input.len());
