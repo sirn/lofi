@@ -156,21 +156,27 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     // skips persistence entirely. A missing most-recent falls back to fresh.
     let session = resolve_session(&opts)?;
 
-    let (agent, label, thinking, hint, ctx_limit, compaction) = match build_agent(
+    let (agent, label, thinking, hint, ctx_limit, compaction, switcher) = match build_agent(
         opts.config_path.as_deref(),
         opts.model.as_deref(),
         opts.root.as_path(),
     )
     .await
     {
-        Ok((agent, model, thinking, config)) => (
-            Some(agent),
-            format!("{}/{}", model.provider, model.id),
-            thinking,
-            None,
-            model.context_window.unwrap_or(0),
-            config.compaction.clone(),
-        ),
+        Ok((agent, model, thinking, config, registry)) => {
+            let root = opts.root.clone();
+            let compaction = config.compaction.clone();
+            let switcher = tui::ModelSwitcher::new(registry, config, root);
+            (
+                Some(agent),
+                format!("{}/{}", model.provider, model.id),
+                thinking,
+                None,
+                model.context_window.unwrap_or(0),
+                compaction,
+                Some(switcher),
+            )
+        }
         // No provider has credentials (or the selected provider is disabled):
         // launch the TUI anyway and show the hint in the log.
         Err(Error::NoModels(hint)) => (
@@ -180,10 +186,11 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
             Some(hint),
             0,
             lofi_types::CompactionConfig::default(),
+            None,
         ),
         Err(e) => return Err(e),
     };
-    tui::run(agent, label, thinking, session, hint, ctx_limit, compaction).await
+    tui::run(agent, label, thinking, session, hint, ctx_limit, compaction, switcher).await
 }
 
 /// Resolve the [`tui::SessionConfig`] for an interactive run from the flags.
@@ -246,7 +253,7 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 /// construction, or the agent run. The binary caller is responsible for
 /// translating the returned error into a nonzero exit code.
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
-    let (agent, _model, _thinking, _config) = build_agent(
+    let (agent, _model, _thinking, _config, _registry) = build_agent(
         opts.config_path.as_deref(),
         opts.model.as_deref(),
         opts.root.as_path(),

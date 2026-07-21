@@ -53,7 +53,7 @@ mod tests;
 
 pub use event::AgentEvent;
 pub use exec::{exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input};
-pub use model::{build_agent, select_model};
+pub use model::{build_agent, rebuild_agent, select_model};
 pub(crate) use exec::{cap_exec_result, cap_tool_result, extract_code_prefix};
 pub(crate) use model::initial_history;
 
@@ -264,6 +264,27 @@ impl Agent {
             max_output_tokens,
             reserved_context_tokens,
             bash_env,
+        }
+    }
+
+    /// Return a new agent bound to a different provider+model, reusing this
+    /// agent's workspace root, per-session tmp directory, system prompt,
+    /// retry budget, and bash policy. The `/model` selector uses this to
+    /// switch models mid-session without orphaning the per-session tmp dir
+    /// (which backs `lofi.bash` full-output logs and `lofi.bash_read`), so
+    /// tool state written before the switch stays reachable after it.
+    #[must_use]
+    pub fn with_model(&self, provider: Box<dyn Provider>, model: Model) -> Self {
+        Self {
+            provider: Arc::from(provider),
+            model,
+            root: self.root.clone(),
+            tmp_dir: self.tmp_dir.clone(),
+            retry: self.retry,
+            system_prompt: self.system_prompt.clone(),
+            max_output_tokens: self.max_output_tokens,
+            reserved_context_tokens: self.reserved_context_tokens,
+            bash_env: self.bash_env.clone(),
         }
     }
 
