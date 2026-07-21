@@ -29,7 +29,7 @@ pub(crate) mod blocks;
 pub(crate) mod component;
 mod prim;
 mod modals;
-use modals::{render_info_modal, render_model_picker, render_picker, render_slash_complete, render_tree_picker};
+use modals::{render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
 
 pub(crate) use prim::RenderLine;
 
@@ -145,6 +145,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.model_picker.is_some() {
         render_model_picker(f, area, app);
+    }
+    if app.thinking_picker.is_some() {
+        render_thinking_picker(f, area, app);
     }
     if app.info.is_some() {
         render_info_modal(f, area, app);

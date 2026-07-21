@@ -62,6 +62,10 @@ impl App {
                 self.open_model_picker();
                 true
             }
+            "/thinking" => {
+                self.open_thinking_picker();
+                true
+            }
             _ if cmd.starts_with('/') => {
                 self.notify(
                     NotifyKind::Error,
@@ -173,6 +177,8 @@ impl App {
         lines.push(info_kv(t, "/resume", "pick a past session"));
         lines.push(info_kv(t, "/tree", "roll back to a past turn"));
         lines.push(info_kv(t, "/session", "show session info"));
+        lines.push(info_kv(t, "/model", "switch the active model"));
+        lines.push(info_kv(t, "/thinking", "switch the thinking level"));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(Line::from(""));
@@ -342,6 +348,59 @@ impl App {
         }
     }
 
+    /// `/thinking`: open the thinking-level picker for the current model.
+    /// Offers `off` plus the model's declared `thinking_levels` (deduped),
+    /// pre-selected at the current level. Shows a notice instead of opening
+    /// when the current model supports no thinking levels (only `off`).
+    pub(super) fn open_thinking_picker(&mut self) {
+        let levels = self.current_thinking_choices();
+        if levels.len() <= 1 {
+            self.notify(
+                NotifyKind::Info,
+                "current model does not support thinking levels",
+            );
+            return;
+        }
+        let selected = levels
+            .iter()
+            .position(|&l| l == self.thinking)
+            .unwrap_or(0);
+        self.thinking_picker = Some(ThinkingPickerState { levels, selected });
+    }
+
+    /// The thinking levels offered by `/thinking` for the current model:
+    /// `off` first, then the model's declared `thinking_levels` with any
+    /// duplicate `off` removed. An unknown current model (not in
+    /// `model_choices`) yields `[off]`.
+    fn current_thinking_choices(&self) -> Vec<ThinkingLevel> {
+        let mut out = vec![ThinkingLevel::Off];
+        if let Some(c) = self
+            .model_choices
+            .iter()
+            .find(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
+        {
+            for &l in &c.thinking_levels {
+                if l != ThinkingLevel::Off {
+                    out.push(l);
+                }
+            }
+        }
+        out
+    }
+
+    /// Confirm: hand the selected level to the run loop as a
+    /// `provider/model:level` query via `pending_model_switch` (the same
+    /// channel `/model` uses) and close the overlay. `select_model`
+    /// validates the level against the model's `thinking_levels`.
+    pub(super) fn thinking_picker_confirm(&mut self) {
+        if let Some(picker) = self.thinking_picker.take() {
+            if let Some(&level) = picker.levels.get(picker.selected) {
+                self.pending_model_switch =
+                    Some(format!("{}:{}", self.model_label, level.as_str()));
+            }
+        }
+    }
+
     /// Apply a completed model switch: update the label, thinking-level
     /// suffix, and context-window gauge. Called by the run loop after it
     /// rebuilds the agent.
@@ -353,6 +412,7 @@ impl App {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off)
             .then(|| format!(" · {}", level.as_str()));
+        self.thinking = level;
         if let Some(cw) = model.context_window {
             if cw > 0 {
                 self.ctx_limit = cw;
@@ -360,7 +420,7 @@ impl App {
         }
         self.notify(
             NotifyKind::Info,
-            format!("switched to {}/{}", model.provider, model.id),
+            format!("switched to {}/{}{}", model.provider, model.id, self.thinking_label.as_deref().unwrap_or("")),
         );
         self.bump_render_epoch();
     }
@@ -437,7 +497,11 @@ impl App {
     /// The slash-complete popover is intentionally excluded — it's inline
     /// and you're still typing into the prompt.
     pub(super) fn modal_open(&self) -> bool {
-        self.info.is_some() || self.picker.is_some() || self.tree_picker.is_some() || self.model_picker.is_some()
+        self.info.is_some()
+            || self.picker.is_some()
+            || self.tree_picker.is_some()
+            || self.model_picker.is_some()
+            || self.thinking_picker.is_some()
     }
 
     /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
@@ -510,13 +574,15 @@ impl App {
     /// key (so the caller skips normal Input-mode processing).
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         /// Which overlay slot is active, for per-slot confirm/cancel.
-        enum Slot { Picker, Tree, Model }
+        enum Slot { Picker, Tree, Model, Thinking }
         let slot = if self.picker.is_some() {
             Slot::Picker
         } else if self.tree_picker.is_some() {
             Slot::Tree
         } else if self.model_picker.is_some() {
             Slot::Model
+        } else if self.thinking_picker.is_some() {
+            Slot::Thinking
         } else {
             return false;
         };
@@ -537,6 +603,7 @@ impl App {
                     }
                 }
                 Slot::Model => self.model_picker_confirm(),
+                Slot::Thinking => self.thinking_picker_confirm(),
             },
             // With a single entry, Tab/Shift+Tab confirm outright instead of
             // cycling (a no-op) — same as pressing Enter.
@@ -552,17 +619,20 @@ impl App {
                     }
                 }
                 Slot::Model => self.model_picker_confirm(),
+                Slot::Thinking => self.thinking_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
                 Slot::Picker => self.picker = None,
                 Slot::Tree => self.tree_picker = None,
                 Slot::Model => self.model_picker = None,
+                Slot::Thinking => self.thinking_picker = None,
             },
             _ => {}
         }
         if (matches!(slot, Slot::Picker) && self.picker.is_none())
             || (matches!(slot, Slot::Tree) && self.tree_picker.is_none())
             || (matches!(slot, Slot::Model) && self.model_picker.is_none())
+            || (matches!(slot, Slot::Thinking) && self.thinking_picker.is_none())
         {
             // Confirm/cancel consumed the overlay; nothing left to navigate.
             return true;
@@ -606,8 +676,10 @@ impl App {
             self.picker.as_mut().map(|p| p as &mut dyn Modal)
         } else if self.tree_picker.is_some() {
             self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
-        } else {
+        } else if self.model_picker.is_some() {
             self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
+        } else {
+            self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
         }
     }
 
