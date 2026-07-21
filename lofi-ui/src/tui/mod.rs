@@ -73,7 +73,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
-use lofi_core::{Agent, AgentEvent, SessionCommit};
+use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions, SessionCommit};
 use lofi_error::{Error, Result};
 use crate::tui::view::HStack;
 
@@ -98,6 +98,7 @@ const DEFAULT_CTX_LIMIT: u64 = 200_000;
 /// right of the command in the popover.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
+    ("/compact", "fold older history into a summary"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
     ("/new", "start a fresh session"),
@@ -182,6 +183,12 @@ enum Block {
     /// cancelled. The turn's partial messages precede it; the marker is the
     /// leaf of the failed branch.
     TurnFailed { label: String, elapsed: Duration, error: String },
+    /// An offline compaction marker: `◇ compacted N msgs · kept M` in the
+    /// muted tint, appended to the current turn when `/compact` (or the
+    /// auto-trigger) folds the older history into a summary. The summary
+    /// itself is injected into the agent's history, not the visible
+    /// transcript; this block just signals that the fold happened.
+    Compaction { summarized: usize, kept: usize },
 }
 
 /// A user prompt and the blocks produced in response.
@@ -571,6 +578,14 @@ pub(crate) struct App {
     /// `None` means append to the file's active leaf (linear continuation).
     branch_hint: Option<String>,
     ctx_limit: u64,
+    /// Auto-compaction trigger configuration (from `[compaction.auto]`).
+    auto_compact: lofi_types::AutoCompactConfig,
+    /// Last observed context input-token count, for the auto-compaction
+    /// hysteresis: the trigger fires only on the upward crossing of the
+    /// threshold, not on every above-threshold turn. `None` until the
+    /// first round reports usage, and reset to `None` after a compaction
+    /// or a session rollback so the baseline re-evaluates cleanly.
+    prev_ctx_tokens: Option<u64>,
     /// Spinner frame while a run is active; None when idle.
     run: Option<usize>,
     /// Wall-clock start of the active run; drives the live `working for Ns`
@@ -720,6 +735,7 @@ pub(crate) async fn run(
     session: SessionConfig,
     no_models_hint: Option<String>,
     ctx_limit: u64,
+    auto_compact: lofi_types::AutoCompactConfig,
 ) -> Result<()> {
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
@@ -749,6 +765,7 @@ pub(crate) async fn run(
                 session,
                 no_models_hint,
                 ctx_limit,
+                auto_compact,
             )
             .await
         })
@@ -765,6 +782,7 @@ async fn run_loop(
     session: SessionConfig,
     no_models_hint: Option<String>,
     ctx_limit: u64,
+    auto_compact: lofi_types::AutoCompactConfig,
 ) -> Result<()> {
     let SessionConfig {
         store,
@@ -774,7 +792,7 @@ async fn run_loop(
         file_size,
         cwd,
     } = session;
-    let mut app = App::new(model_label, thinking, ctx_limit);
+    let mut app = App::new(model_label, thinking, ctx_limit, auto_compact);
     app.session = SessionState {
         store,
         path,
@@ -843,6 +861,7 @@ async fn run_loop(
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
                             app.run_finished();
+                            app.maybe_auto_compact();
                         }
                     }
                 }
@@ -917,4 +936,3 @@ async fn run_loop(
 // A single large key dispatcher; splitting per-key handlers would fragment
 // the picker/submit/run-creation flow and hurt readability more than the line
 // count helps.
-

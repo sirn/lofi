@@ -3,7 +3,12 @@
 use super::*;
 
 impl App {
-    pub(super) fn new(model_label: String, thinking: ThinkingLevel, ctx_limit: u64) -> Self {
+    pub(super) fn new(
+        model_label: String,
+        thinking: ThinkingLevel,
+        ctx_limit: u64,
+        auto_compact: lofi_types::AutoCompactConfig,
+    ) -> Self {
         let thinking_label = (thinking != ThinkingLevel::Off)
             .then(|| format!(" · {}", thinking.as_str()));
         Self {
@@ -18,6 +23,8 @@ impl App {
             thinking_label,
             status_usage: None,
             ctx_limit: if ctx_limit > 0 { ctx_limit } else { DEFAULT_CTX_LIMIT },
+            auto_compact,
+            prev_ctx_tokens: None,
             cost: 0.0,
             turn_cost: 0.0,
             turn_has_round_usage: false,
@@ -360,5 +367,131 @@ impl App {
     /// Elapsed since the current run started; zero when idle.
     pub(super) fn run_elapsed(&self) -> Duration {
         self.run_start.map(|s| s.elapsed()).unwrap_or_default()
+    }
+}
+
+impl App {
+    /// Run an offline compaction over the current session and fold the older
+    /// history into a structured summary. Replaces the agent history with
+    /// the summary message followed by the kept tail, appends a Compaction
+    /// marker to the transcript (so a resumed session rebuilds the same
+    /// compacted history), renders a marker block on the current turn, and
+    /// posts a notification. Returns true when a compaction actually ran.
+    pub(super) fn compact_now(&mut self) -> bool {
+        let Some(events) = self.compaction_events() else {
+            self.notify(NotifyKind::Warn, "not enough history to compact yet");
+            return false;
+        };
+        let opts = CompactOptions::default();
+        let Some(c) = compact(&events, &opts) else {
+            self.notify(NotifyKind::Warn, "not enough history to compact yet");
+            return false;
+        };
+        let new_history = compacted_history(&c);
+        if let Ok(mut g) = self.history.lock() {
+            *g = new_history;
+        }
+        // Persist the marker so resume rebuilds the compacted history. The
+        // marker chains off the active leaf; subsequent turns chain off it.
+        if let Some(path) = self.session.path.clone() {
+            if let Some(first_kept) = c.first_kept_event_id.clone() {
+                let mut ev = SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::Compaction {
+                        summary: c.summary.clone(),
+                        first_kept_entry_id: first_kept,
+                        summarized: c.summarized_count,
+                        kept: c.kept_count,
+                    },
+                };
+                let _ = store::append_events(&path, std::slice::from_mut(&mut ev), None);
+            }
+        }
+        // Render the marker. Attach to the last turn when one exists; push a
+        // fresh turn otherwise (e.g. compaction invoked before any turn).
+        if self.turns.is_empty() {
+            self.push_turn(Turn {
+                prompt: String::new(),
+                blocks: vec![Block::Compaction { summarized: c.summarized_count, kept: c.kept_count }],
+            });
+        } else {
+            self.apply_event(AgentEvent::Compaction { summarized: c.summarized_count, kept: c.kept_count });
+        }
+        // The context gauge's last reading reflects the pre-compaction fill;
+        // drop it so the auto-trigger does not re-fire on the same crossing
+        // and the gauge waits for the next round's real (smaller) usage.
+        self.status_usage = None;
+        self.prev_ctx_tokens = None;
+        self.bump_render_epoch();
+        self.notify(
+            NotifyKind::Info,
+            format!("compacted {} msgs · kept {}", c.summarized_count, c.kept_count),
+        );
+        true
+    }
+
+    /// Auto-compact when the latest round's input tokens cross above the
+    /// configured threshold. Mirrors pi's hm-smart-compact: the trigger fires
+    /// only on the upward crossing (hysteresis), so a session hovering above
+    /// the threshold is not re-compacted every turn. The baseline resets to
+    /// `None` after a compaction (and on rollback/resume) so the next
+    /// crossing re-evaluates cleanly. Called after a run fully finishes — the
+    /// lofi equivalent of pi's `agent_settled`.
+    pub(super) fn maybe_auto_compact(&mut self) {
+        if !self.auto_compact.enable {
+            return;
+        }
+        let Some(usage) = self.status_usage else { return };
+        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
+        let Some(threshold) = self.auto_compact.threshold(limit) else { return };
+        let current = usage.input_tokens;
+        // If the effective threshold changed (model/context window or config
+        // changed), drop the baseline so hysteresis re-evaluates against the
+        // new threshold instead of staying permanently suppressed.
+        let was_below = match self.prev_ctx_tokens {
+            None => true,
+            Some(prev) => {
+                if prev > threshold && current > threshold {
+                    // Already above on the prior round too — no crossing.
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+        self.prev_ctx_tokens = Some(current);
+        if !was_below || current <= threshold {
+            return;
+        }
+        if self.compact_now() {
+            // Reset the baseline so a still-above-threshold context can
+            // re-fire after the compaction (and a below-threshold one starts
+            // a fresh crossing).
+            self.prev_ctx_tokens = None;
+        }
+    }
+
+    /// Gather the active-path events for compaction: load the transcript
+    /// (so native tool records are available) when a session file exists,
+    /// otherwise synthesize a linear event log from the in-memory history.
+    /// Returns None when the history is empty.
+    fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
+        if let Some(path) = &self.session.path {
+            return store::load(path).ok().map(|(_meta, events, _off, _size)| events);
+        }
+        let msgs = self.history.lock().ok()?;
+        if msgs.is_empty() {
+            return None;
+        }
+        let mut events = Vec::with_capacity(msgs.len());
+        for (i, m) in msgs.iter().enumerate() {
+            events.push(SessionEvent {
+                id: i.to_string(),
+                parent_id: if i == 0 { None } else { Some((i - 1).to_string()) },
+                kind: SessionEventKind::Message(m.clone()),
+            });
+        }
+        Some(events)
     }
 }

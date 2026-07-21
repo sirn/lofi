@@ -217,6 +217,34 @@ pub(super) fn render_branch_subtree(
 /// Walk the linear chain from `start`: user → turn outcome → next user
 /// prompt → …, following the first user-prompt child at each `turn_end` and
 /// the turn outcome at each user prompt.
+/// Find the next user-prompt event after a non-user node (a turn outcome
+/// or a compaction). After a compaction the next prompt is a grandchild —
+/// the compaction's child — so route through a compaction child when there
+/// is no direct user-prompt child. Keeps `walk_chain`'s flat chain intact
+/// across a compaction boundary.
+pub(super) fn find_next_user_prompt(
+    start: usize,
+    indices: &[store::EventIndex],
+    children_by_parent: &HashMap<&str, Vec<usize>>,
+) -> Option<usize> {
+    let children = children_by_parent.get(indices[start].id.as_str())?;
+    if let Some(&u) = children
+        .iter()
+        .find(|&&i| indices[i].kind == store::IndexKind::UserPrompt)
+    {
+        return Some(u);
+    }
+    let comp = children
+        .iter()
+        .copied()
+        .find(|&i| indices[i].kind == store::IndexKind::Compaction)?;
+    let comp_children = children_by_parent.get(indices[comp].id.as_str())?;
+    comp_children
+        .iter()
+        .copied()
+        .find(|&i| indices[i].kind == store::IndexKind::UserPrompt)
+}
+
 pub(super) fn walk_chain(
     start: usize,
     indices: &[store::EventIndex],
@@ -230,12 +258,7 @@ pub(super) fn walk_chain(
         let next = if indices[cur].kind == store::IndexKind::UserPrompt {
             find_turn_outcome(cur, indices, children_by_parent)
         } else {
-            children_by_parent
-                .get(indices[cur].id.as_str())
-                .into_iter()
-                .flatten()
-                .copied()
-                .find(|&i| indices[i].kind == store::IndexKind::UserPrompt)
+            find_next_user_prompt(cur, indices, children_by_parent)
         };
         match next {
             Some(n) if visited.insert(n) => {
@@ -292,6 +315,18 @@ pub(super) fn push_tree_entry(
                 ix.id.clone(),
             )
         }
+        store::IndexKind::Compaction => {
+            let (summarized, kept) = load_compaction_counts(path, ix.offset);
+            (
+                format!("compact: compacted {summarized} msgs \u{00b7} kept {kept}"),
+                String::new(),
+                // Roll back to the compaction's parent — the pre-compaction
+                // leaf — so the active path excludes the compaction and the
+                // full un-folded history is restored. Selecting this node is
+                // "revert to before the compact".
+                ix.parent_id.clone().unwrap_or_default(),
+            )
+        }
         store::IndexKind::AssistantMessage | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {
@@ -310,6 +345,7 @@ pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
         store::IndexKind::UserPrompt
             | store::IndexKind::TurnEnd
             | store::IndexKind::TurnFailed
+            | store::IndexKind::Compaction
     )
 }
 
@@ -413,6 +449,19 @@ pub(super) fn load_failed_error(path: &Path, offset: u64) -> String {
         error
     } else {
         String::new()
+    }
+}
+
+/// Load a `compaction` event and extract its `summarized`/`kept` counts
+/// for the `/tree` node label.
+pub(super) fn load_compaction_counts(path: &Path, offset: u64) -> (usize, usize) {
+    let Ok(ev) = store::load_event_at(path, offset) else {
+        return (0, 0);
+    };
+    if let SessionEventKind::Compaction { summarized, kept, .. } = ev.kind {
+        (summarized, kept)
+    } else {
+        (0, 0)
     }
 }
 

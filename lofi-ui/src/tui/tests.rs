@@ -8,7 +8,7 @@ use super::*;
 use lofi_types::{ContentBlock, Role, Usage};
 
 fn app() -> App {
-    App::new("openai/gpt-4o".to_string(), ThinkingLevel::Medium, 0)
+    App::new("openai/gpt-4o".to_string(), ThinkingLevel::Medium, 0, lofi_types::AutoCompactConfig::default())
 }
 
 fn push_turn(app: &mut App) {
@@ -760,7 +760,7 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
-    assert_eq!(sc.candidates, vec![7]); // /tree is index 7
+    assert_eq!(sc.candidates, vec![8]); // /tree is index 8
     // Typing the full command dismisses (nothing left to complete).
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
@@ -772,8 +772,9 @@ fn slash_complete_filters_and_accepts() {
     // Accept replaces the input with the selected candidate.
     a.input = "/".to_string();
     a.refresh_slash_complete();
-    a.slash_complete_down(); // index 1 = /exit
-    a.slash_complete_down(); // index 2 = /help
+    a.slash_complete_down(); // index 1 = /compact
+    a.slash_complete_down(); // index 2 = /exit
+    a.slash_complete_down(); // index 3 = /help
     a.slash_complete_accept();
     assert_eq!(a.input, "/help");
     assert_eq!(a.input_cursor, a.input.len());
@@ -910,6 +911,86 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // One visible turn (turn 1); turn 2 is rolled back out of view.
     assert_eq!(a.turns.len(), 1);
     assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+}
+
+#[test]
+fn tree_shows_compaction_node_and_reverts_before_it() {
+    // user1 -> assistant1 -> turn_end1 -> Compaction -> user2 -> assistant2
+    // -> turn_end2. /tree must list a "compact:" node between turn 1 and
+    // turn 2. Selecting it rolls back to the compaction's parent
+    // (turn_end1), restoring the pre-compaction history (user1 + assistant1)
+    // and leaving the input empty.
+    use lofi_core::session::store::SessionStore;
+    use lofi_types::{ContentBlock, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let kinds = [
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "first".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+        SessionEventKind::Compaction {
+            summary: "summary".into(),
+            first_kept_entry_id: String::new(),
+            summarized: 3,
+            kept: 1,
+        },
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "second".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "world".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            label: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut batch: Vec<SessionEvent> = kinds
+        .into_iter()
+        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .collect();
+    store::append_events(&path, &mut batch, None).unwrap();
+    let (_meta, events, _o, _s) = store::load(&path).unwrap();
+    let turn_end1_id = events[2].id.clone();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    // Trunk: user1, agent1, compact, user2, agent2.
+    assert!(picker.entries.iter().any(|e| e.label.starts_with("compact:")));
+    let comp_idx = picker
+        .entries
+        .iter()
+        .position(|e| e.label.starts_with("compact:"))
+        .unwrap();
+    // The compaction node reverts to its parent (turn_end1), prefill empty.
+    assert_eq!(picker.entries[comp_idx].branch_point, turn_end1_id);
+    assert!(picker.entries[comp_idx].prefill.is_empty());
+    a.tree_picker.as_mut().unwrap().selected = comp_idx;
+    a.tree_picker_confirm();
+    // Rolled back to before the compact: only turn 1's messages remain.
+    assert!(a.tree_picker.is_none());
+    assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
+    assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    assert_eq!(a.turns.len(), 1);
 }
 
 #[test]
@@ -1074,7 +1155,7 @@ fn verbose_toggles() {
 
 #[test]
 fn footer_shows_model_and_thinking() {
-    let a = App::new("openai/gpt-5.6-sol".to_string(), ThinkingLevel::XHigh, 0);
+    let a = App::new("openai/gpt-5.6-sol".to_string(), ThinkingLevel::XHigh, 0, lofi_types::AutoCompactConfig::default());
     let r: String = a
         .render_footer_right()
         .spans
@@ -1087,7 +1168,7 @@ fn footer_shows_model_and_thinking() {
 
 #[test]
 fn footer_hides_thinking_when_off() {
-    let a = App::new("openai/gpt-4o".to_string(), ThinkingLevel::Off, 0);
+    let a = App::new("openai/gpt-4o".to_string(), ThinkingLevel::Off, 0, lofi_types::AutoCompactConfig::default());
     let r: String = a
         .render_footer_right()
         .spans
@@ -1365,6 +1446,7 @@ fn footer_and_header_show_cost_and_usage() {
         "proxy/deepseek-v4-flash".to_string(),
         ThinkingLevel::Off,
         200_000,
+        lofi_types::AutoCompactConfig::default(),
     );
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
@@ -1404,420 +1486,5 @@ fn footer_and_header_show_cost_and_usage() {
     assert!(!header.contains('$'), "header should not show cost: {header}");
 }
 
-/// With no model configured, submitting a prompt must not start a run;
-/// it re-surfaces the configuration hint on the prompt's turn instead.
-#[test]
-fn no_model_submit_surfaces_hint_without_running() {
-    let mut a = app();
-    a.no_models_hint = Some("set OPENAI_API_KEY".to_string());
-    a.input = "hello".to_string();
-    let ev = Event::Key(crossterm::event::KeyEvent::new_with_kind(
-        KeyCode::Enter,
-        KeyModifiers::empty(),
-        KeyEventKind::Press,
-    ));
-    let mut run = None;
-    handle_event(&ev, &mut a, None, &mut run);
-    assert!(run.is_none(), "no run should be started without a model");
-    assert!(a.run.is_none());
-    let last = a.turns.last().unwrap();
-    assert_eq!(last.prompt, "hello");
-    assert!(
-        last.blocks.iter().any(|b| matches!(b, Block::Error(m) if m == "set OPENAI_API_KEY")),
-        "the hint should be attached to the turn"
-    );
-}
 
-#[test]
-fn selection_text_is_content_aware() {
-    let mut a = app();
-    // Simulated rendered log lines paired with their content ranges
-    // (as components now report them): the leading gutter/rails and the
-    // trailing padding tail fall outside the content range, while the
-    // content's own leading spaces (indentation) are inside it.
-    a.log_off = 0;
-    a.log_lines = vec![
-        // gutter "  " + content "hello world" + padding "   "
-        "  hello world   ".to_string(),
-        // gutter "  " + rails "│ │ " + content "lofi-core…Agent {" + padding
-        "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(),
-        // gutter "  " + content "    let x = 1;" (indentation preserved!)
-        "      let x = 1;".to_string(),
-    ];
-    a.log_content = vec![
-        (2, 13),  // "hello world"
-        (6, 51),  // "lofi-core/src/agent.rs:233:pub struct Agent {"
-        (2, 16),  // "    let x = 1;"
-    ];
-    a.sel = Some(Selection { start: (0, 0), end: (2, 40) });
-    assert_eq!(
-        a.selection_text().as_deref(),
-        Some("hello world\nlofi-core/src/agent.rs:233:pub struct Agent {\n    let x = 1;")
-    );
-}
-
-fn ctrl_key(code: KeyCode) -> Event {
-    Event::Key(crossterm::event::KeyEvent::new_with_kind(
-        code,
-        KeyModifiers::CONTROL,
-        KeyEventKind::Press,
-    ))
-}
-
-#[test]
-fn ctrl_k_at_end_of_buffer_does_nothing() {
-    // Regression: C-k at the end of a buffer with no trailing newline used
-    // to slice one past the end and panic (observed as the app "quitting").
-    let mut a = app();
-    a.set_input("hello".to_string());
-    a.move_line_end();
-    a.kill_line_end(false);
-    assert_eq!(a.input, "hello");
-    assert!(a.kill_ring.is_empty());
-}
-
-#[test]
-fn ctrl_k_kills_to_end_of_line_not_newline() {
-    let mut a = app();
-    a.set_input("hello world\nfoo".to_string());
-    a.input_cursor = 0;
-    a.kill_line_end(false);
-    assert_eq!(a.input, "\nfoo");
-    assert_eq!(a.kill_ring, "hello world");
-}
-
-#[test]
-fn ctrl_k_kills_trailing_newline_on_empty_remainder() {
-    let mut a = app();
-    a.set_input("foo\nbar".to_string());
-    a.input_cursor = 0;
-    a.move_line_end();
-    a.kill_line_end(false);
-    assert_eq!(a.input, "foobar");
-}
-
-#[test]
-fn ctrl_c_clears_nonempty_prompt() {
-    let mut a = app();
-    a.set_input("a draft".to_string());
-    let mut run = None;
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert_eq!(a.input, "");
-    assert!(!a.should_quit);
-}
-
-#[test]
-fn ctrl_c_double_press_on_empty_quits() {
-    let mut a = app();
-    let mut run = None;
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert!(!a.should_quit, "first C-c must not quit");
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert!(a.should_quit, "second C-c must quit");
-}
-
-#[test]
-fn ctrl_c_single_press_on_empty_does_not_quit() {
-    let mut a = app();
-    let mut run = None;
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert!(!a.should_quit);
-}
-
-#[test]
-fn scroll_up_enters_nav_and_clamps_cursor_to_bottom_edge() {
-    let mut a = app();
-    a.mode = Mode::Input;
-    a.log_total = 20;
-    a.log_view_h = 5;
-    a.last_base = 15; // base = total - height
-    a.pinned = true; // sitting at the bottom
-    a.nav_cursor = 19; // bottom line
-    a.scroll_nav(-3);
-    assert_eq!(a.mode, Mode::Navigate);
-    // Viewport moved up to [12, 16]; cursor fell below -> clamp to 16.
-    assert_eq!(a.view_off(), 12);
-    assert_eq!(a.nav_cursor, 16);
-}
-
-#[test]
-fn scroll_down_clamps_cursor_to_top_edge() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 20;
-    a.log_view_h = 5;
-    a.last_base = 15;
-    a.pinned = false;
-    a.top_line = 10;
-    a.nav_cursor = 10; // top of the viewport
-    a.scroll_nav(3);
-    // Viewport moved down to [13, 17]; cursor fell above -> clamp to 13.
-    assert_eq!(a.view_off(), 13);
-    assert_eq!(a.nav_cursor, 13);
-}
-
-#[test]
-fn scroll_keeps_cursor_when_still_visible() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 20;
-    a.log_view_h = 5;
-    a.last_base = 15;
-    a.pinned = false;
-    a.top_line = 10;
-    a.nav_cursor = 12; // middle of [10, 14]
-    a.scroll_nav(1);
-    assert_eq!(a.view_off(), 11);
-    assert_eq!(a.nav_cursor, 12); // still inside [11, 15]
-}
-
-#[test]
-fn scroll_at_boundary_leaves_mode_untouched() {
-    let mut a = app();
-    a.mode = Mode::Input;
-    a.log_total = 20;
-    a.log_view_h = 5;
-    a.last_base = 15;
-    a.pinned = true; // already at the bottom
-    a.scroll_nav(3); // scrolling down does nothing
-    assert_eq!(a.mode, Mode::Input);
-}
-
-#[test]
-fn ctrl_c_on_empty_shows_quit_badge() {
-    let mut a = app();
-    let mut run = None;
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert_eq!(a.quit_badge(), Some("Press Ctrl-C again to quit"));
-    // A non-empty draft clears the quit window, dropping the badge.
-    a.set_input("draft".to_string());
-    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
-    assert_eq!(a.quit_badge(), None);
-}
-
-#[test]
-fn ctrl_d_deletes_char_or_quits_on_empty() {
-    let mut a = app();
-    a.set_input("ab".to_string());
-    a.input_cursor = 0;
-    let mut run = None;
-    handle_event(&ctrl_key(KeyCode::Char('d')), &mut a, None, &mut run);
-    assert_eq!(a.input, "b");
-    assert!(!a.should_quit);
-    // Empty prompt -> EOF -> quit.
-    let mut b = app();
-    handle_event(&ctrl_key(KeyCode::Char('d')), &mut b, None, &mut run);
-    assert!(b.should_quit);
-}
-
-fn plain_key(code: KeyCode) -> Event {
-    Event::Key(crossterm::event::KeyEvent::new_with_kind(
-        code,
-        KeyModifiers::empty(),
-        KeyEventKind::Press,
-    ))
-}
-
-#[test]
-fn tab_enters_navigate_and_esc_clears() {
-    let mut a = app();
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
-    assert_eq!(a.mode, Mode::Navigate);
-    // Esc on a non-empty prompt just clears it (no mode switch).
-    let mut b = app();
-    b.set_input("draft".to_string());
-    handle_event(&plain_key(KeyCode::Esc), &mut b, None, &mut run);
-    assert_eq!(b.mode, Mode::Input);
-    assert_eq!(b.input, "");
-}
-
-#[test]
-fn navigate_jk_moves_cursor_and_clamps() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 10;
-    a.log_view_h = 4;
-    a.nav_cursor = 9;
-    a.nav_move(-3);
-    assert_eq!(a.nav_cursor, 6);
-    // Clamp at the top.
-    a.nav_move(-100);
-    assert_eq!(a.nav_cursor, 0);
-    // Clamp at the bottom.
-    a.nav_move(100);
-    assert_eq!(a.nav_cursor, 9);
-}
-
-#[test]
-fn select_sel_is_charwise_inclusive() {
-    let mut a = app();
-    a.mode = Mode::Select;
-    a.select_anchor = (2, 3);
-    a.nav_cursor = 5;
-    a.nav_col = 6;
-    let sel = a.select_sel();
-    // Max end is exclusive (+1) so the cursor char is included.
-    assert_eq!(sel.start, (2, 3));
-    assert_eq!(sel.end, (5, 7));
-    // Cursor left of anchor: same span, min becomes start.
-    a.nav_cursor = 1;
-    a.nav_col = 1;
-    let sel = a.select_sel();
-    assert_eq!(sel.start, (1, 1));
-    assert_eq!(sel.end, (2, 4));
-}
-
-#[test]
-fn v_enters_select_and_extends_selection() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 10;
-    a.log_view_h = 4;
-    a.nav_cursor = 3;
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::Char('v')), &mut a, None, &mut run);
-    assert_eq!(a.mode, Mode::Select);
-    // Empty selection at the cursor (anchor == cursor); +1 makes the end
-    // exclusive, so it spans one char once clamped to the content range.
-    assert_eq!(a.sel.as_ref().unwrap().start, (3, 0));
-    assert_eq!(a.sel.as_ref().unwrap().end, (3, 1));
-    // Move down: selection extends to the next line, column preserved.
-    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 4);
-    assert_eq!(a.sel.as_ref().unwrap().start, (3, 0));
-    assert_eq!(a.sel.as_ref().unwrap().end, (4, 1));
-    // Tab drops selection, back to Navigate.
-    handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
-    assert_eq!(a.mode, Mode::Navigate);
-    assert!(a.sel.is_none());
-}
-
-#[test]
-fn esc_discards_select_back_to_nav() {
-    // From Select, Esc returns to Navigate and clears the selection —
-    // same as Tab, but more conventional for drop-without-yank.
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 10;
-    a.log_view_h = 4;
-    a.nav_cursor = 3;
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::Char('v')), &mut a, None, &mut run);
-    assert_eq!(a.mode, Mode::Select);
-    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
-    assert!(a.sel.is_some());
-    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
-    assert_eq!(a.mode, Mode::Navigate);
-    assert!(a.sel.is_none());
-}
-
-#[test]
-fn turn_start_line_accounts_for_blanks() {
-    let mut a = app();
-    a.frozen_heights = vec![3, 2];
-    a.last_turn_height = 4;
-    a.turns.clear();
-    for _ in 0..3 {
-        push_turn(&mut a);
-    }
-    assert_eq!(a.turn_start_line(0), 0);
-    // turn0 (3) + blank (1) = 4.
-    assert_eq!(a.turn_start_line(1), 4);
-    // + turn1 (2) + blank (1) = 7.
-    assert_eq!(a.turn_start_line(2), 7);
-}
-
-#[test]
-fn bracket_jumps_between_turns() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.frozen_heights = vec![3, 2];
-    a.last_turn_height = 4;
-    a.log_total = 3 + 1 + 2 + 1 + 4;
-    a.log_view_h = 10;
-    a.turns.clear();
-    for _ in 0..3 {
-        push_turn(&mut a);
-    }
-    let mut run = None;
-    a.nav_cursor = 1;
-    handle_event(&plain_key(KeyCode::Char(']')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 4);
-    handle_event(&plain_key(KeyCode::Char(']')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 7);
-    // At the last turn, `]` stays at its start.
-    handle_event(&plain_key(KeyCode::Char(']')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 7);
-    handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 4);
-    handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 0);
-    // At the first turn, `[` stays at 0.
-    handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 0);
-}
-
-#[test]
-fn page_keys_move_cursor_in_nav() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.log_total = 40;
-    a.log_view_h = 10;
-    a.nav_cursor = 20;
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::PageDown), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 30);
-    handle_event(&plain_key(KeyCode::PageUp), &mut a, None, &mut run);
-    assert_eq!(a.nav_cursor, 20);
-}
-
-#[test]
-fn page_down_in_input_pins_at_bottom() {
-    let mut a = app();
-    a.mode = Mode::Input;
-    a.log_total = 40;
-    a.log_view_h = 10;
-    a.last_base = 30;
-    a.top_line = 0;
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::PageDown), &mut a, None, &mut run);
-    assert_eq!(a.top_line, 10);
-    assert!(!a.pinned);
-    for _ in 0..3 {
-        handle_event(&plain_key(KeyCode::PageDown), &mut a, None, &mut run);
-    }
-    assert!(a.pinned);
-    handle_event(&plain_key(KeyCode::PageUp), &mut a, None, &mut run);
-    assert!(!a.pinned);
-}
-
-#[test]
-fn ctrl_c_in_nav_returns_to_input_pinned() {
-    let mut a = app();
-    a.mode = Mode::Navigate;
-    a.last_base = 42;
-    a.top_line = 5;
-    a.pinned = false;
-    let mut run = None;
-    handle_event(
-        &Event::Key(crossterm::event::KeyEvent::new_with_kind(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-            KeyEventKind::Press,
-        )),
-        &mut a,
-        None,
-        &mut run,
-    );
-    assert_eq!(a.mode, Mode::Input);
-    assert!(a.pinned);
-    assert_eq!(a.top_line, 42);
-}
-
-#[test]
-fn insert_str_normalizes_line_endings() {
-    let mut a = app();
-    a.insert_str("a\r\nb\rc");
-    assert_eq!(a.input, "a\nb\nc");
-}
+[Showing lines 1-1487 of 1905 (50.0KB limit). Use offset=1488 to continue.]

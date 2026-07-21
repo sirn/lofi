@@ -156,19 +156,20 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     // skips persistence entirely. A missing most-recent falls back to fresh.
     let session = resolve_session(&opts)?;
 
-    let (agent, label, thinking, hint, ctx_limit) = match build_agent(
+    let (agent, label, thinking, hint, ctx_limit, auto_compact) = match build_agent(
         opts.config_path.as_deref(),
         opts.model.as_deref(),
         opts.root.as_path(),
     )
     .await
     {
-        Ok((agent, model, thinking)) => (
+        Ok((agent, model, thinking, config)) => (
             Some(agent),
             format!("{}/{}", model.provider, model.id),
             thinking,
             None,
             model.context_window.unwrap_or(0),
+            config.compaction.auto.clone(),
         ),
         // No provider has credentials (or the selected provider is disabled):
         // launch the TUI anyway and show the hint in the log.
@@ -178,10 +179,11 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
             ThinkingLevel::Off,
             Some(hint),
             0,
+            lofi_types::AutoCompactConfig::default(),
         ),
         Err(e) => return Err(e),
     };
-    tui::run(agent, label, thinking, session, hint, ctx_limit).await
+    tui::run(agent, label, thinking, session, hint, ctx_limit, auto_compact).await
 }
 
 /// Resolve the [`tui::SessionConfig`] for an interactive run from the flags.
@@ -244,7 +246,7 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 /// construction, or the agent run. The binary caller is responsible for
 /// translating the returned error into a nonzero exit code.
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
-    let (agent, _model, _thinking) = build_agent(
+    let (agent, _model, _thinking, _config) = build_agent(
         opts.config_path.as_deref(),
         opts.model.as_deref(),
         opts.root.as_path(),
@@ -291,7 +293,10 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RetryEnd { .. }
                 // Turn boundaries carry no piped output; the prompt itself
                 // is not echoed (the user typed it).
-                | AgentEvent::TurnStart { .. } => Ok(()),
+                | AgentEvent::TurnStart { .. }
+                // Compaction is a TUI-only marker; never produced in
+                // --print mode.
+                | AgentEvent::Compaction { .. } => Ok(()),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),
