@@ -173,29 +173,27 @@ impl App {
     }
 
     pub(super) fn show_session_info(&mut self) {
-        let t = self.theme;
-        let lines = match &self.session.path {
-            Some(p) => vec![
-                info_kv(t, "session", &p.display().to_string()),
-                info_kv(
-                    t,
-                    "messages",
-                    &self.history.lock().map_or(0, |m| m.len()).to_string(),
-                ),
-                info_kv(t, "model", &self.session_model()),
-            ],
-            None => vec![info_note(
-                t,
+        match &self.session.path {
+            Some(p) => {
+                let id = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?");
+                self.notify(
+                    NotifyKind::Info,
+                    format!(
+                        "{} · {} msgs · {}",
+                        id,
+                        self.history.lock().map_or(0, |m| m.len()),
+                        self.session_model(),
+                    ),
+                );
+            }
+            None => self.notify(
+                NotifyKind::Warn,
                 "no session file (ephemeral or not yet started)",
-            )],
-        };
-        self.info = Some(InfoModal {
-            title: "Session".to_string(),
-            lines,
-            scroll: 0,
-            total: 0,
-            view_h: 0,
-        });
+            ),
+        }
     }
 
     /// '/new': drop the transcript and start a fresh session file on the next
