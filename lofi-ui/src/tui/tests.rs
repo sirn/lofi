@@ -943,6 +943,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         SessionEventKind::Compaction {
             summary: "summary".into(),
             first_kept_entry_id: String::new(),
+            summarized_range: [String::new(), String::new()],
             summarized: 3,
             kept: 1,
         },
@@ -1444,7 +1445,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
 
     // messages_from_events yields only the checkpoint's messages,
     // excluding the failed turn's messages via the TurnFailed boundary.
-    let msgs = messages_from_events(&events);
+    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].role, Role::User);
     assert_eq!(msgs[1].role, Role::Assistant);
@@ -1477,6 +1478,7 @@ fn messages_from_events_prepends_compaction_summary() {
         SessionEventKind::Compaction {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: String::new(), // patched after append
+            summarized_range: [String::new(), String::new()],
             summarized: 1,
             kept: 2,
         },
@@ -1500,13 +1502,85 @@ fn messages_from_events_prepends_compaction_summary() {
         }
     }
 
-    let msgs = messages_from_events(&events);
+    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
     // [summary, kept-prompt, kept-reply, continued]
     assert_eq!(msgs.len(), 4);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
     assert_eq!(user_text(&msgs[1]), "kept-prompt");
     assert_eq!(msgs[2].role, Role::Assistant);
     assert_eq!(msgs[3].role, Role::Assistant);
+}
+
+#[test]
+fn messages_from_events_elides_kept_tail_on_resume() {
+    // After a compaction, resuming must rebuild the kept tail in its elided
+    // (lightweight, recall-recoverable) form — not the verbatim on-disk tail.
+    // Two exec results in the kept tail; with keep_results=1 only the most
+    // recent survives verbatim, the older becomes a lofi.result stub.
+    use lofi_types::{ContentBlock, SessionEvent, SessionEventKind};
+
+    let exec_call = |id: &str| {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "exec".to_string(),
+                input: serde_json::json!({"code": "return 1"}),
+            }],
+        }
+    };
+    let exec_result = |id: &str, out: &str| {
+        Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: out.to_string(),
+                is_error: false,
+            }],
+        }
+    };
+
+    // e0 summarized; e1..e4 kept tail; e5 marker (first_kept_entry_id = e1).
+    let mut events: Vec<SessionEvent> = sev_chain([
+        msg(user("old prompt")),
+        msg(exec_call("t1")),
+        msg(exec_result("t1", "out-1")),
+        msg(exec_call("t2")),
+        msg(exec_result("t2", "out-2")),
+        SessionEventKind::Compaction {
+            summary: "SUMMARY".to_string(),
+            first_kept_entry_id: "e1".to_string(),
+            summarized_range: [String::new(), String::new()],
+            summarized: 1,
+            kept: 4,
+        },
+    ]);
+
+    let edit = lofi_types::EditConfig {
+        enabled: true,
+        keep_results: 1,
+        keep_thinking: 0,
+        keep_calls: 0,
+    };
+    let msgs = messages_from_events(&events, &edit);
+    // [SUMMARY, exec_call t1, result out-1, exec_call t2, result out-2]
+    assert_eq!(msgs.len(), 5);
+    assert_eq!(user_text(&msgs[0]), "SUMMARY");
+    // Most recent result kept verbatim.
+    let ContentBlock::ToolResult { content, .. } = &msgs[4].blocks[0] else { panic!() };
+    assert_eq!(content, "out-2");
+    // Older result elided to a recoverable stub naming its event id (e2).
+    let ContentBlock::ToolResult { content, .. } = &msgs[2].blocks[0] else { panic!() };
+    assert!(content.contains("lofi.result(\"e2\")"), "got {content}");
+    // Older tool-call code elided too.
+    let ContentBlock::ToolUse { input, .. } = &msgs[1].blocks[0] else { panic!() };
+    let code = input.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(code.contains("lofi.result(\"e1\")"), "got {code}");
+
+    // With editing disabled, the tail comes back verbatim.
+    let verbatim = messages_from_events(&events, &lofi_types::EditConfig { enabled: false, ..edit });
+    let ContentBlock::ToolResult { content, .. } = &verbatim[2].blocks[0] else { panic!() };
+    assert_eq!(content, "out-1");
 }
 
 fn user_text(m: &lofi_types::Message) -> &str {

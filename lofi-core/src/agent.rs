@@ -34,7 +34,7 @@ use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
-use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, ToolEvent};
+use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;
@@ -225,7 +225,7 @@ pub struct Agent {
     root: PathBuf,
     /// Per-session tmp directory for bash full-output logs. Created in
     /// [`new`](Self::new) and passed to every exec so the sandbox's
-    /// `lofi.read_tmp` and bash log writer share one location.
+    /// `lofi.bash_read` and bash log writer share one location.
     tmp_dir: PathBuf,
     /// Transient-error retry budget and backoff schedule.
     retry: crate::retry::RetryPolicy,

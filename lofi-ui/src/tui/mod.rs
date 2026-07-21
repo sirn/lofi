@@ -799,13 +799,14 @@ async fn run_loop(
         file_size,
         cwd,
     } = session;
+    let edit = compaction.edit.clone();
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.session = SessionState {
         store,
         path,
         cwd,
     };
-    let messages = messages_from_events(&events);
+    let messages = messages_from_events(&events, &edit);
     if let Ok(mut m) = app.history.lock() {
         m.clone_from(&messages);
     }

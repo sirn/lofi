@@ -84,6 +84,19 @@ const JS_TO_JSON_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// single-threaded and the closure future is `!Send`.
 pub type AgentFn =
     Arc<dyn Fn(AgentRequest) -> LocalBoxFuture<'static, Result<String>> + Send + Sync>;
+/// Optional `lofi.recall` implementation: a sync callback from the
+/// `lofi.recall` native tool into the engine that owns the session
+/// transcript. The callback reads the session file fresh and runs the
+/// recall engine, so the sandbox never depends on `lofi-core`.
+pub type RecallFn =
+    Arc<dyn Fn(&lofi_types::recall::RecallRequest) -> lofi_types::recall::RecallOutcome + Send + Sync>;
+
+/// Optional `lofi.result` implementation: a sync callback that recovers the
+/// original, pre-elision content of one message event by id. The inverse of
+/// compaction's tiered-retention elision — the model re-expands a stubbed
+/// tool result or tool-call by passing the event id the stub names. Reads
+/// the session file fresh, like `RecallFn`.
+pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// A request to a nested agent.
 #[derive(Debug, Clone)]
@@ -110,12 +123,16 @@ pub struct ExecCtx {
     /// Workspace root file operations are confined to.
     pub root: PathBuf,
     /// Per-session tmp directory for bash full-output logs and other
-    /// agent-produced artifacts. `lofi.read_tmp` is rooted here.
+    /// agent-produced artifacts. `lofi.bash_read` is rooted here.
     pub tmp_dir: PathBuf,
     /// Named strings exposed as the global `lofi_strings` object.
     pub strings: HashMap<String, String>,
     /// Optional `lofi.agent` / `lofi.spawn` implementation.
     pub agent: Option<AgentFn>,
+    /// Optional `lofi.recall` implementation (session-history search).
+    pub recall: Option<RecallFn>,
+    /// Optional `lofi.result` implementation (elision recovery).
+    pub result: Option<ResultFn>,
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     /// Resolved `bash` child-env policy + output-redaction set.
     pub bash_env: BashEnv,
@@ -128,6 +145,8 @@ impl std::fmt::Debug for ExecCtx {
             .field("tmp_dir", &self.tmp_dir)
             .field("strings", &self.strings)
             .field("agent", &self.agent.is_some())
+            .field("recall", &self.recall.is_some())
+            .field("result", &self.result.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
             .field("bash_env", &self.bash_env)
             .finish()
@@ -240,11 +259,13 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     ));
     let strings = ctx.strings.clone();
     let agent = ctx.agent.clone();
+    let recall = ctx.recall.clone();
+    let result = ctx.result.clone();
     let logs = Arc::new(Mutex::new(String::new()));
 
     let outcome = tokio::time::timeout(opts.timeout, async {
         async_with!(&actx => |ctx| {
-            install_globals(&ctx, &tools, &strings, agent, &logs)
+            install_globals(&ctx, &tools, &strings, agent, recall, result, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
                 .eval(js.as_str())
@@ -281,13 +302,15 @@ fn install_globals(
     tools: &Arc<BuiltinTools>,
     strings: &HashMap<String, String>,
     agent: Option<AgentFn>,
+    recall: Option<RecallFn>,
+    result: Option<ResultFn>,
     logs: &Arc<Mutex<String>>,
 ) -> rquickjs::Result<()> {
     let lofi = Object::new(ctx.clone())?;
-    bind_tools(ctx, &lofi, tools, agent)?;
+    bind_tools(ctx, &lofi, tools, agent, recall, result)?;
     // Expose the per-session tmp dir path so the model knows where bash
     // full-output logs live (and can reference them if needed beyond
-    // `lofi.read_tmp`, which takes a basename relative to this dir).
+    // `lofi.bash_read`, which takes a basename relative to this dir).
     lofi.set(
         "tmp_dir",
         tools.tmp_dir().to_string_lossy().to_string(),
@@ -444,6 +467,8 @@ mod tests {
             strings: HashMap::new(),
             agent: None,
             on_tool_event: None,
+            recall: None,
+            result: None,
             bash_env: BashEnv::default(),
         }
     }
@@ -606,6 +631,8 @@ mod tests {
             strings,
             agent: None,
             on_tool_event: None,
+            recall: None,
+            result: None,
             bash_env: BashEnv::default(),
         };
         let res = exec(

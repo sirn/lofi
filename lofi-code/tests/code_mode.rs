@@ -26,6 +26,8 @@ fn ctx(root: &Path) -> ExecCtx {
         strings: HashMap::new(),
         agent: None,
         on_tool_event: None,
+            recall: None,
+            result: None,
         bash_env: BashEnv::default(),
     }
 }
@@ -154,6 +156,8 @@ async fn strings_exposed_as_lofi_strings() {
         strings,
         agent: None,
         on_tool_event: None,
+            recall: None,
+            result: None,
         bash_env: BashEnv::default(),
     };
     let res = exec(
@@ -178,7 +182,7 @@ async fn exec_bash_echo() {
 }
 
 #[tokio::test]
-async fn exec_read_tmp_pages_bash_log() {
+async fn exec_bash_read_pages_bash_log() {
     let dir = tempfile::tempdir().unwrap();
     // Generate enough output to trigger tail truncation + a tmp log file.
     let src = "const r = await lofi.bash({ cmd: 'for i in $(seq 1 5000); do echo \"output line number $i with some padding text to make it longer\"; done' }); return r.output;";
@@ -194,7 +198,7 @@ async fn exec_read_tmp_pages_bash_log() {
         .map(|s| format!("lofi-bash-{s}.log"))
         .expect("notice should name a log file");
     let src2 = format!(
-        "const r = await lofi.read_tmp({basename:?}, {{ offset: 1, limit: 3 }}); return r;"
+        "const r = await lofi.bash_read({basename:?}, {{ offset: 1, limit: 3 }}); return r;"
     );
     let res2 = exec(&src2, &ctx(dir.path()), &ExecOptions::default())
         .await
@@ -233,6 +237,8 @@ async fn agent_call_emits_tool_events() {
         strings: HashMap::new(),
         agent: Some(agent),
         on_tool_event: Some(cb),
+        recall: None,
+        result: None,
         bash_env: BashEnv::default(),
     };
     let src = "const r = await lofi.agent('do stuff'); return r;";

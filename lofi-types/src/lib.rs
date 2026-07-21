@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+pub mod recall;
+
 /// Provider wire protocol used to talk to a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Api {
@@ -338,6 +340,12 @@ pub enum SessionEventKind {
         /// into the summary. The empty string means compact-all (nothing
         /// kept).
         first_kept_entry_id: String,
+        /// Event ids `[first, last]` of the summarized range on the active
+        /// path — every live message folded into this summary. `/recall`
+        /// with `scope:compaction:N` resolves these to global message
+        /// indices and searches within the range. Empty strings mean
+        /// compact-all collapsed the whole live list.
+        summarized_range: [String; 2],
         /// How many live messages were folded into the summary (for the
         /// visible marker on resume).
         summarized: usize,
@@ -862,6 +870,12 @@ pub struct CompactionConfig {
     /// Speculative auto-compaction (soft caps + master switch).
     #[serde(default)]
     pub auto: AutoCompactConfig,
+    /// Tiered-retention context editing applied to the kept tail at each
+    /// compaction (elide old tool results / thinking / tool-call code,
+    /// recoverable via `lofi.result`). Cache-safe: it rides the prefix
+    /// rebuild that compaction already pays.
+    #[serde(default)]
+    pub edit: EditConfig,
 }
 
 fn default_reserved_context_tokens() -> u64 {
@@ -921,6 +935,7 @@ impl Default for CompactionConfig {
             reserved_context_tokens: default_reserved_context_tokens(),
             min_messages_between_hard_compacts: default_min_messages_between_hard_compacts(),
             auto: AutoCompactConfig::default(),
+            edit: EditConfig::default(),
         }
     }
 }
@@ -987,6 +1002,62 @@ impl Default for AutoCompactConfig {
             enable: true,
             max_context_tokens: None,
             context_ratio: None,
+        }
+    }
+}
+
+/// Tiered-retention context editing (`[compaction.edit]`). Applied to the
+/// kept tail at each compaction so the new prefix is much lighter and the
+/// next compaction fires far later. Runs at compaction boundaries only —
+/// never mid-run — so prefix caching is preserved between compactions (the
+/// tail is append-only there; the edit rides the cache break compaction
+/// already pays).
+///
+/// Elided tool results and tool-call code are replaced with recall-
+/// recoverable stubs naming an event id the model can re-expand with
+/// `lofi.result`. Thinking blocks are dropped outright (scratchpad; the
+/// conclusion lives in the assistant text). Assistant prose is always kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditConfig {
+    /// Master switch. When `false` the kept tail is carried verbatim (the
+    /// pre-edit behavior). Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Number of most-recent tool-result blocks kept verbatim in the tail.
+    /// Older results are replaced with a `lofi.result`-recoverable stub.
+    /// Defaults to `6`.
+    #[serde(default = "default_edit_keep_results")]
+    pub keep_results: usize,
+    /// Number of most-recent thinking blocks kept verbatim. Older thinking
+    /// blocks are dropped (the assistant text conclusion is kept). Defaults
+    /// to `2`.
+    #[serde(default = "default_edit_keep_thinking")]
+    pub keep_thinking: usize,
+    /// Number of most-recent tool-call (exec) blocks whose full `code` is
+    /// kept. Older calls keep their `display` label (intent) but the
+    /// verbatim code is replaced with a `lofi.result`-recoverable stub.
+    /// Defaults to `6`.
+    #[serde(default = "default_edit_keep_calls")]
+    pub keep_calls: usize,
+}
+
+fn default_edit_keep_results() -> usize {
+    6
+}
+fn default_edit_keep_thinking() -> usize {
+    2
+}
+fn default_edit_keep_calls() -> usize {
+    6
+}
+
+impl Default for EditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            keep_results: default_edit_keep_results(),
+            keep_thinking: default_edit_keep_thinking(),
+            keep_calls: default_edit_keep_calls(),
         }
     }
 }
