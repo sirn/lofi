@@ -16,7 +16,7 @@
 )]
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
@@ -413,29 +413,12 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     draw_scrollbar(f, area, off, total, app.theme);
 }
 
-/// Thin right-edge scrollbar: a faint track with a solid thumb sized from the
-/// visible/total ratio. Only drawn when content overflows the viewport.
+/// Thin right-edge scrollbar for a chrome viewport: delegates to the
+/// shared [`prim::render_scrollbar`] on the rightmost column of `area`,
+/// using the theme's thumb/track tones. Only drawn when content overflows.
 fn draw_scrollbar(f: &mut Frame, area: Rect, off: usize, total: usize, t: crate::tui::theme::Theme) {
-    let visible = area.height as usize;
-    if total <= visible || visible == 0 {
-        return;
-    }
-    let x = area.right().saturating_sub(1);
-    let max_top = total - visible;
-    let thumb_h = ((visible * visible) / total).max(1);
-    // Map `off ∈ [0, max_top]` onto the thumb travel `[0, visible - thumb_h]`
-    // so the thumb reaches both the top and the bottom edge exactly — a plain
-    // `off * visible / total` floor-divides short of the bottom and leaves a
-    // stray `│` at the last row.
-    let thumb_top = (off * (visible - thumb_h)).checked_div(max_top).unwrap_or(0);
-    let buf = f.buffer_mut();
-    for i in 0..visible {
-        let y = area.y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
-        let in_thumb = i >= thumb_top && i < thumb_top + thumb_h;
-        let cell = &mut buf[(x, y)];
-        cell.set_char(if in_thumb { '█' } else { '│' });
-        cell.set_style(Style::new().fg(if in_thumb { t.muted } else { t.subtle }));
-    }
+    let track = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
+    prim::render_scrollbar(f, track, off, area.height as usize, total, t.subtle, t.muted);
 }
 
 /// One-line working indicator above the prompt, shown only while a run is
