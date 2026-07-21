@@ -62,7 +62,7 @@ where
 const MAX_SSE_PENDING_BYTES: usize = 1024 * 1024;
 
 /// Maximum bytes to drain from the upstream after the terminal sentinel
-/// (data: [DONE] or message_stop) before giving up and dropping the
+/// (data: [DONE] or `message_stop`) before giving up and dropping the
 /// connection. Some providers emit a trailing cost or
 /// usage chunk *after* [DONE]; reading it to EOF lets the server close
 /// the socket cleanly instead of seeing EPIPE, which it would otherwise

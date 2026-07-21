@@ -812,11 +812,10 @@ fn render_scrollbar(
     let thumb_h = ((visible * h) / total).clamp(1, h);
     let max_pos = total.saturating_sub(visible);
     let max_top = h.saturating_sub(thumb_h);
-    let thumb_top = if max_pos == 0 {
-        0
-    } else {
-        (position * max_top) / max_pos
-    };
+    let thumb_top = position
+        .checked_mul(max_top)
+        .and_then(|n| n.checked_div(max_pos))
+        .unwrap_or(0);
     let buf = f.buffer_mut();
     for y in 0..h {
         let cell = &mut buf[(track.x, track.y + y as u16)];
@@ -941,7 +940,7 @@ fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// '/tree' branch-picker overlay: a popup showing the session's event tree
-/// rendered with ASCII tree art (`|-`, ``- `, `|  `). `user:` nodes roll
+/// rendered with ASCII tree art (`|-`, `` `-``, `|  `). `user:` nodes roll
 /// back to before the prompt (edit and resend); `agent:` nodes roll back to
 /// after the turn (continue from here). Nodes on the active path are
 /// highlighted so the current branch is visible at a glance.

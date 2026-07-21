@@ -53,6 +53,9 @@ impl Agent {
     ///
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution.
+    // The continuation loop threads mutable round state (usage, byte budget,
+    // event log) through one async dispatch; helpers would fan it out.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_continuation(
         &self,
         messages: &mut Vec<Message>,
@@ -155,18 +158,15 @@ impl Agent {
                         // Cancellable backoff: wait `delay` for the channel to
                         // stay open. If the receiver drops, roll back like a
                         // normal cancellation rather than driving a dead channel.
-                        match tokio::time::timeout(delay, tx.closed()).await {
-                            Err(_) => {
-                                // Delay elapsed and the channel is still open;
-                                // proceed to the retry.
-                            }
-                            Ok(_) => {
-                                // The receiver dropped during the backoff.
-                                // Treat as a user cancel: record the partial
-                                // turn as a failed branch.
-                                cancelled = true;
-                                break;
-                            }
+                        if tokio::time::timeout(delay, tx.closed()).await.is_err() {
+                            // Delay elapsed and the channel is still open;
+                            // proceed to the retry.
+                        } else {
+                            // The receiver dropped during the backoff.
+                            // Treat as a user cancel: record the partial
+                            // turn as a failed branch.
+                            cancelled = true;
+                            break;
                         }
                         continue;
                     }
@@ -504,7 +504,7 @@ impl Agent {
             return Ok(true);
         }
 
-        let results = self.execute_tools(&tool_uses, tx, stats.as_deref_mut()).await?;
+        let results = self.execute_tools(&tool_uses, tx, stats).await?;
 
         // Tool results travel under the dedicated Tool role: each provider
         // converter emits them from its Role::Tool arm (Chat Completions
@@ -560,7 +560,7 @@ impl Agent {
             // error, not a silent empty success.
             if *name != "exec" {
                 let content = format!("unknown tool: {name}");
-                let elapsed_ms = stats.as_deref_mut().map(|s| s.tool_end(id)).unwrap_or(0);
+                let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
                 if !emit(
                     tx,
                     AgentEvent::ToolEnd {
@@ -584,7 +584,7 @@ impl Agent {
             let (code, strings, display) = parse_exec_input(input);
             if code.is_empty() {
                 let content = "exec: missing required 'code' argument".to_string();
-                let elapsed_ms = stats.as_deref_mut().map(|s| s.tool_end(id)).unwrap_or(0);
+                let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
                 if !emit(
                     tx,
                     AgentEvent::ToolEnd {
@@ -697,7 +697,7 @@ impl Agent {
                 }
                 Err(e) => (cap_exec_result(&e.to_string()), true),
             };
-            let elapsed_ms = stats.as_deref_mut().map(|s| s.tool_end(id)).unwrap_or(0);
+            let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
             if !emit(
                 tx,
                 AgentEvent::ToolEnd {

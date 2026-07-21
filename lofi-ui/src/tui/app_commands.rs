@@ -126,8 +126,7 @@ impl App {
 
     pub(super) fn show_help(&mut self) {
         let t = self.theme;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(info_section(t, "Keys"));
+        let mut lines: Vec<Line<'static>> = vec![info_section(t, "Keys")];
         lines.push(info_kv(t, "Enter", "send"));
         lines.push(info_kv(t, "Alt+Enter", "newline (Ctrl+J)"));
         lines.push(info_kv(t, "↑ / ↓", "move line; recall at edge"));
@@ -336,7 +335,7 @@ impl App {
     /// (for "edit and resend" entries) load the original prompt into the
     /// input box. The visual rollback replaces the old "branch ready" badge —
     /// the user sees the conversation up to the branch point immediately.
-    pub(super) fn tree_picker_confirm_inner(&mut self, picker: TreePickerState) {
+    pub(super) fn tree_picker_confirm_inner(&mut self, picker: &TreePickerState) {
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
@@ -462,7 +461,7 @@ impl App {
                 }
                 Slot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(picker);
+                        self.tree_picker_confirm_inner(&picker);
                     }
                 }
             },
@@ -476,7 +475,7 @@ impl App {
                 }
                 Slot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(picker);
+                        self.tree_picker_confirm_inner(&picker);
                     }
                 }
             },
@@ -545,7 +544,7 @@ impl App {
         if self.slash_complete.is_none() {
             return false;
         }
-        let len = self.slash_complete.as_ref().map_or(0, |p| p.len());
+        let len = self.slash_complete.as_ref().map_or(0, super::Popover::len);
         // Accept/dismiss (and the single-item Tab shortcut) take `&mut self`
         // and are handled before borrowing the popover for navigation.
         match k.code {
@@ -606,7 +605,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn tree_picker_confirm(&mut self) {
         if let Some(picker) = self.tree_picker.take() {
-            self.tree_picker_confirm_inner(picker);
+            self.tree_picker_confirm_inner(&picker);
         }
     }
 

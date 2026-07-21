@@ -229,6 +229,7 @@ impl SessionRecorder {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
     use super::*;
     use lofi_types::{ContentBlock, Role};
     use tempfile::tempdir;

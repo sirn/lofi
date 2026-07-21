@@ -2,6 +2,7 @@
 use super::*;
 use globset::Glob;
 use lofi_error::{Error, Result};
+use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 /// Default result cap for `find`.
@@ -53,12 +54,13 @@ impl BuiltinTools {
             let t = truncate_head(&out);
             let mut out = t.content;
             if t.truncated {
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "\n\n[Showing {} of {} results ({} limit).]",
                     t.output_lines,
                     hits.len(),
                     format_size(50 * 1024)
-                ));
+                );
             }
             Ok(out)
         })

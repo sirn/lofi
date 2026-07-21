@@ -4,7 +4,7 @@
 //! `primary`, `success`, `muted`, `surface`, … — never a raw color, so a
 //! different palette (dark vs light, 256 vs 16-color) is just a different
 //! `Theme` value. [`Theme::dark`] is the default and uses the xterm 256-color
-//! cube; [`Theme::light`] inverts the text tones for light backgrounds.
+//! cube.
 
 use ratatui::style::Color;
 
@@ -77,30 +77,6 @@ impl Theme {
         }
     }
 
-    /// Light background variant: text tones inverted, accents retained.
-    #[allow(dead_code)]
-    pub(crate) fn light() -> Self {
-        Self {
-            primary: Color::Indexed(55),    // deep purple
-            secondary: Color::Indexed(162), // magenta
-            success: Color::Indexed(29),    // forest green
-            warn: Color::Indexed(130),      // amber
-            error: Color::Indexed(124),     // red
-            info: Color::Indexed(25),       // blue
-            fg: Color::Indexed(235),        // near-black
-            muted: Color::Indexed(242),     // mid gray
-            subtle: Color::Indexed(248),    // light gray
-            surface: Color::Indexed(253),   // pale tile
-            inline_bg: Color::Indexed(252),
-            
-            selection: Color::Indexed(248),        // light gray
-            cursor_line: Color::Indexed(252),      // pale bar under the nav cursor
-            select_cursor: Color::Indexed(96),     // muted purple marker
-            exec_running_bg: Color::Indexed(252),  // pale gray tile
-            exec_success_bg: Color::Indexed(194),  // pale green tile
-            exec_error_bg: Color::Indexed(224),    // pale red tile
-        }
-    }
 }
 
 impl Default for Theme {

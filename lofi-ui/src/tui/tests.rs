@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 #![allow(clippy::wildcard_imports)]
+// Cost/format tests assert exact computed float values.
+#![allow(clippy::float_cmp)]
 
 use super::*;
 use lofi_types::{ContentBlock, Role, Usage};
@@ -720,14 +723,14 @@ fn tree_picker_is_centered() {
 
 #[test]
 fn help_modal_scrolls_and_dismisses() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     let mut a = app();
     let mut run = None;
     assert!(a.slash_command("/help"));
     assert!(a.turns.is_empty());
     // Render once so the modal publishes its scroll geometry
     // (total/view_h) for the key handler.
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
     let backend = TestBackend::new(64, 18);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();

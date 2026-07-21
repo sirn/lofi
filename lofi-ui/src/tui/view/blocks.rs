@@ -21,7 +21,7 @@ use super::prim::{self, RenderLine};
 const PREVIEW_LINES: usize = 3;
 
 /// Build the whole turn log as a single [`Text`], turns separated by blanks.
-#[allow(dead_code)]
+#[allow(dead_code)] // reference renderer; used as a test oracle (view.rs uses the cached viewport path)
 pub fn render_turns(app: &App, width: u16) -> Text<'static> {
     let theme = app.theme;
     let w = width as usize;

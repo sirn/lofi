@@ -74,8 +74,7 @@ pub fn create_session_tmp_dir() -> Result<PathBuf> {
     path.push("tmp");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     path.push(format!("{nanos:016x}"));
     std::fs::create_dir_all(&path)?;
     Ok(path)

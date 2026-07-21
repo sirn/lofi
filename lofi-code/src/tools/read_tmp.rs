@@ -1,6 +1,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
+use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 impl BuiltinTools {
@@ -53,17 +54,19 @@ impl BuiltinTools {
         if t.truncated {
             let end_display = start_display + t.output_lines - 1;
             let next = end_display + 1;
-            output.push_str(&format!(
+            let _ = write!(
+                output,
                 "\n\n[Showing lines {start_display}-{end_display} of {total_file_lines}. Use offset={next} to continue.]"
-            ));
+            );
         } else if limit.is_some() {
             let used = start + t.output_lines;
             if used < all_lines.len() {
                 let remaining = all_lines.len() - used;
                 let next = used + 1;
-                output.push_str(&format!(
+                let _ = write!(
+                    output,
                     "\n\n[{remaining} more lines in file. Use offset={next} to continue.]"
-                ));
+                );
             }
         }
         Ok(json!(output))

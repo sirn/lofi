@@ -35,11 +35,13 @@ pub struct Truncated {
 /// Whichever limit is hit first wins. Never returns a partial line (except
 /// when the first line alone exceeds the byte budget, in which case the line
 /// is cut at the byte boundary and `[...]` is appended).
+#[must_use]
 pub fn truncate_head(content: &str) -> Truncated {
     truncate_head_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
 }
 
 /// Head truncation with explicit limits.
+#[must_use]
 pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let total_bytes = content.len();
     let lines: Vec<&str> = content.split('\n').collect();
@@ -63,7 +65,7 @@ pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> 
             break;
         }
         // +1 for the newline joining this line to the previous one.
-        let line_bytes = line.len() + if i > 0 { 1 } else { 0 };
+        let line_bytes = line.len() + usize::from(i > 0);
         if out_bytes + line_bytes > max_bytes {
             break;
         }
@@ -87,11 +89,13 @@ pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> 
 /// Truncate from the tail (keep last N lines/bytes). Suitable for `bash`
 /// where errors and final results are at the end. May return a partial first
 /// line if a single line exceeds the byte budget.
+#[must_use]
 pub fn truncate_tail(content: &str) -> Truncated {
     truncate_tail_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
 }
 
 /// Tail truncation with explicit limits.
+#[must_use]
 pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let total_bytes = content.len();
     let lines: Vec<&str> = content.split('\n').collect();
@@ -115,7 +119,7 @@ pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> 
         if out.len() >= max_lines {
             break;
         }
-        let line_bytes = line.len() + if !out.is_empty() { 1 } else { 0 };
+        let line_bytes = line.len() + usize::from(!out.is_empty());
         if out_bytes + line_bytes > max_bytes {
             break;
         }
@@ -137,11 +141,13 @@ pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> 
 
 /// Truncate a single line to at most `max_chars` chars, appending `...` when
 /// truncated. Used for grep match lines.
+#[must_use]
 pub fn truncate_line(line: &str) -> String {
     truncate_line_with(line, GREP_MAX_LINE_LENGTH)
 }
 
 /// Line truncation with an explicit char cap.
+#[must_use]
 pub fn truncate_line_with(line: &str, max_chars: usize) -> String {
     if line.chars().count() <= max_chars {
         return line.to_string();
@@ -151,6 +157,7 @@ pub fn truncate_line_with(line: &str, max_chars: usize) -> String {
 }
 
 /// Format a byte count as a human-readable size (e.g. `50.0KB`).
+#[must_use]
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")

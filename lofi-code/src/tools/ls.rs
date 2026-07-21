@@ -1,6 +1,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
+use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 /// Default entry cap for `ls`.
@@ -49,12 +50,13 @@ impl BuiltinTools {
         let t = truncate_head(&joined);
         let mut out = t.content;
         if t.truncated {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "\n\n[Showing {} of {} entries ({} limit).]",
                 t.output_lines,
                 entries.len(),
                 format_size(50 * 1024)
-            ));
+            );
         }
         Ok(json!(out))
     }

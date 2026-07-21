@@ -61,7 +61,7 @@ impl Component for Stack<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let mut out = Vec::new();
         let mut first = true;
-        for child in self.children.iter() {
+        for child in &self.children {
             let lines = child.lines(cx);
             if lines.is_empty() {
                 continue;

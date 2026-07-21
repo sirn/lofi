@@ -3,6 +3,7 @@ use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
+use std::fmt::Write as _;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
@@ -156,22 +157,24 @@ impl BuiltinTools {
         .unwrap_or("<temp file unavailable>");
     if t.output_lines == 0 {
         // Single line exceeded the byte budget.
-        out.push_str(&format!(
-            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Page with lofi.read_tmp(\"{basename}\"){}]",
+        let _ = write!(
+            out,
+            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Page with lofi.read_tmp(\"{basename}\")]",
             format_size(DEFAULT_MAX_BYTES),
-            if pipe_capped { "" } else { "" }
-        ));
+        );
     } else if pipe_capped && !t.truncated {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Page with lofi.read_tmp(\"{basename}\").]",
             format_size(MAX_BASH_OUTPUT_BYTES)
-        ));
+        );
     } else {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Page with lofi.read_tmp(\"{basename}\").]",
             t.total_lines,
             format_size(DEFAULT_MAX_BYTES)
-        ));
+        );
     }
     out
 }
@@ -194,7 +197,6 @@ fn temp_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("{nanos:016x}")
 }

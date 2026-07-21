@@ -72,6 +72,11 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 cargo = { level = "allow", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Narrowing/precision casts are intentional in the size, cost, and token
+# math and reviewed at each site; the lint fires too broadly to be useful.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 todo = "deny"

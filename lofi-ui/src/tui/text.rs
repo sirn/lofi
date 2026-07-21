@@ -1,7 +1,3 @@
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
-
 /// Byte offset of the start of row (0-indexed) in s.
 pub(super) fn char_is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'

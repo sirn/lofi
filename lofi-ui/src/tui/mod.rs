@@ -38,7 +38,10 @@ mod input;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use {input::*, replay::*, text::*, tree::*};
+// Glob re-export so `view`, `tests`, and this module call the moved
+// helpers by bare name; the submodules are cohesive slices of `tui`.
+#[allow(clippy::wildcard_imports)]
+use {input::*, replay::*, text::*, tree::*};
 
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
@@ -439,7 +442,7 @@ impl Popover for SlashComplete {
 /// One row in the '/tree' picker. `branch_point` is the event id the next
 /// run chains off (becomes the new turn's parent); `label` is the node text
 /// (`user: ...` or `agent: ...`); `prefix` is the ASCII tree art (`|- `,
-/// ``- `, `|  `, `   `); `prefill` is loaded into the input box on confirm
+/// `` `- ``, `|  `, `   `); `prefill` is loaded into the input box on confirm
 /// (empty for `turn_end` entries, since those continue rather than re-edit);
 /// `is_active` marks nodes on the active path — the conversation currently
 /// displayed in the transcript (root → active leaf). After a revert the

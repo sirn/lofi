@@ -67,6 +67,9 @@ pub(super) fn turn_byte_ranges_from_events(
 /// `TurnStart` pushes a new turn; every other event mutates the last turn.
 /// Status-only events (`RetryStart`/`RetryEnd`/`TurnCommitted`) are no-ops
 /// here — the caller (`App::apply_event`) handles them before calling this.
+// One match over AgentEvent shaping the turn list; per-variant helpers would
+// scatter the shared turn/byte-range state.
+#[allow(clippy::too_many_lines)]
 pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
     if let AgentEvent::TurnStart { prompt } = ev {
         turns.push(Turn {

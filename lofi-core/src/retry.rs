@@ -216,9 +216,9 @@ mod tests {
     #[test]
     fn backoff_doubles() {
         let p = RetryPolicy::default();
-        assert_eq!(p.delay_for(1), Duration::from_millis(2000));
-        assert_eq!(p.delay_for(2), Duration::from_millis(4000));
-        assert_eq!(p.delay_for(3), Duration::from_millis(8000));
+        assert_eq!(p.delay_for(1), Duration::from_secs(2));
+        assert_eq!(p.delay_for(2), Duration::from_secs(4));
+        assert_eq!(p.delay_for(3), Duration::from_secs(8));
         // Saturates rather than overflowing.
         assert_eq!(p.delay_for(20), p.delay_for(20));
     }

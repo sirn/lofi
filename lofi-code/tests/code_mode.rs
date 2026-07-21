@@ -7,6 +7,7 @@
 //! agent loop lands in a later step.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 
 use std::collections::HashMap;
 use std::path::Path;

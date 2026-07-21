@@ -129,8 +129,7 @@ fn default_tmp_dir() -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("lofi-session-{nanos:016x}"));
     // Best-effort: if creation fails, fall back to the system temp dir itself
     // so bash log writes still succeed somewhere.
