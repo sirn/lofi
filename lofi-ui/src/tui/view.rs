@@ -205,10 +205,14 @@ fn feed_segment(
 
 fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let w = area.width as usize;
+    let height = area.height as usize;
     // Detect a re-wrap before `ensure_frozen` updates `frozen_width`: the
     // absolute `top_line` is meaningless across a width change, so it is
-    // re-anchored to the viewport's previous relative position below.
+    // re-anchored to the viewport's previous relative position below. A height
+    // change doesn't re-wrap, but the Navigate cursor's row may no longer fit,
+    // so it is re-seated (clamped) on either kind of resize.
     let width_changed = app.frozen_width != w;
+    let view_changed = width_changed || app.log_view_h != height;
     // Sync the frozen-turn cache (all turns but the last) before reading it.
     app.ensure_frozen(w);
     let theme = app.theme;
@@ -237,26 +241,34 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let mut total: usize = frozen_total + last_h;
     total += if n_turns == 0 { 1 } else { n_turns - 1 };
 
-    let height = area.height as usize;
     let base = total.saturating_sub(height);
-    let prev_total = app.log_total;
     app.log_rect = area;
-    // A re-wrap shifts absolute line indices, so offsets carried over from
-    // the previous width may now point past the new bottom — clamping them
-    // would snap a scrolled-up view (and the Navigate cursor) to the bottom
-    // and stick there. Re-anchor both to their previous *relative* positions
-    // instead. Integer math floors, so it can't round up and spuriously pin.
-    // A pinned (tail-following) view is left at the bottom by design.
-    if width_changed {
-        if !app.pinned && app.last_base > 0 {
-            app.top_line = ((app.log_off as u64 * base as u64) / app.last_base as u64) as usize;
-        }
-        if prev_total > 0 {
-            app.nav_cursor = ((app.nav_cursor as u64 * total as u64) / prev_total as u64) as usize;
-            // The selection is derived from the cursor; follow it.
-            if app.mode == Mode::Select {
-                app.sel = Some(app.select_sel());
-            }
+    // A re-wrap shifts absolute line indices, so a `top_line` carried over
+    // from the previous width may now point past the new bottom — clamping it
+    // would snap a scrolled-up view to the bottom and stick there (`pinned`).
+    // Re-anchor to the viewport's previous relative position instead. Integer
+    // math floors, so it can't round up to `base` and spuriously pin. A
+    // pinned (tail-following) view is left at the bottom by design.
+    if width_changed && !app.pinned && app.last_base > 0 {
+        app.top_line = ((app.log_off as u64 * base as u64) / app.last_base as u64) as usize;
+    }
+    // The Navigate/Select cursor is also an absolute index, but it mustn't
+    // drift to a different proportional spot on a resize — it should stay on
+    // the same screen line. The re-anchor above keeps the viewport at ~its
+    // previous content, so pinning the cursor to its previous *row* within the
+    // viewport keeps it on ~the same line. Clamp the row to the new viewport
+    // so a height shrink can't push it off-screen.
+    if view_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
+        // `top_line` is stale while pinned (the viewport is held at `base`),
+        // so anchor against the effective viewport top in that case.
+        let vtop = if app.pinned { base } else { app.top_line };
+        let row = app
+            .nav_cursor
+            .saturating_sub(app.log_off)
+            .min(height.saturating_sub(1));
+        app.nav_cursor = vtop.saturating_add(row).min(total.saturating_sub(1));
+        if app.mode == Mode::Select {
+            app.sel = Some(app.select_sel());
         }
     }
     app.last_base = base;
