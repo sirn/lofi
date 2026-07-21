@@ -199,6 +199,45 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
     out
 }
 
+/// Indent-preserving greedy word-wrap for pre-formatted text — code,
+/// command output, file contents — where leading whitespace and column
+/// alignment carry meaning. Unlike [`wrap`] this never collapses whitespace:
+/// the leading indent is stripped before wrapping (so the wrapper has no
+/// leading spaces to break inside), then prepended to every output row so a
+/// wrapped line stays aligned under its own indentation. The body breaks at
+/// the last space that fits and hard-breaks a token wider than the content
+/// width on a wide-char boundary; the single break space is dropped so
+/// continuation rows start flush (matching [`wrap_line_styled`]). A blank or
+/// empty source line yields one empty row so a line-number rail stays visible.
+pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in s.split('\n') {
+        if max_w == 0 || line.is_empty() {
+            out.push(line.to_string());
+            continue;
+        }
+        // Indent = leading ASCII whitespace, stripped before wrapping and
+        // prepended to every output row.
+        let indent_len = line.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let indent = &line[..indent_len];
+        let body = &line[indent_len..];
+        let content_w = max_w.saturating_sub(width(indent));
+        if content_w == 0 {
+            // Indent alone fills the row; emit verbatim (terminal clips).
+            out.push(line.to_string());
+            continue;
+        }
+        let cells: Vec<(char, Style)> = body.chars().map(|c| (c, Style::default())).collect();
+        for group in wrap_cells(&cells, content_w) {
+            out.push(format!("{indent}{}", group.iter().map(|(c, _)| *c).collect::<String>()));
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// Shared greedy word-wrap core: break a styled cell run into `max_w`-wide
 /// visual rows. Fills each row greedily, breaking at the last space that
 /// fits; a token wider than `max_w` is hard-broken on a char boundary
@@ -527,6 +566,38 @@ mod tests {
     #[test]
     fn wrap_empty_yields_one_blank_line() {
         assert_eq!(wrap("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_pre_preserves_indent_on_every_row() {
+        // Indent is stripped before wrapping (so it is never broken inside)
+        // and prepended to every continuation row.
+        let w = wrap_pre("    indented code here", 12);
+        assert_eq!(w, vec!["    indented", "    code", "    here"]);
+    }
+
+    #[test]
+    fn wrap_pre_breaks_long_word_at_width() {
+        // No spaces to break at: hard-break at max_w chunks.
+        let w = wrap_pre("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(w, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
+
+    #[test]
+    fn wrap_pre_keeps_blank_source_lines() {
+        // A blank line yields one empty row; surrounding lines wrap.
+        let w = wrap_pre("a\n\nb", 10);
+        assert_eq!(w, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrap_pre_empty_yields_one_blank_line() {
+        assert_eq!(wrap_pre("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_pre_no_wrap_when_it_fits() {
+        assert_eq!(wrap_pre("short line", 80), vec!["short line"]);
     }
 
     #[test]

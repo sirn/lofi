@@ -1259,6 +1259,62 @@ fn turn_failed_dedups_after_fatal_error_block() {
 }
 
 #[test]
+fn exec_result_wraps_long_lines_instead_of_truncating() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".to_string(),
+        code: "lofi.bash('echo t')".to_string(),
+        label: Some("echo".to_string()),
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(),
+        id: 0,
+        name: "bash".to_string(),
+        args: "echo t".to_string(),
+    });
+    // A single long unbreakable result line. Under truncation its tail
+    // ("hij") would be clipped at the column edge; under wrapping it must
+    // appear on a continuation row.
+    let token = "abcdefghijklmnopqrstuvwxyz1234567890abcdefghij";
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(),
+        id: 0,
+        result: token.to_string(),
+        is_error: false,
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(),
+        result: "{\"value\":null}".to_string(),
+        is_error: false,
+        elapsed_ms: 0,
+    });
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 28, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    // No row overflows the column — wrapping keeps every line in bounds.
+    for rl in &rls {
+        assert!(rl.line.width() <= 28, "row overflows 28: {}", rl.line.width());
+    }
+    // The tail of the long line is visible (wrapping, not truncation).
+    let all = rls
+        .iter()
+        .map(|rl| {
+            rl.line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(all.contains("hij"), "result tail clipped (no wrapping): {all}");
+}
+
+#[test]
 fn footer_shows_model_and_thinking() {
     let a = App::new("openai/gpt-5.6-sol".to_string(), ThinkingLevel::XHigh, 0, lofi_types::CompactionConfig::default());
     let r: String = a
