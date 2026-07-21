@@ -258,6 +258,13 @@ ttl_seconds = 300               # optional; default 300
 name = "name"
 context_window = "context_length"
 max_tokens = "top_provider.max_completion_tokens"
+
+[compaction.auto]              # optional; auto-compaction trigger
+enable = true                  # optional; default true
+reserved_context_tokens = 20000  # tokens reserved for the response;
+                               #   triggers when context > window - reserved
+max_context_tokens = 150000    # optional; absolute cap, lowers the threshold
+context_ratio = 0.75           # optional; fraction of window, lowers the threshold
 ```
 
 ## Session transcripts
@@ -349,7 +356,7 @@ and final, and keep intermediates in-sandbox.
 | --- | --- |
 | `/help` | Show the keybindings + commands reference. |
 | `/clear` | Drop all turns from the log (the transcript file is untouched). |
-| `/new` | Start a fresh session file on the next prompt. |
+| `/compact` | Fold the older history into a structured summary, keeping the most recent turn. The summary is injected into the agent's context in place of the folded messages; the full transcript stays on disk. Auto-triggers when the context crosses the configured threshold (see `[compaction.auto]`); refused when there is too little to fold. |
 | `/resume` | Open a picker of past sessions for this workspace and resume one. |
 | `/tree` | Open a rollback picker over this session's turns. `✎` entries roll back to before a user prompt and prefill the input (edit and resend); `↳` entries roll back to after a turn and leave the input empty (continue from here). The next run branches off the chosen point. |
 | `/session` | Print the session path, message count, and model. |

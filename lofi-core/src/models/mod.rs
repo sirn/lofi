@@ -419,6 +419,7 @@ mod tests {
     fn config_with(providers: IndexMap<String, ProviderConfig>) -> Config {
         Config {
             agent: lofi_types::AgentConfig::default(),
+            compaction: lofi_types::CompactionConfig::default(),
             default_provider: None,
             default_model: None,
             providers,

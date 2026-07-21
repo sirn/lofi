@@ -41,7 +41,7 @@ pub async fn build_agent(
     config_path: Option<&std::path::Path>,
     model: Option<&str>,
     root: &std::path::Path,
-) -> Result<(Agent, Model, ThinkingLevel)> {
+) -> Result<(Agent, Model, ThinkingLevel, lofi_types::Config)> {
     let config_path = match config_path {
         Some(p) => p.to_path_buf(),
         None => crate::config_loader::user_config_path()?,
@@ -75,7 +75,7 @@ pub async fn build_agent(
         SYSTEM_PROMPT.to_string(),
         None,
     );
-    Ok((agent, model_obj, level))
+    Ok((agent, model_obj, level, config))
 }
 
 /// A parsed --model query: provider/model[:level].

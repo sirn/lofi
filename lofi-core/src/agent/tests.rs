@@ -373,7 +373,7 @@ async fn run_exits_when_receiver_dropped() {
 
 use indexmap::IndexMap;
 use lofi_types::{
-    AgentConfig, ApiTypeMapping, Config, ModelConfig, PricingConvention,
+    AgentConfig, ApiTypeMapping, CompactionConfig, Config, ModelConfig, PricingConvention,
     PricingFieldMappings, ProviderConfig, ThinkingLevel,
 };
 
@@ -456,6 +456,7 @@ fn provider(
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: None,
         default_model: None,
         providers,
@@ -576,6 +577,7 @@ fn select_model_uses_default_model_when_no_query() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
@@ -600,6 +602,7 @@ fn select_model_uses_default_provider_when_no_query() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: None,
         providers,
@@ -624,6 +627,7 @@ fn select_model_default_model_overrides_default_provider() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
@@ -648,6 +652,7 @@ fn select_model_explicit_query_overrides_defaults() {
     );
     let cfg = Config {
         agent: AgentConfig::default(),
+        compaction: CompactionConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
