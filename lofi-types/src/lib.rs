@@ -929,6 +929,52 @@ impl Default for BashConfig {
     }
 }
 
+/// Transient-error retry settings for provider/transport failures.
+///
+/// A failed round whose error matches a transient pattern (overloaded, rate
+/// limit, 429/5xx, network drops, stream truncation) is retried after an
+/// exponential backoff: attempt N waits `base_delay_ms * 2^(N-1)`, clamped to
+/// `max_delay_ms`. Non-transient errors (auth, quota/billing exhaustion,
+/// context overflow, bad requests) are never retried — the round surfaces them
+/// immediately. `max_retries: 0` disables retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum retry attempts after the initial try. Defaults to `10`.
+    #[serde(default = "default_retry_max_retries")]
+    pub max_retries: u32,
+    /// Base delay (ms) for the first retry; later retries double it, clamped
+    /// by `max_delay_ms`. Defaults to `2000` (2s).
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+    /// Per-retry delay ceiling (ms). Defaults to `60_000` (60s) so a long
+    /// retry tail under persistent transient errors waits in bounded steps
+    /// rather than doubling without limit.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+fn default_retry_max_retries() -> u32 {
+    10
+}
+
+fn default_retry_base_delay_ms() -> u64 {
+    2000
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    60_000
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_retry_max_retries(),
+            base_delay_ms: default_retry_base_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -1075,6 +1121,9 @@ pub struct Config {
     /// `bash` native-tool environment settings.
     #[serde(default)]
     pub bash: BashConfig,
+    /// Transient-error retry budget and backoff schedule.
+    #[serde(default)]
+    pub retry: RetryConfig,
     /// Default provider used when `--model` is omitted and no `default_model`
     /// resolves. Overrides the "first available provider" fallback.
     #[serde(default)]
@@ -1142,6 +1191,40 @@ mod tests {
             text: "hmm".to_string(),
             signature: None,
         });
+    }
+
+    #[test]
+    fn retry_config_defaults() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_retries, 10);
+        assert_eq!(cfg.base_delay_ms, 2000);
+        assert_eq!(cfg.max_delay_ms, 60_000);
+    }
+
+    #[test]
+    fn retry_config_serde_omitted_uses_defaults() {
+        // An empty `[retry]` block (or none) yields the default policy.
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            #[serde(default)]
+            retry: RetryConfig,
+        }
+        let w: Wrap = serde_json::from_str("{}").unwrap();
+        assert_eq!(w.retry, RetryConfig::default());
+    }
+
+    #[test]
+    fn retry_config_serde_partial_override() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            #[serde(default)]
+            retry: RetryConfig,
+        }
+        let w: Wrap = serde_json::from_str("{\"retry\":{\"max_retries\":0}}").unwrap();
+        assert_eq!(w.retry.max_retries, 0);
+        // Unset fields keep their defaults.
+        assert_eq!(w.retry.base_delay_ms, 2000);
+        assert_eq!(w.retry.max_delay_ms, 60_000);
     }
 
     #[test]
@@ -1233,6 +1316,7 @@ mod tests {
             agent: AgentConfig::default(),
             compaction: CompactionConfig::default(),
             bash: BashConfig::default(),
+            retry: RetryConfig::default(),
             default_provider: None,
             default_model: None,
             providers,

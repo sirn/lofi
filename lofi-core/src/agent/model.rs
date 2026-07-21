@@ -76,7 +76,8 @@ pub async fn build_agent(
         None,
         config.compaction.reserved_context_tokens,
         &config.bash,
-    );
+    )
+    .with_retry(crate::retry::RetryPolicy::from(config.retry));
     Ok((agent, model_obj, level, config))
 }
 

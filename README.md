@@ -294,6 +294,18 @@ env_file = "~/.config/lofi/secrets.env"  # optional; KEY=VALUE file loaded into
                                #   expanded; keep it outside the workspace so
                                #   lofi.read/edit/write cannot reach it. Values
                                #   are redacted from output. None by default.
+
+[retry]                         # optional; transient-error retries
+max_retries = 10                # default. Max retry attempts after the initial
+                                #   try, for transient provider/transport
+                                #   errors (overloaded, 429/5xx, network drops,
+                                #   stream truncation). Non-transient errors
+                                #   (auth, quota/billing, context overflow)
+                                #   are never retried. 0 disables retries.
+base_delay_ms = 2000            # default. Base delay (ms) for the first retry;
+                                #   later retries double it.
+max_delay_ms = 60000            # default. Per-retry delay ceiling (ms); the
+                                #   exponential backoff clamps here.
 ```
 
 ## Session transcripts
@@ -359,7 +371,7 @@ global `lofi` object:
 - `lofi.write({ path, text })` → `{ ok: true }`
 - `lofi.edit({ path, old, new })` → `{ ok: true }` (errors if `old` is missing
   or appears more than once)
-- `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code }`
+- `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code, command, directory, signal, duration_ms, status }` (`status` is `"exited"`, `"signaled"`, or `"timeout"`)
 - `lofi.agent(prompt, opts?)` → the subagent's final assistant text
 
 File tools canonicalize paths against the workspace root and reject escapes.
