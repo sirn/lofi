@@ -160,14 +160,19 @@ impl Component for AssistantText<'_> {
                 continue;
             }
             if in_code {
-                let body = prim::truncate(raw, content_w.saturating_sub(2));
-                out.push(prim::rline(
-                    vec![
-                        Span::raw("  "),
-                        Span::styled("│ ", Style::new().fg(t.muted).bg(t.surface)),
-                    ],
-                    vec![Span::styled(body, Style::new().fg(t.fg).bg(t.surface))],
-                ));
+                let avail = content_w.saturating_sub(2);
+                let rail = vec![
+                    Span::raw("  "),
+                    Span::styled("│ ", Style::new().fg(t.muted).bg(t.surface)),
+                ];
+                // Wrap each code line preserving its indentation; the rail
+                // repeats on every continuation row.
+                for seg in prim::wrap_pre(raw, avail) {
+                    out.push(prim::rline(
+                        rail.clone(),
+                        vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
+                    ));
+                }
                 continue;
             }
             if let Some(h) = trimmed.strip_prefix("# ").or_else(|| trimmed.strip_prefix("## ")) {
@@ -324,17 +329,25 @@ impl Component for ExecBlock<'_> {
         let avail = w.saturating_sub(4).saturating_sub(lw + 1);
         for (i, line) in code.iter().enumerate() {
             let n = format!("{:>lw$} ", i + 1, lw = lw);
-            let body = prim::truncate(line, avail);
-            out.push(prim::rtile(
-                vec![
-                    prim::gutter(bg),
-                    rail.clone(),
-                    Span::styled(n, Style::new().fg(t.subtle).bg(bg)),
-                ],
-                vec![Span::styled(body, Style::new().fg(t.fg).bg(bg))],
-                bg,
-                w,
-            ));
+            let blank_n = " ".repeat(lw + 1);
+            let body_style = Style::new().fg(t.fg).bg(bg);
+            let num_style = Style::new().fg(t.subtle).bg(bg);
+            // Wrap each command line preserving its indentation; the line
+            // number labels the first row and a blank of the same width
+            // aligns continuation rows under the body.
+            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
+                let num_span = if j == 0 {
+                    Span::styled(n.clone(), num_style)
+                } else {
+                    Span::styled(blank_n.clone(), num_style)
+                };
+                out.push(prim::rtile(
+                    vec![prim::gutter(bg), rail.clone(), num_span],
+                    vec![Span::styled(seg, body_style)],
+                    bg,
+                    w,
+                ));
+            }
         }
 
         let n_total = self.tool.native.len();
@@ -401,18 +414,24 @@ fn exec_result_lines(
     let hidden = all.len().saturating_sub(limit);
     let avail = w.saturating_sub(indent);
     let body_fg = if tool.is_error { t.error } else { t.muted };
+    let rail_deco = vec![
+        prim::gutter(bg),
+        Span::styled("  ", Style::new().bg(bg)),
+        prim::rail(t, bg),
+    ];
+    let body_style = Style::new().fg(body_fg).bg(bg);
+    // Wrap each result line preserving its formatting; the rail repeats on
+    // every continuation row. `hidden` counts logical lines, not wrapped
+    // rows, so the `(N lines hidden)` cap stays accurate.
     for line in all.iter().take(limit) {
-        let body = prim::truncate(line, avail);
-        out.push(prim::rtile(
-            vec![
-                prim::gutter(bg),
-                Span::styled("  ", Style::new().bg(bg)),
-                prim::rail(t, bg),
-            ],
-            vec![Span::styled(body, Style::new().fg(body_fg).bg(bg))],
-            bg,
-            w,
-        ));
+        for seg in prim::wrap_pre(line, avail) {
+            out.push(prim::rtile(
+                rail_deco.clone(),
+                vec![Span::styled(seg, body_style)],
+                bg,
+                w,
+            ));
+        }
     }
     if hidden > 0 {
         let cap = format!("({hidden} lines hidden)");
@@ -489,21 +508,35 @@ impl Component for ExecBlockBranch<'_> {
         let limit = if cx.app.verbose { total } else { PREVIEW_LINES };
         let hidden = total.saturating_sub(limit);
         let body_fg = if self.nt.is_error { t.error } else { t.muted };
+        let blank_n = " ".repeat(lw + 1);
+        let num_style = Style::new().fg(t.subtle).bg(bg);
+        let numbered_style = Style::new().fg(t.fg).bg(bg);
+        let plain_style = Style::new().fg(body_fg).bg(bg);
+        let base_deco = vec![
+            prim::gutter(bg),
+            Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
+            prim::rail(t, bg),
+        ];
+        // Wrap each result line preserving its formatting. For `read`/`view`
+        // the line number labels the first row and a blank of the same width
+        // aligns continuation rows under the body; `hidden` counts logical
+        // lines so the cap stays accurate.
         for (i, line) in all.iter().take(limit).enumerate() {
-            let body = prim::truncate(line, avail);
-            let mut deco = vec![
-                prim::gutter(bg),
-                Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-                prim::rail(t, bg),
-            ];
-            let content = if numbered {
-                let n = format!("{:>lw$} ", i + 1, lw = lw);
-                deco.push(Span::styled(n, Style::new().fg(t.subtle).bg(bg)));
-                vec![Span::styled(body, Style::new().fg(t.fg).bg(bg))]
-            } else {
-                vec![Span::styled(body, Style::new().fg(body_fg).bg(bg))]
-            };
-            out.push(prim::rtile(deco, content, bg, w));
+            let n = format!("{:>lw$} ", i + 1, lw = lw);
+            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
+                let mut deco = base_deco.clone();
+                let content = if numbered {
+                    deco.push(if j == 0 {
+                        Span::styled(n.clone(), num_style)
+                    } else {
+                        Span::styled(blank_n.clone(), num_style)
+                    });
+                    vec![Span::styled(seg, numbered_style)]
+                } else {
+                    vec![Span::styled(seg, plain_style)]
+                };
+                out.push(prim::rtile(deco, content, bg, w));
+            }
         }
         if hidden > 0 {
             let cap = format!("({hidden} lines hidden)");
@@ -558,10 +591,21 @@ struct ErrorLine<'a> {
 impl Component for ErrorLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        vec![prim::rline(
-            vec![Span::raw("  "), Span::styled("✗ ", Style::new().fg(t.error))],
-            vec![Span::styled(self.msg.to_string(), Style::new().fg(t.error))],
-        )]
+        let err = Style::new().fg(t.error);
+        // `✗ ` lead on the first line, a 2-space indent on continuations so
+        // wrapped rows align under the message. Long messages used to be
+        // clipped at the terminal edge on a single line.
+        let content_w = cx.width.saturating_sub(4); // "  " + "✗ "
+        let mut out = Vec::new();
+        for (i, seg) in prim::wrap(self.msg, content_w).iter().enumerate() {
+            let deco = if i == 0 {
+                vec![Span::raw("  "), Span::styled("✗ ", err)]
+            } else {
+                vec![Span::raw("  "), Span::raw("  ")]
+            };
+            out.push(prim::rline(deco, vec![Span::styled(seg.clone(), err)]));
+        }
+        out
     }
 }
 
