@@ -239,15 +239,25 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 
     let height = area.height as usize;
     let base = total.saturating_sub(height);
+    let prev_total = app.log_total;
     app.log_rect = area;
-    // A re-wrap shifts absolute line indices, so a `top_line` carried over
-    // from the previous width may now point past the new bottom — clamping it
-    // would snap a scrolled-up view to the bottom and stick there (`pinned`).
-    // Re-anchor to the viewport's previous relative position instead. Integer
-    // math floors, so it can't round up to `base` and spuriously pin. A
-    // pinned (tail-following) view is left at the bottom by design.
-    if width_changed && !app.pinned && app.last_base > 0 {
-        app.top_line = ((app.log_off as u64 * base as u64) / app.last_base as u64) as usize;
+    // A re-wrap shifts absolute line indices, so offsets carried over from
+    // the previous width may now point past the new bottom — clamping them
+    // would snap a scrolled-up view (and the Navigate cursor) to the bottom
+    // and stick there. Re-anchor both to their previous *relative* positions
+    // instead. Integer math floors, so it can't round up and spuriously pin.
+    // A pinned (tail-following) view is left at the bottom by design.
+    if width_changed {
+        if !app.pinned && app.last_base > 0 {
+            app.top_line = ((app.log_off as u64 * base as u64) / app.last_base as u64) as usize;
+        }
+        if prev_total > 0 {
+            app.nav_cursor = ((app.nav_cursor as u64 * total as u64) / prev_total as u64) as usize;
+            // The selection is derived from the cursor; follow it.
+            if app.mode == Mode::Select {
+                app.sel = Some(app.select_sel());
+            }
+        }
     }
     app.last_base = base;
     let off = if app.pinned { base } else { app.top_line.min(base) };
