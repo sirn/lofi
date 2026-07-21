@@ -5,16 +5,22 @@ use super::*;
 use lofi_error::{Error, Result};
 use std::fmt::Write as _;
 use serde_json::{json, Value};
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 impl BuiltinTools {
     /// Run `cmd` via `sh -c` with cwd pinned to the root.
     ///
     /// stdout and stderr are merged. `timeoutMs` bounds the run (default
-    /// 120s); on timeout the child is killed and `{ ok: false, output:
-    /// "<timeout>", code: null }` is returned.
+    /// 120s); on timeout the child is killed and `status: "timeout"` is returned
+    /// (with `output: "<timeout>"`, `code: null`).
+    ///
+    /// The result is structured: `ok`, `output`, `code` (exit status, null on
+    /// signal/timeout), `command`, `directory` (cwd), `signal` (Unix signal
+    /// number, null unless killed by a signal), `duration_ms`, and `status`
+    /// (`"exited"`, `"signaled"`, or `"timeout"`).
     ///
     /// Output is tail-truncated to 50 KB / 2000 lines (whichever is hit
     /// first), keeping the end where errors and final results land. When
@@ -57,6 +63,7 @@ impl BuiltinTools {
             .process_group(0);
         self.bash_env.apply(&mut command);
 
+        let started = Instant::now();
         let mut child = command.spawn()?;
         // `process_group(0)` makes the child its own session/group leader,
         // so its pid is the process-group id. Killing `-pgid` reaches every
@@ -107,10 +114,17 @@ impl BuiltinTools {
                 let mut full = String::from_utf8_lossy(&merged).into_owned();
                 self.bash_env.redact(&mut full);
                 let output = self.format_bash_output(&full, pipe_capped);
+                #[allow(clippy::cast_possible_truncation)]
+                let duration_ms = started.elapsed().as_millis() as u64;
                 Ok(json!({
                     "ok": status.success(),
                     "output": output,
                     "code": status.code(),
+                    "command": cmd,
+                    "directory": self.root.display().to_string(),
+                    "signal": status.signal(),
+                    "duration_ms": duration_ms,
+                    "status": if status.signal().is_some() { "signaled" } else { "exited" },
                 }))
             }
             Ok(Err(e)) => {
@@ -130,6 +144,11 @@ impl BuiltinTools {
                     "ok": false,
                     "output": "<timeout>",
                     "code": Value::Null,
+                    "command": cmd,
+                    "directory": self.root.display().to_string(),
+                    "signal": Value::Null,
+                    "duration_ms": timeout_ms,
+                    "status": "timeout",
                 }))
             }
         }
