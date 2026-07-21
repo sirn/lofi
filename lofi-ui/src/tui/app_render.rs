@@ -70,7 +70,7 @@ impl App {
             let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
             if prompt > 0 && (u.cache_read_tokens > 0 || u.cache_write_tokens > 0) {
                 let rate = u.cache_read_tokens as f64 / prompt as f64 * 100.0;
-                Some(format!(" · {:.0}% cached", rate))
+                Some(format!(" · {rate:.0}% cached"))
             } else {
                 None
             }

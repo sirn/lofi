@@ -1,6 +1,7 @@
 use super::truncate::{format_size, truncate_head, truncate_line};
-use super::*;
+use super::{BuiltinTools, parse_grep_args, resolve_under, walk_files_capped, MAX_GREP_VISITED, MAX_GREP_OUTPUT_BYTES, DEFAULT_GREP_MAX, MAX_GREP_FILE_BYTES};
 use lofi_error::{Error, Result};
+use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 impl BuiltinTools {
@@ -15,6 +16,8 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or a
     /// read failure.
     #[allow(clippy::unused_async)]
+    // One regex dispatch; per-flag helpers would scatter the shared match/byte budgets.
+    #[allow(clippy::too_many_lines)]
     pub async fn grep(&self, pattern: Value, path: Option<&str>) -> Result<Value> {
         let (re_src, ic, ctx, max) = parse_grep_args(pattern)?;
         let mut builder = regex::RegexBuilder::new(&re_src);
@@ -117,12 +120,13 @@ impl BuiltinTools {
             let t = truncate_head(&out);
             let mut out = t.content;
             if t.truncated {
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "\n\n[Showing {} of {} lines ({} limit).]",
                     t.output_lines,
                     t.total_lines,
                     format_size(50 * 1024)
-                ));
+                );
             }
             Ok(out)
         })

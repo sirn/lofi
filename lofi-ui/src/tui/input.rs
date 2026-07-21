@@ -172,6 +172,8 @@ pub(super) fn handle_event(
         KeyCode::Right => app.move_right(),
         KeyCode::Up if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_up(),
         KeyCode::Down if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_down(),
+        KeyCode::Up if app.slash_complete.is_some() => app.slash_complete_up(),
+        KeyCode::Down if app.slash_complete.is_some() => app.slash_complete_down(),
         KeyCode::Up => app.cursor_up(),
         KeyCode::Down => app.cursor_down(),
         KeyCode::Tab => app.enter_nav(),

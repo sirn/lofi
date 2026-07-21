@@ -53,8 +53,8 @@ mod tests;
 pub use event::AgentEvent;
 pub use exec::{exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input};
 pub use model::{build_agent, select_model};
-pub(crate) use exec::{cap_exec_result, cap_tool_result, cap_tool_result_to, decode_json_string, extract_code_prefix};
-pub(crate) use model::{initial_history, parse_model_query, resolve_thinking_level, ModelQuery};
+pub(crate) use exec::{cap_exec_result, cap_tool_result, extract_code_prefix};
+pub(crate) use model::initial_history;
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 
@@ -158,8 +158,7 @@ impl TurnStats {
         let ms = self
             .tool_starts
             .get(id)
-            .map(|s| s.elapsed().as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |s| s.elapsed().as_millis() as u64);
         self.tool_elapsed
             .insert(id.to_string(), Duration::from_millis(ms));
         ms
@@ -284,10 +283,10 @@ impl Agent {
             "{}/{}{}",
             self.model.provider,
             self.model.id,
-            if self.model.thinking != ThinkingLevel::Off {
-                format!(" · {}", self.model.thinking.as_str())
-            } else {
+            if self.model.thinking == ThinkingLevel::Off {
                 String::new()
+            } else {
+                format!(" · {}", self.model.thinking.as_str())
             }
         )
     }

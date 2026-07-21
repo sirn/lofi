@@ -30,7 +30,7 @@ pub use openai_responses::OpenAiResponsesProvider;
 
 /// A streaming chat-completion transport.
 ///
-/// `stream` runs a single model turn, POSTing to `model.base_url` (the full
+/// `stream` runs a single model turn, `POSTing` to `model.base_url` (the full
 /// endpoint URL resolved at config load) and yielding incremental events
 /// until the provider sends its terminal sentinel. Remote model-list
 /// discovery is driven by `lofi-core`'s `fetch_auto_models`, not by this

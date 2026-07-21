@@ -4,8 +4,8 @@ use super::*;
 
 /// Build the '/tree' picker entries from a lightweight event index.
 ///
-/// Uses [`store::load_index`] (id + parent_id + kind discriminant only —
-/// no ContentBlock deserialization) to build the tree shape, then loads
+/// Uses [`store::load_index`] (id + `parent_id` + kind discriminant only —
+/// no `ContentBlock` deserialization) to build the tree shape, then loads
 /// labels on demand via [`store::load_event_at`]. This keeps `/tree` fast
 /// on large sessions: the full [`store::load`] is avoided entirely.
 ///
@@ -57,7 +57,7 @@ pub(super) fn build_tree_entries(
     let trunk: Vec<usize> = active_path
         .iter()
         .copied()
-        .filter(|&i| is_tree_node(&indices[i].kind))
+        .filter(|&i| is_tree_node(indices[i].kind))
         .collect();
 
     let n = trunk.len();
@@ -105,7 +105,7 @@ pub(super) fn build_tree_entries(
             .iter()
             .enumerate()
             .filter(|&(_, ix)| {
-                if !is_tree_node(&ix.kind) {
+                if !is_tree_node(ix.kind) {
                     return false;
                 }
                 // Walk up the parent chain; this is a top-level tree node
@@ -113,7 +113,7 @@ pub(super) fn build_tree_entries(
                 let mut cur = ix.parent_id.as_deref();
                 while let Some(pid) = cur {
                     let Some(&pidx) = by_id.get(pid) else { break };
-                    if is_tree_node(&indices[pidx].kind) {
+                    if is_tree_node(indices[pidx].kind) {
                         return false;
                     }
                     cur = indices[pidx].parent_id.as_deref();
@@ -206,7 +206,7 @@ pub(super) fn render_branch_subtree(
             sub_branches.extend(user_children);
             if !sub_branches.is_empty() {
                 render_branch_subtree(
-                    &sub_branches, indices, &children_by_parent, &by_id, path,
+                    &sub_branches, indices, children_by_parent, by_id, path,
                     &sub_indent, out,
                 );
             }
@@ -215,7 +215,7 @@ pub(super) fn render_branch_subtree(
 }
 
 /// Walk the linear chain from `start`: user → turn outcome → next user
-/// prompt → …, following the first user-prompt child at each turn_end and
+/// prompt → …, following the first user-prompt child at each `turn_end` and
 /// the turn outcome at each user prompt.
 pub(super) fn walk_chain(
     start: usize,
@@ -304,7 +304,7 @@ pub(super) fn push_tree_entry(
 }
 
 /// Whether a kind is a displayable tree node (user prompt or turn outcome).
-pub(super) fn is_tree_node(kind: &store::IndexKind) -> bool {
+pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
     matches!(
         kind,
         store::IndexKind::UserPrompt
@@ -314,7 +314,7 @@ pub(super) fn is_tree_node(kind: &store::IndexKind) -> bool {
 }
 
 /// Walk the descendant chain from `start` (a user-prompt event) to find the
-/// first turn_end/turn_failed — the outcome of this turn. Follows the
+/// first `turn_end/turn_failed` — the outcome of this turn. Follows the
 /// in-turn chain (assistant → tool → thinking → …), skipping user-prompt
 /// children that are branches.
 pub(super) fn find_turn_outcome(
@@ -355,12 +355,12 @@ pub(super) fn load_assistant_preview(
             break;
         }
         let Some(&pidx) = by_id.get(parent_id) else { break };
-        let pix = &indices[pidx];
-        if pix.kind == store::IndexKind::UserPrompt {
+        let pentry = &indices[pidx];
+        if pentry.kind == store::IndexKind::UserPrompt {
             break;
         }
-        if pix.kind == store::IndexKind::AssistantMessage {
-            if let Some(text) = load_assistant_text(path, pix.offset) {
+        if pentry.kind == store::IndexKind::AssistantMessage {
+            if let Some(text) = load_assistant_text(path, pentry.offset) {
                 return one_line(&text);
             }
         }
@@ -404,7 +404,7 @@ pub(super) fn load_assistant_text(path: &Path, offset: u64) -> Option<String> {
         })
 }
 
-/// Load a turn_failed event and extract its error message.
+/// Load a `turn_failed` event and extract its error message.
 pub(super) fn load_failed_error(path: &Path, offset: u64) -> String {
     let Ok(ev) = store::load_event_at(path, offset) else {
         return String::new();

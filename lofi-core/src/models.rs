@@ -365,10 +365,10 @@ fn inject_discovered(
 /// Explicit static values are preserved.
 fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.name.is_none() {
-        dst.name = src.name.clone();
+        dst.name.clone_from(&src.name);
     }
     if dst.api_type.is_none() {
-        dst.api_type = src.api_type.clone();
+        dst.api_type.clone_from(&src.api_type);
     }
     if dst.reasoning.is_none() {
         dst.reasoning = src.reasoning;
@@ -383,13 +383,13 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
         dst.max_tokens = src.max_tokens;
     }
     if dst.thinking_levels.is_empty() {
-        dst.thinking_levels = src.thinking_levels.clone();
+        dst.thinking_levels.clone_from(&src.thinking_levels);
     }
     if dst.thinking_level.is_none() {
         dst.thinking_level = src.thinking_level;
     }
     if dst.base_url.is_none() {
-        dst.base_url = src.base_url.clone();
+        dst.base_url.clone_from(&src.base_url);
     }
     if dst.input_price.is_none() {
         dst.input_price = src.input_price;

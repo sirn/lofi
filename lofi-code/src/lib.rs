@@ -708,10 +708,10 @@ fn tool_result(res: std::result::Result<Json, Error>) -> rquickjs::Result<JsonV>
 /// Parse an optional `{ limit?: number }` argument object for `lofi.ls`/
 /// `lofi.find`.
 fn parse_limit_opt(opts: Opt<Value>) -> Option<u64> {
-    let Some(v) = opts.0 else { return None; };
+    let v = opts.0?;
     let json = js_to_json(&v);
-    let obj = match json.as_object() { Some(o) => o, None => return None };
-    obj.get("limit").and_then(|v| v.as_u64())
+    let obj = json.as_object()?;
+    obj.get("limit").and_then(serde_json::Value::as_u64)
 }
 
 /// Parse the optional `{ offset?, limit? }` argument object for `lofi.read`.
@@ -719,9 +719,9 @@ fn parse_limit_opt(opts: Opt<Value>) -> Option<u64> {
 fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
     let Some(v) = opts.0 else { return (None, None); };
     let json = js_to_json(&v);
-    let obj = match json.as_object() { Some(o) => o, None => return (None, None) };
-    let offset = obj.get("offset").and_then(|v| v.as_u64());
-    let limit = obj.get("limit").and_then(|v| v.as_u64());
+    let Some(obj) = json.as_object() else { return (None, None) };
+    let offset = obj.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = obj.get("limit").and_then(serde_json::Value::as_u64);
     (offset, limit)
 }
 

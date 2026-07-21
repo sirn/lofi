@@ -269,7 +269,7 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
             ev.id = short_id();
         }
         if legacy_v1 || ev.parent_id.is_none() {
-            ev.parent_id = prev_id.clone();
+            ev.parent_id.clone_from(&prev_id);
         }
         prev_id = Some(ev.id.clone());
         events.push(ev);
@@ -300,7 +300,7 @@ pub fn append_events(
     parent_hint: Option<&str>,
 ) -> Result<(u64, u64)> {
     if events.is_empty() {
-        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let len = std::fs::metadata(path).map_or(0, |m| m.len());
         return Ok((len, len));
     }
     // Resolve the first event's parent: explicit hint (branch) > the file's
@@ -316,11 +316,11 @@ pub fn append_events(
     for ev in events.iter_mut() {
         ev.id = short_id();
         if ev.parent_id.is_none() {
-            ev.parent_id = parent.clone();
+            ev.parent_id.clone_from(&parent);
         }
         parent = Some(ev.id.clone());
     }
-    let byte_start = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -446,7 +446,7 @@ pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
 }
 
 /// Lightweight per-event index entry: just enough to build the event tree
-/// structure (id, parent_id, offset) and identify tree-node kinds, without
+/// structure (id, `parent_id`, offset) and identify tree-node kinds, without
 /// deserializing message content. Used by `/tree` to avoid a full `load`.
 #[derive(Debug, Clone)]
 pub struct EventIndex {
@@ -487,6 +487,11 @@ struct EventSkeleton {
 /// `ContentBlock` deserialization. This is much cheaper than [`load`] for
 /// tree-structure purposes (the `/tree` picker only needs the shape, not
 /// message content).
+///
+/// # Errors
+///
+/// Returns the underlying IO error if the session file cannot be read or
+/// an event line cannot be parsed.
 pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
@@ -540,7 +545,7 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             id = short_id();
         }
         if legacy_v1 || parent_id.is_none() {
-            parent_id = prev_id.clone();
+            parent_id.clone_from(&prev_id);
         }
         let kind = match skel.kind_type.as_str() {
             "message" => match skel.role.as_deref() {
@@ -560,6 +565,11 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
 
 /// Parse a single event at a known byte offset. Used for lazy label loading
 /// after [`load_index`] has built the tree structure.
+///
+/// # Errors
+///
+/// Returns the underlying IO error if the session file cannot be read or the
+/// event at `offset` cannot be parsed.
 pub fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
     use std::io::{BufRead, Seek, SeekFrom};
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -584,7 +594,7 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
     let count = lines
         .filter(|l| !l.is_empty())
         .filter(|l| {
-            parse_event(l).map_or(false, |ev| matches!(ev.kind, SessionEventKind::Message(_)))
+            parse_event(l).is_ok_and(|ev| matches!(ev.kind, SessionEventKind::Message(_)))
         })
         .count();
     Some(SessionEntry {
@@ -615,11 +625,12 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
 
     use super::*;
     use lofi_types::{ContentBlock, Role, SessionEventKind, Usage};
 
-    /// Wrap a message as a `Message` session event (id/parent_id left empty;
+    /// Wrap a message as a `Message` session event (`id/parent_id` left empty;
     /// `append_events` assigns and chains them).
     fn ev(msg: Message) -> SessionEvent {
         SessionEvent {
