@@ -383,7 +383,7 @@ and final, and keep intermediates in-sandbox.
 | `/resume` | Open a picker of past sessions for this workspace and resume one. |
 | `/tree` | Open a rollback picker over this session's turns. `✎` entries roll back to before a user prompt and prefill the input (edit and resend); `↳` entries roll back to after a turn and leave the input empty (continue from here). The next run branches off the chosen point. |
 | `/session` | Print the session path, message count, and model. |
-| `/verbose` | Toggle verbose tool detail in `exec` blocks. |
+| `/recall [query]` | Search the full session transcript — including messages a `/compact` folded away — and render the matches inline in the log. With no query, browse the most recent entries. Scopes: `scope:lineage` (default, active branch), `scope:all` (whole session), `scope:compaction:N` / `scope:compaction:latest` (within one compaction's summarized range). Search supports regex (`hook|inject`) and multi-word BM25 ranking; `page:N` pages results. The model reaches the same engine via the `lofi.recall` native tool. |
 | `/quit` | Exit. |
 
 ## Lint strictness
