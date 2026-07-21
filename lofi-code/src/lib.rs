@@ -36,7 +36,7 @@ use rquickjs::prelude::*;
 use rquickjs::{Array, AsyncContext, AsyncRuntime, Ctx, Function, IntoJs, Object, Promise, Value};
 use serde_json::{json, Value as Json};
 use swc_common::sync::Lrc;
-use swc_common::{FileName, FilePathMapping, Globals, SourceMap, GLOBALS};
+use swc_common::{FileName, FilePathMapping, Globals, SourceMap, Span, Spanned, GLOBALS};
 use swc_ecma_ast::Module;
 use swc_ecma_codegen::to_code_default;
 use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax};
@@ -192,6 +192,17 @@ impl<'js> IntoJs<'js> for JsonV {
     }
 }
 
+/// Render a span as a user-relative `line:col` (1-based). The async-IIFE
+/// wrapper prepends one line before the user's source, so the user's first
+/// line is wrapped-line 2; subtract one to report user-relative lines so a
+/// malformed escape points where the user wrote it.
+fn span_loc(cm: &SourceMap, span: Span) -> String {
+    let loc = cm.lookup_char_pos(span.lo());
+    let line = loc.line.saturating_sub(1).max(1);
+    let col = loc.col.0 + 1;
+    format!("{line}:{col}")
+}
+
 /// Compile a TypeScript snippet to a runnable JS string.
 ///
 /// The user body is wrapped in `(async () => { try { <body> } catch ... })()`
@@ -215,13 +226,23 @@ pub fn compile_ts(src: &str) -> Result<String> {
             StringInput::from(&*fm),
             None,
         );
-        let mut module: Module = parser
-            .parse_module()
-            .map_err(|e| Error::Sandbox(format!("parse error: {}", e.kind().msg())))?;
+        let mut module: Module = parser.parse_module().map_err(|e| {
+            Error::Sandbox(format!(
+                "parse error: {} at {}",
+                e.kind().msg(),
+                span_loc(&cm, e.span())
+            ))
+        })?;
         if let Some(e) = parser.take_errors().into_iter().next() {
             // Non-fatal recovered errors: report the first as a sandbox error
-            // so typos don't silently produce wrong code.
-            return Err(Error::Sandbox(format!("parse error: {}", e.kind().msg())));
+            // so typos don't silently produce wrong code. Include the
+            // user-relative source location so a malformed escape or token
+            // points at its line and column.
+            return Err(Error::Sandbox(format!(
+                "parse error: {} at {}",
+                e.kind().msg(),
+                span_loc(&cm, e.span())
+            )));
         }
         module.visit_mut_with(&mut strip_type());
         let js = to_code_default(cm, None, &module);
@@ -653,5 +674,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.value, json!("hi"));
+    }
+
+    #[test]
+    fn compile_ts_malformed_escape_reports_location() {
+        // `\u{GG}` is not valid hex; the error must carry the user-relative
+        // source location (line 1) so a malformed escape points where it is.
+        let err = compile_ts(r#"return "\u{GG}";"#).unwrap_err();
+        let msg = match err {
+            Error::Sandbox(m) => m,
+            other => panic!("expected Sandbox error, got {other:?}"),
+        };
+        assert!(msg.starts_with("parse error"), "not a parse error: {msg}");
+        assert!(msg.contains("at 1:"), "missing user-relative location: {msg}");
+    }
+
+    #[tokio::test]
+    async fn exec_unicode_escapes_round_trip() {
+        // `\uXXXX`, `\u{...}` (non-BMP), and a UTF-16 surrogate pair all
+        // decode to the same code point and survive parse → codegen → eval.
+        let dir = tempdir().unwrap();
+        let cases: &[(&str, &str)] = &[
+            ("return \"\\u00E9\";", "é"),
+            ("return \"\\u{1F600}\";", "😀"),
+            ("return \"\\uD83D\\uDE00\";", "😀"),
+        ];
+        for (src, expected) in cases {
+            let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(res.value, json!(*expected), "{src} did not round-trip");
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_escaped_unicode_in_tool_arg() {
+        // An escape inside a tool argument string is decoded before the arg
+        // reaches the tool, so `echo \u00E9` echoes é.
+        let dir = tempdir().unwrap();
+        let src = r#"const r = await lofi.bash({ cmd: "echo \u00E9" }); return r.output.trim();"#;
+        let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(res.value, json!("é"));
     }
 }
