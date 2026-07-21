@@ -78,7 +78,7 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
 
 // ── User message ─────────────────────────────────────────────────────────
 
-/// A user message: the prompt soft-wrapped with a `❯` lead on the first
+/// A user message: the prompt soft-wrapped with a `▌` lead on the first
 /// line and a 2-space indent on continuations. No background fill.
 struct UserMessage<'a> {
     prompt: &'a str,
@@ -94,7 +94,7 @@ impl Component for UserMessage<'_> {
         let mut out = Vec::new();
         for (i, seg) in prim::wrap(self.prompt, content_w).iter().enumerate() {
             let prefix = if i == 0 {
-                Span::styled("❯ ", lead)
+                Span::styled("▌ ", lead)
             } else {
                 Span::raw("  ")
             };

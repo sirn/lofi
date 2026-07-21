@@ -94,15 +94,14 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     .unwrap_or(40)
     .min(area.width);
     // Anchor horizontally at the cursor's column within the prompt area,
-    // so the popover tracks the cursor as the user types. The 2-cell `❯ `
-    // prefix is added by render_input; the cursor x is relative to the
-    // content, so add 2. Clamp so the popover stays on screen.
-    let content_width = app.input_rect.width.saturating_sub(2) as usize;
+    // so the popover tracks the cursor as the user types. `input_rect` is
+    // already inset past the gutter, and the cursor x is relative to its
+    // left edge, so add directly. Clamp so the popover stays on screen.
+    let content_width = app.input_rect.width as usize;
     let (cursor_row, cursor_x) = app.input_cursor_pos(content_width);
     let cursor_screen_x = app
         .input_rect
         .x
-        .saturating_add(2)
         .saturating_add(u16::try_from(cursor_x).unwrap_or(u16::MAX));
     let cursor_screen_y = app
         .input_rect

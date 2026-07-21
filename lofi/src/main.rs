@@ -2,6 +2,7 @@
 //!
 //! A thin clap CLI that dispatches into the lofi crates:
 //! - `--list-models` prints `provider/id — name` lines and exits;
+//! - `--list-sessions` prints saved sessions for the workspace and exits;
 //! - `--print <prompt>` runs one non-interactive turn via [`lofi_ui::run_print`];
 //! - otherwise the interactive TUI is launched via [`lofi_ui::run_interactive`].
 //!
@@ -18,6 +19,7 @@ use lofi_ui::{InteractiveOptions, PrintOptions};
 
 /// Command-line interface for lofi.
 #[derive(Parser, Debug)]
+#[allow(clippy::struct_excessive_bools)] // CLI flag struct
 #[command(
     name = "lofi",
     version,
@@ -25,17 +27,19 @@ use lofi_ui::{InteractiveOptions, PrintOptions};
 )]
 struct Cli {
     /// Run one non-interactive turn and stream the assistant text to stdout.
-    #[arg(long, value_name = "PROMPT")]
+    #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
     /// List configured models as `provider/id — name` and exit.
     #[arg(long)]
     list_models: bool,
-    /// Select the model as `provider/model[:level]` (e.g.
-    /// `openai/gpt-5.6-sol:xhigh` or `anthropic/claude-sonnet-5`).
+    /// List saved sessions for this workspace and exit.
+    #[arg(long)]
+    list_sessions: bool,
+    /// Select the model as `provider/model[:level]`.
     #[arg(long, value_name = "SPEC")]
     model: Option<String>,
     /// Continue the most recent session for this workspace.
-    #[arg(short = 'c', long)]
+    #[arg(short = 'c', long = "continue")]
     continue_last: bool,
     /// Resume a specific session by id prefix.
     #[arg(long, value_name = "ID")]
@@ -63,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.list_models {
         list_models(&cli).await?;
+    } else if cli.list_sessions {
+        list_sessions(&root)?;
     } else if let Some(prompt) = cli.print.clone() {
         let opts = build_print_opts(&cli, prompt, root);
         lofi_ui::run_print(opts).await?;
@@ -98,6 +104,55 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
         opts = opts.with_no_session();
     }
     opts
+}
+
+/// List saved sessions for `root`, newest-first, as `id  created  model  (n msgs)`.
+fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
+    let store = lofi_core::session::store::SessionStore::open()
+        .context("open session store")?;
+    let entries = store.list_for_cwd(root).context("list sessions")?;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    if entries.is_empty() {
+        handle.write_all(b"(no sessions)\n")?;
+    } else {
+        for e in &entries {
+            let line = format!(
+                "{}  {}  {}  ({} msgs)\n",
+                e.id(),
+                format_ts(e.meta.created),
+                e.meta.model,
+                e.message_count,
+            );
+            handle.write_all(line.as_bytes())?;
+        }
+    }
+    if std::io::stdout().is_terminal() {
+        handle.flush()?;
+    }
+    Ok(())
+}
+
+/// Format a wall-clock millisecond timestamp as UTC `YYYY-MM-DD HH:MM`.
+#[allow(clippy::many_single_char_names)] // mirrors Howard Hinnant's civil calendar algorithm
+fn format_ts(ms: u64) -> String {
+    let secs = ms / 1000;
+    let day = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
+    let rem = secs % 86_400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    // Civil calendar conversion (Howard Hinnant's algorithm), days -> date.
+    let z = day + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}")
 }
 
 /// Load config, build the registry (with remote discovery + static fallback),
