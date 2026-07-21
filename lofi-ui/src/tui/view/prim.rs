@@ -115,8 +115,21 @@ pub fn render(
     content: Vec<Span<'static>>,
     suffix: Vec<Span<'static>>,
 ) -> RenderLine {
-    let start = char_count(&deco);
-    let end = start + char_count(&content);
+    let deco_len = char_count(&deco);
+    let content_len = char_count(&content);
+    // Exclude leading whitespace from the selectable content range.
+    // `wrap_pre` re-prepends a line's indent to every wrapped row for
+    // alignment; counting it would make the cumulative content length (and
+    // thus the Navigate cursor's content anchor) depend on the number of
+    // wraps — i.e. on width. The indent is still rendered (visible) but not
+    // selectable, so the anchor tracks only the line's actual text.
+    let lead_ws = content
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    let start = deco_len + lead_ws;
+    let end = deco_len + content_len;
     let mut all = deco;
     all.extend(content);
     all.extend(suffix);
@@ -272,22 +285,31 @@ fn wrap_cells(cells: &[(char, Style)], max_w: usize) -> Vec<&[(char, Style)]> {
             }
             k += 1;
         }
+        // Keep the break space in the slice (as trailing content) so the
+        // cumulative selectable-content length stays stable across re-wraps —
+        // dropping it would make the content anchor drift, since the number
+        // of wraps (and thus dropped spaces) depends on width. The space fits
+        // in the word-wrap case; when the line is already full and the next
+        // char is a space it overflows by one cell and is clipped by the
+        // renderer, staying invisible while still being counted.
         let mut end = if k == n {
             n
         } else if cells[k].0 == ' ' {
-            k // boundary space: break here, drop it
+            k + 1 // boundary space: include it (clipped if it overflows)
         } else if break_at > start {
-            break_at // last whitespace: word-wrap there
+            break_at + 1 // word-wrap space: include it (it fit)
         } else {
             k // no whitespace to break at: hard-break at max_w
         };
+        if end > n {
+            end = n;
+        }
         // A single char wider than max_w can't be split — emit it anyway.
         if end <= start {
             end = start + 1;
         }
         out.push(&cells[start..end]);
-        // Skip the single break space so continuation rows start flush.
-        start = if end < n && cells[end].0 == ' ' { end + 1 } else { end };
+        start = end;
     }
     if out.is_empty() {
         out.push(&cells[0..0]);
@@ -562,7 +584,7 @@ mod tests {
     fn wrap_collapses_whitespace_and_wraps() {
         // Flow text: runs of spaces collapse, lines wrap at word boundaries.
         let w = wrap("  aa   bb   cc dd", 7);
-        assert_eq!(w, vec!["aa bb", "cc dd"]);
+        assert_eq!(w, vec!["aa bb ", "cc dd"]);
     }
 
     #[test]
@@ -582,7 +604,7 @@ mod tests {
         // Indent is stripped before wrapping (so it is never broken inside)
         // and prepended to every continuation row.
         let w = wrap_pre("    indented code here", 12);
-        assert_eq!(w, vec!["    indented", "    code", "    here"]);
+        assert_eq!(w, vec!["    indented ", "    code ", "    here"]);
     }
 
     #[test]
@@ -629,14 +651,17 @@ mod tests {
     #[test]
     fn wrap_line_styled_wraps_at_space_preserving_width() {
         let line = Line::from(Span::raw("  aa bb cc dd".to_string()));
-        // Width 7: "  aa bb" (7) fits, break before "cc".
+        // Width 7: "  aa bb" (7) fills the row; the break space is kept as a
+        // trailing char (clipped by the renderer) so the content anchor stays
+        // stable across re-wraps.
         let wrapped = wrap_line_styled(&line, 7);
         assert_eq!(wrapped.len(), 2);
-        assert_eq!(spans_of(&wrapped[0]), "  aa bb");
+        assert_eq!(spans_of(&wrapped[0]), "  aa bb ");
         assert_eq!(spans_of(&wrapped[1]), "cc dd");
-        // each visual line fits the width
+        // each visual line fits the width; the trailing break space may
+        // overflow by one cell (clipped, invisible).
         for l in &wrapped {
-            assert!(l.width() <= 7);
+            assert!(l.width() <= 8);
         }
     }
 
@@ -657,12 +682,43 @@ mod tests {
             Span::raw("abcdefghijklmnopqrstuvwxyz".to_string()),
         ]);
         let wrapped = wrap_line_styled(&line, 10);
-        assert_eq!(spans_of(&wrapped[0]), "key");
+        assert_eq!(spans_of(&wrapped[0]), "key ");
         assert_eq!(spans_of(&wrapped[1]), "abcdefghij");
         assert_eq!(spans_of(&wrapped[2]), "klmnopqrst");
         assert_eq!(spans_of(&wrapped[3]), "uvwxyz");
         for l in &wrapped {
             assert!(l.width() <= 10);
         }
+    }
+
+    #[test]
+    fn wrap_pre_content_length_is_stable_across_widths() {
+        // The cumulative selectable-content length must not depend on wrap
+        // width, or the Navigate cursor's content anchor drifts on resize.
+        let s = "  4   - Accept `prompt`, `model`, `thinking`, `workspace`, `output_limit` or `system`, `world`, `options`.";
+        let indent_len = s.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let body = &s[indent_len..];
+        let body_len = body.chars().count();
+        for &w in &[10usize, 20, 30, 40, 50, 80] {
+            let segs = wrap_pre(s, w);
+            let sum: usize = segs
+                .iter()
+                .map(|seg| seg.chars().count().saturating_sub(indent_len))
+                .sum();
+            assert_eq!(sum, body_len, "width {w}");
+        }
+    }
+
+    #[test]
+    fn render_excludes_leading_whitespace_from_content() {
+        // `wrap_pre` re-prepends a line's indent to every wrapped row for
+        // alignment; that indent must not be selectable content, or the
+        // cumulative content length (the Navigate cursor's anchor) depends
+        // on the number of wraps — i.e. on width.
+        let rl = rline(vec![Span::raw("  ")], vec![Span::raw("    indented body")]);
+        let chars: Vec<char> = rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+        let content: String = chars[rl.content.0..rl.content.1].iter().collect();
+        assert_eq!(content, "indented body");
+        assert_eq!(rl.content_len(), "indented body".len());
     }
 }

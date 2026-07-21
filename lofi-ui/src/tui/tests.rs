@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 #![allow(clippy::wildcard_imports)]
+#![allow(clippy::many_single_char_names)]
 // Cost/format tests assert exact computed float values.
 #![allow(clippy::float_cmp)]
 
@@ -2651,6 +2652,105 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
         a.nav_cursor,
         a.log_off + a.log_view_h - 1,
         "cursor should clamp to the bottom edge on height shrink"
+    );
+}
+
+#[test]
+fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart { prompt: "p".to_string() });
+    // Long flow text that wraps with break spaces (exercises `wrap`).
+    a.apply_event(AgentEvent::Text(
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".repeat(3),
+    ));
+    // A first exec block whose indented code/result sits *before* the
+    // cursor's exec header — its per-row indent must not count as content,
+    // or the header's cumulative offset drifts on resize (exercises
+    // `wrap_pre` + the leading-whitespace exclusion in `render`).
+    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".to_string(),
+        code: "    const p = \"TODO.md\";\n    const s = await read(p);\n    return s.indexOf(\"## Sub\");".to_string(),
+        label: Some("inspect".to_string()),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(),
+        result: "  1 - Accept prompt model thinking workspace output_limit\n  2 - Default to interactive".to_string(),
+        is_error: false,
+        elapsed_ms: 100,
+    });
+    // The cursor's exec header.
+    a.apply_event(AgentEvent::ToolStart { id: "e2".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e2".to_string(),
+        code: "    const r = await run();".to_string(),
+        label: Some("act".to_string()),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e2".to_string(),
+        result: "done".to_string(),
+        is_error: false,
+        elapsed_ms: 50,
+    });
+    a.apply_event(AgentEvent::TurnEnd {
+        label: "m · medium".to_string(),
+        elapsed_ms: 200,
+        cost: 0.0,
+        usage: Usage::default(),
+    });
+    // A second turn so the first is frozen (exercises the frozen-render path).
+    push_turn(&mut a);
+    a.mode = Mode::Navigate;
+
+    let line_text = |a: &App, abs: usize| -> String {
+        let n = a.turns.len();
+        let mut k = 0;
+        for i in 0..n {
+            if a.turn_start_line(i) <= abs { k = i; } else { break; }
+        }
+        let intra = abs - a.turn_start_line(k);
+        let last = k + 1 == n;
+        let text_of = |v: &Vec<view::RenderLine>| {
+            v.get(intra).map(|rl| {
+                let chars: Vec<char> = rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+                let s = rl.content.0.min(chars.len());
+                let e = rl.content.1.min(chars.len());
+                chars[s..e].iter().collect::<String>()
+            }).unwrap_or_default()
+        };
+        if last {
+            let cx = view::component::Cx { app: a, theme: a.theme, width: a.frozen_width, active_turn: a.run_active() };
+            let v = view::blocks::render_turn_lines(&cx, &a.turns[k]);
+            text_of(&v)
+        } else {
+            a.frozen_render.get(k).map(text_of).unwrap_or_default()
+        }
+    };
+
+    // Render at 64; find the second Exec header and place the cursor on it.
+    let mut term = Terminal::new(TestBackend::new(64, 57)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let exec_idx = (0..a.log_total)
+        .rev()
+        .find(|&i| line_text(&a, i).starts_with("Exec"))
+        .expect("an Exec header");
+    a.nav_cursor = exec_idx;
+    a.nav_col = 4;
+    a.nav_show_cursor();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+
+    // Widen: the cursor must stay on the exact same Exec header (same content
+    // char), not drift to the other Exec header, the text, or the code lines.
+    let before = line_text(&a, a.nav_cursor);
+    let mut term = Terminal::new(TestBackend::new(98, 57)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert_eq!(
+        line_text(&a, a.nav_cursor),
+        before,
+        "cursor drifted to: {:?}",
+        line_text(&a, a.nav_cursor)
     );
 }
 
