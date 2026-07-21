@@ -151,7 +151,7 @@ pub(super) fn handle_event(
                 // The engine owns the timers and cost, and writes the turn's
                 // events (messages + timings + turn-end) to the transcript.
                 let result = agent_clone
-                    .run_continuation(&mut messages, prompt, tx, commit.as_ref())
+                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false)
                     .await;
                 if let Ok(mut g) = history.lock() {
                     *g = messages;
@@ -221,6 +221,47 @@ pub(super) fn handle_event(
 /// Ctrl+C: cancel an active run; otherwise clear a non-empty draft, or quit
 /// on a double press within [`QUIT_DOUBLE_PRESS`] when the prompt is empty.
 /// Mode-independent — works the same in Input, Navigate, and Select.
+/// Kick off a silent force-continue after a hard-cap force-compact.
+///
+/// Mirrors the submit path in [`handle_event`] but appends no user prompt:
+/// it seeds the run from the (just-compacted) history, which ends in a tool
+/// result, so the model resumes the turn. The engine emits `TurnContinue`,
+/// which the UI handles by appending to the current turn rather than pushing
+/// a new one. No-op when no model is configured.
+pub(super) fn spawn_continue(
+    app: &mut App,
+    agent: Option<&lofi_core::Agent>,
+    current_run: &mut Option<RunHandle>,
+) {
+    let Some(agent) = agent else { return };
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let history = Arc::clone(&app.history);
+    let session_path = app.session.path.clone();
+    // Chain off the active leaf (the Compaction marker compact_now just
+    // appended) — no branch_hint, so the recorder appends linearly.
+    let commit = session_path.map(|p| SessionCommit {
+        path: p,
+        label: app.session_model(),
+        parent_hint: None,
+    });
+    let agent_clone = agent.clone();
+    let err_tx = tx.clone();
+    let handle = tokio::task::spawn_local(async move {
+        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref()).await;
+        if let Ok(mut g) = history.lock() {
+            *g = messages;
+        }
+        if let Err(e) = result {
+            let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
+        }
+    });
+    *current_run = Some(RunHandle { handle, rx });
+    app.run = Some(0);
+    app.run_start = Some(Instant::now());
+    app.pinned = true;
+}
+
 pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
     if let Some(r) = current_run.take() {
         r.handle.abort();

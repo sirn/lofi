@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::ToolEvent;
 use lofi_error::{Error, Result};
 pub mod bash;
+pub mod env;
 pub mod edit;
 pub mod find;
 pub mod grep;
@@ -28,9 +29,10 @@ pub mod util;
 pub mod write;
 mod fs;
 
+pub use env::BashEnv;
 pub use truncate::{format_size, truncate_head, truncate_head_with, truncate_line, truncate_tail, truncate_tail_with, Truncated};
 pub use util::{read_capped, PgrpKillGuard};
-use fs::{default_tmp_dir, find_walk, looks_secret, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_under, walk_files_capped};
+use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_under, walk_files_capped};
 
 /// Default `bash` timeout in milliseconds (120s).
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
@@ -69,6 +71,8 @@ pub struct BuiltinTools {
     tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     /// Per-exec counter assigning ids to native tool calls.
     tool_counter: Arc<AtomicU64>,
+    /// Resolved `bash` child-env policy + output-redaction set.
+    bash_env: BashEnv,
 }
 
 impl BuiltinTools {
@@ -80,7 +84,7 @@ impl BuiltinTools {
     /// fresh directory under the system temp dir.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self::with_tool_cb(root, None, default_tmp_dir())
+        Self::with_tool_cb(root, None, default_tmp_dir(), BashEnv::default())
     }
 
     /// Like [`new`](Self::new) but also forwards native tool-call events to
@@ -90,6 +94,7 @@ impl BuiltinTools {
         root: PathBuf,
         tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
         tmp_dir: PathBuf,
+        bash_env: BashEnv,
     ) -> Self {
         let root = root.canonicalize().unwrap_or(root);
         Self {
@@ -97,6 +102,7 @@ impl BuiltinTools {
             tmp_dir,
             tool_cb,
             tool_counter: Arc::new(AtomicU64::new(0)),
+            bash_env,
         }
     }
 
@@ -110,6 +116,12 @@ impl BuiltinTools {
     #[must_use]
     pub fn tmp_dir(&self) -> &Path {
         &self.tmp_dir
+    }
+
+    /// The resolved `bash` child-env policy + redaction set.
+    #[must_use]
+    pub fn bash_env(&self) -> &BashEnv {
+        &self.bash_env
     }
 
     /// Allocate the next native tool-call id.

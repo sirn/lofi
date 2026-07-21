@@ -62,31 +62,43 @@ impl Agent {
         user_prompt: String,
         tx: Sender<AgentEvent>,
         commit: Option<&SessionCommit>,
+        continuation: bool,
     ) -> Result<()> {
         let prev_len = messages.len();
-        let prompt_for_event = user_prompt.clone();
-        if messages.is_empty() {
-            *messages = initial_history(&self.system_prompt, &user_prompt);
+        if continuation {
+            // Force-continue after a hard-cap force-compact: resume the
+            // loop on the compacted history (which ends in a tool result)
+            // without appending a new user prompt, and signal the UI to
+            // append to the current turn rather than push a new one.
+            if !emit(Some(&tx), AgentEvent::TurnContinue).await {
+                return Ok(());
+            }
         } else {
-            messages.push(Message {
-                role: Role::User,
-                blocks: vec![ContentBlock::Text {
-                    text: user_prompt,
-                }],
-            });
-        }
-        // Previously a `checkpoint = messages.len()` was captured here so a
-        // cancel/receiver-drop could `messages.truncate(checkpoint)` and roll
-        // back the partial turn. Failed and cancelled turns are now recorded
-        // as branches (see `TurnOutcome`), so the caller's history is left in
-        // place for the recorder to write — the active-path walk on resume
-        // handles excluding the failed content from the agent's context.
-        if !emit(Some(&tx), AgentEvent::TurnStart { prompt: prompt_for_event }).await {
-            return Ok(());
+            let prompt_for_event = user_prompt.clone();
+            if messages.is_empty() {
+                *messages = initial_history(&self.system_prompt, &user_prompt);
+            } else {
+                messages.push(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text {
+                        text: user_prompt,
+                    }],
+                });
+            }
+            // Previously a `checkpoint = messages.len()` was captured here so a
+            // cancel/receiver-drop could `messages.truncate(checkpoint)` and roll
+            // back the partial turn. Failed and cancelled turns are now recorded
+            // as branches (see `TurnOutcome`), so the caller's history is left in
+            // place for the recorder to write — the active-path walk on resume
+            // handles excluding the failed content from the agent's context.
+            if !emit(Some(&tx), AgentEvent::TurnStart { prompt: prompt_for_event }).await {
+                return Ok(());
+            }
         }
         let mut stats = TurnStats::new();
         let mut finished_normally = false;
         let mut cancelled = false;
+        let mut context_pressure = false;
         let mut err: Option<Error> = None;
         let retry = self.retry;
         let mut retry_attempt = 0u32;
@@ -120,7 +132,19 @@ impl Agent {
                     cancelled = true;
                     break;
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    // Hard context cap: the round just completed (its tool
+                    // result is in hand, so the latest turn is a matched
+                    // tool cycle that compaction keeps verbatim). Stop before
+                    // the next round would overflow the window and let the UI
+                    // force-compact + continue.
+                    if let Some(threshold) = self.hard_compact_threshold() {
+                        if stats.usage.input_tokens > threshold {
+                            context_pressure = true;
+                            break;
+                        }
+                    }
+                }
                 Err(Error::Cancelled) => {
                     // Abandoned by the user (Ctrl-C / receiver dropped). The
                     // rounds that ran still consumed tokens, so record the
@@ -194,6 +218,8 @@ impl Agent {
         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
         let outcome = if finished_normally {
             Some(TurnOutcome::Finished)
+        } else if context_pressure {
+            Some(TurnOutcome::ContextPressure)
         } else if let Some(e) = &err {
             Some(TurnOutcome::Failed(e.to_string()))
         } else if cancelled {
@@ -217,6 +243,14 @@ impl Agent {
                             label: self.run_label(),
                             elapsed_ms,
                             error: error.clone(),
+                            cost: stats.cost,
+                            usage: stats.usage,
+                        })
+                        .await,
+                    TurnOutcome::ContextPressure => tx
+                        .send(AgentEvent::ContextPressure {
+                            label: self.run_label(),
+                            elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
                         })
@@ -257,6 +291,30 @@ impl Agent {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Resume the agent loop on an existing (compacted) history without a new
+    /// user prompt — the silent continuation after a hard-cap force-compact.
+    /// The history is expected to end in a tool result, so the model picks up
+    /// where it left off. Emits [`AgentEvent::TurnContinue`] at the start so
+    /// the UI appends to the current turn instead of pushing a new one. The
+    /// hard-cap check remains active, so a continued run that crosses the
+    /// hard cap again triggers another `ContextPressure` (gated by the UI's
+    /// `min_messages_between_hard_compacts` cooldown).
+    ///
+    /// `user_prompt` is unused (the continuation appends no user message);
+    /// it exists only so this can reuse [`run_continuation`].
+    ///
+    /// # Errors
+    /// Propagates [`Error`] from provider streaming, timeouts, or tool
+    /// execution (via [`run_continuation`]).
+    pub async fn run_continue(
+        &self,
+        messages: &mut Vec<Message>,
+        tx: Sender<AgentEvent>,
+        commit: Option<&SessionCommit>,
+    ) -> Result<()> {
+        self.run_continuation(messages, String::new(), tx, commit, true).await
     }
 
     /// A single provider round-trip: stream one assistant turn, append it to
@@ -680,6 +738,7 @@ impl Agent {
                 strings,
                 agent: Some(agent_fn.clone()),
                 on_tool_event: Some(on_tool_event),
+                bash_env: self.bash_env.clone(),
             };
             let outcome = exec(&code, &exec_ctx, &ExecOptions::default()).await;
             // Drain the native tool calls that completed inside this exec into

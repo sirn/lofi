@@ -53,6 +53,7 @@ use bind::bind_tools;
 
 pub mod tools;
 
+pub use tools::BashEnv;
 use crate::tools::BuiltinTools;
 
 /// Default wall-clock budget for a single `exec` call (120s).
@@ -116,6 +117,8 @@ pub struct ExecCtx {
     /// Optional `lofi.agent` / `lofi.spawn` implementation.
     pub agent: Option<AgentFn>,
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
+    /// Resolved `bash` child-env policy + output-redaction set.
+    pub bash_env: BashEnv,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -126,6 +129,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("strings", &self.strings)
             .field("agent", &self.agent.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
+            .field("bash_env", &self.bash_env)
             .finish()
     }
 }
@@ -232,6 +236,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         ctx.root.clone(),
         ctx.on_tool_event.clone(),
         ctx.tmp_dir.clone(),
+        ctx.bash_env.clone(),
     ));
     let strings = ctx.strings.clone();
     let agent = ctx.agent.clone();
@@ -439,6 +444,7 @@ mod tests {
             strings: HashMap::new(),
             agent: None,
             on_tool_event: None,
+            bash_env: BashEnv::default(),
         }
     }
 
@@ -600,6 +606,7 @@ mod tests {
             strings,
             agent: None,
             on_tool_event: None,
+            bash_env: BashEnv::default(),
         };
         let res = exec(
             "return lofi_strings.greeting;",

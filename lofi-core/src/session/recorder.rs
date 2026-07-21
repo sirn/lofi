@@ -37,6 +37,14 @@ pub enum TurnOutcome {
     /// building the agent's history on resume (so the model is not fed
     /// partial/errored content) while the UI still renders them.
     Failed(String),
+    /// The run was force-stopped at the hard context cap mid-turn. The
+    /// partial turn's messages and timings are written (so a following
+    /// compaction can keep the latest turn verbatim and `messages_from_events`
+    /// includes them), but NO terminal marker is written — the turn did not
+    /// finish or fail, and the UI is signaled via a live `ContextPressure`
+    /// event instead. Behaves like [`Cancelled`] for the empty-input
+    /// short-circuit (no terminal marker).
+    ContextPressure,
     /// The turn was abandoned before it produced anything worth recording —
     /// write no terminal marker (and the flush's empty-input short-circuit
     /// applies).
@@ -135,7 +143,7 @@ impl SessionRecorder {
             return Ok(None);
         }
         self.flushed = true;
-        let has_terminal = !matches!(outcome, TurnOutcome::Cancelled);
+        let has_terminal = !matches!(outcome, TurnOutcome::Cancelled | TurnOutcome::ContextPressure);
         if messages.is_empty()
             && summary.tool_elapsed.is_empty()
             && summary.thinking_elapsed.is_empty()
@@ -209,7 +217,7 @@ impl SessionRecorder {
                     },
                 });
             }
-            TurnOutcome::Cancelled => {}
+            TurnOutcome::ContextPressure | TurnOutcome::Cancelled => {}
         }
         let (start, end) = store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
         if end > start {

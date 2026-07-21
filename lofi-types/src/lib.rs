@@ -8,6 +8,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -321,6 +322,28 @@ pub enum SessionEventKind {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
+    /// An offline compaction marker: `summary` replaces the summarized
+    /// prefix (everything older than `first_kept_entry_id` on the active
+    /// path) and is injected as a single user message at the head of the
+    /// kept tail on resume. Appended to the active leaf by the `/compact`
+    /// command (and the auto-trigger); a resumed session rebuilds the
+    /// compacted history from it. Subsequent turns chain off this entry so
+    /// the active path runs root -> kept tail -> Compaction -> new turns.
+    Compaction {
+        /// The full summary text (preamble + sections + brief transcript).
+        summary: String,
+        /// Event id of the first kept message on the active path. The
+        /// agent-history walk on resume emits the summary, then the kept
+        /// tail, and stops at this id — everything older is already folded
+        /// into the summary. The empty string means compact-all (nothing
+        /// kept).
+        first_kept_entry_id: String,
+        /// How many live messages were folded into the summary (for the
+        /// visible marker on resume).
+        summarized: usize,
+        /// How many messages were kept in the tail.
+        kept: usize,
+    },
 }
 
 /// One append-only line in a session transcript log.
@@ -807,12 +830,180 @@ pub struct AgentConfig {
     pub thinking_levels: Vec<ThinkingLevel>,
 }
 
+/// Compaction settings.
+///
+/// `reserved_context_tokens` is the **hard cap**: a run whose round input
+/// tokens exceed `context_window - reserved_context_tokens` is force-stopped
+/// mid-run, compacted, and silently continued. Consecutive force-compacts are
+/// gated by `min_messages_between_hard_compacts` — if the run crosses the
+/// hard cap again within that many agent messages of the last force-compact,
+/// it errors out (the kept tail itself is too big to compact further).
+///
+/// The optional `[compaction.auto]` **soft caps** are speculative: a run may
+/// cross them with no interruption, and when it reaches `agent_settled` with
+/// context above the soft threshold, it compacts. Soft compaction only runs
+/// when at least one soft cap is set; with defaults (reserved only) compaction
+/// is hard-cap-only.
+///
+/// The offline `/compact` is always available regardless of these settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Hard cap: tokens reserved for the model's response. A round whose
+    /// input tokens exceed `context_window - reserved_context_tokens`
+    /// triggers a force-compact. Defaults to `20_000`.
+    #[serde(default = "default_reserved_context_tokens")]
+    pub reserved_context_tokens: u64,
+    /// Minimum agent messages that must elapse between two force-compacts.
+    /// If a continued run crosses the hard cap again within this many
+    /// messages of the last force-compact, it errors out instead of
+    /// compacting again. Defaults to `6`.
+    #[serde(default = "default_min_messages_between_hard_compacts")]
+    pub min_messages_between_hard_compacts: usize,
+    /// Speculative auto-compaction (soft caps + master switch).
+    #[serde(default)]
+    pub auto: AutoCompactConfig,
+}
+
+fn default_reserved_context_tokens() -> u64 {
+    20_000
+}
+
+fn default_min_messages_between_hard_compacts() -> usize {
+    6
+}
+
+/// Settings for the `bash` native tool's child-process environment.
+///
+/// By default the child env is *stripped* to a minimal baseline (`PATH`,
+/// `HOME`, locale, …) so inherited credentials never reach a model-run
+/// shell. `pass_env` and `env_file` opt specific variables back in; their
+/// values are redacted (`[redacted]`) from captured stdout/stderr before the
+/// model sees them, so a command may *use* a secret without it leaking into
+/// the transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BashConfig {
+    /// Strip the inherited environment down to a minimal baseline before
+    /// running a command. `false` inherits the full parent environment (an
+    /// explicit trust opt-out; redaction of `pass_env`/`env_file` values still
+    /// applies). Defaults to `true`.
+    #[serde(default = "default_bash_strip_env")]
+    pub strip_env: bool,
+    /// Env var names to copy from the parent environment into the child on
+    /// top of the baseline (or the inherited env when `strip_env` is false).
+    /// Their values are redacted from output. Empty by default.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// Path to a `KEY=VALUE` file whose entries are loaded into the child
+    /// environment, overriding `pass_env`. `~` is expanded. The file should
+    /// live outside the workspace so `lofi.read`/`edit`/`write` cannot reach
+    /// it. Values are redacted from output. `None` by default.
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
+}
+
+fn default_bash_strip_env() -> bool {
+    true
+}
+
+impl Default for BashConfig {
+    fn default() -> Self {
+        Self {
+            strip_env: default_bash_strip_env(),
+            pass_env: Vec::new(),
+            env_file: None,
+        }
+    }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            reserved_context_tokens: default_reserved_context_tokens(),
+            min_messages_between_hard_compacts: default_min_messages_between_hard_compacts(),
+            auto: AutoCompactConfig::default(),
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Hard-cap threshold: `context_window - reserved_context_tokens`. A run
+    /// crossing this mid-run is force-stopped and compacted. Returns `None`
+    /// when the window is zero or the reserve leaves no positive headroom.
+    #[must_use]
+    pub fn hard_threshold(&self, context_window: u64) -> Option<u64> {
+        if context_window == 0 {
+            return None;
+        }
+        let threshold = context_window.saturating_sub(self.reserved_context_tokens);
+        (threshold > 0).then_some(threshold)
+    }
+
+    /// Soft-cap threshold: the lesser of the set optional caps
+    /// (`max_context_tokens`, `floor(window * context_ratio)`). Returns
+    /// `None` when neither cap is set (or they are out of range) — in which
+    /// case there is no speculative compaction, only the hard cap.
+    #[must_use]
+    pub fn soft_threshold(&self, context_window: u64) -> Option<u64> {
+        let mut threshold = None::<u64>;
+        if let Some(cap) = self.auto.max_context_tokens {
+            threshold = Some(threshold.map_or(cap, |t| t.min(cap)));
+        }
+        if let Some(ratio) = self.auto.context_ratio {
+            if ratio > 0.0 && ratio <= 1.0 && context_window > 0 {
+                let r = (ratio * context_window as f64) as u64;
+                threshold = Some(threshold.map_or(r, |t| t.min(r)));
+            }
+        }
+        threshold.filter(|&t| t > 0)
+    }
+}
+
+/// Speculative auto-compaction soft caps. These lower the compaction
+/// threshold below the reserve-based hard cap so large context windows
+/// compact earlier. They are "soft" — the trigger fires only at
+/// `agent_settled` (between turns), not mid-run. Both caps are optional
+/// and inert when unset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoCompactConfig {
+    /// Master switch. When `false` auto-compaction is disabled and only
+    /// manual `/compact` runs.
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    /// Optional absolute cap. When set, the threshold is lowered to at most
+    /// this many tokens, so compaction fires earlier on large context
+    /// windows. Inert when unset.
+    #[serde(default)]
+    pub max_context_tokens: Option<u64>,
+    /// Optional fraction of the context window in (0, 1]. When set, the
+    /// threshold is lowered to at most `floor(context_window * ratio)`.
+    /// Inert when unset.
+    #[serde(default)]
+    pub context_ratio: Option<f64>,
+}
+
+impl Default for AutoCompactConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            max_context_tokens: None,
+            context_ratio: None,
+        }
+    }
+}
+
 /// Top-level config tree parsed from `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// Agent-level defaults.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Compaction settings (auto-compaction trigger). `/compact` itself is
+    /// always available regardless of this block.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    /// `bash` native-tool environment settings.
+    #[serde(default)]
+    pub bash: BashConfig,
     /// Default provider used when `--model` is omitted and no `default_model`
     /// resolves. Overrides the "first available provider" fallback.
     #[serde(default)]
@@ -969,6 +1160,8 @@ mod tests {
         );
         let cfg = Config {
             agent: AgentConfig::default(),
+            compaction: CompactionConfig::default(),
+            bash: BashConfig::default(),
             default_provider: None,
             default_model: None,
             providers,
@@ -1019,6 +1212,108 @@ mod tests {
         assert_eq!(Api::parse("anthropic-messages"), Some(Api::AnthropicMessages));
         // snake_case still works.
         assert_eq!(Api::parse("openai_responses"), Some(Api::OpenAiResponses));
+    }
+
+    #[test]
+    fn compaction_hard_threshold_reserved() {
+        let cfg = CompactionConfig::default();
+        // 200k window, 20k reserved -> 180k hard cap.
+        assert_eq!(cfg.hard_threshold(200_000), Some(180_000));
+        // Caps do not affect the hard threshold.
+        let with_caps = CompactionConfig {
+            auto: AutoCompactConfig {
+                max_context_tokens: Some(100_000),
+                context_ratio: Some(0.5),
+                ..AutoCompactConfig::default()
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(with_caps.hard_threshold(200_000), Some(180_000));
+        // saturating sub when reserved >= window -> no positive threshold.
+        assert_eq!(cfg.hard_threshold(10_000), None);
+        assert_eq!(cfg.hard_threshold(0), None);
+    }
+
+    #[test]
+    fn compaction_soft_threshold_caps() {
+        // No caps set -> no soft threshold (hard-cap-only).
+        assert_eq!(CompactionConfig::default().soft_threshold(200_000), None);
+        // Absolute cap.
+        let with_cap = CompactionConfig {
+            auto: AutoCompactConfig {
+                max_context_tokens: Some(150_000),
+                ..AutoCompactConfig::default()
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(with_cap.soft_threshold(1_000_000), Some(150_000));
+        assert_eq!(with_cap.soft_threshold(200_000), Some(150_000));
+        // Ratio cap; out-of-range ratio is ignored.
+        let with_ratio = CompactionConfig {
+            auto: AutoCompactConfig {
+                context_ratio: Some(0.5),
+                ..AutoCompactConfig::default()
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(with_ratio.soft_threshold(200_000), Some(100_000));
+        let bad_ratio = CompactionConfig {
+            auto: AutoCompactConfig {
+                context_ratio: Some(1.5),
+                ..AutoCompactConfig::default()
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(bad_ratio.soft_threshold(200_000), None);
+        // Both caps -> the lesser.
+        let both = CompactionConfig {
+            auto: AutoCompactConfig {
+                max_context_tokens: Some(150_000),
+                context_ratio: Some(0.5),
+                ..AutoCompactConfig::default()
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(both.soft_threshold(400_000), Some(150_000)); // min(150k, 200k)
+    }
+
+    #[test]
+    fn compaction_config_serde_defaults() {
+        // [compaction] omitted -> reserved 20k, auto defaults.
+        let cfg: CompactionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.reserved_context_tokens, 20_000);
+        assert_eq!(cfg.min_messages_between_hard_compacts, 6);
+        assert!(cfg.auto.enable);
+        assert!(cfg.auto.max_context_tokens.is_none());
+        assert!(cfg.auto.context_ratio.is_none());
+    }
+
+    #[test]
+    fn bash_config_serde_defaults() {
+        // [bash] omitted -> strip on, nothing passed, no env file.
+        let cfg: BashConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.strip_env);
+        assert!(cfg.pass_env.is_empty());
+        assert!(cfg.env_file.is_none());
+    }
+
+    #[test]
+    fn bash_config_serde_round_trip() {
+        let json = r#"{"strip_env":false,"pass_env":["GITHUB_TOKEN","NPM_TOKEN"],"env_file":"~/.config/lofi/secrets.env"}"#;
+        let cfg: BashConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.strip_env);
+        assert_eq!(cfg.pass_env, ["GITHUB_TOKEN", "NPM_TOKEN"]);
+        assert_eq!(cfg.env_file.as_deref(), Some(std::path::Path::new("~/.config/lofi/secrets.env")));
+    }
+
+    #[test]
+    fn auto_compact_config_serde_defaults() {
+        // [compaction.auto] omitted -> enable=true, caps None (no reserved
+        // field here; it lives on the parent [compaction]).
+        let cfg: AutoCompactConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.enable);
+        assert!(cfg.max_context_tokens.is_none());
+        assert!(cfg.context_ratio.is_none());
     }
 
     #[test]
