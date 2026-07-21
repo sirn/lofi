@@ -71,6 +71,13 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             Block::TurnFailed { label, elapsed, error } => {
                 stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error: error.clone() });
             }
+            Block::Compaction { summarized, kept, summary } => {
+                stack.push(CompactionLine {
+                    summarized: *summarized,
+                    kept: *kept,
+                    summary: summary.clone(),
+                });
+            }
         }
     }
     stack.lines(cx)
@@ -597,6 +604,55 @@ impl Component for TurnFailed {
             ],
             vec![],
         )]
+    }
+}
+
+/// Compaction marker: `◇ compacted N msgs · kept M` in the muted tint,
+/// appended to a turn when `/compact` (or the auto-trigger) folds the
+/// older history into a summary. Under `/verbose` the folded summary text
+/// is expanded below the marker (soft-wrapped, muted) so the fold can be
+/// inspected without leaving the transcript.
+struct CompactionLine {
+    summarized: usize,
+    kept: usize,
+    summary: String,
+}
+
+impl Component for CompactionLine {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let body = format!(
+            "compacted {} msgs · kept {}",
+            self.summarized, self.kept
+        );
+        let marker = prim::render(
+            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.subtle))],
+            vec![Span::styled(body, Style::new().fg(t.muted))],
+            vec![],
+        );
+        let mut out = vec![marker];
+        if cx.app.verbose {
+            let text = self.summary.trim();
+            if !text.is_empty() {
+                let indent = "    ";
+                let content_w = cx.width.saturating_sub(indent.len());
+                for raw in text.split('\n') {
+                    let line = raw.trim_end();
+                    if line.is_empty() {
+                        out.push(prim::rblank());
+                    } else {
+                        for seg in prim::wrap(line, content_w) {
+                            out.push(prim::render(
+                                vec![Span::raw(indent)],
+                                vec![Span::styled(seg, Style::new().fg(t.muted))],
+                                vec![],
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

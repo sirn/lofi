@@ -230,6 +230,10 @@ pub struct Agent {
     retry: crate::retry::RetryPolicy,
     system_prompt: String,
     max_output_tokens: Option<u64>,
+    /// Hard-cap reserve for mid-run force-compaction: a round whose input
+    /// tokens exceed `model.context_window - reserved` triggers a
+    /// `ContextPressure` stop. 0 disables the hard cap.
+    reserved_context_tokens: u64,
 }
 
 impl Agent {
@@ -242,6 +246,7 @@ impl Agent {
         tmp_dir: PathBuf,
         system_prompt: String,
         max_output_tokens: Option<u64>,
+        reserved_context_tokens: u64,
     ) -> Self {
         Self {
             provider: Arc::from(provider),
@@ -251,6 +256,7 @@ impl Agent {
             retry: crate::retry::RetryPolicy::default(),
             system_prompt,
             max_output_tokens,
+            reserved_context_tokens,
         }
     }
 
@@ -258,6 +264,20 @@ impl Agent {
     #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// The mid-run hard-cap threshold: a round whose input tokens exceed this
+    /// triggers a `ContextPressure` force-stop. `None` when the reserve is 0
+    /// or the model has no context window, disabling the hard cap.
+    #[must_use]
+    pub fn hard_compact_threshold(&self) -> Option<u64> {
+        if self.reserved_context_tokens == 0 {
+            return None;
+        }
+        self.model
+            .context_window
+            .filter(|&w| w > self.reserved_context_tokens)
+            .map(|w| w - self.reserved_context_tokens)
     }
 
     /// The workspace root file operations are confined to.
@@ -331,4 +351,3 @@ async fn emit(tx: Option<&Sender<AgentEvent>>, ev: AgentEvent) -> bool {
     }
     true
 }
-

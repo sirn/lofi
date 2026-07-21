@@ -202,13 +202,19 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::Error(msg));
         }
+        AgentEvent::Compaction { summarized, kept, summary } => {
+            turn.blocks.push(Block::Compaction { summarized, kept, summary });
+        }
         // Status-only events are handled by `App::apply_event` before
         // reaching this builder; they are no-ops here.
         AgentEvent::RetryStart { .. }
         | AgentEvent::RetryEnd { .. }
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
-        | AgentEvent::TurnStart { .. } => {}
+        | AgentEvent::TurnStart { .. }
+        // Live-only signals handled by `App::apply_event`; no block here.
+        | AgentEvent::TurnContinue
+        | AgentEvent::ContextPressure { .. } => {}
     }
 }
 
@@ -380,6 +386,16 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 Role::System => {}
             },
             SessionEventKind::NativeTool(_) | SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {}
+            SessionEventKind::Compaction { summarized, kept, summary, .. } => {
+                // The summary is injected into the agent history by
+                // `messages_from_events`; carry it on the marker block too
+                // so `/verbose` can expand it inline.
+                out.push(AgentEvent::Compaction {
+                    summarized: *summarized,
+                    kept: *kept,
+                    summary: summary.clone(),
+                });
+            }
             SessionEventKind::TurnEnd { label, elapsed_ms, cost, usage, .. } => {
                 out.push(AgentEvent::TurnEnd {
                     label: label.clone(),
@@ -406,10 +422,30 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
     let mut out: Vec<Message> = Vec::new();
     let mut skipping = false;
+    // The compaction summary, captured when the Compaction marker is seen
+    // and prepended to the result so it leads the history (matching
+    // `compacted_history`: summary first, then the kept tail). Held aside
+    // because the walk is leaf-first; injecting it inline would place the
+    // summary after the kept tail once reversed, and mid-stream when a
+    // force-continued turn follows the marker.
+    let mut summary_msg: Option<Message> = None;
+    // The compaction boundary: once a Compaction marker is seen leaf-first,
+    // the walk stops at this event id, folding everything older into the
+    // summary. `None` while no compaction is in effect on the active path.
+    let mut boundary: Option<String> = None;
     // Iterate leaf-first so the `TurnFailed` boundary is seen before its
     // ancestors; `path` is root-first, so reverse.
     for &i in path.iter().rev() {
         match &events[i].kind {
+            SessionEventKind::Compaction { summary, first_kept_entry_id, .. } => {
+                if !summary.is_empty() {
+                    summary_msg = Some(Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text { text: summary.clone() }],
+                    });
+                }
+                boundary = Some(first_kept_entry_id.clone());
+            }
             SessionEventKind::TurnFailed { .. } => {
                 skipping = true;
             }
@@ -418,11 +454,21 @@ pub(super) fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
             }
             SessionEventKind::Message(m) if !skipping => {
                 out.push(m.clone());
+                if let Some(b) = &boundary {
+                    if b == &events[i].id {
+                        break;
+                    }
+                }
             }
             _ => {}
         }
     }
     // `out` is leaf-first; reverse to root-first for the model.
     out.reverse();
+    // The summary leads: it is the oldest context (the folded prefix), so it
+    // must come before the kept tail and any post-compaction continuation.
+    if let Some(s) = summary_msg {
+        out.insert(0, s);
+    }
     out
 }
