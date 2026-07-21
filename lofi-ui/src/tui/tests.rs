@@ -643,25 +643,17 @@ fn slash_clear_help_session_resume_new() {
 }
 
 #[test]
-fn session_info_opens_modal() {
+fn session_info_shows_notification() {
     let mut a = app();
-    // No session path: info modal (not a transcript turn or notification).
+    // No session path: a warning notification (not a modal or transcript turn).
     assert!(a.slash_command("/session"));
     assert!(a.turns.is_empty());
-    assert!(a.notify_badge().is_none());
-    let info = a.info.as_ref().expect("info modal open");
-    assert_eq!(info.title, "Session");
-    assert!(info
-        .lines
-        .iter()
-        .any(|l| l
-            .spans
-            .iter()
-            .any(|s| s.content.contains("no session file"))));
-    // Any key dismisses it.
-    let mut run = None;
-    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
     assert!(a.info.is_none());
+    let (msg, kind) = a
+        .notify_badge()
+        .expect("notification shown");
+    assert!(msg.contains("no session file"));
+    assert_eq!(kind, NotifyKind::Warn);
 }
 
 #[test]

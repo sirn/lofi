@@ -37,11 +37,10 @@ the TUI owns the alternate screen, so logs are only emitted when you opt in.
 
 | Flag | Description |
 | --- | --- |
-| `--print <PROMPT>` | Run one non-interactive turn and stream assistant text to stdout. |
+| `-p`, `--print <PROMPT>` | Run one non-interactive turn and stream assistant text to stdout. |
 | `--list-models` | Print `provider/id — name` lines and exit. |
-| `--provider <NAME>` | Select the provider (overrides `default_provider`). |
-| `--model <ID>` | Select a model by `provider/id`, raw id, name, or substring. |
-| `--api-key <KEY>` | Override the selected provider's resolved `api_key` (taken literally). |
+| `--list-sessions` | Print saved sessions for this workspace and exit. |
+| `--model <SPEC>` | Select the model as `provider/model[:level]`. |
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
 | `--no-session` | Do not persist a transcript (ephemeral). |

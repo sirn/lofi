@@ -18,10 +18,10 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::theme::{active_indicator, user_indicator};
+use crate::tui::theme::active_indicator;
 use crate::tui::{App, Mode, NotifyKind, SPINNER};
 use crate::tui::SLASH_COMMANDS;
 
@@ -113,15 +113,16 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     // Keep the prompt cursor on screen within its capped height.
     app.sync_input_scroll(area.width.saturating_sub(2) as usize, input_lines);
 
-    // The footer is a single contiguous block: a mode-colored rule, the
-    // prompt, a blank row, and a gray usage line. The VStack gap supplies
-    // the blank row above the rule.
-    let footer_h = input_h.saturating_add(3);
+    // The footer: a mode-badge line on the default background, then the
+    // panel — a leading blank, the prompt, a blank, and the usage line —
+    // on panel_bg with the `▌` gutter. The VStack gap supplies the blank
+    // row above the mode line.
+    let footer_h = input_h.saturating_add(4);
     let mut vs = VStack::new(1);
     vs.fixed(1);                               // header
     vs.fill();                                 // log viewport
     vs.fixed(u16::from(app.run_active()));     // working indicator (absent when idle)
-    vs.fixed(footer_h);                        // rule + prompt + info
+    vs.fixed(footer_h);                        // mode line + panel
     let rects = vs.split(f, area);
 
     if let Some(r) = rects[0] {
@@ -458,18 +459,18 @@ fn render_working(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// The prompt: `❯` lead on the first select row, 2-space indent on wrapped
-/// continuations, no background. The gaps above and below are owned by the
-/// frame [`VStack`]; this renders only the prompt rows.
+/// The prompt rows on the panel background. The `▌` gutter and 2-cell
+/// inset are owned by [`render_footer_block`]; this renders only the text,
+/// dimmed when the prompt is unfocused. The gaps above and below are owned
+/// by the frame [`VStack`].
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let w = area.width as usize;
-    let content_w = w.saturating_sub(2);
+    let content_w = w;
     // In Navigate/Select the prompt is inert: dim it and hide the cursor so
     // the transcript cursor is the focus. A centered modal (info, /resume,
     // /tree) likewise hides the cursor — it owns input while open.
     let active = app.mode == Mode::Input && !app.modal_open();
-    let prompt = Style::new().fg(if active { user_indicator(t) } else { t.subtle });
     let text_style = Style::new().fg(if active { t.fg } else { t.muted });
 
     let rows = app.input_select_rows(content_w);
@@ -481,28 +482,15 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let end = (start + vis_h).min(total);
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
-    for (i, seg) in rows[start..end].iter().enumerate() {
-        // The `❯` lead belongs to the first select row of the whole input
-        // (absolute row 0), not the first visible row after scrolling.
-        let prefix = if start + i == 0 {
-            Span::styled("❯ ", prompt)
-        } else {
-            Span::raw("  ")
-        };
-        lines.push(Line::from(vec![
-            prefix,
-            Span::styled(seg.clone(), text_style),
-        ]));
+    for seg in &rows[start..end] {
+        lines.push(Line::from(vec![Span::styled(seg.clone(), text_style)]));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines).style(Style::new().bg(t.panel_bg)), area);
 
     if active {
         let (vrow, x_in) = app.input_cursor_pos(content_w);
         if vrow >= start && vrow < end {
-            let x = area
-                .x
-                .saturating_add(2)
-                .saturating_add(u16::try_from(x_in).unwrap_or(u16::MAX));
+            let x = area.x.saturating_add(u16::try_from(x_in).unwrap_or(u16::MAX));
             let y = area
                 .y
                 .saturating_add(u16::try_from(vrow - start).unwrap_or(u16::MAX));
@@ -512,40 +500,60 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     draw_scrollbar(f, area, start, total, t);
 }
 
-/// The footer block: a mode-colored rule, the prompt, a blank, and a gray
-/// usage line, stacked without gaps.
+/// The footer block: a mode-badge line, the prompt, a blank, and a usage
+/// line (the last three on the panel background), stacked without gaps.
 fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
-    let prompt_h = area.height.saturating_sub(3);
+    let t = app.theme;
+    let w = area.width;
+    // Row 0: the mode/notification line on the default background — no
+    // gutter, no panel. It sits above the panel as a separate strip.
+    render_mode_line(f, Rect::new(area.x, area.y, w, 1), app);
+
+    // The panel below: a leading blank, the prompt, a blank, and the stats,
+    // all on panel_bg with the `▌` gutter down the left edge.
+    let panel = Rect::new(area.x, area.y.saturating_add(1), w, area.height.saturating_sub(1));
+    f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
+    let active = app.mode == Mode::Input && !app.modal_open();
+    let bar = if active { t.primary } else { t.subtle };
+    for y in panel.y..panel.bottom() {
+        let cell = &mut f.buffer_mut()[(area.x, y)];
+        cell.set_char('▌');
+        cell.set_fg(bar);
+    }
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        panel.y,
+        w.saturating_sub(2),
+        panel.height,
+    );
+    let prompt_h = inner.height.saturating_sub(3);
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(prompt_h),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .split(area);
-    render_rule(f, chunks[0], app);
+    .split(inner);
+    // chunks[0] is the leading blank (panel_bg + gutter already painted).
     app.input_rect = chunks[1];
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
 }
 
-/// Mode-colored rule line. The left edge keeps the `──` lead followed by a
-/// notification badge — quit/yank confirmations, or a transient
-/// slash-command notification (status or error from `/session`, `/tree`,
-/// `/resume`, unknown commands, …). This side is reserved for transient
-/// and interactive notifications. The right edge carries the ` VERBOSE `
-/// tag (while tool detail is expanded) and the mode chip (` INPUT ` /
-/// ` NAV `) with its `──` tail; dashes fill the middle. A long
-/// notification is truncated with `…` so the right side always fits.
-fn render_rule(f: &mut Frame, area: Rect, app: &App) {
+/// Mode-badge line. The right edge carries the ` VERBOSE ` tag (while tool
+/// detail is expanded) and the mode chip (` INPUT ` / ` NAV `) — a filled
+/// pill in the mode color. The left edge holds one notification badge
+/// (quit > yank > transient slash-command status/error); the middle is
+/// blank. A long notification is truncated with `…` so the right side
+/// always fits.
+fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let (label, color) = app.mode_badge();
     let w = area.width as usize;
     let chip = format!(" {label} ");
-    let tail = "──";
     let bold = Modifier::BOLD;
 
-    // Right: optional ` VERBOSE ` tag, the mode chip, and the `──` tail.
+    // Right: optional ` VERBOSE ` tag and the mode chip.
     let mut right: Vec<Span<'static>> = Vec::new();
     if app.verbose {
         right.push(Span::styled(
@@ -557,21 +565,17 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
         chip,
         Style::new().fg(t.fg).bg(color).add_modifier(bold),
     ));
-    right.push(Span::styled(tail, Style::new().fg(color)));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
-    // Left: leading `──` then one notification badge (quit > yank > notify).
-    let lead = "──";
-    let lead_w = prim::width(lead);
-    let min_dashes = 2;
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(lead, Style::new().fg(color))];
+    // Left: one notification badge (quit > yank > notify), else nothing.
+    let mut left: Vec<Span<'static>> = Vec::new();
     if let Some(badge) = app.quit_badge() {
-        spans.push(Span::styled(
+        left.push(Span::styled(
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(badge) = app.yank_badge() {
-        spans.push(Span::styled(
+        left.push(Span::styled(
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
@@ -581,13 +585,9 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
             NotifyKind::Warn => t.warn,
             NotifyKind::Error => t.error,
         };
-        // Reserve room for the right side and at least `min_dashes`; the
-        // remaining width caps the badge (wrapping spaces + message).
-        let avail = w
-            .saturating_sub(lead_w)
-            .saturating_sub(right_w)
-            .saturating_sub(min_dashes)
-            .saturating_sub(2);
+        // Reserve room for the 2-cell left padding, the right side, and the
+        // badge's wrapping spaces.
+        let avail = w.saturating_sub(2).saturating_sub(right_w).saturating_sub(2);
         if avail >= 1 {
             let body = if prim::width(msg) > avail {
                 let mut s = prim::truncate(msg, avail.saturating_sub(1));
@@ -596,30 +596,53 @@ fn render_rule(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 msg.to_string()
             };
-            spans.push(Span::styled(
+            left.push(Span::styled(
                 format!(" {body} "),
                 Style::new().fg(t.fg).bg(bg).add_modifier(bold),
             ));
         }
     }
-    let left_w: usize = spans.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
-    let dashes = "─".repeat(w.saturating_sub(left_w).saturating_sub(right_w));
-    spans.push(Span::styled(dashes, Style::new().fg(color)));
-    spans.extend(right);
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // A thin rule of `🮙` spans the full width in the panel color, tying the
+    // notification line to the panel below. The chip and badges render on top
+    // as narrow widgets so the rule shows through the gaps between them.
+    let rule: String = std::iter::repeat_n('🮙', w).collect();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            rule,
+            Style::new().fg(t.rule),
+        ))),
+        area,
+    );
+    // Left badges sit at the 2-cell inset; only as wide as their content so
+    // the rule is not overwritten.
+    let left_w: usize = left.iter().map(|s| prim::width(s.content.as_ref())).sum();
+    if left_w > 0 {
+        let lrect = Rect::new(
+            area.x.saturating_add(2),
+            area.y,
+            u16::try_from(left_w).unwrap_or(0),
+            1,
+        );
+        f.render_widget(Paragraph::new(Line::from(left)), lrect);
+    }
+    // Right chip flush to the right edge.
+    let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
+    let rrect = Rect::new(
+        area.x.saturating_add(u16::try_from(w.saturating_sub(right_w)).unwrap_or(0)),
+        area.y,
+        u16::try_from(right_w).unwrap_or(0),
+        1,
+    );
+    f.render_widget(Paragraph::new(Line::from(right)), rrect);
 }
 
 /// Gray usage line below the prompt: `  ↑in ↓out · ctx: used/limit` on the
 /// left, `$cost` on the right.
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
-    let mut left = vec![Span::raw("  ")];
-    left.extend(app.render_footer_left(w).spans);
-    // Two-space right margin so the cost aligns under the right edge of the
-    // mode chip (` INPUT ` + `──` tail = 2 cells past the label).
-    let mut right = app.render_footer_cost().spans;
-    right.push(Span::raw("  "));
+    let left = app.render_footer_left(w).spans;
+    let right = app.render_footer_cost().spans;
     let line = HStack::new(w).left(left).right(right).build();
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(Paragraph::new(line).style(Style::new().bg(app.theme.panel_bg)), area);
 }
