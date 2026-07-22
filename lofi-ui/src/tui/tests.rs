@@ -6,6 +6,8 @@
 #![allow(clippy::float_cmp)]
 
 use super::*;
+use std::sync::Arc;
+
 use lofi_types::{ContentBlock, Role, Usage};
 
 fn app() -> App {
@@ -2285,6 +2287,80 @@ fn selection_text_is_content_aware() {
         a.selection_text().as_deref(),
         Some("hello world\nlofi-core/src/agent.rs:233:pub struct Agent {\n    let x = 1;")
     );
+}
+
+#[test]
+fn yank_line_returns_raw_markdown() {
+    // A rendered line may strip markdown markers (e.g. **bold** → bold), but
+    // the raw source is retained for yank so the clipboard gets the original
+    // markdown, not the formatted text.
+    let mut a = app();
+    a.log_off = 0;
+    a.log_lines = vec!["  bold text".to_string()];
+    a.log_content = vec![(2, 11)]; // rendered "bold text"
+    a.log_raw = vec![Some(view::RawLine {
+        text: Arc::from("**bold** text"),
+        hard_break: true,
+    })];
+    a.nav_cursor = 0;
+    assert_eq!(a.current_line_text().as_deref(), Some("**bold** text"));
+}
+
+#[test]
+fn yank_line_falls_back_to_rendered_without_raw() {
+    // Decoration-only lines carry no raw source; yank returns the rendered
+    // content slice as before.
+    let mut a = app();
+    a.log_off = 0;
+    a.log_lines = vec!["  hello world   ".to_string()];
+    a.log_content = vec![(2, 13)];
+    a.log_raw = vec![None];
+    a.nav_cursor = 0;
+    assert_eq!(a.current_line_text().as_deref(), Some("hello world"));
+}
+
+#[test]
+fn selection_text_raw_skips_softwrap_newlines() {
+    // Two source lines, the first soft-wrapped across two visual rows.
+    // Copying all three rows must yield the two source lines joined by a
+    // single `\n` — the soft-wrap boundary contributes no newline, and the
+    // first source line is emitted only once.
+    let mut a = app();
+    a.log_off = 0;
+    a.log_lines = vec![
+        "  hello ".to_string(),
+        "  world".to_string(),
+        "  second line".to_string(),
+    ];
+    a.log_content = vec![(2, 7), (2, 6), (2, 12)];
+    let first: Arc<str> = Arc::from("hello world");
+    a.log_raw = vec![
+        Some(view::RawLine { text: first.clone(), hard_break: true }),
+        Some(view::RawLine { text: first.clone(), hard_break: false }),
+        Some(view::RawLine { text: Arc::from("second line"), hard_break: true }),
+    ];
+    a.sel = Some(Selection { start: (0, 0), end: (2, 12) });
+    assert_eq!(
+        a.selection_text().as_deref(),
+        Some("hello world\nsecond line")
+    );
+}
+
+#[test]
+fn selection_text_raw_starts_at_continuation() {
+    // Selection begins on a soft-wrap continuation row: the full source
+    // line is still emitted (the source is the unit, not the visual row).
+    let mut a = app();
+    a.log_off = 0;
+    a.log_lines = vec!["  hello ".to_string(), "  world".to_string()];
+    a.log_content = vec![(2, 7), (2, 6)];
+    let first: Arc<str> = Arc::from("hello world");
+    a.log_raw = vec![
+        Some(view::RawLine { text: first.clone(), hard_break: true }),
+        Some(view::RawLine { text: first.clone(), hard_break: false }),
+    ];
+    a.sel = Some(Selection { start: (1, 0), end: (1, 6) });
+    assert_eq!(a.selection_text().as_deref(), Some("hello world"));
 }
 
 fn ctrl_key(code: KeyCode) -> Event {

@@ -4,6 +4,8 @@
 //! Components compose these into larger units; nothing here knows about
 //! turns or blocks.
 
+use std::sync::Arc;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -89,9 +91,32 @@ pub fn blank() -> Line<'static> {
 /// text — is clamped to `content`, so it covers exactly the meaningful text
 /// and never the surrounding decoration, while content's own leading spaces
 /// (indentation) are preserved.
+/// Raw markdown source backing a rendered line, for clipboard yank.
+/// Present only for lines derived from a markdown source (assistant text,
+/// code fences, user messages); `None` for decoration (borders, blanks,
+/// tool glyphs) where the rendered text is the canonical form.
+///
+/// Every soft-wrap visual row of one source line shares the same `text`;
+/// only the first carries `hard_break = true`. Yank joins rows by walking
+/// this field — emitting a `\n` only at hard breaks — so a copied
+/// selection reconstructs the source markdown without spurious newlines at
+/// soft-wrap boundaries.
+#[derive(Clone, Debug)]
+pub struct RawLine {
+    /// The full source line (markdown markers intact), shared by every
+    /// visual wrap-row of that source line. `Arc<str>` so a long source
+    /// line wrapped across many rows costs one allocation.
+    pub text: Arc<str>,
+    /// `true` on the first visual row of a source line (begun at a hard
+    /// newline); `false` on soft-wrap continuations.
+    pub hard_break: bool,
+}
+
 pub struct RenderLine {
     pub line: Line<'static>,
     pub content: (usize, usize),
+    /// Raw source for yank; `None` when the rendered text is canonical.
+    pub raw: Option<RawLine>,
 }
 
 impl RenderLine {
@@ -100,6 +125,14 @@ impl RenderLine {
     /// up to a line is a content anchor for re-seating the cursor.
     pub fn content_len(&self) -> usize {
         self.content.1.saturating_sub(self.content.0)
+    }
+
+    /// Attach raw markdown source to this line for clipboard yank. `text`
+    /// is the full source line shared across wrap-rows; `hard_break` marks
+    /// the first row of a source line (see [`RawLine`]).
+    pub fn with_raw(mut self, text: Arc<str>, hard_break: bool) -> Self {
+        self.raw = Some(RawLine { text, hard_break });
+        self
     }
 }
 
@@ -136,6 +169,7 @@ pub fn render(
     RenderLine {
         line: Line::from(all),
         content: (start, end),
+        raw: None,
     }
 }
 
@@ -149,6 +183,7 @@ pub fn rblank() -> RenderLine {
     RenderLine {
         line: Line::default(),
         content: (0, 0),
+        raw: None,
     }
 }
 

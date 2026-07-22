@@ -63,6 +63,7 @@ impl App {
             input_rect: Rect::default(),
             log_lines: Vec::new(),
             log_content: Vec::new(),
+            log_raw: Vec::new(),
             log_off: 0,
             input_scroll: 0,
             sel: None,

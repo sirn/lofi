@@ -266,6 +266,12 @@ impl App {
     /// bytes), excluding the decorative gutter and trailing padding.
     pub(super) fn current_line_text(&self) -> Option<String> {
         let rel = self.nav_cursor.saturating_sub(self.log_off);
+        // Prefer the raw markdown source line (markers intact) when the
+        // rendered line carries one; decoration-only lines fall through to
+        // the rendered content below.
+        if let Some(raw) = self.log_raw.get(rel).and_then(|r| r.as_ref()) {
+            return Some(raw.text.to_string());
+        }
         let s = self.log_lines.get(rel)?;
         let n = s.chars().count();
         let (cstart, cend) = self.log_content.get(rel).copied().unwrap_or((0, n));
