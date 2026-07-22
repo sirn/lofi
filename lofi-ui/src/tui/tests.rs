@@ -156,7 +156,7 @@ fn numbered_empty_body_line_keeps_its_number() {
 }
 
 #[test]
-fn non_verbose_hides_non_bash_results_keeps_bash_and_errors() {
+fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let mut a = app();
@@ -164,11 +164,11 @@ fn non_verbose_hides_non_bash_results_keeps_bash_and_errors() {
     a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
     a.apply_event(AgentEvent::ToolInput {
         id: "e1".to_string(),
-        code: "lofi.read('a.txt'); lofi.bash('echo x')".to_string(),
-        label: Some("read+bash".to_string()),
+        code: "lofi.read('a.txt'); lofi.write(...); lofi.edit(...); lofi.bash('echo x')".to_string(),
+        label: Some("mixed".to_string()),
     });
-    // A read (hidden in non-verbose), a bash (always shown), and a failed
-    // read whose error must stay visible even when non-bash results hide.
+    // A read (hidden in non-verbose), mutating tools bash/write/edit (kept),
+    // and a failed read whose error stays visible even when read results hide.
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 0, name: "read".to_string(), args: "a.txt".to_string(),
     });
@@ -176,16 +176,28 @@ fn non_verbose_hides_non_bash_results_keeps_bash_and_errors() {
         parent: "e1".to_string(), id: 0, result: "secret line one".to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 1, name: "bash".to_string(), args: "echo x".to_string(),
+        parent: "e1".to_string(), id: 1, name: "write".to_string(), args: "b.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 1, result: "bash output here".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 1, result: "{\"ok\":true}".to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 2, name: "read".to_string(), args: "missing.txt".to_string(),
+        parent: "e1".to_string(), id: 2, name: "edit".to_string(), args: "c.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 2, result: "no such file".to_string(), is_error: true,
+        parent: "e1".to_string(), id: 2, result: "{\"ok\":true}".to_string(), is_error: false,
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(), id: 3, name: "bash".to_string(), args: "echo x".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(), id: 3, result: "bash output here".to_string(), is_error: false,
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(), id: 4, name: "read".to_string(), args: "missing.txt".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(), id: 4, result: "no such file".to_string(), is_error: true,
     });
     a.apply_event(AgentEvent::ToolEnd {
         id: "e1".to_string(), result: "{\"value\":null}".to_string(), is_error: false, elapsed_ms: 0,
@@ -198,15 +210,16 @@ fn non_verbose_hides_non_bash_results_keeps_bash_and_errors() {
             .flat_map(|s| s.content.chars())
             .collect()
     };
-    // Non-verbose: read body hidden; bash body, the error, and every
-    // tool header stay visible.
+    // Non-verbose: read body hidden; bash/write/edit bodies, the error, and
+    // every tool header stay visible (write and edit each yield an `"ok":true`).
     a.verbose = false;
     let nv = text(&a);
     assert!(!nv.contains("secret line one"), "non-verbose read body should hide: {nv}");
     assert!(nv.contains("bash output here"), "non-verbose bash body should show: {nv}");
+    assert!(nv.matches("\"ok\":true").count() >= 2, "non-verbose write/edit bodies should show: {nv}");
     assert!(nv.contains("no such file"), "non-verbose error should stay visible: {nv}");
     assert!(nv.contains("Tool read"), "read header should still show: {nv}");
-    assert!(nv.contains("Tool bash"), "bash header should still show: {nv}");
+    assert!(nv.contains("Tool write"), "write header should still show: {nv}");
     // Verbose: the hidden read body comes back.
     a.verbose = true;
     let v = text(&a);

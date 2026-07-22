@@ -491,11 +491,15 @@ impl Component for ExecBlockBranch<'_> {
         if result.is_empty() {
             return out;
         }
-        // In non-verbose mode, hide non-bash results for a cleaner
-        // transcript — file reads/greps/finds/ls clutter the view; bash
-        // output stays (it's the actionable command result). Errors stay
-        // visible so a failure is never silently swallowed.
-        if !cx.app.verbose && self.nt.name != "bash" && !self.nt.is_error {
+        // In non-verbose mode, hide read-only results for a cleaner
+        // transcript — file reads/greps/finds/ls clutter the view. Mutating
+        // tools (bash, write, edit) keep their result so the user sees the
+        // outcome of an action; errors stay visible regardless so a failure
+        // is never silently swallowed.
+        if !cx.app.verbose
+            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit")
+            && !self.nt.is_error
+        {
             return out;
         }
 
