@@ -491,6 +491,13 @@ impl Component for ExecBlockBranch<'_> {
         if result.is_empty() {
             return out;
         }
+        // In non-verbose mode, hide non-bash results for a cleaner
+        // transcript — file reads/greps/finds/ls clutter the view; bash
+        // output stays (it's the actionable command result). Errors stay
+        // visible so a failure is never silently swallowed.
+        if !cx.app.verbose && self.nt.name != "bash" && !self.nt.is_error {
+            return out;
+        }
 
         let exec_cont = if self.is_last { "  " } else { "│ " };
         let indent = 2 + 2 + 2; // gutter + exec-rail col + own rail
