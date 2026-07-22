@@ -287,6 +287,26 @@ impl Agent {
         }
     }
 
+    /// Return a new agent with its system prompt replaced. Used once at
+    /// startup to fold global and per-directory `AGENTS.md` into the base
+    /// [`SYSTEM_PROMPT`] after the agent is built; the `/model` switch
+    /// reuses the existing agent's prompt as-is, so this is never re-applied
+    /// on a switch.
+    #[must_use]
+    pub fn with_system_prompt(&self, system_prompt: String) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            root: self.root.clone(),
+            tmp_dir: self.tmp_dir.clone(),
+            retry: self.retry,
+            system_prompt,
+            max_output_tokens: self.max_output_tokens,
+            reserved_context_tokens: self.reserved_context_tokens,
+            bash_env: self.bash_env.clone(),
+        }
+    }
+
     /// The system prompt this agent runs with.
     #[must_use]
     pub fn system_prompt(&self) -> &str {
