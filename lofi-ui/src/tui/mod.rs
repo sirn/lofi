@@ -57,7 +57,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use lofi_core::session::store::{self, SessionEntry, SessionStore};
-use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -638,7 +638,7 @@ pub(crate) struct App {
     /// Live input stashed while navigating history; restored on recall exit.
     input_stash: String,
     model_label: String,
-    /// " · medium"-style suffix, or None when thinking is off.
+    /// ":medium"-style suffix, or None when thinking is off.
     thinking_label: Option<String>,
     /// Current thinking level; the source of `thinking_label` and the
     /// pre-selection for the `/thinking` picker.

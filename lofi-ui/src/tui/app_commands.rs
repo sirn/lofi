@@ -411,7 +411,7 @@ impl App {
     ) {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off)
-            .then(|| format!(" · {}", level.as_str()));
+            .then(|| format!(":{}", level.as_str()));
         self.thinking = level;
         if let Some(cw) = model.context_window {
             if cw > 0 {
