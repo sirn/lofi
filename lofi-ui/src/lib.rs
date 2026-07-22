@@ -217,23 +217,27 @@ enum StartupAgent {
     NoModel(String),
 }
 
-/// Build the startup agent, preferring a restored model query (`restored`)
-/// over the config default. If the restored model can no longer be resolved
-/// (removed from the config since the session ran, or its provider lost its
-/// API key), fall back to the default so resume still opens the transcript
-/// instead of aborting.
+/// Build the startup agent. `--model` takes precedence over a restored
+/// session model; with neither, `build_agent` falls back to the config
+/// default. If the restored model can no longer be resolved (removed from
+/// the config since the session ran, or its provider lost its API key), fall
+/// back to the default so resume still opens the transcript instead of
+/// aborting. An explicit `--model` that fails to resolve is not silently
+/// replaced — it surfaces via the error arms below rather than masked by
+/// the default.
 async fn resolve_startup_agent(
     opts: &InteractiveOptions,
     restored: Option<&str>,
 ) -> Result<StartupAgent> {
-    match build_agent(opts.config_path.as_deref(), restored, opts.root.as_path()).await {
+    let requested = opts.model.as_deref().or(restored);
+    match build_agent(opts.config_path.as_deref(), requested, opts.root.as_path()).await {
         Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
         // The restored model is gone from the registry (config changed since
         // the session ran, or its provider lost its API key): fall back to
         // the default so the transcript is still readable instead of aborting.
         Err(_) if restored.is_some() => match build_agent(
             opts.config_path.as_deref(),
-            opts.model.as_deref(),
+            None,
             opts.root.as_path(),
         )
         .await
