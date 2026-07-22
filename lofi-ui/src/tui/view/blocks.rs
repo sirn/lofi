@@ -332,11 +332,21 @@ fn render_table(
             col_w[i] = col_w[i].max(cell.chars().count());
         }
     }
-    // Shrink the last column if the total width exceeds the content area.
+    // Distribute available width proportionally across all columns when
+    // the natural table width exceeds the content area. Borders and padding
+    // (2 per column + 1 border per column + 1 trailing) are subtracted first;
+    // the remainder is split by each column's share of the natural total.
     let total: usize = col_w.iter().map(|&w| w + 2).sum::<usize>() + n_cols + 1;
     if total > content_w {
-        let excess = total - content_w;
-        col_w[n_cols - 1] = col_w[n_cols - 1].saturating_sub(excess).max(1);
+        let overhead = n_cols * 2 + n_cols + 1;
+        let avail = content_w.saturating_sub(overhead).max(n_cols);
+        let natural = col_w.iter().sum::<usize>().max(1);
+        let mut assigned = 0usize;
+        for cw in col_w.iter_mut().take(n_cols - 1) {
+            *cw = (*cw * avail / natural).max(1);
+            assigned += *cw;
+        }
+        col_w[n_cols - 1] = avail.saturating_sub(assigned).max(1);
     }
 
     let border = Style::new().fg(t.subtle);
@@ -386,10 +396,14 @@ fn table_row(
     prim::rline(lead, spans)
 }
 
-/// Pad/truncate `s` to exactly `w` chars per the alignment.
+/// Pad/truncate `s` to exactly `w` chars per the alignment. Truncated cells
+/// end with `…` so the cut is visible.
 fn align_cell(s: &str, w: usize, align: Align) -> String {
     let len = s.chars().count();
-    if len >= w {
+    if len > w {
+        if w > 1 {
+            return format!("{}…", s.chars().take(w - 1).collect::<String>());
+        }
         return s.chars().take(w).collect();
     }
     let pad = w - len;
