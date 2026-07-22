@@ -370,8 +370,11 @@ fn render_table(
     out.push(border_row('┌', '┬', '┐'));
     out.extend(table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad));
     out.push(border_row('├', '┼', '┤'));
-    for row in data {
+    for (i, row) in data.iter().enumerate() {
         out.extend(table_row(&col_w, row, aligns, body_style, border, &lead, &pad));
+        if i + 1 < data.len() {
+            out.push(border_row('├', '┼', '┤'));
+        }
     }
     out.push(border_row('└', '┴', '┘'));
     out
