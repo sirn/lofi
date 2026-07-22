@@ -202,6 +202,35 @@ fn inline_markdown_code_stays_literal() {
 }
 
 #[test]
+fn inline_markdown_code_wraps_across_lines() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    // Inline code that spans a wrap boundary must still be rendered as code
+    // on every wrapped line.  Previously, wrapping split the text first and
+    // each segment was parsed independently, leaving backtick markers visible
+    // and losing the code style.
+    let md = "Run `git rebase --interactive upstream main` now";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    // Narrow enough to force the code span to wrap.
+    let cx = Cx { app: &a, theme: a.theme, width: 30, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let spans: Vec<_> = rls.iter().flat_map(|rl| rl.line.spans.iter().cloned()).collect();
+    let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    // No backtick markers should survive in the output.
+    assert!(!body.contains('`'), "backtick markers should be stripped: {body}");
+    // Every word from the code span should carry the code style (bg set).
+    for word in ["git", "rebase", "interactive", "upstream", "main"] {
+        let found = spans.iter().any(|s| {
+            s.content.contains(word) && s.style.bg.is_some()
+        });
+        assert!(found, "word {word:?} should be in a code-styled span: {body}");
+    }
+}
+
+#[test]
 fn inline_markdown_underscore_not_inword() {
     use ratatui::style::Modifier;
     // Identifiers with underscores must NOT be parsed as emphasis.

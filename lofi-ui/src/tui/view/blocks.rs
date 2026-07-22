@@ -223,8 +223,9 @@ impl Component for AssistantText<'_> {
                     ));
                 }
             } else {
-                for seg in prim::wrap(raw, content_w) {
-                    out.push(prim::rline(lead.clone(), inline_spans(&seg, t, Style::new().fg(t.fg))));
+                let line = Line::from(inline_spans(raw, t, Style::new().fg(t.fg)));
+                for wrapped in prim::wrap_line_styled(&line, content_w) {
+                    out.push(prim::rline(lead.clone(), wrapped.spans));
                 }
             }
             idx += 1;
