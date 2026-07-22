@@ -450,6 +450,25 @@ pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
     }
 }
 
+/// The raw model+thinking of the last completed turn on the active path, so
+/// a resumed session can restore the model the user last ran with rather than
+/// the config default. Walks the active path from the leaf backward so a
+/// sibling branch never supplies a stale model; `None` when the session has
+/// no `TurnEnd`/`TurnFailed` marker (fresh, only a pending prompt, or a
+/// force-stopped turn with no completed turn before it).
+#[must_use]
+pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
+    let path = active_path_from_leaf(events);
+    for &i in path.iter().rev() {
+        match &events[i].kind {
+            SessionEventKind::TurnEnd { model, .. }
+            | SessionEventKind::TurnFailed { model, .. } => return Some(model.clone()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Parse a session file into a [`SessionEntry`] (metadata + message count),
 /// or `None` if the file is not a valid session. Only `Message` events are
 /// counted, so timing/turn-end lines do not inflate the "msgs" total.
@@ -497,7 +516,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use lofi_types::{ContentBlock, Role, SessionEventKind, Usage};
+    use lofi_types::{ContentBlock, Role, SessionEventKind, ThinkingLevel, Usage};
 
     /// Wrap a message as a `Message` session event (`id/parent_id` left empty;
     /// `append_events` assigns and chains them).
@@ -659,6 +678,115 @@ mod tests {
         assert_eq!(path_idx.len(), 2);
         assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User));
         assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User));
+    }
+
+    #[test]
+    fn last_run_model_is_final_turn_on_active_path() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/lrm-final");
+        let path = store.create(cwd, &"p/orig:medium".into()).unwrap();
+        let mut batch = [
+            ev(user("hi")),
+            ev(assistant("hey")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    model: "p/switched:high".into(),
+                    elapsed_ms: 1,
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        append_events(&path, &mut batch, None).unwrap();
+        let (_meta, events, _, _) = load(&path).unwrap();
+        let m = last_run_model(&events).expect("a turn-end marker is present");
+        assert_eq!(m.provider, "p");
+        assert_eq!(m.id, "switched");
+        assert_eq!(m.thinking, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn last_run_model_uses_turn_failed() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/lrm-failed");
+        let path = store.create(cwd, &"p/orig".into()).unwrap();
+        let mut batch = [
+            ev(user("hi")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnFailed {
+                    model: "p/boom:low".into(),
+                    elapsed_ms: 1,
+                    error: "oops".into(),
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        append_events(&path, &mut batch, None).unwrap();
+        let (_meta, events, _, _) = load(&path).unwrap();
+        let m = last_run_model(&events).expect("a turn-failed marker is present");
+        assert_eq!(m.id, "boom");
+        assert_eq!(m.thinking, ThinkingLevel::Low);
+    }
+
+    #[test]
+    fn last_run_model_none_without_a_turn_marker() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/lrm-none");
+        let path = store.create(cwd, &"p/orig".into()).unwrap();
+        let mut batch = [ev(user("hi")), ev(assistant("partial"))];
+        append_events(&path, &mut batch, None).unwrap();
+        let (_meta, events, _, _) = load(&path).unwrap();
+        assert!(last_run_model(&events).is_none());
+    }
+
+    #[test]
+    fn last_run_model_skips_sibling_branch() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/lrm-branch");
+        let path = store.create(cwd, &"p/orig".into()).unwrap();
+        // Root chain ends with model A; a sibling branch off the root user
+        // ends with model B and is the active leaf, so B is restored (not A).
+        let mut first = [
+            ev(user("a")),
+            ev(assistant("b")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    model: "p/A:medium".into(),
+                    elapsed_ms: 1,
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        append_events(&path, &mut first, None).unwrap();
+        let (_meta, base, _, _) = load(&path).unwrap();
+        let root_id = base[0].id.clone();
+        let mut branch = [
+            ev(user("alt")),
+            ev(assistant("alt2")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    model: "p/B:high".into(),
+                    elapsed_ms: 1,
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        append_events(&path, &mut branch, Some(&root_id)).unwrap();
+        let (_meta, events, _, _) = load(&path).unwrap();
+        let m = last_run_model(&events).expect("active leaf has a turn-end");
+        assert_eq!(m.id, "B");
+        assert_eq!(m.thinking, ThinkingLevel::High);
     }
 
     #[test]

@@ -312,6 +312,14 @@ impl SessionConfig {
             cwd,
         }
     }
+
+    /// The raw model+thinking of the last completed turn on the active path,
+    /// for restoring the model on resume (see [`store::last_run_model`]).
+    /// `None` for fresh/ephemeral sessions or sessions with no completed turn.
+    #[must_use]
+    pub(crate) fn last_run_model(&self) -> Option<RunModel> {
+        store::last_run_model(&self.events)
+    }
 }
 
 /// State for the '/resume' session-picker overlay.
