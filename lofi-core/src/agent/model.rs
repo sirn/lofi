@@ -57,7 +57,100 @@ pub async fn build_agent(
     };
 
     let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root)?;
+    // Fold any global (`<config_dir>/AGENTS.md`) and per-directory
+    // `AGENTS.md` (walked from `root` up to the git repo root) into the
+    // base system prompt after the agent is built. The `/model` switch
+    // reuses the existing agent's prompt, so the folded prompt is inherited
+    // without re-reading the files on every switch.
+    let agent = agent.with_system_prompt(assemble_system_prompt(
+        config_path.parent(),
+        root,
+    ));
     Ok((agent, model_obj, level, config, registry))
+}
+
+/// Assemble the agent's system prompt: the shipped [`SYSTEM_PROMPT`] followed
+/// by any `AGENTS.md` that applies to this run.
+///
+/// Two sources, ordered least to most specific so the most specific file is
+/// last and most prominent:
+/// - **Global** — `<config_dir>/AGENTS.md`, user-wide instructions kept next
+///   to the config file. Skipped when `config_dir` is `None`.
+/// - **Per-directory** — every `AGENTS.md` found walking from the workspace
+///   `root` up to the enclosing git repo root (inclusive). Walking stops at
+///   the repo boundary so unrelated ancestor directories never contribute;
+///   when `root` is not inside a git repository only `root`'s own
+///   `AGENTS.md` is considered. Files are ordered outermost-first.
+///
+/// Missing or whitespace-only files are skipped. When none are found the base
+/// [`SYSTEM_PROMPT`] is returned unchanged.
+fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> String {
+    let mut sections: Vec<(String, String)> = Vec::new();
+
+    if let Some(dir) = config_dir {
+        if let Some(body) = read_agents_md(&dir.join("AGENTS.md")) {
+            sections.push(("global".to_string(), body));
+        }
+    }
+
+    for (dir, body) in dir_agents_md(root) {
+        sections.push((dir, body));
+    }
+
+    if sections.is_empty() {
+        return SYSTEM_PROMPT.to_string();
+    }
+    let mut out = String::from(SYSTEM_PROMPT);
+    for (origin, body) in sections {
+        out.push_str("\n\n## AGENTS.md — ");
+        out.push_str(&origin);
+        out.push_str("\n\n");
+        out.push_str(body.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// Read an `AGENTS.md` file, returning its body only when it has
+/// non-whitespace content. Missing or unreadable files yield `None`.
+fn read_agents_md(path: &std::path::Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    (!body.trim().is_empty()).then_some(body)
+}
+
+/// Collect `(origin, body)` pairs for every `AGENTS.md` from `root` up to
+/// the enclosing git repo root (inclusive), ordered outermost-first. When
+/// `root` is not inside a git repository only `root`'s own `AGENTS.md` is
+/// considered, so the walk never escapes into unrelated ancestor directories.
+fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
+    let boundary = git_boundary(root).unwrap_or_else(|| root.to_path_buf());
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut cur = Some(root);
+    while let Some(d) = cur {
+        if let Some(body) = read_agents_md(&d.join("AGENTS.md")) {
+            found.push((d.display().to_string(), body));
+        }
+        if d == boundary.as_path() {
+            break;
+        }
+        cur = d.parent();
+    }
+    found.reverse();
+    found
+}
+
+/// Walk up from `start` to the first ancestor (inclusive) containing a
+/// `.git` entry — the git repo root. `None` when `start` is not inside a
+/// git repository.
+fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(d) = cur {
+        if d.join(".git").exists() {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
 }
 
 /// Build an [`Agent`] for a selected model from an already-loaded
@@ -279,4 +372,104 @@ pub(crate) fn resolve_thinking_level(
         )));
     }
     Ok(desired)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write(path: &std::path::Path, body: &str) {
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).unwrap();
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn no_agents_md_returns_base_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "").unwrap();
+        let cfg = tmp.path().join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        assert_eq!(prompt, SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn global_agents_md_appended() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "").unwrap();
+        let cfg = tmp.path().join("config");
+        write(&cfg.join("AGENTS.md"), "Be terse.\n");
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        assert!(prompt.starts_with(SYSTEM_PROMPT));
+        assert_eq!(prompt.matches("## AGENTS.md — global").count(), 1);
+        assert!(prompt.contains("Be terse."));
+    }
+
+    #[test]
+    fn per_dir_agents_md_ordered_outermost_first() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let root = repo.join("sub");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(repo.join(".git"), "").unwrap();
+        write(&repo.join("AGENTS.md"), "repo-level rules\n");
+        write(&root.join("AGENTS.md"), "sub-level rules\n");
+        let cfg = tmp.path().join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        let repo_pos = prompt.find("repo-level").unwrap();
+        let sub_pos = prompt.find("sub-level").unwrap();
+        assert!(repo_pos < sub_pos, "outermost (repo) must precede innermost (sub)");
+    }
+
+    #[test]
+    fn walk_stops_at_git_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let root = repo.join("sub");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(repo.join(".git"), "").unwrap();
+        // Outside the repo boundary — must not be picked up.
+        write(&tmp.path().join("AGENTS.md"), "OUTSIDE-LEAK\n");
+        write(&root.join("AGENTS.md"), "inside\n");
+        let prompt = assemble_system_prompt(Some(&tmp.path().join("config")), &root);
+        assert!(prompt.contains("inside"));
+        assert!(!prompt.contains("OUTSIDE-LEAK"));
+    }
+
+    #[test]
+    fn non_git_project_uses_only_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        write(&root.join("AGENTS.md"), "root-only\n");
+        let cfg = tmp.path().join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        assert!(prompt.contains("root-only"));
+        // Only the root's section; no global (config dir has no AGENTS.md).
+        assert_eq!(prompt.matches("## AGENTS.md —").count(), 1);
+    }
+
+    #[test]
+    fn empty_agents_md_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "").unwrap();
+        write(&root.join("AGENTS.md"), "   \n\n  \n");
+        let cfg = tmp.path().join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        assert_eq!(prompt, SYSTEM_PROMPT);
+    }
 }
