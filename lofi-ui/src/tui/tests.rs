@@ -127,7 +127,7 @@ fn numbered_empty_body_line_keeps_its_number() {
     a.apply_event(AgentEvent::NativeToolEnd {
         parent: "e1".to_string(),
         id: 0,
-        result: "line one\n\nline three".to_string(),
+        result: serde_json::json!({ "content": "line one\n\nline three", "start_line": 1, "total_lines": 3, "truncated": false }).to_string(),
         is_error: false,
     });
     a.apply_event(AgentEvent::ToolEnd {
@@ -173,25 +173,25 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
         parent: "e1".to_string(), id: 0, name: "read".to_string(), args: "a.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 0, result: "secret line one".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 0, result: serde_json::json!({ "content": "secret line one", "start_line": 1, "total_lines": 1, "truncated": false }).to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 1, name: "write".to_string(), args: "b.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 1, result: "written content here".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 1, result: serde_json::json!({ "ok": true, "content": "written content here" }).to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 2, name: "edit".to_string(), args: "c.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 2, result: "edited content here".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 2, result: serde_json::json!({ "ok": true, "old": "old text", "new": "edited content here" }).to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 3, name: "bash".to_string(), args: "echo x".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 3, result: "bash output here".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 3, result: serde_json::json!({ "ok": true, "output": "bash output here", "code": 0 }).to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 4, name: "read".to_string(), args: "missing.txt".to_string(),
@@ -1397,7 +1397,7 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
     a.apply_event(AgentEvent::NativeToolEnd {
         parent: "e1".to_string(),
         id: 0,
-        result: token.to_string(),
+        result: serde_json::json!({ "ok": true, "output": token, "code": 0 }).to_string(),
         is_error: false,
     });
     a.apply_event(AgentEvent::ToolEnd {
@@ -1776,7 +1776,7 @@ fn messages_from_events_elides_kept_tail_on_resume() {
     };
 
     // e0 summarized; e1..e4 kept tail; e5 marker (first_kept_entry_id = e1).
-    let mut events: Vec<SessionEvent> = sev_chain([
+    let events: Vec<SessionEvent> = sev_chain([
         msg(user("old prompt")),
         msg(exec_call("t1")),
         msg(exec_result("t1", "out-1")),

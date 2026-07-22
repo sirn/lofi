@@ -154,10 +154,18 @@ pub(super) fn walk_files_capped(
     Ok(false)
 }
 
+/// Reason a capped filesystem walk stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WalkLimit {
+    Complete,
+    TooManyHits,
+    TooManyVisited,
+}
+
 /// Traverse `dir` applying `matcher` to each regular file's path relative to
 /// `root`, collecting matching relative paths into `hits`. Every `read_dir`
-/// entry increments `visited`; the traversal stops at `max_hits` matches or
-/// `max_visited` entries. Returns `true` when truncated.
+/// entry increments `visited`; the traversal reports which safety ceiling was
+/// reached.
 pub(super) fn find_walk(
     dir: &Path,
     root: &Path,
@@ -166,13 +174,16 @@ pub(super) fn find_walk(
     max_hits: usize,
     visited: &mut usize,
     max_visited: usize,
-) -> Result<bool> {
+) -> Result<WalkLimit> {
     if !dir.is_dir() {
-        return Ok(false);
+        return Ok(WalkLimit::Complete);
     }
     for entry in std::fs::read_dir(dir)? {
-        if hits.len() >= max_hits || *visited >= max_visited {
-            return Ok(true);
+        if hits.len() >= max_hits {
+            return Ok(WalkLimit::TooManyHits);
+        }
+        if *visited >= max_visited {
+            return Ok(WalkLimit::TooManyVisited);
         }
         *visited += 1;
         let entry = entry?;
@@ -182,8 +193,9 @@ pub(super) fn find_walk(
         }
         let path = entry.path();
         if ft.is_dir() {
-            if find_walk(&path, root, matcher, hits, max_hits, visited, max_visited)? {
-                return Ok(true);
+            match find_walk(&path, root, matcher, hits, max_hits, visited, max_visited)? {
+                WalkLimit::Complete => {}
+                other => return Ok(other),
             }
         } else if ft.is_file() {
             if let Ok(rel) = path.strip_prefix(root) {
@@ -194,13 +206,13 @@ pub(super) fn find_walk(
             }
         }
     }
-    Ok(false)
+    Ok(WalkLimit::Complete)
 }
 
-/// Parse the `grep` pattern argument into (regex, ignore-case, ctx, max).
-pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, usize)> {
+/// Parse the `grep` pattern argument into (regex, ignore-case, context).
+pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize)> {
     match pattern {
-        Value::String(s) => Ok((s, false, 0, 0)),
+        Value::String(s) => Ok((s, false, 0)),
         Value::Object(_) => {
             let re_src = pattern
                 .get("regex")
@@ -210,9 +222,7 @@ pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, us
             let ic = pattern.get("ic").and_then(Value::as_bool).unwrap_or(false);
             let ctx = usize::try_from(pattern.get("ctx").and_then(Value::as_u64).unwrap_or(0))
                 .unwrap_or(0);
-            let max = usize::try_from(pattern.get("max").and_then(Value::as_u64).unwrap_or(0))
-                .unwrap_or(0);
-            Ok((re_src, ic, ctx, max))
+            Ok((re_src, ic, ctx))
         }
         _ => Err(Error::Tool("grep: pattern must be string or object".into())),
     }

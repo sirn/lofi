@@ -192,7 +192,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         return None;
     }
 
-    let plan = plan_cut(&live, opts.clone());
+    let plan = plan_cut(&live, opts);
     if plan.summarized < MIN_SUMMARIZED {
         return None;
     }
@@ -261,7 +261,7 @@ pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
 /// fall back to a completed tool-cycle boundary in the first half, then to
 /// compact-all. The kept-tail token budget, when set, splits an oversized
 /// final turn at a completed tool-cycle so it does not re-overflow.
-fn plan_cut(live: &[LiveMessage], opts: CompactOptions) -> CutPlan {
+fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
     let user_indices: Vec<usize> = live
         .iter()
         .enumerate()
