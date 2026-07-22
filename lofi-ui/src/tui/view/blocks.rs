@@ -125,9 +125,11 @@ impl Component for UserMessage<'_> {
 // ── Assistant text ───────────────────────────────────────────────────────
 
 /// Plain assistant text with a 2-space left margin; soft-wrapped lines all
-/// carry the margin. Markdown-lite: headings bold, blockquotes dim, inline
-/// `code` on a tile, fenced code as a plain triple-backtick fence on a
-/// full-width surface tile.
+/// carry the margin. Markdown-lite: headings bold (all six levels),
+/// blockquotes dim, inline `code` on a tile, `**bold**`, `*italic*`,
+/// blockquotes dim, inline `code` on a tile, `**bold**`, `*italic*`,
+/// `_underline_`, `~~strike~~`, fenced code as a plain triple-backtick fence
+/// on a full-width surface tile, and `|`-delimited tables as box-drawn grids.
 struct AssistantText<'a> {
     text: &'a str,
 }
@@ -144,7 +146,10 @@ impl Component for AssistantText<'_> {
         }
         let mut out = Vec::new();
         let mut in_code = false;
-        for raw in text.split('\n') {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut idx = 0;
+        while idx < lines.len() {
+            let raw = lines[idx];
             let trimmed = raw.trim_end();
             if trimmed.starts_with("```") {
                 in_code = !in_code;
@@ -164,14 +169,11 @@ impl Component for AssistantText<'_> {
                     t.surface,
                     w,
                 ));
+                idx += 1;
                 continue;
             }
             if in_code {
                 let avail = content_w.saturating_sub(2);
-                // Wrap each code line preserving its indentation; the 2-space
-                // left gutter repeats on every continuation row. The surface
-                // background spans the full width via `rtile`, with a
-                // 2-space right gutter as trailing bg padding.
                 for seg in prim::wrap_pre(raw, avail) {
                     out.push(prim::rtile(
                         vec![Span::raw("  ")],
@@ -180,17 +182,35 @@ impl Component for AssistantText<'_> {
                         w,
                     ));
                 }
+                idx += 1;
                 continue;
             }
-            if let Some(h) = trimmed.strip_prefix("# ").or_else(|| trimmed.strip_prefix("## ")) {
+            // Markdown table: a `|`-row whose next line is a separator.
+            if trimmed.starts_with('|')
+                && idx + 1 < lines.len()
+                && is_table_separator(lines[idx + 1].trim())
+            {
+                let start = idx;
+                while idx < lines.len() && lines[idx].trim().starts_with('|') {
+                    idx += 1;
+                }
+                let tlines = &lines[start..idx];
+                let header = parse_table_row(tlines[0]);
+                let aligns: Vec<Align> =
+                    parse_table_row(tlines[1]).iter().map(|c| parse_align(c)).collect();
+                let data: Vec<Vec<String>> =
+                    tlines[2..].iter().map(|l| parse_table_row(l)).collect();
+                out.extend(render_table(&header, &data, &aligns, content_w, t));
+                continue;
+            }
+            let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+            if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ')
+            {
+                let h = &trimmed[hashes + 1..];
+                let head_fg = if hashes <= 2 { t.fg } else { t.muted };
+                let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
                 for seg in prim::wrap(h, content_w) {
-                    out.push(prim::rline(
-                        lead.clone(),
-                        vec![Span::styled(
-                            seg,
-                            Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
-                        )],
-                    ));
+                    out.push(prim::rline(lead.clone(), vec![Span::styled(seg, style)]));
                 }
             } else if let Some(q) = trimmed.strip_prefix("> ") {
                 for seg in prim::wrap(q, content_w) {
@@ -204,40 +224,239 @@ impl Component for AssistantText<'_> {
                 }
             } else {
                 for seg in prim::wrap(raw, content_w) {
-                    out.push(prim::rline(lead.clone(), inline_code(&seg, t)));
+                    out.push(prim::rline(lead.clone(), inline_spans(&seg, t)));
                 }
             }
+            idx += 1;
         }
         out
     }
 }
 
-/// Split a line into spans, turning `` `code` `` segments into tiles.
-fn inline_code(line: &str, t: Theme) -> Vec<Span<'static>> {
+/// Split a line into styled spans, parsing inline markdown: `` `code` ``
+/// (literal content on an inline-bg tile), `**bold**`, `__bold__`,
+/// `*italic*`, `_underline_`, `~~strike~~`. Code spans are extracted first
+/// (their content is literal); remaining text is recursively scanned for
+/// marker pairs. Underscore markers are suppressed inside words so
+/// identifiers like `my_var_name` stay literal.
+fn inline_spans(line: &str, t: Theme) -> Vec<Span<'static>> {
+    let base = Style::new().fg(t.fg);
+    let code_style = Style::new().fg(t.info).bg(t.inline_bg);
     let mut spans = Vec::new();
     let mut rest = line;
-    let code_style = Style::new().fg(t.info).bg(t.inline_bg);
-    let body_style = Style::new().fg(t.fg);
     while let Some(start) = rest.find('`') {
         if start > 0 {
-            spans.push(Span::styled(rest[..start].to_string(), body_style));
+            spans.extend(parse_markers(&rest[..start], base));
         }
         let after = &rest[start + 1..];
         if let Some(end) = after.find('`') {
             spans.push(Span::styled(after[..end].to_string(), code_style));
             rest = &after[end + 1..];
         } else {
-            spans.push(Span::styled(rest[start..].to_string(), body_style));
-            return spans;
+            spans.extend(parse_markers(rest, base));
+            return nonempty(spans);
         }
     }
-    if !rest.is_empty() {
-        spans.push(Span::styled(rest.to_string(), body_style));
-    }
+    spans.extend(parse_markers(rest, base));
+    nonempty(spans)
+}
+
+/// Ensure at least one span so empty input still produces a renderable row.
+fn nonempty(mut spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     if spans.is_empty() {
         spans.push(Span::raw(String::new()));
     }
     spans
+}
+
+// ── Markdown table ───────────────────────────────────────────────────────
+
+/// Column alignment inferred from the separator row (`:--`, `--:`, `:--:`).
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Right,
+    Center,
+}
+
+/// A table separator line contains only `|`, `-`, `:`, and spaces, with at
+/// least one dash.
+fn is_table_separator(line: &str) -> bool {
+    line.contains('-')
+        && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// Split a `|`-delimited row into trimmed cell strings.
+fn parse_table_row(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(|c| c.trim().to_string())
+        .collect()
+}
+
+/// Derive alignment from a separator cell (`:--` left, `--:` right, `:--:`
+/// center, `---` default left).
+fn parse_align(cell: &str) -> Align {
+    let left = cell.starts_with(':');
+    let right = cell.ends_with(':');
+    match (left, right) {
+        (true, true) => Align::Center,
+        (false, true) => Align::Right,
+        _ => Align::Left,
+    }
+}
+
+/// Render a markdown table with box-drawing borders. Column widths are the
+/// max cell width per column; the last column is shrunk if the table would
+/// exceed `content_w`.
+fn render_table(
+    header: &[String],
+    data: &[Vec<String>],
+    aligns: &[Align],
+    content_w: usize,
+    t: Theme,
+) -> Vec<RenderLine> {
+    let lead: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let n_cols = header.len();
+    if n_cols == 0 {
+        return Vec::new();
+    }
+    let mut col_w = vec![0usize; n_cols];
+    for (i, cell) in header.iter().enumerate() {
+        col_w[i] = col_w[i].max(cell.chars().count());
+    }
+    for row in data {
+        for (i, cell) in row.iter().enumerate().take(n_cols) {
+            col_w[i] = col_w[i].max(cell.chars().count());
+        }
+    }
+    // Shrink the last column if the total width exceeds the content area.
+    let total: usize = col_w.iter().map(|&w| w + 2).sum::<usize>() + n_cols + 1;
+    if total > content_w {
+        let excess = total - content_w;
+        col_w[n_cols - 1] = col_w[n_cols - 1].saturating_sub(excess).max(1);
+    }
+
+    let border = Style::new().fg(t.subtle);
+    let hdr_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+    let body_style = Style::new().fg(t.fg);
+    let mut out = Vec::new();
+
+    // Border row: left + (─×(w+2) + mid)×n + right
+    let border_row = |left: char, mid: char, right: char| -> RenderLine {
+        let mut s = String::from(left);
+        for (i, &cw) in col_w.iter().enumerate() {
+            for _ in 0..cw + 2 {
+                s.push('─');
+            }
+            s.push(if i + 1 < n_cols { mid } else { right });
+        }
+        prim::rline(lead.clone(), vec![Span::styled(s, border)])
+    };
+
+    out.push(border_row('┌', '┬', '┐'));
+    out.push(table_row(&col_w, header, aligns, hdr_style, border, lead.clone()));
+    out.push(border_row('├', '┼', '┤'));
+    for row in data {
+        out.push(table_row(&col_w, row, aligns, body_style, border, lead.clone()));
+    }
+    out.push(border_row('└', '┴', '┘'));
+    out
+}
+
+/// One data row: `│ cell │ cell │` with borders in `border` style and cells in
+/// `style`. Cells are padded to their column width per the alignment.
+fn table_row(
+    col_w: &[usize],
+    cells: &[String],
+    aligns: &[Align],
+    style: Style,
+    border: Style,
+    lead: Vec<Span<'static>>,
+) -> RenderLine {
+    let mut spans = vec![Span::styled("│", border)];
+    for (i, &w) in col_w.iter().enumerate() {
+        let cell = cells.get(i).map_or("", String::as_str);
+        let padded = align_cell(cell, w, aligns.get(i).copied().unwrap_or(Align::Left));
+        spans.push(Span::styled(format!(" {padded} "), style));
+        spans.push(Span::styled("│", border));
+    }
+    prim::rline(lead, spans)
+}
+
+/// Pad/truncate `s` to exactly `w` chars per the alignment.
+fn align_cell(s: &str, w: usize, align: Align) -> String {
+    let len = s.chars().count();
+    if len >= w {
+        return s.chars().take(w).collect();
+    }
+    let pad = w - len;
+    match align {
+        Align::Left => format!("{s}{}", " ".repeat(pad)),
+        Align::Right => format!("{}{s}", " ".repeat(pad)),
+        Align::Center => {
+            let left = pad / 2;
+            format!("{}{s}{}", " ".repeat(left), " ".repeat(pad - left))
+        }
+    }
+}
+
+/// Recursively parse inline emphasis markers into styled spans. Markers are
+/// tried in priority order (longer first so `**` wins over `*`); the first
+/// marker with a matched open/close pair splits the text into before / inner
+/// (with the modifier stacked) / after, each parsed recursively.
+fn parse_markers(text: &str, base: Style) -> Vec<Span<'static>> {
+    // (marker, modifier, word_boundary_check)
+    for (marker, modifier, check) in [
+        ("**", Modifier::BOLD, false),
+        ("__", Modifier::BOLD, true),
+        ("~~", Modifier::CROSSED_OUT, false),
+        ("*", Modifier::ITALIC, false),
+        ("_", Modifier::UNDERLINED, true),
+    ] {
+        let Some(open) = find_marker(text, marker, check, true) else { continue };
+        let after_open = &text[open + marker.len()..];
+        if let Some(close) = find_marker(after_open, marker, check, false) {
+            let before = &text[..open];
+            let inner = &after_open[..close];
+            let after = &after_open[close + marker.len()..];
+            let mut spans = Vec::new();
+            spans.extend(parse_markers(before, base));
+            spans.extend(parse_markers(inner, base.add_modifier(modifier)));
+            spans.extend(parse_markers(after, base));
+            return spans;
+        }
+    }
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::styled(text.to_string(), base)]
+    }
+}
+
+/// Find the first occurrence of `marker` in `text`, optionally enforcing a
+/// word-boundary check (for underscore markers so `my_var` stays literal).
+/// `is_open` distinguishes opening (char before) from closing (char after).
+fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<usize> {
+    let mut search = 0;
+    while let Some(rel) = text[search..].find(marker) {
+        let pos = search + rel;
+        if check {
+            let ok = if is_open {
+                text[..pos].chars().next_back().is_none_or(|c| !c.is_alphanumeric())
+            } else {
+                text[pos + marker.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric())
+            };
+            if !ok {
+                search = pos + marker.len();
+                continue;
+            }
+        }
+        return Some(pos);
+    }
+    None
 }
 
 // ── Thinking ─────────────────────────────────────────────────────────────
