@@ -105,6 +105,9 @@ fn numbered_empty_body_line_keeps_its_number() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let mut a = app();
+    // Verbose so the `read` result renders — non-verbose now hides
+    // non-bash results for a cleaner transcript.
+    a.verbose = true;
     push_turn(&mut a);
     a.apply_event(AgentEvent::ToolStart {
         id: "e1".to_string(),
@@ -150,6 +153,64 @@ fn numbered_empty_body_line_keeps_its_number() {
         .expect("empty-body numbered line should keep its decoration");
     let s: String = empty.line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(s.contains(" 2 ") || s.contains(" 2"), "number preserved: {s:?}");
+}
+
+#[test]
+fn non_verbose_hides_non_bash_results_keeps_bash_and_errors() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".to_string(),
+        code: "lofi.read('a.txt'); lofi.bash('echo x')".to_string(),
+        label: Some("read+bash".to_string()),
+    });
+    // A read (hidden in non-verbose), a bash (always shown), and a failed
+    // read whose error must stay visible even when non-bash results hide.
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(), id: 0, name: "read".to_string(), args: "a.txt".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(), id: 0, result: "secret line one".to_string(), is_error: false,
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(), id: 1, name: "bash".to_string(), args: "echo x".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(), id: 1, result: "bash output here".to_string(), is_error: false,
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(), id: 2, name: "read".to_string(), args: "missing.txt".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(), id: 2, result: "no such file".to_string(), is_error: true,
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(), result: "{\"value\":null}".to_string(), is_error: false, elapsed_ms: 0,
+    });
+    let text = |a: &App| -> String {
+        let cx = Cx { app: a, theme: a.theme, width: 80, active_turn: false };
+        render_turn_lines(&cx, &a.turns[0])
+            .iter()
+            .flat_map(|rl| rl.line.spans.iter())
+            .flat_map(|s| s.content.chars())
+            .collect()
+    };
+    // Non-verbose: read body hidden; bash body, the error, and every
+    // tool header stay visible.
+    a.verbose = false;
+    let nv = text(&a);
+    assert!(!nv.contains("secret line one"), "non-verbose read body should hide: {nv}");
+    assert!(nv.contains("bash output here"), "non-verbose bash body should show: {nv}");
+    assert!(nv.contains("no such file"), "non-verbose error should stay visible: {nv}");
+    assert!(nv.contains("Tool read"), "read header should still show: {nv}");
+    assert!(nv.contains("Tool bash"), "bash header should still show: {nv}");
+    // Verbose: the hidden read body comes back.
+    a.verbose = true;
+    let v = text(&a);
+    assert!(v.contains("secret line one"), "verbose read body should show: {v}");
 }
 
 #[test]
