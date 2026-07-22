@@ -83,7 +83,7 @@ async fn pi_read_reads_a_tempdir_file() {
     )
     .await
     .unwrap();
-    assert_eq!(res.value, json!("hello world"));
+    assert_eq!(res.value["content"], json!("hello world"));
 }
 
 #[tokio::test]
@@ -93,7 +93,7 @@ async fn pi_write_then_read_round_trip() {
     let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
-    assert_eq!(res.value, json!("hi"));
+    assert_eq!(res.value["content"], json!("hi"));
 }
 
 #[tokio::test]
@@ -203,7 +203,7 @@ async fn exec_bash_read_pages_bash_log() {
     let res2 = exec(&src2, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
-    let s2: &str = res2.value.as_str().unwrap();
+    let s2: &str = res2.value["content"].as_str().unwrap();
     assert!(s2.contains("output line number 1"), "first page should start at line 1: basename={basename:?} s2={s2}");
 }
 

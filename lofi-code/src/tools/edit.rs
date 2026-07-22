@@ -26,6 +26,9 @@ impl BuiltinTools {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("edit: missing 'new'".into()))?
             .to_owned();
+        // Echo the replaced text back so the renderer can show a diff.
+        let old_echo = old.clone();
+        let new_echo = new.clone();
         reject_symlink_leaf(&self.root, &path, &format!("edit {path}"))?;
         let resolved = resolve_under(&self.root, &path)?;
         reject_non_regular(&format!("edit {path}"), &resolved)?;
@@ -61,6 +64,6 @@ impl BuiltinTools {
         })
         .await
         .map_err(|e| Error::Tool(format!("edit {path}: {e}")))??;
-        Ok(json!({ "ok": true }))
+        Ok(json!({ "ok": true, "old": old_echo, "new": new_echo }))
     }
 }
