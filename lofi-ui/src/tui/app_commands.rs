@@ -193,27 +193,47 @@ impl App {
     }
 
     pub(super) fn show_session_info(&mut self) {
+        let t = self.theme;
+        let mut lines: Vec<Line<'static>> = vec![info_section(t, "Session")];
+        #[allow(clippy::single_match_else)]
         match &self.session.path {
             Some(p) => {
                 let id = p
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("?");
-                self.notify(
-                    NotifyKind::Info,
-                    format!(
-                        "{} · {} msgs · {}",
-                        id,
-                        self.history.lock().map_or(0, |m| m.len()),
-                        self.session_model(),
-                    ),
-                );
+                lines.push(info_kv(t, "id", id));
+                lines.push(info_kv(t, "file", &p.display().to_string()));
+                let size = std::fs::metadata(p).map_or(0, |m| m.len());
+                lines.push(info_kv(t, "size", &format_bytes(size)));
             }
-            None => self.notify(
-                NotifyKind::Warn,
-                "no session file (ephemeral or not yet started)",
-            ),
+            None => {
+                lines.push(info_kv(t, "id", "(none)"));
+                lines.push(info_note(
+                    t,
+                    "No session file — ephemeral or not yet started.",
+                ));
+            }
         }
+        lines.push(Line::from(""));
+        lines.push(info_section(t, "Model"));
+        lines.push(info_kv(t, "model", &self.session_model()));
+        lines.push(info_kv(
+            t,
+            "messages",
+            &self.history.lock().map_or(0, |m| m.len()).to_string(),
+        ));
+        lines.push(info_kv(t, "turns", &self.turns.len().to_string()));
+        lines.push(Line::from(""));
+        lines.push(info_section(t, "Workspace"));
+        lines.push(info_kv(t, "root", &self.session.cwd.display().to_string()));
+        self.info = Some(InfoModal {
+            title: "Session".to_string(),
+            lines,
+            scroll: 0,
+            total: 0,
+            view_h: 0,
+        });
     }
 
     /// '/new': drop the transcript and start a fresh session file on the next

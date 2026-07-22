@@ -126,7 +126,8 @@ impl Component for UserMessage<'_> {
 
 /// Plain assistant text with a 2-space left margin; soft-wrapped lines all
 /// carry the margin. Markdown-lite: headings bold, blockquotes dim, inline
-/// `code` on a tile, fenced code in a framed surface tile.
+/// `code` on a tile, fenced code as a plain triple-backtick fence on a
+/// full-width surface tile.
 struct AssistantText<'a> {
     text: &'a str,
 }
@@ -149,28 +150,34 @@ impl Component for AssistantText<'_> {
                 in_code = !in_code;
                 let lang = trimmed.trim_start_matches('`');
                 let label = if in_code {
-                    format!("╭─ {}", if lang.is_empty() { "code" } else { lang })
+                    if lang.is_empty() {
+                        "```".to_string()
+                    } else {
+                        format!("```{lang}")
+                    }
                 } else {
-                    "╰──".to_string()
+                    "```".to_string()
                 };
-                out.push(prim::rline(
+                out.push(prim::rtile(
                     vec![Span::raw("  ")],
                     vec![Span::styled(label, Style::new().fg(t.muted).bg(t.surface))],
+                    t.surface,
+                    w,
                 ));
                 continue;
             }
             if in_code {
                 let avail = content_w.saturating_sub(2);
-                let rail = vec![
-                    Span::raw("  "),
-                    Span::styled("│ ", Style::new().fg(t.muted).bg(t.surface)),
-                ];
-                // Wrap each code line preserving its indentation; the rail
-                // repeats on every continuation row.
+                // Wrap each code line preserving its indentation; the 2-space
+                // left gutter repeats on every continuation row. The surface
+                // background spans the full width via `rtile`, with a
+                // 2-space right gutter as trailing bg padding.
                 for seg in prim::wrap_pre(raw, avail) {
-                    out.push(prim::rline(
-                        rail.clone(),
+                    out.push(prim::rtile(
+                        vec![Span::raw("  ")],
                         vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
+                        t.surface,
+                        w,
                     ));
                 }
                 continue;
