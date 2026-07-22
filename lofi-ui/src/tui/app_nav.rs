@@ -514,7 +514,16 @@ impl App {
     }
 
     /// Plain text of the current mouse selection, or `None` when the selection
-    /// is empty (a bare click with no drag). Lines are joined with `\n`.
+    /// is empty (a bare click with no drag).
+    ///
+    /// Lines carrying raw markdown source ([`log_raw`]) are copied from that
+    /// source — markers intact — so a selection reconstructs the original
+    /// markdown. Soft-wrap continuation rows share their source line with the
+    /// preceding row, so only the first row of each source line emits text;
+    /// a `\n` is inserted only at hard breaks (a new source line) or at the
+    /// boundary to a decoration-only line. Decoration-only lines (tool glyphs,
+    /// borders) fall back to their rendered content slice, always treated as a
+    /// hard break.
     #[allow(clippy::needless_range_loop)]
     pub(super) fn selection_text(&self) -> Option<String> {
         let sel = self.sel.as_ref()?;
@@ -532,6 +541,7 @@ impl App {
         // absolute selection bounds into it and clamp to what's on screen.
         let lines = &self.log_lines;
         let content = &self.log_content;
+        let raw = &self.log_raw;
         let off = self.log_off;
         let vis_len = lines.len();
         if vis_len == 0 || el < off || sl >= off + vis_len {
@@ -539,14 +549,25 @@ impl App {
         }
         let lo = sl.max(off) - off;
         let hi = el.min(off + vis_len - 1) - off;
-        // Selection is content-aware: each line's char range is clamped to its
-        // content bounds, so the decorative gutter indent (leading) and the
-        // background-padding tail (trailing) are never copied. Cell-level
-        // selection with the gutter/padding intact is left to the terminal's
-        // native copy.
         let mut out = String::new();
+        let mut started = false;
         for rel in lo..=hi {
             let li_abs = off + rel;
+            // Raw markdown source: emit the full source line once per hard
+            // break; skip soft-wrap continuations (same source line already
+            // emitted by the preceding row).
+            if let Some(rl) = raw.get(rel).and_then(|r| r.as_ref()) {
+                if !rl.hard_break && started {
+                    continue;
+                }
+                if started {
+                    out.push('\n');
+                }
+                out.push_str(&rl.text);
+                started = true;
+                continue;
+            }
+            // Decoration-only line: rendered content slice, hard break.
             let s = &lines[rel];
             let (cstart, cend) = content.get(rel).copied().unwrap_or((0, s.chars().count()));
             let cs = if li_abs == sl { sc } else { 0 };
@@ -564,12 +585,13 @@ impl App {
             } else {
                 chars[ce - 1].0 + chars[ce - 1].1.len_utf8()
             };
-            out.push_str(&s[b0..b1]);
-            if rel < hi {
+            if started {
                 out.push('\n');
             }
+            out.push_str(&s[b0..b1]);
+            started = true;
         }
-        Some(out)
+        if out.is_empty() { None } else { Some(out) }
     }
 
     pub(super) fn clear_log(&mut self) {

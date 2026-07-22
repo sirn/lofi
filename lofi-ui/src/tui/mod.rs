@@ -771,6 +771,11 @@ pub(crate) struct App {
     /// or the background-padding tail at the end — while preserving content's
     /// own leading spaces (indentation).
     log_content: Vec<(usize, usize)>,
+    /// Raw markdown source line for each *visible* log line, parallel to
+    /// [`log_lines`]. `Some` on lines derived from a markdown source
+    /// (assistant text, code, user messages) so yank copies the raw source
+    /// rather than the rendered/stripped text; `None` on decoration.
+    log_raw: Vec<Option<view::RawLine>>,
     /// Absolute index of the top visible log line (`scroll` offset).
     log_off: usize,
     /// Top visible select row of the prompt input when it overflows its

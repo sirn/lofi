@@ -12,7 +12,8 @@
     clippy::many_single_char_names,
     clippy::needless_lifetimes,
     clippy::similar_names,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::too_many_arguments
 )]
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -32,6 +33,7 @@ mod modals;
 use modals::{render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
 
 pub(crate) use prim::RenderLine;
+pub(crate) use prim::RawLine;
 
 pub(crate) use prim::HStack;
 
@@ -177,6 +179,7 @@ fn feed_segment(
     vis: &mut Vec<Line<'static>>,
     visp: &mut Vec<String>,
     visc: &mut Vec<(usize, usize)>,
+    visr: &mut Vec<Option<RawLine>>,
 ) {
     if *want == 0 {
         return;
@@ -198,6 +201,7 @@ fn feed_segment(
                 .collect(),
         );
         visc.push(rl.content);
+        visr.push(rl.raw.clone());
         *pos += 1;
         *want -= 1;
     }
@@ -322,6 +326,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
     let mut visp: Vec<String> = Vec::with_capacity(height);
     let mut visc: Vec<(usize, usize)> = Vec::with_capacity(height);
+    let mut visr: Vec<Option<RawLine>> = Vec::with_capacity(height);
     let mut pos = 0usize;
     let mut want = height;
     if n_turns == 0 {
@@ -333,6 +338,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             &mut vis,
             &mut visp,
             &mut visc,
+            &mut visr,
         );
     } else {
         for i in 0..n_turns {
@@ -345,6 +351,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     &mut vis,
                     &mut visp,
                     &mut visc,
+                    &mut visr,
                 );
                 if want == 0 {
                     break;
@@ -358,7 +365,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     app.ensure_frozen_turn(i, w);
                     if let Some(lines) = app.frozen_render.get(i) {
-                        feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visp, &mut visc);
+                        feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visp, &mut visc, &mut visr);
                     }
                 }
             } else {
@@ -370,6 +377,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     &mut vis,
                     &mut visp,
                     &mut visc,
+                    &mut visr,
                 );
             }
             if want == 0 {
@@ -379,6 +387,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.log_lines = visp;
     app.log_content = visc;
+    app.log_raw = visr;
 
     // Highlight the active mouse selection over the visible window only.
     if let Some(sel) = &app.sel {

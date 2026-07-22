@@ -6,6 +6,7 @@
 //! primitives in [`super::prim`] supply padding, rails, and styled spans.
 //! [`render_turns`] builds a [`Stack`] per turn and joins turns with blanks.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -107,6 +108,7 @@ impl Component for UserMessage<'_> {
         let mark = Style::new().fg(user_indicator(t));
         let body = Style::new().fg(t.fg);
         let mut out = Vec::new();
+        let src: Arc<str> = Arc::from(self.prompt);
         for (i, seg) in prim::wrap(self.prompt, content_w).into_iter().enumerate() {
             // A single `❯` marks the prompt; continuation rows carry a
             // 2-space margin so a multi-line message reads as one block
@@ -116,7 +118,7 @@ impl Component for UserMessage<'_> {
             } else {
                 vec![Span::raw("  ")]
             };
-            out.push(prim::rline(lead, vec![Span::styled(seg, body)]));
+            out.push(prim::rline(lead, vec![Span::styled(seg, body)]).with_raw(src.clone(), i == 0));
         }
         out
     }
@@ -163,24 +165,31 @@ impl Component for AssistantText<'_> {
                 } else {
                     "```".to_string()
                 };
-                out.push(prim::rtile(
-                    vec![Span::raw("  ")],
-                    vec![Span::styled(label, Style::new().fg(t.muted).bg(t.surface))],
-                    t.surface,
-                    w,
-                ));
+                out.push(
+                    prim::rtile(
+                        vec![Span::raw("  ")],
+                        vec![Span::styled(label, Style::new().fg(t.muted).bg(t.surface))],
+                        t.surface,
+                        w,
+                    )
+                    .with_raw(Arc::from(trimmed), true),
+                );
                 idx += 1;
                 continue;
             }
             if in_code {
                 let avail = content_w.saturating_sub(2);
-                for seg in prim::wrap_pre(raw, avail) {
-                    out.push(prim::rtile(
-                        vec![Span::raw("  ")],
-                        vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
-                        t.surface,
-                        w,
-                    ));
+                let src: Arc<str> = Arc::from(raw);
+                for (i, seg) in prim::wrap_pre(raw, avail).into_iter().enumerate() {
+                    out.push(
+                        prim::rtile(
+                            vec![Span::raw("  ")],
+                            vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
+                            t.surface,
+                            w,
+                        )
+                        .with_raw(src.clone(), i == 0),
+                    );
                 }
                 idx += 1;
                 continue;
@@ -209,23 +218,34 @@ impl Component for AssistantText<'_> {
                 let h = &trimmed[hashes + 1..];
                 let head_fg = if hashes <= 2 { t.fg } else { t.muted };
                 let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
-                for seg in prim::wrap(h, content_w) {
-                    out.push(prim::rline(lead.clone(), vec![Span::styled(seg, style)]));
+                let src: Arc<str> = Arc::from(trimmed);
+                for (i, seg) in prim::wrap(h, content_w).into_iter().enumerate() {
+                    out.push(
+                        prim::rline(lead.clone(), vec![Span::styled(seg, style)])
+                            .with_raw(src.clone(), i == 0),
+                    );
                 }
             } else if let Some(q) = trimmed.strip_prefix("> ") {
-                for seg in prim::wrap(q, content_w) {
-                    out.push(prim::rline(
-                        lead.clone(),
-                        vec![Span::styled(
-                            seg,
-                            Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
-                        )],
-                    ));
+                let src: Arc<str> = Arc::from(trimmed);
+                for (i, seg) in prim::wrap(q, content_w).into_iter().enumerate() {
+                    out.push(
+                        prim::rline(
+                            lead.clone(),
+                            vec![Span::styled(
+                                seg,
+                                Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
+                            )],
+                        )
+                        .with_raw(src.clone(), i == 0),
+                    );
                 }
             } else {
                 let line = Line::from(inline_spans(raw, t, Style::new().fg(t.fg)));
-                for wrapped in prim::wrap_line_styled(&line, content_w) {
-                    out.push(prim::rline(lead.clone(), wrapped.spans));
+                let src: Arc<str> = Arc::from(raw);
+                for (i, wrapped) in prim::wrap_line_styled(&line, content_w).into_iter().enumerate() {
+                    out.push(
+                        prim::rline(lead.clone(), wrapped.spans).with_raw(src.clone(), i == 0),
+                    );
                 }
             }
             idx += 1;
