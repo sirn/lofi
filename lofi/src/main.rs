@@ -121,7 +121,7 @@ fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
                 "{}  {}  {}  ({} msgs)\n",
                 e.id(),
                 format_ts(e.meta.created),
-                e.meta.model,
+                e.meta.model.label(),
                 e.message_count,
             );
             handle.write_all(line.as_bytes())?;

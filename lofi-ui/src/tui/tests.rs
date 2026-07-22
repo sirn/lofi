@@ -532,7 +532,7 @@ fn turn_end_updates_usage() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m".into(),
+        model: "m".into(),
         elapsed_ms: 0,
         cost: 0.0,
         usage: Usage {
@@ -587,7 +587,7 @@ fn round_usage_updates_totals_per_round() {
 
     // TurnEnd folds turn_cost into cost and does NOT re-add tokens.
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m".into(),
+        model: "m".into(),
         elapsed_ms: 0,
         cost: 0.03,
         usage: Usage {
@@ -612,7 +612,7 @@ fn turn_end_folds_bundled_totals_on_resume_path() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m".into(),
+        model: "m".into(),
         elapsed_ms: 0,
         cost: 0.05,
         usage: Usage {
@@ -1019,7 +1019,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -1030,7 +1030,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             blocks: vec![ContentBlock::Text { text: "hello".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1044,7 +1044,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             blocks: vec![ContentBlock::Text { text: "world".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1097,7 +1097,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -1108,7 +1108,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             blocks: vec![ContentBlock::Text { text: "hello".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1129,7 +1129,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             blocks: vec![ContentBlock::Text { text: "world".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1176,7 +1176,7 @@ fn modal_tab_cycles_with_wraparound() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -1187,7 +1187,7 @@ fn modal_tab_cycles_with_wraparound() {
             blocks: vec![ContentBlock::Text { text: "hello".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1201,7 +1201,7 @@ fn modal_tab_cycles_with_wraparound() {
             blocks: vec![ContentBlock::Text { text: "world".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1252,7 +1252,7 @@ fn tree_revert_to_root_then_reopens() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), "m").unwrap();
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::System,
@@ -1267,7 +1267,7 @@ fn tree_revert_to_root_then_reopens() {
             blocks: vec![ContentBlock::Text { text: "hello".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1281,7 +1281,7 @@ fn tree_revert_to_root_then_reopens() {
             blocks: vec![ContentBlock::Text { text: "world".into() }],
         }),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
@@ -1385,7 +1385,7 @@ fn turn_failed_wraps_error_below_header() {
     // Line 0 is the status header: model, level, duration only — the error
     // must not appear inline there (it used to, and got clipped).
     let header: String = rls[0].line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(header.contains("failed in"), "header missing status: {header}");
+    assert!(header.contains("Failed in"), "header missing status: {header}");
     assert!(header.contains("openai/gpt-4o"), "header missing label: {header}");
     assert!(!header.contains("503"), "header must not carry the error inline: {header}");
     // The error text lives on later, indented lines that each fit the column.
@@ -1497,7 +1497,7 @@ fn footer_shows_model_and_thinking() {
         .map(|s| s.content.as_ref().to_string())
         .collect();
     assert!(r.contains("gpt-5.6-sol"));
-    assert!(r.contains("· xhigh"));
+    assert!(r.contains(":xhigh"));
 }
 
 #[test]
@@ -1517,7 +1517,7 @@ fn footer_shows_ctx_after_usage() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m".into(),
+        model: "m".into(),
         elapsed_ms: 0,
         cost: 0.0,
         usage: Usage {
@@ -1651,7 +1651,7 @@ fn turns_from_events_restores_timings() {
         }),
         SessionEventKind::ToolTiming { tool_call_id: "t1".into(), elapsed_ms: 7 },
         SessionEventKind::TurnEnd {
-            label: "proxy/gemini-3-flash · medium".into(),
+            model: "proxy/gemini-3-flash · medium".into(),
             elapsed_ms: 2000,
             cost: 0.0,
             usage: Usage::default(),
@@ -1666,7 +1666,7 @@ fn turns_from_events_restores_timings() {
     // The trailing block is the restored turn-end marker.
     match blocks.last() {
         Some(Block::TurnEnd { label, elapsed }) => {
-            assert_eq!(label, "proxy/gemini-3-flash · medium");
+            assert_eq!(label, "proxy/gemini-3-flash:medium");
             assert_eq!(*elapsed, Duration::from_secs(2));
         }
         other => panic!("expected TurnEnd, got {other:?}"),
@@ -1694,7 +1694,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
         SessionEventKind::Message(user("hi")),
         SessionEventKind::Message(assistant("hello")),
         SessionEventKind::TurnEnd {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 10,
             cost: 0.0,
             usage: Usage::default(),
@@ -1713,7 +1713,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
         SessionEventKind::Message(user("oops")),
         SessionEventKind::Message(assistant("partial")),
         SessionEventKind::TurnFailed {
-            label: "m".into(),
+            model: "m".into(),
             elapsed_ms: 5,
             error: "boom".into(),
             cost: 0.01,
@@ -1923,7 +1923,7 @@ fn footer_and_header_show_cost_and_usage() {
     );
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m".into(),
+        model: "m".into(),
         elapsed_ms: 0,
         cost: 18.0,
         usage: Usage {
@@ -2468,7 +2468,7 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
     };
     a.apply_model_switch(&model, ThinkingLevel::XHigh);
     assert_eq!(a.model_label, "anthropic/claude");
-    assert_eq!(a.thinking_label.as_deref(), Some(" · xhigh"));
+    assert_eq!(a.thinking_label.as_deref(), Some(":xhigh"));
     assert_eq!(a.ctx_limit, 200_000);
     assert_eq!(a.thinking, ThinkingLevel::XHigh);
 }
@@ -2829,7 +2829,7 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         elapsed_ms: 50,
     });
     a.apply_event(AgentEvent::TurnEnd {
-        label: "m · medium".to_string(),
+        model: "m · medium".into(),
         elapsed_ms: 200,
         cost: 0.0,
         usage: Usage::default(),

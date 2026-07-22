@@ -100,7 +100,7 @@ pub(super) fn handle_event(
             if app.session.path.is_none() {
                 if let Some(store) = &app.session.store {
                     if let Ok(p) =
-                        store.create(&app.session.cwd, &app.session_model())
+                        store.create(&app.session.cwd, &app.run_model())
                     {
                         app.session.path = Some(p);
                     }
@@ -141,7 +141,6 @@ pub(super) fn handle_event(
             let session_path = app.session.path.clone();
             let commit = session_path.as_ref().map(|p| SessionCommit {
                 path: p.clone(),
-                label: app.session_model(),
                 parent_hint: app.branch_hint.take(),
             });
             let agent_clone = agent.clone();
@@ -241,7 +240,6 @@ pub(super) fn spawn_continue(
     // appended) — no branch_hint, so the recorder appends linearly.
     let commit = session_path.map(|p| SessionCommit {
         path: p,
-        label: app.session_model(),
         parent_hint: None,
     });
     let agent_clone = agent.clone();

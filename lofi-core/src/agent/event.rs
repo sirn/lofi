@@ -93,16 +93,16 @@ pub enum AgentEvent {
         result: String,
         is_error: bool,
     },
-    /// A turn completed: its run label (`provider/model · level`), wall-clock
+    /// A turn completed: the raw model identity that ran it, wall-clock
     /// duration, the accumulated USD cost across the turn's rounds, and the
     /// final round's token usage. Emitted once per turn by
     /// [`Agent::run_continuation`] and also written to the transcript, so the
-    /// live view and a resumed view render the same `◇ label done in Ns`
-    /// block — the label travels with the event rather than being re-derived
-    /// from the (possibly switched) active model on resume.
+    /// live view and a resumed view render the same `◇ Done in Ns with
+    /// <model>` block — the model travels with the event rather than being
+    /// re-derived from the (possibly switched) active model on resume.
     TurnEnd {
-        /// `provider/model · level` label for the turn-end marker.
-        label: String,
+        /// Raw model identity for the turn-end marker (rendered at display).
+        model: RunModel,
         /// Wall-clock duration of the turn in milliseconds.
         elapsed_ms: u64,
         /// Accumulated USD cost across the turn's rounds.
@@ -115,12 +115,12 @@ pub enum AgentEvent {
     /// carries the same cost/usage as [`TurnEnd`](Self::TurnEnd) plus the
     /// error message. The UI folds the turn's `turn_cost` into `cost` (so
     /// failed attempts are honestly accounted for) and renders a red
-    /// `◇ label failed in Ns · <error>` marker. Emitted once per failed
-    /// turn, after any [`RoundUsage`](Self::RoundUsage) events for the
-    /// rounds that completed.
+    /// `◇ Failed in Ns with <model>` marker. Emitted once per failed turn,
+    /// after any [`RoundUsage`](Self::RoundUsage) events for the rounds that
+    /// completed.
     TurnFailed {
-        /// `provider/model · level` label for the failure marker.
-        label: String,
+        /// Raw model identity for the failure marker (rendered at display).
+        model: RunModel,
         /// Wall-clock duration of the turn in milliseconds.
         elapsed_ms: u64,
         /// The error that ended the turn (provider error or "cancelled").
@@ -140,8 +140,6 @@ pub enum AgentEvent {
     /// Never persisted as a `SessionEvent` — the partial turn is committed
     /// without a terminal marker, so this is a live-only signal.
     ContextPressure {
-        /// `provider/model · level` label.
-        label: String,
         /// Wall-clock duration of the partial turn so far, in milliseconds.
         elapsed_ms: u64,
         /// Accumulated USD cost across the partial turn's rounds.

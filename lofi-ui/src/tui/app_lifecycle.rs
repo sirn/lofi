@@ -10,7 +10,7 @@ impl App {
         compaction: lofi_types::CompactionConfig,
     ) -> Self {
         let thinking_label = (thinking != ThinkingLevel::Off)
-            .then(|| format!(" · {}", thinking.as_str()));
+            .then(|| format!(":{}", thinking.as_str()));
         Self {
             turns: Vec::new(),
             input: String::new(),
@@ -239,7 +239,7 @@ impl App {
         if let Some(turn) = self.turns.last_mut() {
             finalize_open_thinking(turn);
         }
-        // The turn-end marker (label, elapsed, cost, usage) arrives as an
+        // The turn-end marker (model, elapsed, cost, usage) arrives as an
         // `AgentEvent::TurnEnd` emitted by the engine, which also writes it
         // to the transcript — so there is nothing to stamp or persist here.
         self.run_start = None;
@@ -397,10 +397,26 @@ impl App {
         self.retry.as_ref()
     }
 
-    /// `model` or `model · level` — the label shown on the working / turn-end
+    /// `model` or `model:level` — the label shown on the working / turn-end
     /// lines. Mirrors [`session_model`].
     pub(super) fn run_label(&self) -> String {
         self.session_model()
+    }
+
+    /// Raw model identity for the session header (`store::create`). The App
+    /// holds the rendered `model_label` (`provider/id`) transiently; this
+    /// splits it back to raw fields so the header stores raw data, not a
+    /// formatted string.
+    pub(super) fn run_model(&self) -> RunModel {
+        let (provider, id) = match self.model_label.split_once('/') {
+            Some((p, r)) => (p, r),
+            None => ("", self.model_label.as_str()),
+        };
+        RunModel {
+            provider: provider.to_string(),
+            id: id.to_string(),
+            thinking: self.thinking,
+        }
     }
 
     /// Elapsed since the current run started; zero when idle.
