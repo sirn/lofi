@@ -459,6 +459,102 @@ struct ExecBlockBranch<'a> {
     is_last: bool,
 }
 
+/// Per-tool interpretation of a native tool's structured result: the body
+/// lines to render, whether to number them, the first line number, whether
+/// the body is a color-coded diff, and an optional always-shown notice.
+struct NativeBody {
+    lines: Vec<String>,
+    numbered: bool,
+    start_line: usize,
+    is_diff: bool,
+    notice: Option<String>,
+}
+
+fn native_body(nt: &NativeTool) -> NativeBody {
+    let name = nt.name.as_str();
+    let raw = nt.result.as_deref().unwrap_or("");
+    if nt.is_error {
+        return NativeBody { lines: split_lines(raw), numbered: false, start_line: 1, is_diff: false, notice: None };
+    }
+    let v: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        // Non-JSON result (e.g. a plain error string or an older
+        // persisted string): show it verbatim rather than dropping it.
+        Err(_) => return NativeBody {
+            lines: split_lines(raw),
+            numbered: matches!(name, "read" | "view" | "bash_read"),
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+    let b = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    match name {
+        "write" => NativeBody { lines: split_lines(s("content")), numbered: false, start_line: 1, is_diff: false, notice: None },
+        "edit" => NativeBody { lines: edit_diff(s("old"), s("new")), numbered: false, start_line: 1, is_diff: true, notice: None },
+        "bash" => NativeBody { lines: split_lines(s("output")), numbered: false, start_line: 1, is_diff: false, notice: None },
+        "read" | "view" | "bash_read" => {
+            let start = n("start_line").max(1);
+            let total = n("total_lines");
+            let lines = split_lines(s("content"));
+            let notice = b("truncated").then_some(format!(
+                "(showing {start}-{} of {total}; use offset={next} to continue)",
+                start + lines.len().saturating_sub(1),
+                next = start + lines.len()
+            ));
+            NativeBody { lines, numbered: true, start_line: start, is_diff: false, notice }
+        }
+        "ls" => {
+            let lines = v.get("entries").and_then(|x| x.as_array())
+                .map_or_else(|| split_lines(raw), |a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect());
+            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+        }
+        "find" => {
+            let lines = v.get("matches").and_then(|x| x.as_array())
+                .map_or_else(|| split_lines(raw), |a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect());
+            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+        }
+        "grep" => {
+            let mut lines = Vec::new();
+            if let Some(arr) = v.get("matches").and_then(|x| x.as_array()) {
+                for m in arr {
+                    let file = m.get("file").and_then(|x| x.as_str()).unwrap_or("");
+                    let line = m.get("line").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("");
+                    lines.push(format!("{file}:{line}:{content}"));
+                }
+            }
+            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+        }
+        _ => NativeBody { lines: split_lines(raw), numbered: false, start_line: 1, is_diff: false, notice: None },
+    }
+}
+
+fn split_lines(s: &str) -> Vec<String> {
+    s.trim_end_matches('\n').split('\n').map(String::from).collect()
+}
+
+/// A line diff of `old` vs `new` (what `edit` replaced), as `-`/`+`/` `
+/// prefixed lines. The renderer colors these by prefix.
+fn edit_diff(old: &str, new: &str) -> Vec<String> {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = Vec::new();
+    for change in diff.iter_all_changes() {
+        let prefix = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => ' ',
+        };
+        let val = change.value();
+        let line = val.strip_suffix('\n').unwrap_or(val);
+        out.push(format!("{prefix}{line}"));
+    }
+    out
+}
+
 impl Component for ExecBlockBranch<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
@@ -505,10 +601,12 @@ impl Component for ExecBlockBranch<'_> {
 
         let exec_cont = if self.is_last { "  " } else { "│ " };
         let indent = 2 + 2 + 2; // gutter + exec-rail col + own rail
-        // Trim a trailing newline so a result terminated with one doesn't
-        // render an empty rail line at the bottom of the preview.
-        let all: Vec<&str> = result.trim_end_matches('\n').split('\n').collect();
-        let numbered = matches!(self.nt.name.as_str(), "read" | "view");
+        // Each native tool returns structured output; interpret it per tool to
+        // derive the body lines (and how to label / color them).
+        let body = native_body(self.nt);
+        let all: Vec<&str> = body.lines.iter().map(String::as_str).collect();
+        let numbered = body.numbered;
+        let start = body.start_line;
         let total = all.len();
         let lw = total.to_string().len().max(3);
         let avail = w
@@ -521,17 +619,31 @@ impl Component for ExecBlockBranch<'_> {
         let num_style = Style::new().fg(t.subtle).bg(bg);
         let numbered_style = Style::new().fg(t.fg).bg(bg);
         let plain_style = Style::new().fg(body_fg).bg(bg);
+        let diff_del = Style::new().fg(t.error).bg(bg);
+        let diff_add = Style::new().fg(t.success).bg(bg);
+        let diff_ctx = Style::new().fg(t.muted).bg(bg);
         let base_deco = vec![
             prim::gutter(bg),
             Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
             prim::rail(t, bg),
         ];
-        // Wrap each result line preserving its formatting. For `read`/`view`
-        // the line number labels the first row and a blank of the same width
-        // aligns continuation rows under the body; `hidden` counts logical
-        // lines so the cap stays accurate.
+        // Wrap each result line preserving its formatting. Numbered tools
+        // (read/view/bash_read) label from `start_line`; an edit diff colors
+        // each line by its `-`/`+`/` ` prefix; `hidden` counts logical lines
+        // so the preview cap stays accurate.
         for (i, line) in all.iter().take(limit).enumerate() {
-            let n = format!("{:>lw$} ", i + 1, lw = lw);
+            let n = format!("{:>lw$} ", start + i, lw = lw);
+            let content_style = if body.is_diff {
+                match line.chars().next() {
+                    Some('-') => diff_del,
+                    Some('+') => diff_add,
+                    _ => diff_ctx,
+                }
+            } else if numbered {
+                numbered_style
+            } else {
+                plain_style
+            };
             for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
                 let mut deco = base_deco.clone();
                 let content = if numbered {
@@ -540,9 +652,9 @@ impl Component for ExecBlockBranch<'_> {
                     } else {
                         Span::styled(blank_n.clone(), num_style)
                     });
-                    vec![Span::styled(seg, numbered_style)]
+                    vec![Span::styled(seg, content_style)]
                 } else {
-                    vec![Span::styled(seg, plain_style)]
+                    vec![Span::styled(seg, content_style)]
                 };
                 out.push(prim::rtile(deco, content, bg, w));
             }
@@ -556,6 +668,18 @@ impl Component for ExecBlockBranch<'_> {
                     Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
                 ],
                 vec![Span::styled(cap, Style::new().fg(t.subtle).bg(bg))],
+                bg,
+                w,
+            ));
+        }
+        if let Some(notice) = body.notice {
+            out.push(prim::rtile(
+                vec![
+                    prim::gutter(bg),
+                    Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
+                    Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
+                ],
+                vec![Span::styled(notice, Style::new().fg(t.subtle).bg(bg))],
                 bg,
                 w,
             ));

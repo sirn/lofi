@@ -397,15 +397,7 @@ fn install_globals(
     Ok(())
 }
 
-/// First line of `s`, truncated to `cap` visible chars with an ellipsis.
-/// Parse an optional `{ limit?: number }` argument object for `lofi.ls`/
-/// `lofi.find`.
-fn parse_limit_opt(opts: Opt<Value>) -> Option<u64> {
-    let v = opts.0?;
-    let json = js_to_json(&v);
-    let obj = json.as_object()?;
-    obj.get("limit").and_then(serde_json::Value::as_u64)
-}
+
 
 /// Parse the optional `{ offset?, limit? }` argument object for `lofi.read`.
 /// Accepts either an object (`{ offset: 10, limit: 20 }`) or nothing.
@@ -418,6 +410,7 @@ fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
     (offset, limit)
 }
 
+/// First line of `s`, truncated to `cap` visible chars with an ellipsis.
 fn cap_first_line(s: &str, cap: usize) -> String {
     let line = s.split('\n').next().unwrap_or("");
     let mut chars = line.chars();
@@ -449,25 +442,15 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
     cap_first_line(&s, 120)
 }
 
-/// Render a native tool result as the string the UI should display, plus
-/// whether it was an error. Plain strings (e.g. `read` output) are passed
-/// through; structured results (e.g. `bash`) keep their JSON so the UI can
-/// pull out the interesting field.
+/// Stringify a native tool's structured return for the UI. Plain strings
+/// (e.g. `read` content) pass through; structured objects serialize to JSON.
+/// The renderer interprets the result per tool — this never extracts fields.
 fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
     match res {
-        Ok(v) => {
-            // Hand the UI a ready-to-show string: plain strings (read) pass
-            // through; structured results (bash) yield their `output` field
-            // so the TUI never has to parse JSON.
-            let s = match v {
-                Json::String(s) => s.clone(),
-                Json::Object(map) if map.contains_key("output") => map
-                    .get("output")
-                    .and_then(serde_json::Value::as_str).map_or_else(|| v.to_string(), std::string::ToString::to_string),
-                other => other.to_string(),
-            };
-            (s, false)
-        }
+        Ok(v) => match v {
+            Json::String(s) => (s.clone(), false),
+            other => (other.to_string(), false),
+        },
         Err(e) => (e.to_string(), true),
     }
 }
@@ -543,7 +526,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res.value, json!("hello"));
+        assert_eq!(res.value["content"], json!("hello"));
     }
 
     #[tokio::test]
@@ -553,7 +536,7 @@ mod tests {
         let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
             .await
             .unwrap();
-        assert_eq!(res.value, json!("hi"));
+        assert_eq!(res.value["content"], json!("hi"));
     }
 
     #[tokio::test]
