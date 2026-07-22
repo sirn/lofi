@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use lofi_types::{Message, NativeToolRecord, SessionEvent, SessionEventKind,
+use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind,
     Usage};
 
 use crate::session::store;
@@ -82,7 +82,7 @@ pub struct TurnSummary {
 #[derive(Debug)]
 pub struct SessionRecorder {
     path: std::path::PathBuf,
-    label: String,
+    model: RunModel,
     /// The entry id to branch this turn from. `None` appends to the file's
     /// current active leaf (linear continuation); `Some(id)` starts a new
     /// branch as a sibling of `id`'s existing children.
@@ -91,14 +91,14 @@ pub struct SessionRecorder {
 }
 
 impl SessionRecorder {
-    /// Wrap a transcript path + the run label (`provider/model · level`) used
-    /// for the `SessionEvent::TurnEnd` marker. The turn appends to the file's
-    /// active leaf (no branching).
+    /// Wrap a transcript path + the raw model identity used for the
+    /// `SessionEvent::TurnEnd` marker. The turn appends to the file's active
+    /// leaf (no branching).
     #[must_use]
-    pub fn new(path: std::path::PathBuf, label: String) -> Self {
+    pub fn new(path: std::path::PathBuf, model: RunModel) -> Self {
         Self {
             path,
-            label,
+            model,
             parent_hint: None,
             flushed: false,
         }
@@ -108,10 +108,10 @@ impl SessionRecorder {
     /// of appending to the active leaf. Used by the agent when the user
     /// resumes from a selected entry in the tree picker.
     #[must_use]
-    pub fn with_parent(path: std::path::PathBuf, label: String, parent_hint: String) -> Self {
+    pub fn with_parent(path: std::path::PathBuf, model: RunModel, parent_hint: String) -> Self {
         Self {
             path,
-            label,
+            model,
             parent_hint: Some(parent_hint),
             flushed: false,
         }
@@ -191,7 +191,7 @@ impl SessionRecorder {
                     id: String::new(),
                     parent_id: None,
                     kind: SessionEventKind::TurnEnd {
-                        label: self.label.clone(),
+                        model: self.model.clone(),
                         elapsed_ms: summary.elapsed_ms,
                         cost: summary.cost,
                         usage: summary.usage,
@@ -209,7 +209,7 @@ impl SessionRecorder {
                     id: String::new(),
                     parent_id: None,
                     kind: SessionEventKind::TurnFailed {
-                        label: self.label.clone(),
+                        model: self.model.clone(),
                         elapsed_ms: summary.elapsed_ms,
                         error: error.clone(),
                         cost: summary.cost,
@@ -342,8 +342,8 @@ mod tests {
         }
         i += 1;
         match &events[i].kind {
-            SessionEventKind::TurnEnd { label, elapsed_ms, cost, .. } => {
-                assert_eq!(label, "m");
+            SessionEventKind::TurnEnd { model, elapsed_ms, cost, .. } => {
+                assert_eq!(model, &RunModel::from("m"));
                 assert_eq!(*elapsed_ms, 100);
                 assert!((cost - 0.01).abs() < 1e-9);
             }

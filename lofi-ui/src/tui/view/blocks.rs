@@ -93,9 +93,8 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
 
 // ── User message ─────────────────────────────────────────────────────────
 
-/// A user message: the prompt soft-wrapped with a `▌` lead on every row
-/// so the indicator spans the whole message (not just the first line). No
-/// background fill.
+/// A user message: the prompt soft-wrapped with a `❯` lead on the first
+/// row and a 2-space margin on continuation rows. No background fill.
 struct UserMessage<'a> {
     prompt: &'a str,
 }
@@ -105,16 +104,19 @@ impl Component for UserMessage<'_> {
         let t = cx.theme;
         let w = cx.width;
         let content_w = w.saturating_sub(2);
-        let lead = Style::new().fg(user_indicator(t));
+        let mark = Style::new().fg(user_indicator(t));
         let body = Style::new().fg(t.fg);
         let mut out = Vec::new();
-        for seg in prim::wrap(self.prompt, content_w) {
-            // The `▌` lead spans every wrapped row of the prompt (not just
-            // the first), so a multi-line user message reads as one block.
-            out.push(prim::rline(
-                vec![Span::styled("▌ ", lead)],
-                vec![Span::styled(seg, body)],
-            ));
+        for (i, seg) in prim::wrap(self.prompt, content_w).into_iter().enumerate() {
+            // A single `❯` marks the prompt; continuation rows carry a
+            // 2-space margin so a multi-line message reads as one block
+            // without a rail down the whole left edge.
+            let lead = if i == 0 {
+                vec![Span::styled("❯ ", mark)]
+            } else {
+                vec![Span::raw("  ")]
+            };
+            out.push(prim::rline(lead, vec![Span::styled(seg, body)]));
         }
         out
     }
@@ -264,7 +266,11 @@ impl Component for Thinking<'_> {
                 if !out.is_empty() {
                     out.push(prim::rblank());
                 }
-                out.push(prim::rline(lead.clone(), vec![Span::styled(
+                let thought_lead = vec![
+                    Span::raw("  "),
+                    Span::styled("◇ ", Style::new().fg(t.subtle)),
+                ];
+                out.push(prim::rline(thought_lead, vec![Span::styled(
                     format!("Thought for {}", prim::fmt_duration(d)),
                     Style::new().fg(t.muted),
                 )]));
@@ -750,7 +756,7 @@ impl Component for ErrorLine<'_> {
 
 // ── Turn-end rule ─────────────────────────────────────────────────────────
 
-/// Turn-end separator: `<label> done in Ns`. Appended to a turn when
+/// Turn-end separator: `Done in Ns with <label>`. Appended to a turn when
 /// its run finishes. Carries only model, level, and duration so the line
 /// never overflows; nothing is wrapped below it.
 struct TurnEnd {
@@ -762,12 +768,11 @@ impl Component for TurnEnd {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
-        let done = format!(" done in {dur}");
         vec![prim::render(
             vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.subtle))],
             vec![
+                Span::styled(format!("Done in {dur} with "), Style::new().fg(t.subtle)),
                 Span::styled(self.label.clone(), Style::new().fg(t.muted)),
-                Span::styled(done, Style::new().fg(t.subtle)),
             ],
             vec![],
         )]
@@ -775,7 +780,7 @@ impl Component for TurnEnd {
 }
 
 /// Turn-failed separator. Line 1 carries model, level, and duration only
-/// (`◇ <label> failed in Ns`) so the status never overflows; the provider
+/// (`◇ Failed in Ns with <label>`) so the status never overflows; the provider
 /// error is wrapped below it, indented and word-broken with a wide-char
 /// fallback. Mirrors [`TurnEnd`] but signals the turn did not complete;
 /// the turn's partial content precedes it on the same branch.
@@ -794,12 +799,11 @@ impl Component for TurnFailed {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
-        let failed = format!(" failed in {dur}");
         let mut out = vec![prim::render(
             vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.error))],
             vec![
+                Span::styled(format!("Failed in {dur} with "), Style::new().fg(t.error)),
                 Span::styled(self.label.clone(), Style::new().fg(t.error)),
-                Span::styled(failed, Style::new().fg(t.error)),
             ],
             vec![],
         )];

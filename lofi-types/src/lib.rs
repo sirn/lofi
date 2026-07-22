@@ -298,24 +298,28 @@ pub enum SessionEventKind {
     ThinkingTiming {
         elapsed_ms: u64,
     },
-    /// A completed turn: its run label, wall-clock duration, accumulated USD
-    /// cost, and the final round's token usage. Rendered as the `◇ label done
-    /// in Ns` block and folded into the status bar totals.
+    /// A completed turn: the raw model identity that ran it, wall-clock
+    /// duration, accumulated USD cost, and the final round's token usage.
+    /// Rendered as the `◇ Done in Ns with <model>` block and folded into the
+    /// status bar totals.
     TurnEnd {
-        label: String,
+        #[serde(alias = "label", default)]
+        model: RunModel,
         elapsed_ms: u64,
         cost: f64,
         usage: Usage,
     },
     /// A turn that ended in failure (a non-retryable provider error or a
-    /// user cancel): its run label, wall-clock duration, the error message,
-    /// and the cost/usage accumulated by the rounds that did run. Rendered as
-    /// a `◇ label failed in Ns · <error>` marker. Its `parent_id` points at
+    /// user cancel): the raw model identity that ran it, wall-clock duration,
+    /// the error message, and the cost/usage accumulated by the rounds that
+    /// did run. Rendered as a `◇ Failed in Ns with <model>` marker. Its
+    /// `parent_id` points at
     /// the turn's checkpoint (the last event before the failed turn started),
     /// so the active-path walk excludes the failed turn's messages from the
     /// agent's history on resume while keeping them visible in the tree.
     TurnFailed {
-        label: String,
+        #[serde(alias = "label", default)]
+        model: RunModel,
         elapsed_ms: u64,
         error: String,
         cost: f64,
@@ -457,6 +461,100 @@ pub struct Model {
     /// counts.
     #[serde(default)]
     pub per_request_price: Option<f64>,
+}
+
+/// The model identity that ran a turn (or started a session): raw data, no
+/// presentation. Persisted on turn-end markers and the session header so a
+/// resumed session renders the turn's original model rather than the
+/// (possibly switched) active one. Rendered to `provider/id:level` only at
+/// display time — never stored as a formatted string, so a later UI change
+/// can't strand stale text in old session files.
+///
+/// Deserializes from the new object form (`{provider, id, thinking}`) or a
+/// legacy rendered string (`provider/id:level`, `provider/id · level`, or
+/// bare `provider/id`), so pre-change session files still load. Serializes
+/// only as the object form.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct RunModel {
+    pub provider: String,
+    pub id: String,
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
+}
+
+impl RunModel {
+    /// Render the display label `provider/id` plus `:level` when thinking is
+    /// on (empty when off). The single place this presentation is produced.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!(
+            "{}/{}{}",
+            self.provider,
+            self.id,
+            if self.thinking == ThinkingLevel::Off {
+                String::new()
+            } else {
+                format!(":{}", self.thinking.as_str())
+            }
+        )
+    }
+
+    /// Best-effort parse of a legacy rendered model string
+    /// (`provider/id[:level]` or `provider/id · level`) back into raw data.
+    /// Used to load pre-change session files and as a test convenience.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        let (provider, rest) = match s.split_once('/') {
+            Some((p, r)) => (p.to_string(), r),
+            None => (String::new(), s),
+        };
+        // The level suffix was ` · level` (agent) or `:level` (app); both
+        // appeared in the wild before this was stored raw.
+        let (id, thinking) = if let Some((i, lvl)) = rest.split_once(" · ") {
+            (i.to_string(), ThinkingLevel::parse(lvl.trim()).unwrap_or_default())
+        } else if let Some((i, lvl)) = rest.split_once(':') {
+            (i.to_string(), ThinkingLevel::parse(lvl.trim()).unwrap_or_default())
+        } else {
+            (rest.to_string(), ThinkingLevel::Off)
+        };
+        Self { provider, id, thinking }
+    }
+}
+
+impl From<&str> for RunModel {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
+    }
+}
+
+impl From<String> for RunModel {
+    fn from(s: String) -> Self {
+        Self::parse(&s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RunModel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Obj {
+                provider: String,
+                id: String,
+                #[serde(default)]
+                thinking: ThinkingLevel,
+            },
+            Str(String),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Obj { provider, id, thinking } => Self { provider, id, thinking },
+            Repr::Str(s) => Self::parse(&s),
+        })
+    }
 }
 
 /// A model entry declared statically in TOML.
