@@ -224,7 +224,7 @@ impl Component for AssistantText<'_> {
                 }
             } else {
                 for seg in prim::wrap(raw, content_w) {
-                    out.push(prim::rline(lead.clone(), inline_spans(&seg, t)));
+                    out.push(prim::rline(lead.clone(), inline_spans(&seg, t, Style::new().fg(t.fg))));
                 }
             }
             idx += 1;
@@ -239,8 +239,7 @@ impl Component for AssistantText<'_> {
 /// (their content is literal); remaining text is recursively scanned for
 /// marker pairs. Underscore markers are suppressed inside words so
 /// identifiers like `my_var_name` stay literal.
-fn inline_spans(line: &str, t: Theme) -> Vec<Span<'static>> {
-    let base = Style::new().fg(t.fg);
+fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
     let mut spans = Vec::new();
     let mut rest = line;
@@ -324,13 +323,14 @@ fn render_table(
     if n_cols == 0 {
         return Vec::new();
     }
+    let base = Style::new().fg(t.fg);
     let mut col_w = vec![0usize; n_cols];
     for (i, cell) in header.iter().enumerate() {
-        col_w[i] = col_w[i].max(cell.chars().count());
+        col_w[i] = col_w[i].max(rendered_width(cell, t, base));
     }
     for row in data {
         for (i, cell) in row.iter().enumerate().take(n_cols) {
-            col_w[i] = col_w[i].max(cell.chars().count());
+            col_w[i] = col_w[i].max(rendered_width(cell, t, base));
         }
     }
     // Distribute available width proportionally across all columns when
@@ -368,10 +368,10 @@ fn render_table(
     };
 
     out.push(border_row('┌', '┬', '┐'));
-    out.extend(table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad));
+    out.extend(table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad, t));
     out.push(border_row('├', '┼', '┤'));
     for (i, row) in data.iter().enumerate() {
-        out.extend(table_row(&col_w, row, aligns, body_style, border, &lead, &pad));
+        out.extend(table_row(&col_w, row, aligns, body_style, border, &lead, &pad, t));
         if i + 1 < data.len() {
             out.push(border_row('├', '┼', '┤'));
         }
@@ -381,9 +381,11 @@ fn render_table(
 }
 
 /// One data row: `│ cell │ cell │` with borders in `border` style and cells in
-/// `style`. Each cell is wrapped to its column width; a row whose cells wrap
-/// to different line counts produces one `RenderLine` per line, with shorter
-/// cells padded to their column width on every continuation row.
+/// `style`. Each cell is parsed for inline markdown, wrapped to its column
+/// width, and aligned; a row whose cells wrap to different line counts
+/// produces one `RenderLine` per line, with shorter cells padded on
+/// continuation rows.
+#[allow(clippy::too_many_arguments)]
 fn table_row(
     col_w: &[usize],
     cells: &[String],
@@ -392,13 +394,15 @@ fn table_row(
     border: Style,
     lead: &[Span<'static>],
     pad: &[Span<'static>],
+    t: Theme,
 ) -> Vec<RenderLine> {
-    let wrapped: Vec<Vec<String>> = col_w
+    let wrapped: Vec<Vec<Line<'static>>> = col_w
         .iter()
         .enumerate()
         .map(|(i, &w)| {
             let cell = cells.get(i).map_or("", String::as_str);
-            prim::wrap(cell, w)
+            let line = Line::from(inline_spans(cell, t, style));
+            prim::wrap_line_styled(&line, w)
         })
         .collect();
     let max_lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -406,9 +410,14 @@ fn table_row(
     for line_idx in 0..max_lines {
         let mut spans = vec![Span::styled("│", border)];
         for (i, &w) in col_w.iter().enumerate() {
-            let segment = wrapped[i].get(line_idx).map_or("", |s| s.as_str());
-            let padded = align_cell(segment, w, aligns.get(i).copied().unwrap_or(Align::Left));
-            spans.push(Span::styled(format!(" {padded} "), style));
+            let cell_spans = wrapped[i]
+                .get(line_idx)
+                .map_or(Vec::new(), |l| l.spans.clone());
+            let aligned =
+                align_spans(cell_spans, w, aligns.get(i).copied().unwrap_or(Align::Left), style);
+            spans.push(Span::raw(" "));
+            spans.extend(aligned);
+            spans.push(Span::raw(" "));
             spans.push(Span::styled("│", border));
         }
         out.push(prim::render(lead.to_vec(), spans, pad.to_vec()));
@@ -416,20 +425,60 @@ fn table_row(
     out
 }
 
-/// Pad `s` to exactly `w` chars per the alignment. Segments that exceed `w`
-/// (only possible when a single word is wider than the column) are clipped.
-fn align_cell(s: &str, w: usize, align: Align) -> String {
-    let len = s.chars().count();
-    if len >= w {
-        return s.chars().take(w).collect();
+/// Rendered width of a cell after stripping markdown markers.
+fn rendered_width(cell: &str, t: Theme, base: Style) -> usize {
+    inline_spans(cell, t, base)
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum()
+}
+
+/// Pad a sequence of styled spans to exactly `w` chars per the alignment.
+/// Spans that exceed `w` (trailing-space overflow from wrapping) are clipped.
+fn align_spans(
+    spans: Vec<Span<'static>>,
+    w: usize,
+    align: Align,
+    pad_style: Style,
+) -> Vec<Span<'static>> {
+    let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if len > w {
+        let mut out = Vec::new();
+        let mut remaining = w;
+        for span in spans {
+            let count = span.content.chars().count();
+            if remaining == 0 {
+                break;
+            }
+            if count <= remaining {
+                out.push(span);
+                remaining -= count;
+            } else {
+                let clipped: String = span.content.chars().take(remaining).collect();
+                out.push(Span::styled(clipped, span.style));
+                remaining = 0;
+            }
+        }
+        return out;
     }
     let pad = w - len;
     match align {
-        Align::Left => format!("{s}{}", " ".repeat(pad)),
-        Align::Right => format!("{}{s}", " ".repeat(pad)),
+        Align::Left => {
+            let mut out = spans;
+            out.push(Span::styled(" ".repeat(pad), pad_style));
+            out
+        }
+        Align::Right => {
+            let mut out = vec![Span::styled(" ".repeat(pad), pad_style)];
+            out.extend(spans);
+            out
+        }
         Align::Center => {
             let left = pad / 2;
-            format!("{}{s}{}", " ".repeat(left), " ".repeat(pad - left))
+            let mut out = vec![Span::styled(" ".repeat(left), pad_style)];
+            out.extend(spans);
+            out.push(Span::styled(" ".repeat(pad - left), pad_style));
+            out
         }
     }
 }
