@@ -206,6 +206,14 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("write", &args);
+                // Surface the written content (not the success ack) so the
+                // transcript records what landed in the file; errors keep
+                // their message.
+                let written = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -215,6 +223,7 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.write(args).await;
                     let (result, is_error) = tool_preview(&res);
+                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
@@ -235,6 +244,14 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("edit", &args);
+                // Surface the replacement text (not the success ack) so the
+                // transcript records what the edit wrote; errors keep their
+                // message.
+                let written = args
+                    .get("new")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -244,6 +261,7 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.edit(args).await;
                     let (result, is_error) = tool_preview(&res);
+                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
