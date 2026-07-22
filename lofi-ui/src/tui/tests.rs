@@ -59,6 +59,71 @@ fn native_tool_events_nest_under_their_exec() {
     assert!(!nt.is_error);
 }
 
+/// The native tool header shows a parenthetical line-range suffix for `read`
+/// and a `(took Ns)` suffix for `bash`, derived from the structured result.
+#[test]
+fn rich_header_suffix_for_read_and_bash() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![Block::Tool(ToolCall {
+            id: "e1".to_string(),
+            name: "exec".to_string(),
+            input: String::new(),
+            label: None,
+            native: vec![
+                NativeTool {
+                    id: 0,
+                    name: "read".to_string(),
+                    args: "TODO.md".to_string(),
+                    result: Some(
+                        serde_json::json!({
+                            "ok": true,
+                            "content": "line one\nline two\nline three",
+                            "start_line": 20,
+                            "total_lines": 100,
+                            "truncated": false,
+                        })
+                        .to_string(),
+                    ),
+                    is_error: false,
+                    done: true,
+                },
+                NativeTool {
+                    id: 1,
+                    name: "bash".to_string(),
+                    args: "ls -alh".to_string(),
+                    result: Some(
+                        serde_json::json!({
+                            "ok": true,
+                            "output": "file.txt",
+                            "code": 0,
+                            "duration_ms": 1500,
+                            "status": "exited",
+                        })
+                        .to_string(),
+                    ),
+                    is_error: false,
+                    done: true,
+                },
+            ],
+            result: Some("{\"value\":null}".to_string()),
+            is_error: false,
+            done: true,
+            elapsed: None,
+        })],
+    });
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 80, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let body: String = rls.iter().flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref()).collect();
+    assert!(body.contains("(lines 20-22)"), "read header should show line range: {body}");
+    assert!(body.contains("(took 1.5s)"), "bash header should show duration: {body}");
+}
+
 #[test]
 fn render_tree_smoke() {
     use crate::tui::view::blocks::render_turns;
