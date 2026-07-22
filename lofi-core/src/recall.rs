@@ -19,6 +19,7 @@
 //! live history no longer carries after a compact.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind};
 
@@ -71,12 +72,14 @@ struct SearchHit {
 /// `events` is the entire transcript (every line after the header), in file
 /// order — the same slice `store::load` returns. Scoping filters *which*
 /// messages render, never the global indexing.
+#[must_use]
+// One cohesive transcript walk; extracting sub-steps would scatter the flow.
+#[allow(clippy::too_many_lines)]
 pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     let scope = resolve_scope(events, &req.scope);
     let allowed_ids = match &scope {
-        Scope::Lineage(ids) => Some(ids.clone()),
+        Scope::Lineage(ids) | Scope::Compaction { ids, .. } => Some(ids.clone()),
         Scope::All => None,
-        Scope::Compaction { ids, .. } => Some(ids.clone()),
     };
 
     // Index native tool records by their parent exec id so the assistant
@@ -88,7 +91,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         }
     }
 
-    let has_query = req.query.as_deref().map_or(false, |q| !q.trim().is_empty());
+    let has_query = req.query.as_deref().is_some_and(|q| !q.trim().is_empty());
     let expand_set: std::collections::HashSet<usize> = req.expand.iter().copied().collect();
     let has_expand = !expand_set.is_empty();
 
@@ -110,7 +113,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
                 text: format!(
                     "Cannot expand indices outside {}: {}",
                     scope_label(&scope),
-                    invalid.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+                    invalid.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ")
                 ),
                 status: format!("{} invalid", invalid.len()),
             };
@@ -144,7 +147,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         };
     }
 
-    let total_pages = ((all_hits.len() + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
+    let total_pages = all_hits.len().div_ceil(PAGE_SIZE).max(1);
     if page > MAX_PAGES.min(total_pages) {
         return RecallOutcome {
             text: format!(
@@ -171,7 +174,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
             }
             let Some(raw) = raw_by_index.get(&hit.entry.index) else { continue };
             let full = render_message(raw, hit.entry.index, true, &native_by_parent);
-            hit.entry.summary = full.summary.clone();
+            hit.entry.summary.clone_from(&full.summary);
             hit.snippet = Some(full.summary);
             expanded.push(hit.entry.index);
         }
@@ -198,10 +201,10 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
                 "--- expanded {} {} to full content; not on this page: {} ---",
                 expanded.len(),
                 noun,
-                not_expanded.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+                not_expanded.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ")
             ));
         } else {
-            footer.push(format!("--- no expand indices on this page ---"));
+            footer.push("--- no expand indices on this page ---".to_string());
         }
     }
     let footer_text = if footer.is_empty() { String::new() } else { format!("\n{}", footer.join("\n")) };
@@ -335,7 +338,7 @@ fn load_all_messages(
     let mut out: Vec<RecallEntry> = Vec::new();
     let mut message_index = 0usize;
     for e in events {
-        let allowed = allowed_ids.map_or(true, |ids| ids.contains(&e.id));
+        let allowed = allowed_ids.is_none_or(|ids| ids.contains(&e.id));
         if let SessionEventKind::Message(m) = &e.kind {
             if allowed {
                 out.push(render_message(m, message_index, full, native_by_parent));
@@ -359,7 +362,7 @@ fn load_raw_messages(
 ) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     for e in events {
-        let allowed = allowed_ids.map_or(true, |ids| ids.contains(&e.id));
+        let allowed = allowed_ids.is_none_or(|ids| ids.contains(&e.id));
         if let SessionEventKind::Message(m) = &e.kind {
             if allowed {
                 out.push(m.clone());
@@ -449,7 +452,7 @@ fn render_assistant(
     if !thinking_parts.is_empty() {
         let t = thinking_parts.join("\n");
         let clip_len = if full { usize::MAX } else { CLIP_THINKING };
-        summary.push_str(&format!("[thinking] {}\n", clip(&t, clip_len)));
+        let _ = writeln!(summary, "[thinking] {}", clip(&t, clip_len));
     }
     if !text_parts.is_empty() {
         let t = text_parts.join("\n");
@@ -603,7 +606,7 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
         if mc < min_match {
             continue;
         }
-        let snip_re = regex::Regex::new(&patterns.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("|")).unwrap();
+        let snip_re = regex::Regex::new(&patterns.iter().map(regex::Regex::as_str).collect::<Vec<_>>().join("|")).unwrap();
         let snip = line_snippet(&full_text(&messages[i]), &snip_re);
         scored.push((score, SearchHit { entry: entries[i].clone(), snippet: snip, match_count: mc }));
     }
@@ -630,11 +633,7 @@ fn full_text(msg: &Message) -> String {
     let mut out = String::new();
     for b in &msg.blocks {
         match b {
-            ContentBlock::Text { text } => {
-                out.push_str(text);
-                out.push('\n');
-            }
-            ContentBlock::Thinking { text, .. } => {
+            ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => {
                 out.push_str(text);
                 out.push('\n');
             }
@@ -678,9 +677,9 @@ fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
     let end = (hit + 3).min(lines.len());
     let mut parts: Vec<String> = Vec::new();
     if start > 0 {
-        parts.push(format!("...({} lines above)", start));
+        parts.push(format!("...({start} lines above)"));
     }
-    parts.extend(lines[start..end].iter().map(|s| s.to_string()));
+    parts.extend(lines[start..end].iter().map(std::string::ToString::to_string));
     if end < lines.len() {
         parts.push(format!("...({} lines below)", lines.len() - end));
     }
@@ -750,7 +749,7 @@ fn format_search_output(hits: &[SearchHit], query: &str, header: &str) -> String
     };
     let mut lines = vec![format!("{header} for \"{query}\" — {prefix}")];
     let range = segment_range(hits);
-    lines.push(format!("--- {} ---", range));
+    lines.push(format!("--- {range} ---"));
     for hit in hits {
         let mark = ">";
         let file_suffix = if hit.entry.files.is_empty() {
