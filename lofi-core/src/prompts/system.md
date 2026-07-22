@@ -16,18 +16,26 @@ The tool result is a JSON object `{ "value": <what you returned>, "logs": <buffe
 
 Inside `code`, call these async functions on the global `lofi` object. All file paths are resolved against the workspace root; paths that escape the root are rejected. Use `await`.
 
-- `lofi.read(path, { offset?, limit? }) -> string` — read a file as UTF-8. `offset` is a 1-indexed line to start from; `limit` caps the number of lines returned. Output is head-truncated to 2000 lines or 50 KB; when truncated a `[Showing lines A-B of N. Use offset=C to continue.]` hint is appended. Page large files with `offset` instead of reading them whole.
-- `lofi.ls(dir?, { limit? }) -> string` — newline-joined entries (relative paths), sorted. `limit` caps entries (default 500). Output is head-truncated to 2000 lines / 50 KB.
-- `lofi.find(glob, dir?, { limit? }) -> string` — recursive glob match, newline-joined relative paths. `limit` caps results (default 1000). Output is head-truncated to 2000 lines / 50 KB.
-- `lofi.grep(pattern, path?) -> string` — `pattern` is a regex string or `{ regex, ic?, ctx?, max? }` (`max` caps matches, default 100). Output is `file:line:content` (match lines capped to 500 chars), groups separated by `--`; head-truncated to 2000 lines / 50 KB.
-- `lofi.write({ path, text }) -> { ok: true }` — write a file (creates parent dirs).
-- `lofi.edit({ path, old, new }) -> { ok: true }` — replace the single occurrence of `old` with `new`. Errors if `old` is absent or appears more than once.
+- `lofi.read(path, { offset?, limit? }) -> { ok: true, content, start_line, total_lines, truncated }` — read a file as UTF-8. `offset` is a 1-indexed line to start from (default 1); `limit` caps the number of lines returned (default 2000). `content` is the requested lines (head-truncated to 2000 lines / 50 KB); `start_line` is the 1-indexed first line returned; `total_lines` is the file's line count; `truncated` is true when more lines remain below either cap. Page large files with a higher `offset`.
+- `lofi.ls(dir?) -> { ok: true, entries }` — `entries` is a sorted array of relative paths under `dir` (empty/`.` means the root). The result is always complete: if the directory has more than 50,000 entries the call throws (narrow with a more specific `dir`).
+- `lofi.find(glob, dir?) -> { ok: true, matches }` — recursive glob match. `matches` is a sorted array of relative paths. The result is always complete: the call throws if it exceeds 50,000 matches or 65,536 traversed entries (narrow the `glob` or `dir`).
+- `lofi.grep(pattern, path?) -> { ok: true, matches, skipped }` — `pattern` is a regex string or `{ regex, ic?, ctx? }` (`ic` = case-insensitive, `ctx` = context lines around each match). `matches` is an array of `{ file, line, content, matched }` (`matched` is false for context lines). `skipped: { oversize, unreadable }` counts files skipped for being over 8 MB or unreadable. The result is always complete: the call throws if it exceeds 65,536 files traversed, 10,000 matching/context rows, or 8 MB of total output (narrow the `path` or `regex`).
+- `lofi.write({ path, text }) -> { ok: true, content }` — write a file (creates parent dirs). `content` echoes the text written.
+- `lofi.edit({ path, old, new }) -> { ok: true, old, new }` — replace the single occurrence of `old` with `new`; `old`/`new` echo the replaced and replacement text. Errors if `old` is absent or appears more than once.
 - `lofi.bash({ cmd, timeoutMs? }) -> { ok, output, code, command, directory, signal, duration_ms, status }` — run `sh -c cmd` with cwd pinned to the workspace root; stdout and stderr are merged. `code` is the exit status (null on signal/timeout); `signal` is the Unix signal number (null unless killed by a signal); `duration_ms` is wall time; `status` is `"exited"`, `"signaled"`, or `"timeout"` (the timeout reason). Default timeout 120s. Output is tail-truncated to 2000 lines / 50 KB (keeping the end where errors land); when truncated, the full output is saved to a file under `lofi.tmp_dir` and the notice names it — page through it with `lofi.bash_read(basename)`. The child env is stripped to a minimal baseline by default; env vars the user approved (via `pass_env`/`env_file`) are present so commands can use them, but their values are replaced with `[redacted]` in the output — do not try to exfiltrate them (e.g. `printenv`, `echo $VAR`), they will not appear.
-- `lofi.bash_read(handle, { offset?, limit? }) -> string` — read the full output of a bash result by handle, with the same range/limit semantics as `lofi.read`. Use it to page through a bash result that was too large to surface inline (the truncation notice names the handle), and later for background/async bash results. The handle is a basename relative to `lofi.tmp_dir` (e.g. `lofi-bash-<hex>.log`).
+- `lofi.bash_read(handle, { offset?, limit? }) -> { ok: true, content, start_line, total_lines, truncated }` — read the full output of a bash result by handle, with the same shape and range/limit semantics as `lofi.read`. Use it to page through a bash result that was too large to surface inline (the truncation notice names the handle), and later for background/async bash results. The handle is a basename relative to `lofi.tmp_dir` (e.g. `lofi-bash-<hex>.log`).
 - `lofi.tmp_dir` — absolute path to the per-session tmp directory backing `lofi.bash` full-output logs.
 - `lofi.result(eventId) -> string` — recover the original, full content of a tool result or tool-call that compaction elided. Stubs left in place of cleared content name an event id; pass it here to re-expand. Returns the raw content (a tool result's output text, or a tool call's input JSON). Cheap and on-demand — use it only when you actually need old content you can't see.
 - `lofi.recall({ query?, scope?, page?, expand? }) -> { text, status }` — search the full session transcript (including messages a `/compact` folded away) and return rendered matches as text. `query` is a regex or multi-word BM25 query; omit it to browse the most recent entries. `scope`: `"lineage"` (default, active branch), `"all"` (whole session), `"compaction:N"` / `"compaction:latest"` (within one compaction's summarized range). `page` is 1-based; `expand: [indices]` returns full untruncated content for those entries. Use it to recover prior decisions, file activity, or context that is no longer in your live history after a compact. Returns `{ text, status }`.
 
+## Truncated results and filtering
+
+Two kinds of "too much" are handled differently:
+
+- **Content tools page.** `read` and `bash_read` return a window of a file (head-truncated to 2000 lines / 50 KB) carrying a `truncated` flag plus `total_lines`/`start_line`. **Before you `.filter`/`.map`/`.includes`/`.split` their `content`, check `.truncated`**: if `true`, more lines remain — page with a higher `offset` until `truncated` is `false` before processing the whole file.
+- **List tools throw.** `ls`, `find`, and `grep` never return a partial set — they have no `truncated` flag and no `limit`/`max` parameter. If a result would exceed a safety ceiling, the call **throws** with a "narrow the ..." message. Treat that thrown error as the signal to narrow (a tighter `glob`, a more specific `dir`/`path`, or a stricter `regex`) and re-run. Do not catch it and filter whatever you got back — you got nothing.
+
+Prefer narrowing the query server-side over filtering client-side when the result might be large — a complete, small result is always safe to filter.
 ## Top-level await and return
 
 Your code runs as `(async () => { ... })()`. You may `await` anything at the top level and `return` the final value. Example:
@@ -35,7 +43,7 @@ Your code runs as `(async () => { ... })()`. You may `await` anything at the top
 ```ts
 const files = await lofi.ls("src");
 const a = await lofi.read("src/a.ts");
-return { files, len: a.length };
+return { files: files.entries, len: a.content.length };
 ```
 
 ## `print` buffers into `logs`

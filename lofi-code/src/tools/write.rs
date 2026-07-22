@@ -20,6 +20,8 @@ impl BuiltinTools {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("write: missing 'text'".into()))?
             .to_owned();
+        // Echo the written text back so the renderer can display it.
+        let content = text.clone();
         reject_symlink_leaf(&self.root, &path, &format!("write {path}"))?;
         let resolved = resolve_under(&self.root, &path)?;
         reject_non_regular(&format!("write {path}"), &resolved)?;
@@ -34,6 +36,6 @@ impl BuiltinTools {
         .await
         .map_err(|e| Error::Tool(format!("write {label}: {e}")))?
         .map_err(|e| Error::Tool(format!("write {label}: {e}")))?;
-        Ok(json!({ "ok": true }))
+        Ok(json!({ "ok": true, "content": content }))
     }
 }
