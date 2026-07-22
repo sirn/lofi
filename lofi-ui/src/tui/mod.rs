@@ -320,7 +320,8 @@ impl SessionConfig {
     pub(crate) fn last_run_model(&self) -> Option<RunModel> {
         store::last_run_model(&self.events)
     }
-}
+
+    }
 
 /// State for the '/resume' session-picker overlay.
 #[derive(Debug, Clone)]
@@ -393,6 +394,22 @@ fn info_kv(t: Theme, key: &str, value: &str) -> Line<'static> {
 /// A plain muted note line (no key column, flush left).
 fn info_note(t: Theme, text: &str) -> Line<'static> {
     Line::from(Span::styled(text.to_string(), Style::new().fg(t.muted)))
+}
+
+/// Format a byte count as a human-readable string (e.g. `1.2 KB`, `3.4 MB`).
+fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", n, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
 }
 
 /// Severity of a transient rule-line notification (see [`App::notify`]).

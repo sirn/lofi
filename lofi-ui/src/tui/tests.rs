@@ -816,17 +816,30 @@ fn slash_clear_help_session_resume_new() {
 }
 
 #[test]
-fn session_info_shows_notification() {
+fn session_info_opens_modal() {
     let mut a = app();
-    // No session path: a warning notification (not a modal or transcript turn).
+    // No session path: the modal still opens, showing "(none)" and a note.
     assert!(a.slash_command("/session"));
     assert!(a.turns.is_empty());
-    assert!(a.info.is_none());
-    let (msg, kind) = a
-        .notify_badge()
-        .expect("notification shown");
-    assert!(msg.contains("no session file"));
-    assert_eq!(kind, NotifyKind::Warn);
+    let info = a.info.as_ref().expect("modal opened");
+    assert_eq!(info.title, "Session");
+    let body: String = info.lines.iter().flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref()).collect();
+    assert!(body.contains("(none)"));
+    assert!(body.contains("No session file"));
+}
+
+#[test]
+fn session_info_modal_shows_id_when_path_set() {
+    let mut a = app();
+    a.session.path = Some(std::path::PathBuf::from("/tmp/sessions/abc123.jsonl"));
+    assert!(a.slash_command("/session"));
+    let info = a.info.as_ref().expect("modal opened");
+    let body: String = info.lines.iter().flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref()).collect();
+    assert!(body.contains("abc123"), "body should contain the session id: {body}");
+    assert!(body.contains("Workspace"), "body should have a workspace section: {body}");
+    assert!(body.contains("Model"), "body should have a model section: {body}");
 }
 
 #[test]
