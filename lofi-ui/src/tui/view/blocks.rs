@@ -555,6 +555,45 @@ fn split_lines(s: &str) -> Vec<String> {
     s.trim_end_matches('\n').split('\n').map(String::from).collect()
 }
 
+/// A short parenthetical annotation for the tool header, derived from the
+/// structured result: `(lines 20-25)` for `read`/`view`/`bash_read`, and
+/// `(took 1.2s)` for bash. `None` when the tool is still running, has no
+/// result yet, or the result doesn't carry useful metadata.
+fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
+    let raw = result?;
+    if raw.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    match name {
+        "read" | "view" | "bash_read" => {
+            let start = v.get("start_line").and_then(serde_json::Value::as_u64)?;
+            if start == 0 {
+                return None;
+            }
+            let content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
+            let count = content.split('\n').count();
+            if count == 0 {
+                return None;
+            }
+            let end = start + count as u64 - 1;
+            if end <= start {
+                return None;
+            }
+            Some(format!("(lines {start}-{end})"))
+        }
+        "bash" => {
+            let ms = v.get("duration_ms").and_then(serde_json::Value::as_u64)?;
+            if ms == 0 {
+                return None;
+            }
+            let dur = std::time::Duration::from_millis(ms);
+            Some(format!("(took {})", prim::fmt_duration(dur)))
+        }
+        _ => None,
+    }
+}
+
 /// A line diff of `old` vs `new` (what `edit` replaced), as `-`/`+`/` `
 /// prefixed lines. The renderer colors these by prefix.
 fn edit_diff(old: &str, new: &str) -> Vec<String> {
@@ -588,6 +627,9 @@ impl Component for ExecBlockBranch<'_> {
         ];
         if !self.nt.args.is_empty() {
             content.push(prim::subtle(format!(" {}", self.nt.args), t, bg));
+        }
+        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
+            content.push(prim::subtle(format!(" {note}"), t, bg));
         }
         out.push(prim::rtile(
             vec![
