@@ -307,6 +307,30 @@ fn inline_markdown_table_right_aligns() {
     assert!(body.contains("22"), "right-aligned 22: {body}");
 }
 
+#[test]
+fn inline_markdown_table_renders_inline_formatting() {
+    use ratatui::style::Modifier;
+    // Bold and code formatting inside table cells should be rendered with
+    // the appropriate styles, and markers stripped from the visible text.
+    let md = "| Name | Type |\n|------|------|\n| **bold** | `code` |";
+    let spans = render_text_spans(md);
+    let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    // Markers should be stripped.
+    assert!(!body.contains("**"), "bold markers should be stripped: {body}");
+    assert!(!body.contains('`'), "code markers should be stripped: {body}");
+    // Content should be present.
+    assert!(body.contains("bold"), "bold text should be present: {body}");
+    assert!(body.contains("code"), "code text should be present: {body}");
+    // The bold cell should have BOLD modifier.
+    let bold_span = spans.iter().find(|s| s.content == "bold").expect("bold span");
+    assert!(bold_span.style.add_modifier.contains(Modifier::BOLD),
+        "bold cell should be BOLD: {bold_span:?}");
+    // The code cell should have the code style (fg = info).
+    let code_span = spans.iter().find(|s| s.content == "code").expect("code span");
+    assert!(code_span.style.fg.is_some(),
+        "code cell should have fg color: {code_span:?}");
+}
+
 /// A numbered `read` line whose body is empty must still carry its line
 /// number as decoration with an empty content range, so the Navigate
 /// cursor overlay preserves it instead of treating it as a blank line.
