@@ -2975,4 +2975,51 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     );
 }
 
+/// A fenced code block renders as plain triple-backtick fences (not the old
+/// `╭─`/`╰──` frame art) on a full-width surface tile with a 2-space right
+/// gutter, and the language label follows the opening backticks.
+#[test]
+fn fence_renders_plain_backticks_on_full_width_tile() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![Block::Text(
+            "before\n```rust\nlet x = 1;\n```\nafter".to_string()
+        )],
+    });
+    let turn = &a.turns[0];
+    let w = 40usize;
+    let cx = Cx { app: &a, theme: a.theme, width: w, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let lines: Vec<String> = rls
+        .iter()
+        .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    // Locate the opening fence, code line, and closing fence.
+    let open = lines.iter().find(|l| l.starts_with("  ```rust")).expect("opening ```rust");
+    let code = lines.iter().find(|l| l.contains("let x = 1;")).expect("code line");
+    let close = lines.iter().find(|l| l.trim() == "```").expect("closing ```");
+    // No frame art survives.
+    for l in &lines {
+        assert!(!l.contains('╭'), "stray frame art: {l}");
+        assert!(!l.contains('╰'), "stray frame art: {l}");
+        assert!(!l.contains('│'), "stray rail: {l}");
+    }
+    // Every fence/code line fills the full width (surface bg spans edge-to-edge
+    // via rtile, with the 2-space right gutter as trailing bg padding).
+    for l in [&open.clone(), &code.clone(), &close.clone()] {
+        assert_eq!(l.chars().count(), w, "line not full-width: {l:?}");
+    }
+    // The content range excludes the leading gutter and the trailing bg
+    // padding, so the gutter and right gutter never get selected/copied.
+    let open_rl = rls.iter().find(|rl| {
+        rl.line.spans.iter().any(|s| s.content.starts_with("```rust"))
+    }).expect("open rl");
+    let chars: String = open_rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+    let content: String = chars[open_rl.content.0..open_rl.content.1].to_string();
+    assert_eq!(content, "```rust");
+}
+
 
