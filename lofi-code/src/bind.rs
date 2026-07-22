@@ -109,10 +109,9 @@ fn bind_file_tools<'js>(
         "ls",
         Function::new(
             ctx.clone(),
-            Async(move |dir: Opt<String>, opts: Opt<Value>| {
+            Async(move |dir: Opt<String>| {
                 let t = t.clone();
                 let d = dir.0.as_deref().unwrap_or("").to_string();
-                let limit = parse_limit_opt(opts);
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -120,7 +119,7 @@ fn bind_file_tools<'js>(
                         name: "ls".into(),
                         args: cap_first_line(&d, 120),
                     });
-                    let res = t.ls(&d, limit).await;
+                    let res = t.ls(&d).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
@@ -138,10 +137,9 @@ fn bind_file_tools<'js>(
         "find",
         Function::new(
             ctx.clone(),
-            Async(move |glob: String, dir: Opt<String>, opts: Opt<Value>| {
+            Async(move |glob: String, dir: Opt<String>| {
                 let t = t.clone();
                 let d = dir.0.as_deref().unwrap_or("").to_string();
-                let limit = parse_limit_opt(opts);
                 let args = if d.is_empty() {
                     glob.clone()
                 } else {
@@ -154,7 +152,7 @@ fn bind_file_tools<'js>(
                         name: "find".into(),
                         args: cap_first_line(&args, 120),
                     });
-                    let res = t.find(&glob, Some(d.as_str()), limit).await;
+                    let res = t.find(&glob, Some(d.as_str())).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
@@ -206,14 +204,6 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("write", &args);
-                // Surface the written content (not the success ack) so the
-                // transcript records what landed in the file; errors keep
-                // their message.
-                let written = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -223,7 +213,6 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.write(args).await;
                     let (result, is_error) = tool_preview(&res);
-                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
@@ -244,14 +233,6 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("edit", &args);
-                // Surface the replacement text (not the success ack) so the
-                // transcript records what the edit wrote; errors keep their
-                // message.
-                let written = args
-                    .get("new")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -261,7 +242,6 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.edit(args).await;
                     let (result, is_error) = tool_preview(&res);
-                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
@@ -400,22 +380,19 @@ fn bind_recall_tool<'js>(
     lofi: &Object<'js>,
     recall: Option<RecallFn>,
 ) -> rquickjs::Result<()> {
-    let recall = match recall {
-        Some(r) => r,
-        None => {
-            lofi.set(
-                "recall",
-                Function::new(ctx.clone(), Async(move |_: Opt<Value>| {
-                    async move {
-                        Ok::<JsonV, rquickjs::Error>(JsonV(json!({
-                            "text": "recall unavailable: no session file for this session.",
-                            "status": "unavailable",
-                        })))
-                    }
-                }))?,
-            )?;
-            return Ok(());
-        }
+    let Some(recall) = recall else {
+        lofi.set(
+            "recall",
+            Function::new(ctx.clone(), Async(move |_: Opt<Value>| {
+                async move {
+                    Ok::<JsonV, rquickjs::Error>(JsonV(json!({
+                        "text": "recall unavailable: no session file for this session.",
+                        "status": "unavailable",
+                    })))
+                }
+            }))?,
+        )?;
+        return Ok(());
     };
     lofi.set(
         "recall",
@@ -423,9 +400,9 @@ fn bind_recall_tool<'js>(
             ctx.clone(),
             Async(move |args: Opt<Value>| {
                 let recall = recall.clone();
-                let args = args.0.map(|v| js_to_json(&v)).unwrap_or(serde_json::Value::Null);
+                let args = args.0.map_or(serde_json::Value::Null, |v| js_to_json(&v));
                 async move {
-                    let req = parse_recall_args(args);
+                    let req = parse_recall_args(&args);
                     let outcome = recall(&req);
                     Ok::<JsonV, rquickjs::Error>(JsonV(json!({
                         "text": outcome.text,
@@ -439,12 +416,10 @@ fn bind_recall_tool<'js>(
 }
 
 /// Parse `lofi.recall`'s argument object into a `RecallRequest`.
-fn parse_recall_args(json: serde_json::Value) -> lofi_types::recall::RecallRequest {
+fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequest {
     use lofi_types::recall::{CompactionTarget, RecallRequest, RecallScope};
-    let _ = json.clone();
-    // json already an owned serde_json::Value
     let Some(obj) = json.as_object() else { return RecallRequest::default(); };
-    let query = obj.get("query").and_then(serde_json::Value::as_str).map(|s| s.to_string());
+    let query = obj.get("query").and_then(serde_json::Value::as_str).map(std::string::ToString::to_string);
     let page = obj.get("page").and_then(serde_json::Value::as_u64).map_or(1, |n| n.max(1) as usize);
     let expand: Vec<usize> = obj
         .get("expand")
@@ -476,21 +451,18 @@ fn bind_result_tool<'js>(
     lofi: &Object<'js>,
     result: Option<ResultFn>,
 ) -> rquickjs::Result<()> {
-    let result = match result {
-        Some(r) => r,
-        None => {
-            lofi.set(
-                "result",
-                Function::new(ctx.clone(), Async(move |_: String| {
-                    async move {
-                        Ok::<JsonV, rquickjs::Error>(JsonV(json!(
-                            "result unavailable: no session file for this session."
-                        )))
-                    }
-                }))?,
-            )?;
-            return Ok(());
-        }
+    let Some(result) = result else {
+        lofi.set(
+            "result",
+            Function::new(ctx.clone(), Async(move |_: String| {
+                async move {
+                    Ok::<JsonV, rquickjs::Error>(JsonV(json!(
+                        "result unavailable: no session file for this session."
+                    )))
+                }
+            }))?,
+        )?;
+        return Ok(());
     };
     lofi.set(
         "result",

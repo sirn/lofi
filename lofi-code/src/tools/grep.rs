@@ -1,25 +1,24 @@
-use super::truncate::{format_size, truncate_head, truncate_line};
-use super::{BuiltinTools, parse_grep_args, resolve_under, walk_files_capped, MAX_GREP_VISITED, MAX_GREP_OUTPUT_BYTES, DEFAULT_GREP_MAX, MAX_GREP_FILE_BYTES};
+use super::{
+    format_size, parse_grep_args, resolve_under, walk_files_capped, BuiltinTools,
+    MAX_GREP_FILE_BYTES, MAX_GREP_OUTPUT_BYTES, MAX_GREP_ROWS, MAX_GREP_VISITED,
+};
 use lofi_error::{Error, Result};
-use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 impl BuiltinTools {
     /// Grep files under `path` (default root, recursive) for `pattern`.
     ///
-    /// `pattern` is either a string or an object `{ regex, ic?, ctx?, max? }`.
-    /// Matching lines are emitted as `file:line:content`; `ctx` surrounding
-    /// lines (if requested) get the same prefix and groups are separated by
-    /// `--`.
+    /// `pattern` is either a string or an object `{ regex, ic?, ctx? }`.
+    /// Results contain full matching and context lines. The result is complete
+    /// or the call errors when an output or traversal ceiling is exceeded.
     ///
     /// # Errors
-    /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or a
-    /// read failure.
+    /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or when
+    /// a safety ceiling is exceeded.
     #[allow(clippy::unused_async)]
-    // One regex dispatch; per-flag helpers would scatter the shared match/byte budgets.
     #[allow(clippy::too_many_lines)]
     pub async fn grep(&self, pattern: Value, path: Option<&str>) -> Result<Value> {
-        let (re_src, ic, ctx, max) = parse_grep_args(pattern)?;
+        let (re_src, ic, ctx) = parse_grep_args(pattern)?;
         let mut builder = regex::RegexBuilder::new(&re_src);
         builder.case_insensitive(ic);
         let re = builder
@@ -27,111 +26,83 @@ impl BuiltinTools {
             .map_err(|e| Error::Tool(format!("invalid regex {re_src:?}: {e}")))?;
         let base = resolve_under(&self.root, path.unwrap_or(""))?;
         let root = self.root.clone();
-        let out = tokio::task::spawn_blocking(move || -> Result<String> {
-            // A file path scans just that file; a directory recurses with a
-            // visited cap so a huge tree can't exhaust memory or hang.
-            let mut files = Vec::new();
-            let mut visited = 0usize;
-            let truncated_walk = if base.is_file() {
-                files.push(base.clone());
-                false
-            } else {
-                walk_files_capped(&base, &mut files, &mut visited, MAX_GREP_VISITED)?
-            };
-            files.sort();
-
-            let budget = MAX_GREP_OUTPUT_BYTES;
-            let mut out = String::new();
-            let mut emitted = 0usize;
-            let max = if max == 0 { DEFAULT_GREP_MAX } else { max };
-            let mut truncated_output = false;
-            // Append a line only if it fits the remaining output budget;
-            // otherwise mark truncated and stop. This bounds total output to
-            // `budget` plus at most one line length, rather than overshooting
-            // by a multi-MiB context group.
-            let mut push_line = |out: &mut String, s: &str| -> bool {
-                if out.len() + s.len() > budget {
-                    truncated_output = true;
+        let re_src_inner = re_src.clone();
+        let (matches, oversize, unreadable) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, u64, u64)> {
+                let mut files = Vec::new();
+                let mut visited = 0usize;
+                let traversal_capped = if base.is_file() {
+                    files.push(base.clone());
                     false
                 } else {
-                    out.push_str(s);
-                    true
-                }
-            };
-            'outer: for file in &files {
-                // Skip oversized files so a single huge artifact can't blow
-                // memory by being fully read into a String.
-                let Ok(meta) = std::fs::metadata(file) else {
-                    continue;
+                    walk_files_capped(&base, &mut files, &mut visited, MAX_GREP_VISITED)?
                 };
-                if meta.len() > MAX_GREP_FILE_BYTES {
-                    continue;
+                if traversal_capped {
+                    return Err(Error::Tool(format!(
+                        "grep {re_src_inner}: exceeded {MAX_GREP_VISITED}-file traversal limit; narrow the path"
+                    )));
                 }
-                let rel = file
-                    .strip_prefix(&root)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let Ok(text) = std::fs::read_to_string(file) else {
-                    continue;
-                };
-                let lines: Vec<&str> = text.lines().collect();
-                let mut i = 0;
-                let mut last_group_end: Option<usize> = None;
-                while i < lines.len() {
-                    if re.is_match(lines[i]) {
+                files.sort();
+
+                let mut matches = Vec::new();
+                let mut bytes = 0usize;
+                let mut oversize = 0u64;
+                let mut unreadable = 0u64;
+                for file in &files {
+                    let Ok(meta) = std::fs::metadata(file) else {
+                        unreadable += 1;
+                        continue;
+                    };
+                    if meta.len() > MAX_GREP_FILE_BYTES {
+                        oversize += 1;
+                        continue;
+                    }
+                    let rel = file
+                        .strip_prefix(&root)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let Ok(text) = std::fs::read_to_string(file) else {
+                        unreadable += 1;
+                        continue;
+                    };
+                    let lines: Vec<&str> = text.lines().collect();
+                    for (i, candidate) in lines.iter().copied().enumerate() {
+                        if !re.is_match(candidate) {
+                            continue;
+                        }
                         let start = i.saturating_sub(ctx);
                         let end = i.saturating_add(ctx).min(lines.len().saturating_sub(1));
-                        if let Some(prev_end) = last_group_end {
-                            if prev_end + 1 < start && !push_line(&mut out, "--\n") {
-                                break 'outer;
+                        for (j, line) in lines.iter().copied().enumerate().take(end + 1).skip(start) {
+                            if matches.len() >= MAX_GREP_ROWS {
+                                return Err(Error::Tool(format!(
+                                    "grep {re_src_inner}: exceeded {MAX_GREP_ROWS}-row limit; narrow the regex or path"
+                                )));
                             }
-                        }
-                        for (j, line) in lines.iter().enumerate().take(end + 1).skip(start) {
-                            let capped = truncate_line(line);
-                            let rendered = format!("{}:{}:{}\n", rel, j + 1, capped);
-                            if !push_line(&mut out, &rendered) {
-                                break 'outer;
+                            let entry = line.len() + rel.len() + 16;
+                            if bytes.saturating_add(entry) > MAX_GREP_OUTPUT_BYTES {
+                                return Err(Error::Tool(format!(
+                                    "grep {re_src_inner}: exceeded {} output limit; narrow the regex or path",
+                                    format_size(MAX_GREP_OUTPUT_BYTES)
+                                )));
                             }
-                        }
-                        last_group_end = Some(end);
-                        emitted += 1;
-                        if emitted >= max {
-                            break 'outer;
+                            bytes += entry;
+                            matches.push(json!({
+                                "file": rel.as_str(),
+                                "line": j + 1,
+                                "content": line,
+                                "matched": j == i,
+                            }));
                         }
                     }
-                    i += 1;
                 }
-            }
-            if truncated_output {
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str("<output truncated>");
-            } else if truncated_walk {
-                // The file list was truncated; signal that the search was
-                // incomplete even when some matches were found.
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str("<truncated>");
-            }
-            // Apply the user-visible head truncation (50 KB / 2000 lines)
-            // on top of the match-count and byte budgets.
-            let t = truncate_head(&out);
-            let mut out = t.content;
-            if t.truncated {
-                let _ = write!(
-                    out,
-                    "\n\n[Showing {} of {} lines ({} limit).]",
-                    t.output_lines,
-                    t.total_lines,
-                    format_size(50 * 1024)
-                );
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| Error::Tool(format!("grep {re_src}: {e}")))??;
-        Ok(json!(out))
+                Ok((matches, oversize, unreadable))
+            })
+            .await
+            .map_err(|e| Error::Tool(format!("grep {re_src}: {e}")))??;
+        Ok(json!({
+            "ok": true,
+            "matches": matches,
+            "skipped": { "oversize": oversize, "unreadable": unreadable },
+        }))
     }
 }

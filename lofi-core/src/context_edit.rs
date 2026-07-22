@@ -61,7 +61,7 @@ fn result_stub(event_id: &str, is_error: bool) -> String {
 /// pairing is preserved.
 fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json::Value {
     use serde_json::json;
-    let stub = format!("[code cleared — re-expand with lofi.result(\"{event_id}\")]",);
+    let stub = format!("[code cleared — re-expand with lofi.result(\"{event_id}\")]");
     match input {
         serde_json::Value::Object(obj) => {
             let mut out = serde_json::Map::new();
