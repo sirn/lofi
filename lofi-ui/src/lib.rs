@@ -217,23 +217,27 @@ enum StartupAgent {
     NoModel(String),
 }
 
-/// Build the startup agent, preferring a restored model query (`restored`)
-/// over the config default. If the restored model can no longer be resolved
-/// (removed from the config since the session ran, or its provider lost its
-/// API key), fall back to the default so resume still opens the transcript
-/// instead of aborting.
+/// Build the startup agent. `--model` takes precedence over a restored
+/// session model; with neither, `build_agent` falls back to the config
+/// default. If the restored model can no longer be resolved (removed from
+/// the config since the session ran, or its provider lost its API key), fall
+/// back to the default so resume still opens the transcript instead of
+/// aborting. An explicit `--model` that fails to resolve is not silently
+/// replaced — it surfaces via the error arms below rather than masked by
+/// the default.
 async fn resolve_startup_agent(
     opts: &InteractiveOptions,
     restored: Option<&str>,
 ) -> Result<StartupAgent> {
-    match build_agent(opts.config_path.as_deref(), restored, opts.root.as_path()).await {
+    let requested = opts.model.as_deref().or(restored);
+    match build_agent(opts.config_path.as_deref(), requested, opts.root.as_path()).await {
         Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
         // The restored model is gone from the registry (config changed since
         // the session ran, or its provider lost its API key): fall back to
         // the default so the transcript is still readable instead of aborting.
         Err(_) if restored.is_some() => match build_agent(
             opts.config_path.as_deref(),
-            opts.model.as_deref(),
+            None,
             opts.root.as_path(),
         )
         .await
@@ -445,5 +449,52 @@ mod tests {
             opts.config_path.as_deref(),
             Some(std::path::Path::new("/tmp/cfg.toml"))
         );
+    }
+
+    /// Temp config with two `no_auth` providers so model resolution needs no
+    /// environment variables or network access. `alpha` is first and thus the
+    /// default; `beta` is the non-default that `--model` must select.
+    fn dual_provider_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let cfg = dir.join("config.toml");
+        std::fs::write(&cfg, "[providers.alpha]\nno_auth = true\n\n[providers.alpha.models]\na1 = {}\n\n[providers.beta]\nno_auth = true\n\n[providers.beta.models]\nb1 = {}\n").unwrap();
+        cfg
+    }
+
+    /// `--model provider/model` must be honored at startup, not silently
+    /// replaced by the config default. Regression for the model-restore
+    /// refactor that passed `restored` (None when `--model` is set) to
+    /// `build_agent` instead of `opts.model`.
+    #[tokio::test]
+    async fn startup_model_flag_honored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = dual_provider_config(tmp.path());
+        let opts = InteractiveOptions::new(tmp.path())
+            .with_config_path(&cfg)
+            .with_model("beta/b1");
+        match resolve_startup_agent(&opts, None).await.unwrap() {
+            StartupAgent::Ready(built) => {
+                let (_agent, model, _thinking, _config, _registry) = *built;
+                assert_eq!(model.provider, "beta");
+                assert_eq!(model.id, "b1");
+            }
+            StartupAgent::NoModel(hint) => panic!("expected a built agent, got NoModel: {hint}"),
+        }
+    }
+
+    /// With no `--model` and no restored session model, the config default
+    /// (first available provider's first model) is selected.
+    #[tokio::test]
+    async fn startup_default_model_when_no_flag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = dual_provider_config(tmp.path());
+        let opts = InteractiveOptions::new(tmp.path()).with_config_path(&cfg);
+        match resolve_startup_agent(&opts, None).await.unwrap() {
+            StartupAgent::Ready(built) => {
+                let (_agent, model, _thinking, _config, _registry) = *built;
+                assert_eq!(model.provider, "alpha");
+                assert_eq!(model.id, "a1");
+            }
+            StartupAgent::NoModel(hint) => panic!("expected a built agent, got NoModel: {hint}"),
+        }
     }
 }
