@@ -266,6 +266,30 @@ fn inline_markdown_table_renders_borders() {
 }
 
 #[test]
+fn inline_markdown_table_fits_narrow_width() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    // A 3-column table with long cells rendered at a narrow width must not
+    // produce any line wider than the viewport.
+    let md = "| File | Status | Details |\n|------|--------|---------|\n| src/main.rs | modified | added new function |\n| README.md | created | initial version |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 40, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    assert!(!rls.is_empty(), "table should render");
+    for rl in &rls {
+        let w: usize = rl.line.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert!(w <= 40, "line too wide ({w} > 40): {:?}", rl.line);
+    }
+    // At least one cell should be truncated with ellipsis.
+    let body: String = rls.iter().flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref()).collect();
+    assert!(body.contains('…'), "narrow table should truncate: {body}");
+}
+
+#[test]
 fn inline_markdown_table_right_aligns() {
     // Right-aligned column: `--:` → numbers should be right-padded.
     let md = "| Item | Count |\n|------|------:|\n| a    | 1     |\n| bb   | 22    |";
