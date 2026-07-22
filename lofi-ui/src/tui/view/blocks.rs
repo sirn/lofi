@@ -398,6 +398,12 @@ fn exec_result_lines(
         bg,
         w,
     ));
+    // In non-verbose mode, hide the final result body for a cleaner
+    // transcript — the native-tool lines above already showed the work.
+    // Keep it on error (and in verbose) so a failure is never swallowed.
+    if !verbose && !tool.is_error {
+        return out;
+    }
 
     let Some(result) = &tool.result else {
         return out;

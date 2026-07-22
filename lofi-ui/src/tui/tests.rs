@@ -228,6 +228,65 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
 }
 
 #[test]
+fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let text = |a: &App| -> String {
+        let cx = Cx { app: a, theme: a.theme, width: 80, active_turn: false };
+        render_turn_lines(&cx, &a.turns[0])
+            .iter()
+            .flat_map(|rl| rl.line.spans.iter())
+            .flat_map(|s| s.content.chars())
+            .collect()
+    };
+    // A successful exec whose returned value is a short summary. In
+    // non-verbose the result body hides (the native-tool lines already showed
+    // the work) but the Succeed status header stays; verbose brings it back.
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".to_string(),
+        code: "const x = 1;".to_string(),
+        label: Some("compute".to_string()),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(),
+        result: "{\"value\":\"all done marker\"}".to_string(),
+        is_error: false,
+        elapsed_ms: 0,
+    });
+    a.verbose = false;
+    let nv = text(&a);
+    assert!(!nv.contains("all done marker"), "non-verbose exec result body should hide: {nv}");
+    assert!(nv.contains("Succeed"), "non-verbose exec status header should stay: {nv}");
+    a.verbose = true;
+    let v = text(&a);
+    assert!(v.contains("all done marker"), "verbose exec result body should show: {v}");
+
+    // A failed exec keeps its error body even in non-verbose so a failure is
+    // never silently swallowed.
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart { id: "e2".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e2".to_string(),
+        code: "throw new Error('x')".to_string(),
+        label: Some("compute".to_string()),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e2".to_string(),
+        result: "exec blew up here".to_string(),
+        is_error: true,
+        elapsed_ms: 0,
+    });
+    a.verbose = false;
+    let nv = text(&a);
+    assert!(nv.contains("exec blew up here"), "non-verbose exec error body should stay: {nv}");
+    assert!(nv.contains("Failed"), "non-verbose exec error status should stay: {nv}");
+}
+
+#[test]
 fn current_line_text_excludes_decoration() {
     let mut a = app();
     push_turn(&mut a);
