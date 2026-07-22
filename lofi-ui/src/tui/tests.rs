@@ -2531,6 +2531,93 @@ fn thinking_picker_confirm_sets_pending_switch() {
     assert!(a.thinking_picker.is_none());
 }
 
+#[test]
+fn resume_model_switch_when_model_differs() {
+    let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "anthropic".into(),
+        id: "claude".into(),
+        name: String::new(),
+        thinking_levels: vec![],
+        supports_image: false,
+        context_window: None,
+    }];
+    let events = vec![SessionEvent {
+        id: "1".into(),
+        parent_id: None,
+        kind: SessionEventKind::TurnEnd {
+            model: "anthropic/claude:high".into(),
+            elapsed_ms: 0,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    }];
+    assert_eq!(
+        a.resume_model_switch(&events).as_deref(),
+        Some("anthropic/claude:high")
+    );
+}
+
+#[test]
+fn resume_model_switch_none_when_same_model() {
+    let mut a = app();
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "openai".into(),
+        id: "gpt-4o".into(),
+        name: String::new(),
+        thinking_levels: vec![],
+        supports_image: false,
+        context_window: None,
+    }];
+    let events = vec![SessionEvent {
+        id: "1".into(),
+        parent_id: None,
+        kind: SessionEventKind::TurnEnd {
+            model: "openai/gpt-4o:medium".into(),
+            elapsed_ms: 0,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    }];
+    assert!(a.resume_model_switch(&events).is_none());
+}
+
+#[test]
+fn resume_model_switch_none_when_no_choices_or_no_turn() {
+    let mut a = app();
+    // No models available -> never switch.
+    a.model_choices = Vec::new();
+    let events = vec![SessionEvent {
+        id: "1".into(),
+        parent_id: None,
+        kind: SessionEventKind::TurnEnd {
+            model: "anthropic/claude:high".into(),
+            elapsed_ms: 0,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    }];
+    assert!(a.resume_model_switch(&events).is_none());
+    // No turn marker -> nothing to restore even with choices.
+    a.model_choices = vec![lofi_types::ModelChoice {
+        provider: "x".into(),
+        id: "y".into(),
+        name: String::new(),
+        thinking_levels: vec![],
+        supports_image: false,
+        context_window: None,
+    }];
+    let no_turn = vec![SessionEvent {
+        id: "1".into(),
+        parent_id: None,
+        kind: SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "hi".into() }],
+        }),
+    }];
+    assert!(a.resume_model_switch(&no_turn).is_none());
+}
+
 /// Regression for "Transcript with background color should resize when
 /// viewport changed": the frozen-render cache must be invalidated on a width
 /// change, not only on a content (epoch) change. Otherwise completed turns

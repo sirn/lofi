@@ -304,6 +304,12 @@ impl App {
                 self.session.path = Some(entry.path);
                 self.pinned = true;
                 self.top_line = 0;
+                // Restore the resumed session's last-used model when it
+                // differs from the current one; the run loop rebuilds off
+                // `pending_model_switch` (the same path `/model` uses).
+                if let Some(q) = self.resume_model_switch(&events) {
+                    self.pending_model_switch = Some(q);
+                }
             }
             Err(e) => {
                 self.push_turn(Turn {
@@ -312,6 +318,22 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Whether resuming `events` should switch the active model: the
+    /// resumed session's last completed turn ran a different
+    /// `provider/model:level` than the current one, and at least one model
+    /// is available to switch to. Returns the query for
+    /// `pending_model_switch` (the run loop rebuilds off it, the same path
+    /// `/model` uses), or `None` when no switch is needed or possible.
+    pub(super) fn resume_model_switch(&self, events: &[SessionEvent]) -> Option<String> {
+        if self.model_choices.is_empty() {
+            return None;
+        }
+        let m = store::last_run_model(events)?;
+        let restored = format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str());
+        let current = format!("{}:{}", self.model_label, self.thinking.as_str());
+        (restored != current).then_some(restored)
     }
 
     /// `/model`: open the model-picker overlay populated from the retained

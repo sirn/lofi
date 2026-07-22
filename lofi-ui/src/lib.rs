@@ -156,41 +156,95 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     // skips persistence entirely. A missing most-recent falls back to fresh.
     let session = resolve_session(&opts)?;
 
-    let (agent, label, thinking, hint, ctx_limit, compaction, switcher) = match build_agent(
-        opts.config_path.as_deref(),
-        opts.model.as_deref(),
-        opts.root.as_path(),
-    )
-    .await
-    {
-        Ok((agent, model, thinking, config, registry)) => {
-            let root = opts.root.clone();
-            let compaction = config.compaction.clone();
-            let switcher = tui::ModelSwitcher::new(registry, config, root);
-            (
-                Some(agent),
-                format!("{}/{}", model.provider, model.id),
-                thinking,
+    // Restore the model+thinking the user last ran with unless --model was
+    // given: the resumed session's final turn marker carries it (raw, on the
+    // active path), so a fresh/ephemeral session with no turns falls through
+    // to the config default. `resolve_startup_agent` falls back to that
+    // default when the restored model is no longer resolvable.
+    let restored = opts
+        .model
+        .is_none()
+        .then(|| session.last_run_model())
+        .flatten()
+        .map(|m| format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str()));
+
+    let (agent, label, thinking, hint, ctx_limit, compaction, switcher) =
+        match resolve_startup_agent(&opts, restored.as_deref()).await? {
+            StartupAgent::Ready(built) => {
+                let (agent, model, thinking, config, registry) = *built;
+                let root = opts.root.clone();
+                let compaction = config.compaction.clone();
+                let switcher = tui::ModelSwitcher::new(registry, config, root);
+                (
+                    Some(agent),
+                    format!("{}/{}", model.provider, model.id),
+                    thinking,
+                    None,
+                    model.context_window.unwrap_or(0),
+                    compaction,
+                    Some(switcher),
+                )
+            }
+            // No provider has credentials (or the selected provider is
+            // disabled): launch the TUI anyway and show the hint in the log.
+            StartupAgent::NoModel(hint) => (
                 None,
-                model.context_window.unwrap_or(0),
-                compaction,
-                Some(switcher),
-            )
-        }
-        // No provider has credentials (or the selected provider is disabled):
-        // launch the TUI anyway and show the hint in the log.
-        Err(Error::NoModels(hint)) => (
-            None,
-            "(no model)".to_string(),
-            ThinkingLevel::Off,
-            Some(hint),
-            0,
-            lofi_types::CompactionConfig::default(),
-            None,
-        ),
-        Err(e) => return Err(e),
-    };
+                "(no model)".to_string(),
+                ThinkingLevel::Off,
+                Some(hint),
+                0,
+                lofi_types::CompactionConfig::default(),
+                None,
+            ),
+        };
     tui::run(agent, label, thinking, session, hint, ctx_limit, compaction, switcher).await
+}
+
+/// Startup agent resolution: a built agent, or the model-less launch path.
+///
+/// `Ready`'s payload is boxed: it holds the agent, config, and model
+/// registry (a KB+ together), and the variant is built once and unpacked
+/// immediately, so a single allocation keeps the enum off the stack.
+enum StartupAgent {
+    Ready(Box<(
+        lofi_core::Agent,
+        lofi_types::Model,
+        ThinkingLevel,
+        lofi_types::Config,
+        lofi_core::ModelRegistry,
+    )>),
+    /// No provider has credentials — launch the TUI model-less with `hint`.
+    NoModel(String),
+}
+
+/// Build the startup agent, preferring a restored model query (`restored`)
+/// over the config default. If the restored model can no longer be resolved
+/// (removed from the config since the session ran, or its provider lost its
+/// API key), fall back to the default so resume still opens the transcript
+/// instead of aborting.
+async fn resolve_startup_agent(
+    opts: &InteractiveOptions,
+    restored: Option<&str>,
+) -> Result<StartupAgent> {
+    match build_agent(opts.config_path.as_deref(), restored, opts.root.as_path()).await {
+        Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
+        // The restored model is gone from the registry (config changed since
+        // the session ran, or its provider lost its API key): fall back to
+        // the default so the transcript is still readable instead of aborting.
+        Err(_) if restored.is_some() => match build_agent(
+            opts.config_path.as_deref(),
+            opts.model.as_deref(),
+            opts.root.as_path(),
+        )
+        .await
+        {
+            Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
+            Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
+            Err(e) => Err(e),
+        },
+        Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Resolve the [`tui::SessionConfig`] for an interactive run from the flags.
