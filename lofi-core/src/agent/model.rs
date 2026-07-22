@@ -83,7 +83,9 @@ pub async fn build_agent(
 ///   `AGENTS.md` is considered. Files are ordered outermost-first.
 ///
 /// Missing or whitespace-only files are skipped. When none are found the base
-/// [`SYSTEM_PROMPT`] is returned unchanged.
+/// [`SYSTEM_PROMPT`] is returned unchanged. Otherwise each found file is
+/// appended as an `agents_md` XML block (with a `source` attribute naming
+/// its origin) after the unwrapped base prompt.
 fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
 
@@ -102,11 +104,11 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
     }
     let mut out = String::from(SYSTEM_PROMPT);
     for (origin, body) in sections {
-        out.push_str("\n\n## AGENTS.md — ");
+        out.push_str("\n\n<agents_md source=\"");
         out.push_str(&origin);
-        out.push_str("\n\n");
+        out.push_str("\">\n");
         out.push_str(body.trim());
-        out.push('\n');
+        out.push_str("\n</agents_md>");
     }
     out
 }
@@ -410,7 +412,8 @@ mod tests {
         write(&cfg.join("AGENTS.md"), "Be terse.\n");
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         assert!(prompt.starts_with(SYSTEM_PROMPT));
-        assert_eq!(prompt.matches("## AGENTS.md — global").count(), 1);
+        assert_eq!(prompt.matches(r#"<agents_md source="global">"#).count(), 1);
+        assert_eq!(prompt.matches("</agents_md>").count(), 1);
         assert!(prompt.contains("Be terse."));
     }
 
@@ -457,7 +460,8 @@ mod tests {
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         assert!(prompt.contains("root-only"));
         // Only the root's section; no global (config dir has no AGENTS.md).
-        assert_eq!(prompt.matches("## AGENTS.md —").count(), 1);
+        assert_eq!(prompt.matches("<agents_md").count(), 1);
+        assert_eq!(prompt.matches("</agents_md>").count(), 1);
     }
 
     #[test]
