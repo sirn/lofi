@@ -430,8 +430,8 @@ impl App {
     /// history into a structured summary. Replaces the agent history with
     /// the summary message followed by the kept tail, appends a Compaction
     /// marker to the transcript (so a resumed session rebuilds the same
-    /// compacted history), renders a marker block on the current turn, and
-    /// posts a notification. Returns true when a compaction actually ran.
+    /// compacted history), and renders a marker block on the current turn.
+    /// Returns true when a compaction actually ran.
     pub(super) fn compact_now(&mut self) -> bool {
         let Some(events) = self.compaction_events() else {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
@@ -483,10 +483,6 @@ impl App {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
         self.bump_render_epoch();
-        self.notify(
-            NotifyKind::Info,
-            format!("compacted {} msgs · kept {}", c.summarized_count, c.kept_count),
-        );
         true
     }
 
