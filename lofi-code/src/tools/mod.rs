@@ -30,30 +30,33 @@ pub mod write;
 mod fs;
 
 pub use env::BashEnv;
-pub use truncate::{format_size, truncate_head, truncate_head_with, truncate_line, truncate_tail, truncate_tail_with, Truncated};
+pub use truncate::{format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated};
 pub use util::{read_capped, PgrpKillGuard};
-use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_under, walk_files_capped};
+use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_under, walk_files_capped, WalkLimit};
 
 /// Default `bash` timeout in milliseconds (120s).
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 
-/// Per-stream byte cap for captured `bash` output. Prevents a runaway
-/// command from exhausting memory before the wall-clock timeout fires.
+/// Per-stream byte ceiling for captured `bash` output. Captured bytes are also
+/// the most `bash_read` can page back; output past this is discarded at the pipe.
 const MAX_BASH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum bytes returned by `read` before truncation.
-const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum file size accepted by `edit`; larger files are rejected before the
-/// replacement is built so a huge target cannot exhaust memory.
+/// File-size ceiling for `read` and `bash_read`; larger files error.
+const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
+/// File-size ceiling for `edit`; larger files error before replacement.
 const MAX_EDIT_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum bytes of grep output before truncation.
-const MAX_GREP_OUTPUT_BYTES: usize = 1024 * 1024;
-/// Files larger than this are skipped by `grep` to bound memory.
+/// Complete `grep` output byte ceiling; exceeding it errors.
+const MAX_GREP_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Per-file `grep` size ceiling; larger files are reported as skipped.
 const MAX_GREP_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Default match cap for `grep` when the caller omits `max`.
-const DEFAULT_GREP_MAX: usize = 1000;
-/// Maximum filesystem entries `find` traverses before signaling truncation.
+/// Complete `grep` row ceiling, including context rows; exceeding it errors.
+const MAX_GREP_ROWS: usize = 10_000;
+/// Complete `ls` entry ceiling; exceeding it errors.
+const MAX_LS_ENTRIES: usize = 50_000;
+/// Complete `find` result ceiling; exceeding it errors.
+const MAX_FIND_RESULTS: usize = 50_000;
+/// `find` traversal ceiling; exceeding it errors.
 const MAX_FIND_VISITED: usize = 65_536;
-/// Maximum filesystem entries `grep` scans before signaling truncation.
+/// `grep` traversal ceiling; exceeding it errors.
 const MAX_GREP_VISITED: usize = 65_536;
 
 /// The builtin tool bundle.
@@ -151,12 +154,30 @@ mod tests {
         (dir, tools)
     }
 
+    /// Format a `grep` result's matches as `file:line:content` strings.
+    fn grep_lines(v: &Value) -> Vec<String> {
+        v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}:{}:{}",
+                    m["file"].as_str().unwrap_or(""),
+                    m["line"].as_u64().unwrap_or(0),
+                    m["content"].as_str().unwrap_or("")
+                )
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn bash_read_reads_from_tmp_dir() {
         let (_dir, tools) = tools();
         std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
         let v = tools.bash_read("log.txt", None, None).await.unwrap();
-        assert_eq!(v, json!("first\nsecond\nthird"));
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["content"], json!("first\nsecond\nthird"));
     }
 
     #[tokio::test]
@@ -165,9 +186,9 @@ mod tests {
         let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
         std::fs::write(tools.tmp_dir().join("big.log"), content).unwrap();
         let v = tools.bash_read("big.log", Some(3), Some(2)).await.unwrap();
-        let s = v.as_str().unwrap();
+        let s = v["content"].as_str().unwrap();
         assert!(s.starts_with("line2\nline3"));
-        assert!(s.contains("6 more lines in file. Use offset=5 to continue."));
+        assert_eq!(v["truncated"], json!(true));
     }
 
     #[tokio::test]
@@ -184,7 +205,8 @@ mod tests {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("a.txt"), "hello").unwrap();
         let v = tools.read("a.txt", None, None).await.unwrap();
-        assert_eq!(v, json!("hello"));
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["content"], json!("hello"));
     }
 
     #[tokio::test]
@@ -193,7 +215,7 @@ mod tests {
         let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
         std::fs::write(tools.root().join("big.txt"), content).unwrap();
         let v = tools.read("big.txt", Some(3), None).await.unwrap();
-        let s = v.as_str().unwrap();
+        let s = v["content"].as_str().unwrap();
         assert!(s.starts_with("line2"), "got: {s}");
         assert!(!s.contains("line1\n"));
     }
@@ -204,10 +226,10 @@ mod tests {
         let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
         std::fs::write(tools.root().join("big.txt"), content).unwrap();
         let v = tools.read("big.txt", Some(1), Some(3)).await.unwrap();
-        let s = v.as_str().unwrap();
-        // 3 lines kept + continuation notice.
-        assert!(s.contains("line0\nline1\nline2"));
-        assert!(s.contains("7 more lines in file. Use offset=4 to continue."));
+        // 3 lines kept; truncation is signalled structurally.
+        assert_eq!(v["content"], json!("line0\nline1\nline2"));
+        assert_eq!(v["truncated"], json!(true));
+        assert_eq!(v["total_lines"], json!(10));
     }
 
     #[tokio::test]
@@ -251,10 +273,11 @@ mod tests {
         std::fs::write(tools.root().join("b.txt"), "b").unwrap();
         std::fs::create_dir(tools.root().join("sub")).unwrap();
         std::fs::write(tools.root().join("sub/c.txt"), "c").unwrap();
-        let v = tools.ls("", None).await.unwrap();
-        let lines: Vec<&str> = v.as_str().unwrap().lines().collect();
-        assert!(lines.contains(&"b.txt"));
-        assert!(lines.contains(&"sub"));
+        let v = tools.ls("").await.unwrap();
+        let entries: Vec<&str> = v["entries"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        assert_eq!(v["ok"], json!(true));
+        assert!(entries.contains(&"b.txt"));
+        assert!(entries.contains(&"sub"));
     }
 
     #[tokio::test]
@@ -264,11 +287,12 @@ mod tests {
         std::fs::write(tools.root().join("src/a.rs"), "").unwrap();
         std::fs::write(tools.root().join("src/b.txt"), "").unwrap();
         std::fs::write(tools.root().join("root.rs"), "").unwrap();
-        let v = tools.find("**/*.rs", None, None).await.unwrap();
-        let lines: Vec<&str> = v.as_str().unwrap().lines().collect();
-        assert!(lines.contains(&"root.rs"));
-        assert!(lines.contains(&"src/a.rs"));
-        assert!(!lines.contains(&"src/b.txt"));
+        let v = tools.find("**/*.rs", None).await.unwrap();
+        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        assert_eq!(v["ok"], json!(true));
+        assert!(matches.contains(&"root.rs"));
+        assert!(matches.contains(&"src/a.rs"));
+        assert!(!matches.contains(&"src/b.txt"));
     }
 
     #[tokio::test]
@@ -276,30 +300,31 @@ mod tests {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("a.txt"), "Foo\nbar\nFOO\n").unwrap();
         let v = tools.grep(json!("FOO"), None).await.unwrap();
-        assert!(v.as_str().unwrap().contains("a.txt:3:FOO"));
-        assert!(!v.as_str().unwrap().contains("a.txt:1:Foo"));
+        let lines = grep_lines(&v);
+        assert!(lines.contains(&"a.txt:3:FOO".to_string()));
+        assert!(!lines.contains(&"a.txt:1:Foo".to_string()));
 
         let v = tools
             .grep(json!({ "regex": "foo", "ic": true }), None)
             .await
             .unwrap();
-        let s = v.as_str().unwrap();
-        assert!(s.contains("a.txt:1:Foo"));
-        assert!(s.contains("a.txt:3:FOO"));
+        let lines = grep_lines(&v);
+        assert!(lines.contains(&"a.txt:1:Foo".to_string()));
+        assert!(lines.contains(&"a.txt:3:FOO".to_string()));
     }
 
     #[tokio::test]
-    async fn grep_object_with_context_and_max() {
+    async fn grep_object_with_context() {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("a.txt"), "l1\nl2\nMATCH\nl4\nl5\n").unwrap();
         let v = tools
-            .grep(json!({ "regex": "MATCH", "ctx": 1, "max": 1 }), None)
+            .grep(json!({ "regex": "MATCH", "ctx": 1 }), None)
             .await
             .unwrap();
-        let s = v.as_str().unwrap();
-        assert!(s.contains("a.txt:2:l2"));
-        assert!(s.contains("a.txt:3:MATCH"));
-        assert!(s.contains("a.txt:4:l4"));
+        let lines = grep_lines(&v);
+        assert!(lines.contains(&"a.txt:2:l2".to_string()));
+        assert!(lines.contains(&"a.txt:3:MATCH".to_string()));
+        assert!(lines.contains(&"a.txt:4:l4".to_string()));
     }
 
     #[tokio::test]
@@ -311,9 +336,9 @@ mod tests {
         std::fs::write(tools.root().join("sub/a.txt"), "alpha\n").unwrap();
         std::fs::write(tools.root().join("sub/b.txt"), "beta\n").unwrap();
         let v = tools.grep(json!("alpha"), Some("sub/a.txt")).await.unwrap();
-        let s = v.as_str().unwrap();
-        assert!(s.contains("sub/a.txt:1:alpha"));
-        assert!(!s.contains("b.txt"));
+        let lines = grep_lines(&v);
+        assert!(lines.contains(&"sub/a.txt:1:alpha".to_string()));
+        assert!(lines.iter().all(|l| !l.contains("b.txt")));
     }
 
     #[tokio::test]
@@ -323,9 +348,10 @@ mod tests {
             .write(json!({ "path": "nested/x.txt", "text": "hi" }))
             .await
             .unwrap();
-        assert_eq!(v, json!({ "ok": true }));
+        assert_eq!(v["content"], json!("hi"));
+        assert_eq!(v["ok"], json!(true));
         let v = tools.read("nested/x.txt", None, None).await.unwrap();
-        assert_eq!(v, json!("hi"));
+        assert_eq!(v["content"], json!("hi"));
     }
 
     #[cfg(unix)]
@@ -384,9 +410,11 @@ mod tests {
             .edit(json!({ "path": "a.txt", "old": "beta", "new": "BETA" }))
             .await
             .unwrap();
-        assert_eq!(v, json!({ "ok": true }));
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["old"], json!("beta"));
+        assert_eq!(v["new"], json!("BETA"));
         let v = tools.read("a.txt", None, None).await.unwrap();
-        assert_eq!(v, json!("alpha BETA gamma"));
+        assert_eq!(v["content"], json!("alpha BETA gamma"));
     }
 
     #[tokio::test]

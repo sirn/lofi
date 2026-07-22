@@ -61,7 +61,7 @@ fn result_stub(event_id: &str, is_error: bool) -> String {
 /// pairing is preserved.
 fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json::Value {
     use serde_json::json;
-    let stub = format!("[code cleared — re-expand with lofi.result(\"{event_id}\")]",);
+    let stub = format!("[code cleared — re-expand with lofi.result(\"{event_id}\")]");
     match input {
         serde_json::Value::Object(obj) => {
             let mut out = serde_json::Map::new();
@@ -146,7 +146,7 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
                             input: trim_tool_use_input(input, eid),
                         });
                     }
-                    other => blocks.push(other.clone()),
+                    text @ ContentBlock::Text { .. } => blocks.push(text.clone()),
                 }
             }
             Message { role: msg.role, blocks }
@@ -160,11 +160,11 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
 ///
 /// Returns the elided payload as a string:
 /// - a `Tool`-role message with `ToolResult` block(s) → their `content`
-///  (the exec output text),
+///   (the exec output text),
 /// - an `Assistant` message with `ToolUse` block(s) → the first tool use's
-///  `input` pretty-printed (the verbatim `code`),
+///   `input` pretty-printed (the verbatim `code`),
 /// - anything else → `None` (not recoverable; the id was not a message event
-///  or held no elidable block).
+///   or held no elidable block).
 #[must_use]
 pub fn recover_event_content(events: &[SessionEvent], id: &str) -> Option<String> {
     let event = events.iter().find(|e| e.id == id)?;
@@ -198,6 +198,8 @@ mod tests {
     use super::*;
     use lofi_types::{ContentBlock, Message, Role};
 
+    // kept as a test fixture
+    #[allow(dead_code)]
     fn user(t: &str) -> Message {
         Message { role: Role::User, blocks: vec![ContentBlock::Text { text: t.to_string() }] }
     }

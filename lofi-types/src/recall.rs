@@ -4,9 +4,10 @@
 //! supplies the implementation that reads the transcript).
 
 /// Which part of the transcript a recall covers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RecallScope {
     /// The active lineage only (root -> current leaf). Default.
+    #[default]
     Lineage,
     /// Every message event in the file, including off-lineage branches.
     All,
@@ -24,11 +25,7 @@ pub enum CompactionTarget {
     Latest,
 }
 
-impl Default for RecallScope {
-    fn default() -> Self {
-        Self::Lineage
-    }
-}
+
 
 /// A recall request — the union of the `/recall` command's args and the
 /// `lofi.recall` tool's parameters.
