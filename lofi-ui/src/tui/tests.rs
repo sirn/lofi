@@ -179,13 +179,13 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
         parent: "e1".to_string(), id: 1, name: "write".to_string(), args: "b.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 1, result: "{\"ok\":true}".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 1, result: "written content here".to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 2, name: "edit".to_string(), args: "c.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 2, result: "{\"ok\":true}".to_string(), is_error: false,
+        parent: "e1".to_string(), id: 2, result: "edited content here".to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(), id: 3, name: "bash".to_string(), args: "echo x".to_string(),
@@ -210,13 +210,14 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
             .flat_map(|s| s.content.chars())
             .collect()
     };
-    // Non-verbose: read body hidden; bash/write/edit bodies, the error, and
-    // every tool header stay visible (write and edit each yield an `"ok":true`).
+    // Non-verbose: read body hidden; bash body and the written write/edit
+    // content, the error, and every tool header stay visible.
     a.verbose = false;
     let nv = text(&a);
     assert!(!nv.contains("secret line one"), "non-verbose read body should hide: {nv}");
     assert!(nv.contains("bash output here"), "non-verbose bash body should show: {nv}");
-    assert!(nv.matches("\"ok\":true").count() >= 2, "non-verbose write/edit bodies should show: {nv}");
+    assert!(nv.contains("written content here"), "non-verbose write body should show its content: {nv}");
+    assert!(nv.contains("edited content here"), "non-verbose edit body should show its content: {nv}");
     assert!(nv.contains("no such file"), "non-verbose error should stay visible: {nv}");
     assert!(nv.contains("Tool read"), "read header should still show: {nv}");
     assert!(nv.contains("Tool write"), "write header should still show: {nv}");

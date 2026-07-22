@@ -253,6 +253,45 @@ async fn agent_call_emits_tool_events() {
 }
 
 #[tokio::test]
+async fn write_and_edit_emit_written_content_as_result() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let events: Arc<Mutex<Vec<ToolEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let cb = {
+        let events = events.clone();
+        Arc::new(move |ev: ToolEvent| events.lock().unwrap().push(ev))
+            as Arc<dyn Fn(ToolEvent) + Send + Sync>
+    };
+    let cx = ExecCtx {
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-test"),
+        strings: HashMap::new(),
+        agent: None,
+        on_tool_event: Some(cb),
+        recall: None,
+        result: None,
+        bash_env: BashEnv::default(),
+    };
+    let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
+               await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \
+               return 'ok';";
+    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let evs = events.lock().unwrap();
+    // Each successful End carries the written content (write -> text,
+    // edit -> new), not the success ack.
+    let ends: Vec<&String> = evs
+        .iter()
+        .filter_map(|e| match e {
+            ToolEvent::End { result, is_error: false, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 2, "expected two successful tool ends: {evs:?}");
+    assert!(ends.iter().any(|r| r.contains("written line one")), "write content missing: {ends:?}");
+    assert!(ends.iter().any(|r| r.contains("edited line one")), "edit content missing: {ends:?}");
+}
+
+#[tokio::test]
 async fn exec_returns_undefined_as_null() {
     let dir = tempfile::tempdir().unwrap();
     let res = exec("print('hi');", &ctx(dir.path()), &ExecOptions::default())
