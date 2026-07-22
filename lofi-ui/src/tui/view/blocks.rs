@@ -319,6 +319,7 @@ fn render_table(
     t: Theme,
 ) -> Vec<RenderLine> {
     let lead: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let pad: Vec<Span<'static>> = vec![Span::raw("  ")];
     let n_cols = header.len();
     if n_cols == 0 {
         return Vec::new();
@@ -333,13 +334,13 @@ fn render_table(
         }
     }
     // Distribute available width proportionally across all columns when
-    // the natural table width exceeds the content area. Borders and padding
-    // (2 per column + 1 border per column + 1 trailing) are subtracted first;
-    // the remainder is split by each column's share of the natural total.
+    // the natural table width exceeds the content area. Two chars are
+    // reserved for right padding so the table doesn't hug the edge.
+    let table_w = content_w.saturating_sub(2);
     let total: usize = col_w.iter().map(|&w| w + 2).sum::<usize>() + n_cols + 1;
-    if total > content_w {
+    if total > table_w {
         let overhead = n_cols * 2 + n_cols + 1;
-        let avail = content_w.saturating_sub(overhead).max(n_cols);
+        let avail = table_w.saturating_sub(overhead).max(n_cols);
         let natural = col_w.iter().sum::<usize>().max(1);
         let mut assigned = 0usize;
         for cw in col_w.iter_mut().take(n_cols - 1) {
@@ -363,47 +364,60 @@ fn render_table(
             }
             s.push(if i + 1 < n_cols { mid } else { right });
         }
-        prim::rline(lead.clone(), vec![Span::styled(s, border)])
+        prim::render(lead.clone(), vec![Span::styled(s, border)], pad.clone())
     };
 
     out.push(border_row('┌', '┬', '┐'));
-    out.push(table_row(&col_w, header, aligns, hdr_style, border, lead.clone()));
+    out.extend(table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad));
     out.push(border_row('├', '┼', '┤'));
     for row in data {
-        out.push(table_row(&col_w, row, aligns, body_style, border, lead.clone()));
+        out.extend(table_row(&col_w, row, aligns, body_style, border, &lead, &pad));
     }
     out.push(border_row('└', '┴', '┘'));
     out
 }
 
 /// One data row: `│ cell │ cell │` with borders in `border` style and cells in
-/// `style`. Cells are padded to their column width per the alignment.
+/// `style`. Each cell is wrapped to its column width; a row whose cells wrap
+/// to different line counts produces one `RenderLine` per line, with shorter
+/// cells padded to their column width on every continuation row.
 fn table_row(
     col_w: &[usize],
     cells: &[String],
     aligns: &[Align],
     style: Style,
     border: Style,
-    lead: Vec<Span<'static>>,
-) -> RenderLine {
-    let mut spans = vec![Span::styled("│", border)];
-    for (i, &w) in col_w.iter().enumerate() {
-        let cell = cells.get(i).map_or("", String::as_str);
-        let padded = align_cell(cell, w, aligns.get(i).copied().unwrap_or(Align::Left));
-        spans.push(Span::styled(format!(" {padded} "), style));
-        spans.push(Span::styled("│", border));
+    lead: &[Span<'static>],
+    pad: &[Span<'static>],
+) -> Vec<RenderLine> {
+    let wrapped: Vec<Vec<String>> = col_w
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let cell = cells.get(i).map_or("", String::as_str);
+            prim::wrap(cell, w)
+        })
+        .collect();
+    let max_lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut out = Vec::with_capacity(max_lines);
+    for line_idx in 0..max_lines {
+        let mut spans = vec![Span::styled("│", border)];
+        for (i, &w) in col_w.iter().enumerate() {
+            let segment = wrapped[i].get(line_idx).map_or("", |s| s.as_str());
+            let padded = align_cell(segment, w, aligns.get(i).copied().unwrap_or(Align::Left));
+            spans.push(Span::styled(format!(" {padded} "), style));
+            spans.push(Span::styled("│", border));
+        }
+        out.push(prim::render(lead.to_vec(), spans, pad.to_vec()));
     }
-    prim::rline(lead, spans)
+    out
 }
 
-/// Pad/truncate `s` to exactly `w` chars per the alignment. Truncated cells
-/// end with `…` so the cut is visible.
+/// Pad `s` to exactly `w` chars per the alignment. Segments that exceed `w`
+/// (only possible when a single word is wider than the column) are clipped.
 fn align_cell(s: &str, w: usize, align: Align) -> String {
     let len = s.chars().count();
-    if len > w {
-        if w > 1 {
-            return format!("{}…", s.chars().take(w - 1).collect::<String>());
-        }
+    if len >= w {
         return s.chars().take(w).collect();
     }
     let pad = w - len;

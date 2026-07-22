@@ -270,7 +270,8 @@ fn inline_markdown_table_fits_narrow_width() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     // A 3-column table with long cells rendered at a narrow width must not
-    // produce any line wider than the viewport.
+    // produce any line wider than the viewport, and must not truncate cell
+    // content — it wraps instead.
     let md = "| File | Status | Details |\n|------|--------|---------|\n| src/main.rs | modified | added new function |\n| README.md | created | initial version |";
     let mut a = app();
     push_turn(&mut a);
@@ -283,10 +284,16 @@ fn inline_markdown_table_fits_narrow_width() {
         let w: usize = rl.line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert!(w <= 40, "line too wide ({w} > 40): {:?}", rl.line);
     }
-    // At least one cell should be truncated with ellipsis.
+    // All content must be present (wrapped, not truncated). Words that fit
+    // survive intact; long unbreakable tokens hard-break across rows.
     let body: String = rls.iter().flat_map(|rl| rl.line.spans.iter())
         .map(|s| s.content.as_ref()).collect();
-    assert!(body.contains('…'), "narrow table should truncate: {body}");
+    assert!(body.contains("function"), "content should not be truncated: {body}");
+    assert!(body.contains("initial"), "content should not be truncated: {body}");
+    assert!(body.contains("version"), "content should not be truncated: {body}");
+    assert!(body.contains("src/mai") && body.contains("n.rs"),
+        "long token should hard-break: {body}");
+    assert!(!body.contains('…'), "no ellipsis: {body}");
 }
 
 #[test]
