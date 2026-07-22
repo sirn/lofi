@@ -162,6 +162,120 @@ fn render_tree_smoke() {
     assert!(!text.lines.is_empty());
 }
 
+/// Render assistant text containing inline markdown and collect the content
+/// spans (skipping the 2-space margin) so tests can assert on styles.
+fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(markdown.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    render_turn_lines(&cx, turn)
+        .into_iter()
+        .flat_map(|rl| rl.line.spans)
+        .skip_while(|s| s.content == "  ")
+        .collect()
+}
+
+#[test]
+
+
+fn inline_markdown_bold_italic_underscore() {
+    use ratatui::style::Modifier;
+    let spans = render_text_spans("**bold** *italic* _underline_");
+    let bold = spans.iter().find(|s| s.content == "bold").expect("bold span");
+    assert!(bold.style.add_modifier == Modifier::BOLD, "bold: {bold:?}");
+    let italic = spans.iter().find(|s| s.content == "italic").expect("italic span");
+    assert!(italic.style.add_modifier == Modifier::ITALIC, "italic: {italic:?}");
+    let under = spans.iter().find(|s| s.content == "underline").expect("underline span");
+    assert!(under.style.add_modifier == Modifier::UNDERLINED, "underline: {under:?}");
+}
+
+#[test]
+fn inline_markdown_code_stays_literal() {
+    let spans = render_text_spans("use `inline_spans` here");
+    let code = spans.iter().find(|s| s.content == "inline_spans").expect("code span");
+    // Code spans have an inline_bg background; plain text does not.
+    assert!(code.style.bg.is_some(), "code should have bg: {code:?}");
+}
+
+#[test]
+fn inline_markdown_underscore_not_inword() {
+    use ratatui::style::Modifier;
+    // Identifiers with underscores must NOT be parsed as emphasis.
+    let spans = render_text_spans("call my_var_name here");
+    let var = spans.iter().find(|s| s.content.contains("my_var_name"))
+        .expect("var span");
+    assert_eq!(var.style.add_modifier, Modifier::empty(), "no emphasis: {var:?}");
+    assert!(!var.content.contains("**") && !var.content.contains("__"),
+        "underscores should be literal: {var:?}");
+}
+
+#[test]
+fn inline_markdown_nested_bold_italic() {
+    use ratatui::style::Modifier;
+    let spans = render_text_spans("**bold *italic* bold**");
+    let inner = spans.iter().find(|s| s.content == "italic").expect("nested italic");
+    assert!(inner.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC),
+        "nested should be bold+italic: {inner:?}");
+}
+
+#[test]
+fn inline_markdown_header_all_levels_bold() {
+    use ratatui::style::Modifier;
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    for md in ["# H1", "## H2", "### H3", "#### H4", "##### H5", "###### H6"] {
+        let mut a = app();
+        push_turn(&mut a);
+        a.apply_event(AgentEvent::Text(md.to_string()));
+        let turn = &a.turns[0];
+        let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+        let rls = render_turn_lines(&cx, turn);
+        let all_spans: Vec<_> = rls.iter().flat_map(|rl| rl.line.spans.iter()).collect();
+        assert!(
+            all_spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "header should be bold: {md} (spans: {all_spans:?})",
+        );
+    }
+}
+
+#[test]
+fn inline_markdown_table_renders_borders() {
+    let md = "| Name | Value |\n|------|------:|\n| foo  | 1    |\n| bar  | 22   |";
+    let spans = render_text_spans(md);
+    let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(body.contains('┌'), "top border: {body}");
+    assert!(body.contains('┬'), "top mid: {body}");
+    assert!(body.contains('┐'), "top right: {body}");
+    assert!(body.contains('├'), "header sep: {body}");
+    assert!(body.contains('┼'), "header mid: {body}");
+    assert!(body.contains('┤'), "header right: {body}");
+    assert!(body.contains('└'), "bottom border: {body}");
+    assert!(body.contains('┴'), "bottom mid: {body}");
+    assert!(body.contains('┘'), "bottom right: {body}");
+    assert!(body.contains('│'), "vertical border: {body}");
+    assert!(body.contains("Name"), "header cell: {body}");
+    assert!(body.contains("Value"), "header cell: {body}");
+    assert!(body.contains("foo"), "data cell: {body}");
+    assert!(body.contains("bar"), "data cell: {body}");
+    assert!(body.contains('1'), "data cell: {body}");
+    assert!(body.contains("22"), "data cell: {body}");
+}
+
+#[test]
+fn inline_markdown_table_right_aligns() {
+    // Right-aligned column: `--:` → numbers should be right-padded.
+    let md = "| Item | Count |\n|------|------:|\n| a    | 1     |\n| bb   | 22    |";
+    let spans = render_text_spans(md);
+    let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    // The right-aligned cells should have leading spaces before the numbers.
+    assert!(body.contains(" 1"), "right-aligned 1: {body}");
+    assert!(body.contains("22"), "right-aligned 22: {body}");
+}
+
 /// A numbered `read` line whose body is empty must still carry its line
 /// number as decoration with an empty content range, so the Navigate
 /// cursor overlay preserves it instead of treating it as a blank line.
