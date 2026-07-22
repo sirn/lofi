@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use futures::future::LocalBoxFuture;
 use futures::StreamExt;
 use lofi_types::{
-    ContentBlock, Message, Model, NativeToolRecord, Role, StreamingEvent, ThinkingLevel,
-    Usage,
+    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, StreamingEvent,
+    ThinkingLevel, Usage,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -89,16 +89,15 @@ const PER_EVENT_OVERHEAD: usize = 64;
 /// past `Instant`'s range.
 const MAX_SUBAGENT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
-/// Where to durably commit a completed turn: the transcript path and the
-/// run label to stamp on the turn-end marker. Passed into
-/// [`Agent::run_continuation`] so the engine — which owns the timers and
-/// cost counter — is the sole writer of the session log.
+/// Where to durably commit a completed turn: the transcript path (and an
+/// optional branch point). Passed into [`Agent::run_continuation`] so the
+/// engine — which owns the timers and cost counter — is the sole writer of
+/// the session log. The turn-end marker's model identity comes from the
+/// agent's own resolved model, not from here.
 #[derive(Debug, Clone)]
 pub struct SessionCommit {
     /// Path to the session `.jsonl` file.
     pub path: PathBuf,
-    /// `provider/model · level` label for the turn-end marker.
-    pub label: String,
     /// The entry id to branch this turn from. `None` appends to the file's
     /// current active leaf (linear continuation); `Some(id)` starts a new
     /// branch as a sibling of `id`'s existing children — used when the user
@@ -320,23 +319,19 @@ impl Agent {
         &self.tmp_dir
     }
 
-    /// `provider/model · level` — the run label stamped onto
-    /// [`AgentEvent::TurnEnd`] and the transcript's `TurnEnd` marker. Built
-    /// from the resolved [`Model`] so it is authoritative across a model
-    /// switch on resume (the UI no longer re-derives it from the active
-    /// model, which would mismatch a persisted turn's original model).
+    /// The raw model identity stamped onto [`AgentEvent::TurnEnd`] (and the
+    /// transcript's `TurnEnd` marker, via the recorder). Built from the
+    /// resolved [`Model`] so it is authoritative across a model switch on
+    /// resume — the persisted turn keeps its original model, and the UI
+    /// renders it to `provider/id:level` at display time rather than storing
+    /// a formatted string.
     #[must_use]
-    pub fn run_label(&self) -> String {
-        format!(
-            "{}/{}{}",
-            self.model.provider,
-            self.model.id,
-            if self.model.thinking == ThinkingLevel::Off {
-                String::new()
-            } else {
-                format!(" · {}", self.model.thinking.as_str())
-            }
-        )
+    pub fn run_model(&self) -> RunModel {
+        RunModel {
+            provider: self.model.provider.clone(),
+            id: self.model.id.clone(),
+            thinking: self.model.thinking,
+        }
     }
 
     /// Override the retry policy (used by tests to inject a fast backoff).

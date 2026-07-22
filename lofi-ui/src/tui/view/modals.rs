@@ -17,7 +17,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|e| {
             let id = e.id();
-            ListItem::new(format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model))
+            ListItem::new(format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model.label()))
         })
         .collect();
     let content_w = picker
@@ -28,7 +28,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
                 "{}  ({} msgs, {})",
                 e.id(),
                 e.message_count,
-                e.meta.model
+                e.meta.model.label()
             ))
         })
         .max()

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lofi_error::{Error, Result};
-use lofi_types::{Message, SessionEvent, SessionEventKind};
+use lofi_types::{Message, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
@@ -33,8 +33,10 @@ pub struct SessionMeta {
     pub created: u64,
     /// Absolute working directory the session belongs to.
     pub cwd: String,
-    /// Model label (provider/id[:level]) active when the session started.
-    pub model: String,
+    /// Raw model identity active when the session started (rendered to
+    /// `provider/id:level` only at display; deserializes from a legacy
+    /// `provider/id[:level]` string too).
+    pub model: RunModel,
     }
 
 /// The first-line wrapper. `type: "meta"` distinguishes it from message lines
@@ -132,7 +134,7 @@ impl SessionStore {
     /// # Errors
     /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
     /// header-serialization failure.
-    pub fn create(&self, cwd: &Path, model: &str) -> Result<PathBuf> {
+    pub fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
         let dir = self.dir_for_cwd(cwd);
         std::fs::create_dir_all(&dir)?;
     let file_name = format!("{}_{}.jsonl", now_ms(), short_id());
@@ -143,7 +145,7 @@ impl SessionStore {
             version: SESSION_VERSION,
             created: now_ms(),
             cwd: cwd.to_string_lossy().into_owned(),
-            model: model.to_string(),
+            model: model.clone(),
         },
     };
     let line = serde_json::to_string(&header)
@@ -538,19 +540,55 @@ mod tests {
     fn create_load_round_trip() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/project");
-        let path = store.create(cwd, "openai/gpt-5.6-sol").unwrap();
+        let path = store.create(cwd, &"openai/gpt-5.6-sol".into()).unwrap();
         let (meta, msgs, _, _) = load(&path).unwrap();
         assert_eq!(meta.version, SESSION_VERSION);
         assert_eq!(meta.cwd, "/tmp/project");
-        assert_eq!(meta.model, "openai/gpt-5.6-sol");
+        assert_eq!(meta.model, "openai/gpt-5.6-sol".into());
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn turn_end_model_is_raw_not_rendered() {
+        // The session file must store the model as raw data (a `{provider, id,
+        // thinking}` object), never a rendered `provider/id:level` string —
+        // a later display-format change must not strand stale text in old files.
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/raw");
+        let path = store.create(cwd, &"openai/gpt-5.6-sol:medium".into()).unwrap();
+        let header = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            header.contains("\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\"}"),
+            "header model must be a raw object: {header}"
+        );
+        assert!(!header.contains("\"model\":\""), "header must not store a rendered model string: {header}");
+
+        let mut batch = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "anthropic/claude:high".into(),
+                elapsed_ms: 5,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        }];
+        append_events(&path, &mut batch, None).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let turn_end_line = body.lines().last().unwrap();
+        assert!(
+            turn_end_line.contains("\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"),
+            "turn-end model must be a raw object: {turn_end_line}"
+        );
+        assert!(!turn_end_line.contains("\"label\""), "turn-end must not carry a rendered label field: {turn_end_line}");
+        assert!(!turn_end_line.contains("\"model\":\""), "turn-end must not store a rendered model string: {turn_end_line}");
     }
 
     #[test]
     fn append_then_load_messages() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/proj2");
-        let path = store.create(cwd, "openai/gpt-4o").unwrap();
+        let path = store.create(cwd, &"openai/gpt-4o".into()).unwrap();
         let mut batch = [ev(user("hello")), ev(assistant("hi there"))];
         append_events(&path, &mut batch, None).unwrap();
         let (_meta, events, _, _) = load(&path).unwrap();
@@ -566,7 +604,7 @@ mod tests {
     fn events_round_trip_with_timings_and_cost() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/events");
-        let path = store.create(cwd, "m").unwrap();
+        let path = store.create(cwd, &"m".into()).unwrap();
         let mut batch = [
             ev(user("hi")),
             SessionEvent {
@@ -578,7 +616,7 @@ mod tests {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::TurnEnd {
-                    label: "m · medium".into(),
+                    model: "p/m:medium".into(),
                     elapsed_ms: 1234,
                     cost: 0.01,
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Usage::default() },
@@ -590,15 +628,15 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
         assert!(matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1"));
-        assert!(matches!(&events[2].kind, SessionEventKind::TurnEnd { label, elapsed_ms: 1234, cost, usage }
-            if label == "m · medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10));
+        assert!(matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
+            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10));
     }
 
     #[test]
     fn append_with_parent_hint_branches_off_target() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/branch");
-        let path = store.create(cwd, "m").unwrap();
+        let path = store.create(cwd, &"m".into()).unwrap();
         // Root chain: user -> assistant.
         let mut first = [ev(user("a")), ev(assistant("b"))];
         append_events(&path, &mut first, None).unwrap();
@@ -627,7 +665,7 @@ mod tests {
     fn legacy_bare_message_lines_still_load() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/legacy");
-        let path = store.create(cwd, "m").unwrap();
+        let path = store.create(cwd, &"m".into()).unwrap();
         // Pre-event-log files stored bare Message JSON, one per line.
         let legacy = serde_json::to_string(&user("old")).unwrap();
         std::fs::OpenOptions::new()
@@ -645,9 +683,9 @@ mod tests {
     fn list_newest_first_and_counts() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/listy");
-        let p1 = store.create(cwd, "m").unwrap();
+        let p1 = store.create(cwd, &"m".into()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, "m").unwrap();
+        let p2 = store.create(cwd, &"m".into()).unwrap();
         let mut batch = [ev(user("a"))];
         append_events(&p1, &mut batch, None).unwrap();
         let list = store.list_for_cwd(cwd).unwrap();
@@ -662,9 +700,9 @@ mod tests {
     fn most_recent_and_find_prefix() {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/findy");
-        let _p1 = store.create(cwd, "m").unwrap();
+        let _p1 = store.create(cwd, &"m".into()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, "m").unwrap();
+        let p2 = store.create(cwd, &"m".into()).unwrap();
         let mr = store.most_recent(cwd).unwrap().unwrap();
         assert_eq!(mr.path, p2);
         let id2 = p2.file_stem().unwrap().to_str().unwrap();

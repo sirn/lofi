@@ -517,11 +517,11 @@ fn render_working(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
-            Span::styled(app.run_label(), Style::new().fg(t.muted)),
             Span::styled(
-                format!(" working for {}...", prim::fmt_duration(app.run_elapsed())),
+                format!("Working for {} with ", prim::fmt_duration(app.run_elapsed())),
                 Style::new().fg(t.subtle),
             ),
+            Span::styled(app.run_label(), Style::new().fg(t.muted)),
         ])
     };
     f.render_widget(Paragraph::new(line), area);
@@ -578,16 +578,11 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_mode_line(f, Rect::new(area.x, area.y, w, 1), app);
 
     // The panel below: a leading blank, the prompt, a blank, and the stats,
-    // all on panel_bg with the `▌` gutter down the left edge.
+    // all on panel_bg. A single `❯` marks the prompt row (no spanning rail).
     let panel = Rect::new(area.x, area.y.saturating_add(1), w, area.height.saturating_sub(1));
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
     let bar = if active { t.primary } else { t.subtle };
-    for y in panel.y..panel.bottom() {
-        let cell = &mut f.buffer_mut()[(area.x, y)];
-        cell.set_char('▌');
-        cell.set_fg(bar);
-    }
     let inner = Rect::new(
         area.x.saturating_add(2),
         panel.y,
@@ -602,8 +597,16 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(inner);
-    // chunks[0] is the leading blank (panel_bg + gutter already painted).
+    // chunks[0] is the leading blank (panel_bg already painted).
     app.input_rect = chunks[1];
+    // A single `❯` caret on the prompt's first row replaces the old
+    // spanning `▌` gutter; skipped on a degenerate 0-height prompt area
+    // (the old bounded `▌` loop was a no-op there).
+    if chunks[1].height > 0 {
+        let cell = &mut f.buffer_mut()[(area.x, chunks[1].y)];
+        cell.set_char('❯');
+        cell.set_fg(bar);
+    }
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
 }
@@ -671,13 +674,11 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // A thin rule of `╱` spans the full width in the current mode color,
+    // A thin rule of `▁` spans the full width in the current mode color,
     // visually tying the notification line to the mode chip on the right and
     // the panel below. The chip and badges render on top as narrow widgets so
-    // the rule shows through the gaps between them. `╱` is used over `🮙`
-    // (the stripped-box glyph) for font coverage — the latter is not
-    // universally implemented.
-    let rule: String = std::iter::repeat_n('╱', w).collect();
+    // the rule shows through the gaps between them.
+    let rule: String = std::iter::repeat_n('▁', w).collect();
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,

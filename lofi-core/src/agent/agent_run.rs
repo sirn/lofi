@@ -264,7 +264,7 @@ impl Agent {
                 let _ = match outcome {
                     TurnOutcome::Finished => tx
                         .send(AgentEvent::TurnEnd {
-                            label: self.run_label(),
+                            model: self.run_model(),
                             elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
@@ -272,7 +272,7 @@ impl Agent {
                         .await,
                     TurnOutcome::Failed(error) => tx
                         .send(AgentEvent::TurnFailed {
-                            label: self.run_label(),
+                            model: self.run_model(),
                             elapsed_ms,
                             error: error.clone(),
                             cost: stats.cost,
@@ -281,7 +281,6 @@ impl Agent {
                         .await,
                     TurnOutcome::ContextPressure => tx
                         .send(AgentEvent::ContextPressure {
-                            label: self.run_label(),
                             elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
@@ -303,10 +302,10 @@ impl Agent {
             let mut recorder = match commit.parent_hint.as_deref() {
                 Some(id) => SessionRecorder::with_parent(
                     commit.path.clone(),
-                    commit.label.clone(),
+                    self.run_model(),
                     id.to_string(),
                 ),
-                None => SessionRecorder::new(commit.path.clone(), commit.label.clone()),
+                None => SessionRecorder::new(commit.path.clone(), self.run_model()),
             };
             // A turn with no terminal outcome and no content writes nothing.
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);

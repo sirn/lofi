@@ -183,17 +183,17 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 }
             }
         }
-        AgentEvent::TurnEnd { label, elapsed_ms, .. } => {
+        AgentEvent::TurnEnd { model, elapsed_ms, .. } => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::TurnEnd {
-                label,
+                label: model.label(),
                 elapsed: Duration::from_millis(elapsed_ms),
             });
         }
-        AgentEvent::TurnFailed { label, elapsed_ms, error, .. } => {
+        AgentEvent::TurnFailed { model, elapsed_ms, error, .. } => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::TurnFailed {
-                label,
+                label: model.label(),
                 elapsed: Duration::from_millis(elapsed_ms),
                 error,
             });
@@ -236,7 +236,7 @@ pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
 /// Tool timings, thinking timings, and native-tool records are gathered first
 /// (they are written after the messages) so each `ToolUse` block can be
 /// stamped as it is replayed. A `SessionEvent::TurnEnd` becomes the matching
-/// `AgentEvent::TurnEnd`, attaching the `◇ label done in Ns` block to the
+/// `AgentEvent::TurnEnd`, attaching the `◇ Done in Ns with <model>` block to the
 /// turn it follows.
 ///
 /// Tool results in the durable log travel as a separate `Message` with
@@ -396,17 +396,17 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                     summary: summary.clone(),
                 });
             }
-            SessionEventKind::TurnEnd { label, elapsed_ms, cost, usage, .. } => {
+            SessionEventKind::TurnEnd { model, elapsed_ms, cost, usage, .. } => {
                 out.push(AgentEvent::TurnEnd {
-                    label: label.clone(),
+                    model: model.clone(),
                     elapsed_ms: *elapsed_ms,
                     cost: *cost,
                     usage: *usage,
                 });
             }
-            SessionEventKind::TurnFailed { label, elapsed_ms, error, cost, usage, .. } => {
+            SessionEventKind::TurnFailed { model, elapsed_ms, error, cost, usage, .. } => {
                 out.push(AgentEvent::TurnFailed {
-                    label: label.clone(),
+                    model: model.clone(),
                     elapsed_ms: *elapsed_ms,
                     error: error.clone(),
                     cost: *cost,
