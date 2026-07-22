@@ -109,10 +109,9 @@ fn bind_file_tools<'js>(
         "ls",
         Function::new(
             ctx.clone(),
-            Async(move |dir: Opt<String>, opts: Opt<Value>| {
+            Async(move |dir: Opt<String>| {
                 let t = t.clone();
                 let d = dir.0.as_deref().unwrap_or("").to_string();
-                let limit = parse_limit_opt(opts);
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -120,7 +119,7 @@ fn bind_file_tools<'js>(
                         name: "ls".into(),
                         args: cap_first_line(&d, 120),
                     });
-                    let res = t.ls(&d, limit).await;
+                    let res = t.ls(&d).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
@@ -138,10 +137,9 @@ fn bind_file_tools<'js>(
         "find",
         Function::new(
             ctx.clone(),
-            Async(move |glob: String, dir: Opt<String>, opts: Opt<Value>| {
+            Async(move |glob: String, dir: Opt<String>| {
                 let t = t.clone();
                 let d = dir.0.as_deref().unwrap_or("").to_string();
-                let limit = parse_limit_opt(opts);
                 let args = if d.is_empty() {
                     glob.clone()
                 } else {
@@ -154,7 +152,7 @@ fn bind_file_tools<'js>(
                         name: "find".into(),
                         args: cap_first_line(&args, 120),
                     });
-                    let res = t.find(&glob, Some(d.as_str()), limit).await;
+                    let res = t.find(&glob, Some(d.as_str())).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
@@ -206,14 +204,6 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("write", &args);
-                // Surface the written content (not the success ack) so the
-                // transcript records what landed in the file; errors keep
-                // their message.
-                let written = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -223,7 +213,6 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.write(args).await;
                     let (result, is_error) = tool_preview(&res);
-                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
@@ -244,14 +233,6 @@ fn bind_file_tools<'js>(
                 let t = t.clone();
                 let args = js_to_json(&args);
                 let label = native_args_label("edit", &args);
-                // Surface the replacement text (not the success ack) so the
-                // transcript records what the edit wrote; errors keep their
-                // message.
-                let written = args
-                    .get("new")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
@@ -261,7 +242,6 @@ fn bind_file_tools<'js>(
                     });
                     let res = t.edit(args).await;
                     let (result, is_error) = tool_preview(&res);
-                    let result = if is_error { result } else { written };
                     t.emit(ToolEvent::End {
                         id,
                         result,
