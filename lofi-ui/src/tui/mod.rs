@@ -46,6 +46,7 @@ use {input::*, replay::*, text::*, tree::*};
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -832,6 +833,7 @@ pub(crate) struct App {
 struct RunHandle {
     handle: JoinHandle<()>,
     rx: Receiver<AgentEvent>,
+    cancel: Arc<AtomicBool>,
 }
 
 struct TerminalGuard {

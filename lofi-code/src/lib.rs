@@ -27,8 +27,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::future::LocalBoxFuture;
 use rquickjs::async_with;
@@ -58,6 +59,23 @@ use crate::tools::BuiltinTools;
 
 /// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Maximum heap the `QuickJS` runtime may allocate before `JS_SetMemoryLimit`
+/// rejects further growth. Generous but finite — prevents a runaway guest
+/// (e.g. building an unbounded array) from exhausting host memory.
+const GUEST_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+/// Maximum native call-stack depth the interpreter may use. `QuickJS` checks
+/// this at function-entry granularity, so a deeply recursive guest aborts
+/// with a stack-overflow exception rather than segfaulting the host.
+const GUEST_MAX_STACK: usize = 1024 * 1024;
+
+/// Interrupt-reason state shared between the host and the `QuickJS` interrupt
+/// handler. The handler — called periodically by the interpreter — returns
+/// `true` (abort) when this is non-zero, breaking out of synchronous tight
+/// loops that the cooperative tokio timeout cannot preempt.
+const INTR_RUNNING: u8 = 0;
+const INTR_TIMEOUT: u8 = 1;
+const INTR_CANCELLED: u8 = 2;
 
 /// Sentinel object key used by the IIFE wrapper to surface an uncaught guest
 /// exception as a resolved (not rejected) promise.
@@ -163,12 +181,20 @@ impl std::fmt::Debug for ExecCtx {
 pub struct ExecOptions {
     /// Wall-clock budget for the guest.
     pub timeout: Duration,
+    /// Optional external cancellation flag. When set to `true`, the `QuickJS`
+    /// interrupt handler breaks out of any running synchronous guest code and
+    /// [`exec`](fn.exec.html) returns [`Error::Sandbox`] with a
+    /// "cancelled" message. Without this, a tight `while (true) {}` loop
+    /// blocks inside native `ctx.eval` and cannot be preempted by tokio's
+    /// task-abort mechanism — the interrupt handler is the only way in.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ExecOptions {
     fn default() -> Self {
         Self {
             timeout: DEFAULT_GUEST_TIMEOUT,
+            cancel: None,
         }
     }
 }
@@ -259,16 +285,30 @@ pub fn compile_ts(src: &str) -> Result<String> {
 
 /// Compile and run `src` in a fresh `QuickJS` runtime.
 ///
-/// The wall-clock timeout is cooperative: it bounds awaited native tool
-/// calls, but a *synchronous* infinite loop (e.g. `while (true) {}`) blocks
-/// inside `ctx.eval` and cannot be interrupted, because `rquickjs` 0.9
-/// exposes no safe interrupt-handler or memory-limit API and this crate
-/// forbids `unsafe`. `print` output and the returned value are still bounded
-/// (see [`MAX_LOG_BYTES`] and [`js_to_json`]).
+/// Execution is bounded on two fronts:
+///
+/// - **Memory & stack** — `JS_SetMemoryLimit` and `JS_SetMaxStackSize` cap
+///   the guest heap and call depth so a runaway allocation or deep recursion
+///   aborts with a JS exception instead of exhausting the host.
+///
+/// - **Time** — the `QuickJS` interrupt handler (installed via
+///   `set_interrupt_handler`) checks `Instant::now()` against `opts.timeout`
+///   on every interpreter tick. When the deadline is exceeded it returns
+///   *abort*, breaking out of *synchronous* tight loops (`while (true) {}`)
+///   that the cooperative `tokio::time::timeout` cannot preempt because they
+///   never reach an `.await` point. The tokio timeout remains as a backstop
+///   for the async-await path (guest code blocked inside a native tool).
+///
+/// If `opts.cancel` is provided, setting it to `true` causes the same
+/// interrupt path and surfaces a distinct "cancelled" error.
+///
+/// `print` output and the returned value are always bounded (see
+/// [`MAX_LOG_BYTES`] and [`js_to_json`]).
 ///
 /// # Errors
-/// Returns [`Error::Sandbox`] for compile failures, guest timeouts, guest
-/// exceptions, or tool errors that propagate as thrown exceptions.
+/// Returns [`Error::Sandbox`] for compile failures, guest timeouts,
+/// cancellation, guest exceptions, or tool errors that propagate as thrown
+/// exceptions.
 pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecResult> {
     let js = compile_ts(src)?;
 
@@ -276,6 +316,44 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     let actx = AsyncContext::full(&rt)
         .await
         .map_err(|e| Error::Sandbox(format!("context: {e}")))?;
+
+    // Bound guest memory and stack so a runaway allocation or deep recursion
+    // throws a catchable JS exception instead of exhausting the host.
+    rt.set_memory_limit(GUEST_MEMORY_LIMIT).await;
+    rt.set_max_stack_size(GUEST_MAX_STACK).await;
+
+    // Shared interrupt state. The QuickJS interrupt handler — called
+    // periodically by the interpreter — checks the deadline and the optional
+    // external cancel flag on every tick and returns `true` (abort) when
+    // either fires. This is the only mechanism that can break a synchronous
+    // tight loop blocking inside native `ctx.eval`; tokio's task abort and
+    // `tokio::time::timeout` cannot preempt it because the loop never reaches
+    // an `.await` point. Checking `Instant::now()` in the handler avoids any
+    // dependency on a background task (which couldn't run on the same thread
+    // the loop is blocking).
+    let intr = Arc::new(AtomicU8::new(INTR_RUNNING));
+    let deadline = Instant::now() + opts.timeout;
+    let cancel = opts.cancel.clone();
+    {
+        let intr = intr.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            if intr.load(Ordering::Relaxed) != INTR_RUNNING {
+                return true;
+            }
+            if let Some(c) = &cancel {
+                if c.load(Ordering::Relaxed) {
+                    intr.store(INTR_CANCELLED, Ordering::Relaxed);
+                    return true;
+                }
+            }
+            if Instant::now() >= deadline {
+                intr.store(INTR_TIMEOUT, Ordering::Relaxed);
+                return true;
+            }
+            false
+        })))
+        .await;
+    }
 
     let tools = Arc::new(BuiltinTools::with_tool_cb(
         ctx.root.clone(),
@@ -314,8 +392,22 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     })
     .await;
 
+    let reason = intr.load(Ordering::Relaxed);
     match outcome {
-        Ok(inner) => inner,
+        Ok(inner) => match inner {
+            Ok(r) => Ok(r),
+            Err(e) => match reason {
+                INTR_TIMEOUT => Err(Error::Sandbox(format!(
+                    "guest timeout after {}ms",
+                    opts.timeout.as_millis()
+                ))),
+                INTR_CANCELLED => Err(Error::Sandbox("guest cancelled".to_string())),
+                _ => Err(e),
+            },
+        },
+        // Tokio timeout — the async-await path (guest blocked in a native
+        // tool) never reaches an interpreter tick, so the interrupt handler
+        // can't fire; the outer `tokio::time::timeout` is the backstop.
         Err(_) => Err(Error::Sandbox(format!(
             "guest timeout after {}ms",
             opts.timeout.as_millis()
@@ -710,5 +802,147 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.value, json!("é"));
+    }
+
+    // ── Interrupt handler: deadlines & cancellation ──
+
+    #[tokio::test]
+    async fn exec_sync_infinite_loop_times_out() {
+        // `while (true) {}` blocks inside native `ctx.eval` and never reaches
+        // an `.await` — the interrupt handler is the only thing that can
+        // break it.
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            timeout: Duration::from_millis(500),
+            cancel: None,
+        };
+        let err = exec("while (true) {}", &ctx(dir.path()), &opts)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Sandbox(ref m) if m.contains("timeout")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_cpu_heavy_loop_times_out() {
+        // A CPU-bound loop that does real work each iteration must also be
+        // interrupted — the handler fires on interpreter ticks, not just
+        // idle loops.
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            timeout: Duration::from_millis(500),
+            cancel: None,
+        };
+        let err = exec(
+            "let x = 0; while (true) { x = (x + 1) * 3; } return x;",
+            &ctx(dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Sandbox(ref m) if m.contains("timeout")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_sync_loop_can_be_cancelled() {
+        // Setting the external cancel flag must interrupt a synchronous tight
+        // loop and surface a distinct "cancelled" error (not "timeout").
+        //
+        // The guest loop blocks inside native `ctx.eval` on this thread, so
+        // the cancel flag must be set from a *separate* spawned task; the
+        // QuickJS interrupt handler then sees it on the next interpreter tick
+        // and aborts. A single-threaded runtime would deadlock here.
+        let dir = tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let opts = ExecOptions {
+            timeout: Duration::from_secs(30),
+            cancel: Some(cancel.clone()),
+        };
+
+        tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+
+        let err = exec("while (true) {}", &ctx(dir.path()), &opts)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Sandbox(ref m) if m.contains("cancelled")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_works_after_cancelled_exec() {
+        // After a cancelled exec, a fresh exec on a new runtime must work —
+        // the interrupt did not leave the host in a bad state.
+        let dir = tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let exec_ctx = ctx(dir.path());
+        let opts = ExecOptions {
+            timeout: Duration::from_secs(30),
+            cancel: Some(cancel.clone()),
+        };
+
+        tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        let _ = exec("while (true) {}", &exec_ctx, &opts).await;
+
+        let res = exec("return 42;", &exec_ctx, &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(res.value, json!(42));
+    }
+
+    #[tokio::test]
+    async fn exec_memory_limit_aborts_unbounded_allocation() {
+        // Growing an array without bound must hit the memory limit and throw
+        // a JS exception (surfaced as Sandbox) rather than exhausting the host.
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            timeout: Duration::from_secs(5),
+            cancel: None,
+        };
+        let err = exec(
+            "const a = []; while (true) a.push('x'.repeat(1024)); return a.length;",
+            &ctx(dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Sandbox(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn exec_deep_recursion_hits_stack_limit() {
+        // Unbounded recursion must hit the stack-size limit and throw rather
+        // than segfaulting the host.
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            timeout: Duration::from_secs(5),
+            cancel: None,
+        };
+        let err = exec(
+            "function f() { return f(); } return f();",
+            &ctx(dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Sandbox(_)), "{err:?}");
     }
 }

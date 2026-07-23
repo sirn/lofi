@@ -22,7 +22,7 @@ impl Agent {
             if tx.is_closed() {
                 return Ok(());
             }
-            let finished = match self.run_once_inner(&mut messages, Some(&tx), None, None, None).await {
+            let finished = match self.run_once_inner(&mut messages, Some(&tx), None, None, None, None).await {
                 Ok(f) => f,
                 // A gone receiver is a graceful cancellation, not a provider
                 // error: stop the run cleanly instead of surfacing it.
@@ -63,6 +63,7 @@ impl Agent {
         tx: Sender<AgentEvent>,
         commit: Option<&SessionCommit>,
         continuation: bool,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
         let prev_len = messages.len();
         if continuation {
@@ -139,7 +140,7 @@ impl Agent {
                 break;
             }
             match self
-                .run_once_inner(&mut *messages, Some(&tx), Some(&mut stats), recall.clone(), result.clone())
+                .run_once_inner(&mut *messages, Some(&tx), Some(&mut stats), recall.clone(), result.clone(), cancel.as_ref())
                 .await
             {
                 Ok(true) => {
@@ -344,8 +345,9 @@ impl Agent {
         messages: &mut Vec<Message>,
         tx: Sender<AgentEvent>,
         commit: Option<&SessionCommit>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, commit, true).await
+        self.run_continuation(messages, String::new(), tx, commit, true, cancel).await
     }
 
     /// A single provider round-trip: stream one assistant turn, append it to
@@ -360,7 +362,7 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None, None, None).await
+        self.run_once_inner(messages, None, None, None, None, None).await
     }
 
     /// Shared core of [`run_once`] with an optional event sender.
@@ -381,6 +383,7 @@ impl Agent {
         mut stats: Option<&mut TurnStats>,
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
+        cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<bool> {
         let schema = exec_tool_schema();
         // Effective output limit: an explicit agent override wins over the
@@ -595,7 +598,7 @@ impl Agent {
             return Ok(true);
         }
 
-        let results = self.execute_tools(&tool_uses, tx, stats, recall.clone(), result.clone()).await?;
+        let results = self.execute_tools(&tool_uses, tx, stats, recall.clone(), result.clone(), cancel).await?;
 
         // Tool results travel under the dedicated Tool role: each provider
         // converter emits them from its Role::Tool arm (Chat Completions
@@ -621,6 +624,7 @@ impl Agent {
         mut stats: Option<&mut TurnStats>,
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
+        cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<Vec<ContentBlock>> {
         let agent_fn = self.make_agent_fn();
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
@@ -778,7 +782,15 @@ impl Agent {
                 bash_env: self.bash_env.clone(),
                 skills_dir: self.skills_dir.clone(),
             };
-            let outcome = exec(&code, &exec_ctx, &ExecOptions::default()).await;
+            let outcome = exec(
+                &code,
+                &exec_ctx,
+                &ExecOptions {
+                    timeout: lofi_code::DEFAULT_GUEST_TIMEOUT,
+                    cancel: cancel.cloned(),
+                },
+            )
+            .await;
             // Drain the native tool calls that completed inside this exec into
             // the turn stats, so they are persisted with the turn.
             let captured = lock(&native_completed).drain(..).collect::<Vec<_>>();

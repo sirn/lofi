@@ -159,12 +159,14 @@ pub(super) fn handle_event(
             });
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
             let handle = tokio::task::spawn_local(async move {
                 let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
                 // The engine owns the timers and cost, and writes the turn's
                 // events (messages + timings + turn-end) to the transcript.
                 let result = agent_clone
-                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false)
+                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone))
                     .await;
                 if let Ok(mut g) = history.lock() {
                     *g = messages;
@@ -173,7 +175,7 @@ pub(super) fn handle_event(
                     let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
                 }
             });
-            *current_run = Some(RunHandle { handle, rx });
+            *current_run = Some(RunHandle { handle, rx, cancel });
             app.run = Some(0);
             app.run_start = Some(Instant::now());
             app.pinned = true;
@@ -287,10 +289,12 @@ pub(super) fn spawn_prompt(
     });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
         let result = agent_clone
-            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false)
+            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone))
             .await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
@@ -299,7 +303,7 @@ pub(super) fn spawn_prompt(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx });
+    *current_run = Some(RunHandle { handle, rx, cancel });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
@@ -322,9 +326,11 @@ pub(super) fn spawn_continue(
     });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref()).await;
+        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref(), Some(cancel_clone)).await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
         }
@@ -332,7 +338,7 @@ pub(super) fn spawn_continue(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx });
+    *current_run = Some(RunHandle { handle, rx, cancel });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
@@ -340,6 +346,10 @@ pub(super) fn spawn_continue(
 
 pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
     if let Some(r) = current_run.take() {
+        // Signal the QuickJS interrupt handler to break any synchronous
+        // guest loop *before* aborting the task — `handle.abort()` alone
+        // cannot preempt code blocked inside native `ctx.eval`.
+        r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         r.handle.abort();
         if let Some(turn) = app.turns.last_mut() {
             turn.blocks.push(Block::Error("cancelled".to_string()));
