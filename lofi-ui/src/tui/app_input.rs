@@ -279,10 +279,13 @@ impl App {
             }
             // Degenerate (whole-line) raw — no per-char map. The display
             // (e.g. a table grid) doesn't map 1:1 to the source, so yank
-            // returns the full source line.
+            // returns the full source line. A table border row carries an
+            // empty source — it has no markdown to yank, so return nothing
+            // rather than the rendered box-drawing characters.
             if !rl.source.is_empty() {
                 return Some(rl.source.to_string());
             }
+            return None;
         }
         let s = self.log_lines.get(rel)?;
         let n = s.chars().count();
