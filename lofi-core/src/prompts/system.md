@@ -76,6 +76,8 @@ When a session grows long, lofi folds the older history into a structured summar
 
 `lofi.skills() -> { ok, skills }` lists available skills. Each entry is `{ name, description, source }` where `source` is `"global"` (from `<config_dir>/skills/`) or `"workspace"` (from `<root>/.lofi/skills/`).
 
-`lofi.skill(name) -> { ok, name, source, content }` reads a single skill's full content. When both sources define the same name, the workspace version wins.
+`lofi.skill(name) -> { ok, name, source, file, content }` reads a single skill's `SKILL.md`. When both sources define the same name, the workspace version wins.
 
-Skills are directories containing a `SKILL.md` file. The skill name is the directory path relative to the skills root, so `skills/git-workflow/SKILL.md` has name `git-workflow` and `skills/git-workflow/rebase/SKILL.md` has name `git-workflow/rebase`. The name may contain `/` as a namespace separator. Skills provide reusable instructions or domain knowledge you can load on demand. Use `lofi.skills()` to discover what is available, then `lofi.skill(name)` to read the one you need.
+`lofi.skill_file(name, file) -> { ok, name, source, file, content }` reads a companion file within a skill's directory (e.g. `examples/branching.md`). This is the only way to read files under global skills, which live outside the workspace root and are therefore unreachable via `lofi.read`.
+
+Skills are directories containing a `SKILL.md` file. The skill name is the directory path relative to the skills root, so `skills/git-workflow/SKILL.md` has name `git-workflow` and `skills/git-workflow/rebase/SKILL.md` has name `git-workflow/rebase`. The name may contain `/` as a namespace separator. Skills may also carry companion files alongside `SKILL.md` (examples, templates, etc.). Skills provide reusable instructions or domain knowledge you can load on demand. Use `lofi.skills()` to discover what is available, then `lofi.skill(name)` to read the one you need.

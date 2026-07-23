@@ -15,6 +15,10 @@
 //! sources define the same name, the per-workspace version wins (it is more
 //! specific). The description is the first non-heading non-empty line of
 //! `SKILL.md`.
+//!
+//! Symlinks are followed — skill directories or `SKILL.md` files may be
+//! symlinks (e.g. referencing nix store paths). The walk is bounded by depth
+//! and visited-entry limits to prevent infinite loops.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -46,8 +50,8 @@ impl BuiltinTools {
         Ok(json!({ "ok": true, "skills": entries }))
     }
 
-    /// Read a single skill by name. When both sources define the same name,
-    /// the per-workspace version is returned.
+    /// Read a single skill's `SKILL.md` by name. When both sources define the
+    /// same name, the per-workspace version is returned.
     ///
     /// The name may contain `/` as a namespace separator (e.g.
     /// `git-workflow/rebase`). `..` and absolute paths are rejected.
@@ -57,20 +61,76 @@ impl BuiltinTools {
     /// be read.
     #[allow(clippy::unused_async)]
     pub async fn skill(&self, name: &str) -> Result<Value> {
+        let (path, source) = self.resolve_skill_path(name)?;
+        Self::read_skill_file(&path, name, SKILL_FILE, source)
+    }
+
+    /// Read a companion file within a skill's directory.
+    ///
+    /// `file` is a path relative to the skill directory (e.g.
+    /// `examples/branching.md`). `..`, absolute paths, and backslashes are
+    /// rejected. This is the only way to read files under global skills,
+    /// which live outside the workspace root and are therefore unreachable
+    /// via `lofi.read`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] if the skill or file is not found, or the file
+    /// path is invalid.
+    #[allow(clippy::unused_async)]
+    pub async fn skill_file(&self, name: &str, file: &str) -> Result<Value> {
+        validate_skill_name(name)?;
+        validate_skill_file(file)?;
+
+        // Resolve the skill directory (not the SKILL.md file).
+        let (skill_dir, source) = self.resolve_skill_dir(name)?;
+        let file_path = skill_dir.join(file);
+        if !file_path.is_file() {
+            return Err(Error::Tool(format!(
+                "skill `{name}`: file `{file}` not found"
+            )));
+        }
+        Self::read_skill_file(&file_path, name, file, source)
+    }
+
+    /// Resolve a skill name to its `SKILL.md` path and source.
+    /// Workspace wins over global on name collision.
+    fn resolve_skill_path(&self, name: &str) -> Result<(PathBuf, &'static str)> {
         validate_skill_name(name)?;
 
         // Check per-workspace first (more specific).
         let ws_skills = self.root.join(".lofi").join("skills");
         let ws_path = ws_skills.join(name).join(SKILL_FILE);
         if ws_path.is_file() {
-            return Self::read_skill_file(&ws_path, name, "workspace");
+            return Ok((ws_path, "workspace"));
         }
 
         // Then global.
         if let Some(dir) = &self.skills_dir {
             let g_path = dir.join(name).join(SKILL_FILE);
             if g_path.is_file() {
-                return Self::read_skill_file(&g_path, name, "global");
+                return Ok((g_path, "global"));
+            }
+        }
+
+        Err(Error::Tool(format!(
+            "skill `{name}` not found"
+        )))
+    }
+
+    /// Resolve a skill name to its directory path and source.
+    fn resolve_skill_dir(&self, name: &str) -> Result<(PathBuf, &'static str)> {
+        validate_skill_name(name)?;
+
+        let ws_skills = self.root.join(".lofi").join("skills");
+        let ws_dir = ws_skills.join(name);
+        if ws_dir.is_dir() && ws_dir.join(SKILL_FILE).is_file() {
+            return Ok((ws_dir, "workspace"));
+        }
+
+        if let Some(dir) = &self.skills_dir {
+            let g_dir = dir.join(name);
+            if g_dir.is_dir() && g_dir.join(SKILL_FILE).is_file() {
+                return Ok((g_dir, "global"));
             }
         }
 
@@ -114,7 +174,7 @@ impl BuiltinTools {
 
     /// Recursively walk `dir` for `<sub>/SKILL.md` files, inserting into `map`.
     /// The skill name is the directory path relative to `dir`. Symlinks are
-    /// skipped. The walk is bounded by [`MAX_WALK_DEPTH`] and
+    /// followed. The walk is bounded by [`MAX_WALK_DEPTH`] and
     /// [`MAX_WALK_VISITED`].
     fn walk_skills(
         dir: &Path,
@@ -153,16 +213,11 @@ impl BuiltinTools {
                 Ok(e) => e.path(),
                 Err(_) => continue,
             };
-            // Skip symlinks.
-            if std::fs::symlink_metadata(&path)
-                .is_ok_and(|m| m.file_type().is_symlink())
-            {
-                continue;
-            }
             if !path.is_dir() {
                 continue;
             }
             // Check if this directory is a skill (contains SKILL.md).
+            // Symlinks to SKILL.md or to the directory itself are followed.
             let skill_file = path.join(SKILL_FILE);
             if skill_file.is_file() {
                 let name = path
@@ -182,10 +237,11 @@ impl BuiltinTools {
         Ok(())
     }
 
-    /// Read a skill file and return the structured result.
+    /// Read a file within a skill directory and return the structured result.
     fn read_skill_file(
         path: &Path,
         name: &str,
+        file: &str,
         source: &str,
     ) -> Result<Value> {
         let content = std::fs::read_to_string(path).map_err(|e| {
@@ -195,6 +251,7 @@ impl BuiltinTools {
             "ok": true,
             "name": name,
             "source": source,
+            "file": file,
             "content": content,
         }))
     }
@@ -216,6 +273,27 @@ fn validate_skill_name(name: &str) -> Result<()> {
         if component == ".." {
             return Err(Error::Tool(format!(
                 "skill: invalid name `{name}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a file path within a skill directory: non-empty, no `..`, no
+/// leading `/`, no backslash. `/` is allowed for subdirectories.
+fn validate_skill_file(file: &str) -> Result<()> {
+    if file.is_empty() {
+        return Err(Error::Tool("skill: file path must not be empty".into()));
+    }
+    if file.starts_with('/') || file.contains('\\') {
+        return Err(Error::Tool(format!(
+            "skill: invalid file path `{file}`"
+        )));
+    }
+    for component in file.split('/') {
+        if component == ".." {
+            return Err(Error::Tool(format!(
+                "skill: invalid file path `{file}`"
             )));
         }
     }
@@ -358,6 +436,7 @@ mod tests {
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["name"], json!("testing"));
         assert_eq!(v["source"], json!("global"));
+        assert_eq!(v["file"], json!("SKILL.md"));
         assert!(v["content"].as_str().unwrap().contains("Run cargo test"));
     }
 
@@ -434,6 +513,100 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid name"));
+    }
+
+    #[tokio::test]
+    async fn skill_file_reads_companion() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        make_skill(skills.path(), "git-workflow", "# Git\n\nWorkflow.\n");
+        std::fs::create_dir_all(skills.path().join("git-workflow").join("examples"))
+            .unwrap();
+        std::fs::write(
+            skills.path().join("git-workflow").join("examples").join("branching.md"),
+            "Example branching strategy.\n",
+        )
+        .unwrap();
+        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skill_file("git-workflow", "examples/branching.md")
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["name"], json!("git-workflow"));
+        assert_eq!(v["file"], json!("examples/branching.md"));
+        assert_eq!(v["source"], json!("global"));
+        assert!(v["content"].as_str().unwrap().contains("Example branching"));
+    }
+
+    #[tokio::test]
+    async fn skill_file_not_found() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        make_skill(skills.path(), "git-workflow", "# Git\n");
+        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skill_file("git-workflow", "missing.txt")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn skill_file_rejects_dotdot() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        make_skill(skills.path(), "git-workflow", "# Git\n");
+        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skill_file("git-workflow", "../../../etc/passwd")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid file path"));
+    }
+
+    #[tokio::test]
+    async fn skill_file_rejects_leading_slash() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        make_skill(skills.path(), "git-workflow", "# Git\n");
+        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skill_file("git-workflow", "/etc/passwd")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid file path"));
+    }
+
+    #[tokio::test]
+    async fn skills_follows_symlinked_dir() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        let real = tempdir().unwrap();
+        // Create a real skill directory, then symlink it into skills/.
+        std::fs::write(real.path().join(SKILL_FILE), "Symlinked skill.\n").unwrap();
+        std::os::unix::fs::symlink(real.path(), skills.path().join("linked"))
+            .unwrap();
+        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skills()
+            .await
+            .unwrap();
+        let skills_arr = v["skills"].as_array().unwrap();
+        assert_eq!(skills_arr.len(), 1);
+        assert_eq!(skills_arr[0]["name"], json!("linked"));
+        assert_eq!(skills_arr[0]["description"], json!("Symlinked skill."));
+    }
+
+    #[tokio::test]
+    async fn skills_follows_symlinked_skill_file() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        let real_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(&real_file, "Symlinked SKILL.md.\n").unwrap();
+        std::fs::create_dir_all(skills.path().join("linked-file")).unwrap();
+        std::os::unix::fs::symlink(real_file.path(), skills.path().join("linked-file").join(SKILL_FILE))
+            .unwrap();
+        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
+            .skill("linked-file")
+            .await
+            .unwrap();
+        assert!(v["content"].as_str().unwrap().contains("Symlinked SKILL.md"));
     }
 
     #[tokio::test]

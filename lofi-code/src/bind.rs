@@ -436,6 +436,33 @@ fn bind_skills_tools<'js>(
         )?,
     )?;
 
+    let t3 = t.clone();
+    lofi.set(
+        "skill_file",
+        Function::new(
+            ctx.clone(),
+            Async(move |name: String, file: String| {
+                let t = t3.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "skill_file".into(),
+                        args: cap_first_line(&format!("{name}: {file}"), 120),
+                    });
+                    let res = t.skill_file(&name, &file).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
     Ok(())
 }
 
