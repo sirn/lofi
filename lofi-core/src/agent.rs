@@ -12,9 +12,10 @@
 //! iteration cap. Runaway loops are bounded by **per-call timeouts**: each
 //! provider stream is wrapped in [`tokio::time::timeout`] with
 //! [`DEFAULT_STREAM_TIMEOUT`], and each `exec` call inherits
-//! [`lofi_code::DEFAULT_GUEST_TIMEOUT`] via [`lofi_code::ExecOptions`].
-//! These bound provider waits and awaited native-tool calls; a *synchronous*
-//! guest loop (see [`lofi_code`]) is not interruptible and is not covered.
+//! [`lofi_code::DEFAULT_GUEST_TIMEOUT`] via [`lofi_code::ExecOptions`] as a
+//! *CPU-time* budget. A synchronous guest loop (see [`lofi_code`]) is
+//! interrupted by the `QuickJS` interrupt handler when the budget is
+//! exceeded; awaited tool calls do not consume it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

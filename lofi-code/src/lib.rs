@@ -77,6 +77,13 @@ const INTR_RUNNING: u8 = 0;
 const INTR_TIMEOUT: u8 = 1;
 const INTR_CANCELLED: u8 = 2;
 
+/// Gap between interrupt-handler calls that distinguishes continuous
+/// interpreter execution (microseconds) from a suspended `await` (>= a
+/// tool round-trip). Gaps below this are accumulated as CPU time; gaps at
+/// or above it reset the accumulator, so long-running awaited tools don't
+/// count toward the CPU budget.
+const SUSPEND_THRESHOLD: Duration = Duration::from_millis(1);
+
 /// Sentinel object key used by the IIFE wrapper to surface an uncaught guest
 /// exception as a resolved (not rejected) promise.
 const SANDBOX_ERROR_KEY: &str = "__lofi_sandbox_error__";
@@ -179,7 +186,9 @@ impl std::fmt::Debug for ExecCtx {
 /// Per-call options.
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
-    /// Wall-clock budget for the guest.
+    /// Maximum *CPU time* (not wall-clock) for synchronous guest code.
+    /// Awaited tool calls (`lofi.bash`, `lofi.agent`, …) do not consume
+    /// this budget — only pure JS computation does. See [`exec`](fn.exec.html).
     pub timeout: Duration,
     /// Optional external cancellation flag. When set to `true`, the `QuickJS`
     /// interrupt handler breaks out of any running synchronous guest code and
@@ -285,28 +294,38 @@ pub fn compile_ts(src: &str) -> Result<String> {
 
 /// Compile and run `src` in a fresh `QuickJS` runtime.
 ///
-/// Execution is bounded on two fronts:
+/// Execution is bounded on three fronts:
 ///
 /// - **Memory & stack** — `JS_SetMemoryLimit` and `JS_SetMaxStackSize` cap
 ///   the guest heap and call depth so a runaway allocation or deep recursion
 ///   aborts with a JS exception instead of exhausting the host.
 ///
-/// - **Time** — the `QuickJS` interrupt handler (installed via
-///   `set_interrupt_handler`) checks `Instant::now()` against `opts.timeout`
-///   on every interpreter tick. When the deadline is exceeded it returns
-///   *abort*, breaking out of *synchronous* tight loops (`while (true) {}`)
-///   that the cooperative `tokio::time::timeout` cannot preempt because they
-///   never reach an `.await` point. The tokio timeout remains as a backstop
-///   for the async-await path (guest code blocked inside a native tool).
+/// - **CPU budget** — the `QuickJS` interrupt handler (installed via
+///   `set_interrupt_handler`) is called on every interpreter tick. It
+///   measures *CPU time*, not wall-clock time: gaps between handler calls
+///   that are shorter than [`SUSPEND_THRESHOLD`] (microseconds during
+///   continuous execution) are accumulated; larger gaps (the interpreter
+///   was suspended inside an `await`ed tool) reset the accumulator. When
+///   the accumulated CPU time exceeds `opts.timeout` the handler returns
+///   *abort*, breaking out of synchronous tight loops (`while (true) {}`)
+///   that the cooperative `tokio` runtime cannot preempt.
 ///
-/// If `opts.cancel` is provided, setting it to `true` causes the same
-/// interrupt path and surfaces a distinct "cancelled" error.
+///   This means a long-running awaited tool — a subagent that takes hours,
+///   a slow `bash` command — does *not* consume the budget. Only pure
+///   synchronous guest code does. Individual tools carry their own
+///   timeouts; the exec-level CPU budget is a backstop for loops, not a
+///   wall-clock deadline on the whole call.
+///
+/// - **Cancellation** — if `opts.cancel` is provided, setting it to `true`
+///   causes the same interrupt path and surfaces a distinct "cancelled"
+///   error. This is how the UI's Ctrl+C breaks a sync loop that `handle
+///   .abort()` alone cannot preempt.
 ///
 /// `print` output and the returned value are always bounded (see
 /// [`MAX_LOG_BYTES`] and [`js_to_json`]).
 ///
 /// # Errors
-/// Returns [`Error::Sandbox`] for compile failures, guest timeouts,
+/// Returns [`Error::Sandbox`] for compile failures, CPU-budget exhaustion,
 /// cancellation, guest exceptions, or tool errors that propagate as thrown
 /// exceptions.
 pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecResult> {
@@ -322,20 +341,22 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     rt.set_memory_limit(GUEST_MEMORY_LIMIT).await;
     rt.set_max_stack_size(GUEST_MAX_STACK).await;
 
-    // Shared interrupt state. The QuickJS interrupt handler — called
-    // periodically by the interpreter — checks the deadline and the optional
-    // external cancel flag on every tick and returns `true` (abort) when
-    // either fires. This is the only mechanism that can break a synchronous
-    // tight loop blocking inside native `ctx.eval`; tokio's task abort and
-    // `tokio::time::timeout` cannot preempt it because the loop never reaches
-    // an `.await` point. Checking `Instant::now()` in the handler avoids any
-    // dependency on a background task (which couldn't run on the same thread
-    // the loop is blocking).
+    // CPU-budget interrupt handler. QuickJS calls the handler every ~256
+    // bytecode instructions. During continuous execution the gap between
+    // calls is microseconds; when the guest `await`s a tool the interpreter
+    // suspends and the gap is the tool's duration (milliseconds to hours).
+    // We accumulate only the sub-threshold gaps as CPU time and reset on
+    // larger ones, so long-running awaited tools don't count toward the
+    // budget. This is the only mechanism that can break a synchronous tight
+    // loop blocking inside native `ctx.eval` — tokio's task abort cannot
+    // preempt it because the loop never reaches an `.await` point.
     let intr = Arc::new(AtomicU8::new(INTR_RUNNING));
-    let deadline = Instant::now() + opts.timeout;
+    let cpu_budget = opts.timeout;
     let cancel = opts.cancel.clone();
     {
         let intr = intr.clone();
+        let mut last_tick = Instant::now();
+        let mut cpu_accumulated = Duration::ZERO;
         rt.set_interrupt_handler(Some(Box::new(move || {
             if intr.load(Ordering::Relaxed) != INTR_RUNNING {
                 return true;
@@ -346,7 +367,15 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                     return true;
                 }
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            let delta = now.saturating_duration_since(last_tick);
+            last_tick = now;
+            if delta < SUSPEND_THRESHOLD {
+                cpu_accumulated += delta;
+            } else {
+                cpu_accumulated = Duration::ZERO;
+            }
+            if cpu_accumulated >= cpu_budget {
                 intr.store(INTR_TIMEOUT, Ordering::Relaxed);
                 return true;
             }
@@ -368,7 +397,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     let skills_dir = ctx.skills_dir.clone();
     let logs = Arc::new(Mutex::new(String::new()));
 
-    let outcome = tokio::time::timeout(opts.timeout, async {
+    let outcome = async {
         async_with!(&actx => |ctx| {
             install_globals(&ctx, &tools, &strings, agent, recall, result, skills_dir, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
@@ -389,29 +418,20 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
             })
         })
         .await
-    })
+    }
     .await;
 
     let reason = intr.load(Ordering::Relaxed);
     match outcome {
-        Ok(inner) => match inner {
-            Ok(r) => Ok(r),
-            Err(e) => match reason {
-                INTR_TIMEOUT => Err(Error::Sandbox(format!(
-                    "guest timeout after {}ms",
-                    opts.timeout.as_millis()
-                ))),
-                INTR_CANCELLED => Err(Error::Sandbox("guest cancelled".to_string())),
-                _ => Err(e),
-            },
+        Ok(r) => Ok(r),
+        Err(e) => match reason {
+            INTR_TIMEOUT => Err(Error::Sandbox(format!(
+                "guest CPU budget exceeded ({}ms)",
+                opts.timeout.as_millis()
+            ))),
+            INTR_CANCELLED => Err(Error::Sandbox("guest cancelled".to_string())),
+            _ => Err(e),
         },
-        // Tokio timeout — the async-await path (guest blocked in a native
-        // tool) never reaches an interpreter tick, so the interrupt handler
-        // can't fire; the outer `tokio::time::timeout` is the backstop.
-        Err(_) => Err(Error::Sandbox(format!(
-            "guest timeout after {}ms",
-            opts.timeout.as_millis()
-        ))),
     }
 }
 
@@ -810,7 +830,7 @@ mod tests {
     async fn exec_sync_infinite_loop_times_out() {
         // `while (true) {}` blocks inside native `ctx.eval` and never reaches
         // an `.await` — the interrupt handler is the only thing that can
-        // break it.
+        // break it. The CPU budget accumulates and fires well under 1s.
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),
@@ -820,7 +840,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, Error::Sandbox(ref m) if m.contains("timeout")),
+            matches!(err, Error::Sandbox(ref m) if m.contains("CPU budget")),
             "{err:?}"
         );
     }
@@ -843,7 +863,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(err, Error::Sandbox(ref m) if m.contains("timeout")),
+            matches!(err, Error::Sandbox(ref m) if m.contains("CPU budget")),
             "{err:?}"
         );
     }
@@ -944,5 +964,27 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, Error::Sandbox(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn exec_awaited_tool_does_not_consume_cpu_budget() {
+        // A slow `bash` call (sleep 1s) repeated many times must not accumulate
+        // CPU budget — the interpreter is suspended during each `await`, so
+        // the gap resets the accumulator. With a 500ms CPU budget and 3 rounds
+        // of 1s sleep (3s wall-clock), this would fail if the budget were
+        // wall-clock but succeeds because only JS computation counts.
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            timeout: Duration::from_millis(500),
+            cancel: None,
+        };
+        let src = r#"
+            for (let i = 0; i < 3; i++) {
+                await lofi.bash({ cmd: "sleep 1" });
+            }
+            return "done";
+        "#;
+        let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+        assert_eq!(res.value, json!("done"));
     }
 }
