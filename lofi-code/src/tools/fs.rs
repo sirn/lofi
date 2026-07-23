@@ -148,13 +148,12 @@ pub(super) fn resolve_for_read(
 }
 
 /// Reject `path` if it exists but is not a regular file (FIFO, socket,
-/// device) or is a symlink. Rejecting symlinks with no-follow semantics stops
-/// a dangling leaf symlink whose target escapes the workspace from being
-/// followed by a later `write`. A nonexistent target is allowed so `write`
-/// can create new files. `symlink_metadata` never blocks.
+/// device). Called on a canonicalized path (symlinks already resolved by
+/// `resolve_for_read` or `resolve_under`), so no symlink check is needed.
+/// A nonexistent target is allowed so `write` can create new files.
 pub(super) fn reject_non_regular(label: &str, path: &Path) -> Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() || !meta.is_file() {
+        if !meta.is_file() {
             return Err(Error::Tool(format!("{label}: not a regular file")));
         }
     }
@@ -175,8 +174,9 @@ pub(super) fn reject_symlink_leaf(root: &Path, p: &str, label: &str) -> Result<(
 
 /// Recursively collect files under `dir`.
 ///
-/// Symlinks are skipped so a link pointing outside the workspace root can't
-/// smuggle files into `find`/`grep` results.
+/// Symlinks are followed (via `metadata`) so symlinked files and directories
+/// appear in results; broken symlinks are skipped. The canonicalization + root
+/// check in `resolve_for_read` is the security boundary for path escapes.
 /// Walk `dir` recursively, collecting regular-file paths into `out`.
 /// Every `read_dir` entry (files, directories, skipped specials) increments
 /// `visited`, and the traversal stops at `max_visited` entries so a tree of
@@ -198,10 +198,12 @@ pub(super) fn walk_files_capped(
         }
         *visited += 1;
         let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            continue;
-        }
+        // Follow symlinks via std::fs::metadata (DirEntry::metadata does
+        // not follow symlinks on Unix). Broken symlinks are skipped.
+        let ft = match std::fs::metadata(entry.path()) {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
         if ft.is_dir() {
             if walk_files_capped(&entry.path(), out, visited, max_visited)? {
                 return Ok(true);
@@ -246,10 +248,12 @@ pub(super) fn find_walk(
         }
         *visited += 1;
         let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            continue;
-        }
+        // Follow symlinks via std::fs::metadata (DirEntry::metadata does
+        // not follow symlinks on Unix). Broken symlinks are skipped.
+        let ft = match std::fs::metadata(entry.path()) {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
         let path = entry.path();
         if ft.is_dir() {
             match find_walk(&path, root, matcher, hits, max_hits, visited, max_visited)? {

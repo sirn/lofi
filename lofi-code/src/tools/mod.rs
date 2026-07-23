@@ -346,6 +346,32 @@ mod tests {
         assert!(!matches.contains(&"src/b.txt"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_follows_symlinked_file() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("real.rs"), "").unwrap();
+        symlink("real.rs", tools.root().join("link.rs")).unwrap();
+        let v = tools.find("**/*.rs", None).await.unwrap();
+        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        assert!(matches.contains(&"link.rs"), "matches: {matches:?}");
+        assert!(matches.contains(&"real.rs"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_follows_symlinked_dir() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        std::fs::create_dir_all(tools.root().join("realdir")).unwrap();
+        std::fs::write(tools.root().join("realdir/inner.rs"), "").unwrap();
+        symlink("realdir", tools.root().join("linkdir")).unwrap();
+        let v = tools.find("**/*.rs", None).await.unwrap();
+        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        assert!(matches.contains(&"linkdir/inner.rs"), "matches: {matches:?}");
+    }
+
     #[tokio::test]
     async fn grep_basic_and_case_insensitive() {
         let (_dir, tools) = tools();
@@ -407,15 +433,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn read_write_edit_reject_leaf_symlink() {
+    async fn read_follows_leaf_symlink() {
         use std::os::unix::fs::symlink;
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("real.txt"), "payload").unwrap();
-        // A valid in-workspace leaf symlink must be rejected (no-follow),
-        // not silently followed to its target.
+        // A valid in-workspace leaf symlink is followed by read.
         symlink("real.txt", tools.root().join("link.txt")).unwrap();
-        let err = tools.read("link.txt", None, None).await.unwrap_err();
-        assert!(err.to_string().contains("symlink"));
+        let v = tools.read("link.txt", None, None).await.unwrap();
+        assert_eq!(v["content"], json!("payload"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_edit_reject_leaf_symlink() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("real.txt"), "payload").unwrap();
+        // Write and edit must still reject leaf symlinks (no-follow) to
+        // prevent writing through a link to an unexpected target.
+        symlink("real.txt", tools.root().join("link.txt")).unwrap();
         let err = tools
             .write(json!({ "path": "link.txt", "text": "x" }))
             .await
