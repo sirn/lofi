@@ -2705,6 +2705,30 @@ fn footer_and_header_show_cost_and_usage() {
     assert!(!header.contains('$'), "header should not show cost: {header}");
 }
 
+#[test]
+fn footer_shows_session_cache_metrics() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "m".into(),
+        elapsed_ms: 0,
+        cost: 1.0,
+        usage: Usage {
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            cache_read_tokens: 800_000,
+            cache_write_tokens: 200_000,
+        },
+    });
+    let footer: String = a
+        .render_footer_left(120)
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref().to_string())
+        .collect();
+    assert!(footer.contains("cache ↑800k ↓200k"), "footer: {footer}");
+}
+
 /// With no model configured, submitting a prompt must not start a run;
 /// it re-surfaces the configuration hint on the prompt's turn instead.
 #[test]

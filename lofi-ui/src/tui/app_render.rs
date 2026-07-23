@@ -58,6 +58,14 @@ impl App {
                 compact_count(self.total_out)
             ));
         }
+        // Session-wide cache metrics: cumulative cache reads and writes.
+        if self.total_cache_read > 0 || self.total_cache_write > 0 {
+            segments.push(format!(
+                "cache ↑{} ↓{}",
+                compact_count(self.total_cache_read),
+                compact_count(self.total_cache_write)
+            ));
+        }
         // Context gauge: the latest turn's full prompt size (input + output +
         // cache read + cache write).
         // Cache tokens are included so the gauge reflects the real window usage

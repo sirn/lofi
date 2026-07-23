@@ -673,6 +673,10 @@ pub(crate) struct App {
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
+    /// Cumulative prompt-cache read tokens across the session.
+    total_cache_read: u64,
+    /// Cumulative prompt-cache write tokens across the session.
+    total_cache_write: u64,
     /// Accumulated USD cost across turns (engine-computed, fed by
     /// `RoundUsage` per round and folded by `TurnEnd`).
     cost: f64,

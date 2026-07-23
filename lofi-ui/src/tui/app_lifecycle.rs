@@ -33,6 +33,8 @@ impl App {
             branch_hint: None,
             total_in: 0,
             total_out: 0,
+            total_cache_read: 0,
+            total_cache_write: 0,
             run: None,
             run_start: None,
             retry: None,
@@ -170,6 +172,8 @@ impl App {
                 self.turn_has_round_usage = true;
                 self.total_in += usage.input_tokens;
                 self.total_out += usage.output_tokens;
+                self.total_cache_read += usage.cache_read_tokens;
+                self.total_cache_write += usage.cache_write_tokens;
                 self.status_usage = Some(usage);
                 return;
             }
@@ -185,6 +189,8 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
+                    self.total_cache_read += usage.cache_read_tokens;
+                    self.total_cache_write += usage.cache_write_tokens;
                     self.status_usage = Some(usage);
                 }
                 self.turn_cost = 0.0;
@@ -204,6 +210,8 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
+                    self.total_cache_read += usage.cache_read_tokens;
+                    self.total_cache_write += usage.cache_write_tokens;
                     self.status_usage = Some(usage);
                 }
                 self.turn_cost = 0.0;
@@ -222,6 +230,8 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
+                    self.total_cache_read += usage.cache_read_tokens;
+                    self.total_cache_write += usage.cache_write_tokens;
                 }
                 self.status_usage = Some(usage);
                 self.turn_cost = 0.0;

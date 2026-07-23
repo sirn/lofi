@@ -306,6 +306,8 @@ impl App {
                 self.cost = 0.0;
                 self.total_in = 0;
                 self.total_out = 0;
+                self.total_cache_read = 0;
+                self.total_cache_write = 0;
                 self.status_usage = None;
                 self.prev_ctx_tokens = None;
                 for ev in replay_session_events(&events) {
@@ -822,6 +824,8 @@ impl App {
         self.cost = 0.0;
         self.total_in = 0;
         self.total_out = 0;
+        self.total_cache_read = 0;
+        self.total_cache_write = 0;
         self.status_usage = None;
         self.prev_ctx_tokens = None;
         for ev in replay_session_events(&rolled_back) {
