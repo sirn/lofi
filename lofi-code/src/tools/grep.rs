@@ -1,5 +1,5 @@
 use super::{
-    format_size, parse_grep_args, resolve_under, walk_files_capped, BuiltinTools,
+    format_size, parse_grep_args, walk_files_capped, BuiltinTools,
     MAX_GREP_FILE_BYTES, MAX_GREP_OUTPUT_BYTES, MAX_GREP_ROWS, MAX_GREP_VISITED,
 };
 use lofi_error::{Error, Result};
@@ -24,8 +24,8 @@ impl BuiltinTools {
         let re = builder
             .build()
             .map_err(|e| Error::Tool(format!("invalid regex {re_src:?}: {e}")))?;
-        let base = resolve_under(&self.root, path.unwrap_or(""))?;
-        let root = self.root.clone();
+        let base = self.resolve_for_read(path.unwrap_or(""))?;
+        let root = self.root_for(&base).to_path_buf();
         let re_src_inner = re_src.clone();
         let (matches, oversize, unreadable) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, u64, u64)> {

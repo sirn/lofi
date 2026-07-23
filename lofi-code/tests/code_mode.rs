@@ -193,20 +193,20 @@ async fn exec_bash_read_pages_bash_log() {
         .unwrap();
     let out: &str = res.value.as_str().unwrap();
     assert!(out.contains("Full output:"), "got: {out}");
-    let basename = out
-        .split("lofi-bash-")
+    // Extract the absolute path from the notice: "Full output: /path/to/file.log. Use lofi.read"
+    let path = out
+        .split("Full output: ")
         .nth(1)
-        .and_then(|s| s.split('.').next())
-        .map(|s| format!("lofi-bash-{s}.log"))
-        .expect("notice should name a log file");
+        .and_then(|s| s.split(". Use lofi.read").next().map(|s| s.trim().to_string()))
+        .expect("notice should contain an absolute path");
     let src2 = format!(
-        "const r = await lofi.bash_read({basename:?}, {{ offset: 1, limit: 3 }}); return r;"
+        "const r = await lofi.read({path:?}, {{ offset: 1, limit: 3 }}); return r;"
     );
     let res2 = exec(&src2, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let s2: &str = res2.value["content"].as_str().unwrap();
-    assert!(s2.contains("output line number 1"), "first page should start at line 1: basename={basename:?} s2={s2}");
+    assert!(s2.contains("output line number 1"), "first page should start at line 1: path={path:?} s2={s2}");
 }
 
 #[tokio::test]

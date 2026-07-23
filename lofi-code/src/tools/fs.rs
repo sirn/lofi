@@ -88,6 +88,65 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+/// Resolve `p` for read-only operations, allowing absolute paths under
+/// any of `extra_roots` in addition to `primary_root`.
+///
+/// Relative/empty paths resolve under `primary_root` (via [`resolve_under`]).
+/// Absolute paths are canonicalized (existing prefix) and checked against
+/// `primary_root` and every `extra_root`. Symlinks are followed by
+/// canonicalization; the final `starts_with` check against the allowed roots
+/// is the security boundary.
+pub(super) fn resolve_for_read(
+    primary_root: &Path,
+    extra_roots: &[PathBuf],
+    p: &str,
+) -> Result<PathBuf> {
+    // Relative or empty: resolve under primary root (workspace).
+    if p.is_empty() || !Path::new(p).is_absolute() {
+        return resolve_under(primary_root, p);
+    }
+
+    // Absolute path: canonicalize (walking up to existing ancestor for
+    // non-existent tails) then check against all allowed roots.
+    let path = Path::new(p);
+    let resolved = if path.exists() {
+        path.canonicalize()
+            .map_err(|_| Error::Tool(format!("cannot resolve: {p}")))?
+    } else {
+        let mut existing = path.to_path_buf();
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+        while !existing.exists() {
+            let name = existing
+                .file_name()
+                .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
+                .to_owned();
+            tail.push(name);
+            existing = existing
+                .parent()
+                .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
+                .to_path_buf();
+        }
+        let canon = existing
+            .canonicalize()
+            .map_err(|_| Error::Tool(format!("cannot resolve: {p}")))?;
+        let mut r = canon;
+        for name in tail.into_iter().rev() {
+            r.push(name);
+        }
+        r
+    };
+
+    if resolved.starts_with(primary_root) {
+        return Ok(resolved);
+    }
+    for root in extra_roots {
+        if resolved.starts_with(root) {
+            return Ok(resolved);
+        }
+    }
+    Err(Error::Tool(format!("path outside allowed roots: {p}")))
+}
+
 /// Reject `path` if it exists but is not a regular file (FIFO, socket,
 /// device) or is a symlink. Rejecting symlinks with no-follow semantics stops
 /// a dangling leaf symlink whose target escapes the workspace from being

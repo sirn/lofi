@@ -13,8 +13,13 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if the path escapes the root, exceeds the file
     /// size limit, cannot be read, or `offset` is beyond the end of the file.
     pub async fn read(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<Value> {
-        reject_symlink_leaf(&self.root, path, &format!("read {path}"))?;
-        let resolved = resolve_under(&self.root, path)?;
+        // Reject leaf symlinks for workspace-relative paths (existing behavior).
+        // Absolute paths under read roots are allowed to be symlinks (e.g.
+        // nix store paths); canonicalization + root check is the security boundary.
+        if !Path::new(path).is_absolute() {
+            reject_symlink_leaf(&self.root, path, &format!("read {path}"))?;
+        }
+        let resolved = self.resolve_for_read(path)?;
         reject_non_regular(&format!("read {path}"), &resolved)?;
         let label = path.to_string();
         let label_inner = label.clone();

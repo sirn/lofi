@@ -75,39 +75,6 @@ fn bind_file_tools<'js>(
 
     let t = tools.clone();
     lofi.set(
-        "bash_read",
-        Function::new(
-            ctx.clone(),
-            Async(move |path: String, opts: Opt<Value>| {
-                let t = t.clone();
-                let (offset, limit) = parse_read_opts(opts);
-                let args_label = if let Some(o) = offset {
-                    format!("{path} +{o}")
-                } else {
-                    path.clone()
-                };
-                async move {
-                    let id = t.next_tool_id();
-                    t.emit(ToolEvent::Start {
-                        id,
-                        name: "bash_read".into(),
-                        args: cap_first_line(&args_label, 120),
-                    });
-                    let res = t.bash_read(&path, offset, limit).await;
-                    let (result, is_error) = tool_preview(&res);
-                    t.emit(ToolEvent::End {
-                        id,
-                        result,
-                        is_error,
-                    });
-                    tool_result(res)
-                }
-            }),
-        )?,
-    )?;
-
-    let t = tools.clone();
-    lofi.set(
         "ls",
         Function::new(
             ctx.clone(),
@@ -424,60 +391,6 @@ fn bind_skills_tools<'js>(
                         args: cap_first_line(&name, 120),
                     });
                     let res = t.skill(&name).await;
-                    let (result, is_error) = tool_preview(&res);
-                    t.emit(ToolEvent::End {
-                        id,
-                        result,
-                        is_error,
-                    });
-                    tool_result(res)
-                }
-            }),
-        )?,
-    )?;
-
-    let t3 = t.clone();
-    lofi.set(
-        "skill_read",
-        Function::new(
-            ctx.clone(),
-            Async(move |name: String, file: String| {
-                let t = t3.clone();
-                async move {
-                    let id = t.next_tool_id();
-                    t.emit(ToolEvent::Start {
-                        id,
-                        name: "skill_read".into(),
-                        args: cap_first_line(&format!("{name}: {file}"), 120),
-                    });
-                    let res = t.skill_read(&name, &file).await;
-                    let (result, is_error) = tool_preview(&res);
-                    t.emit(ToolEvent::End {
-                        id,
-                        result,
-                        is_error,
-                    });
-                    tool_result(res)
-                }
-            }),
-        )?,
-    )?;
-
-    let t4 = t.clone();
-    lofi.set(
-        "skill_search",
-        Function::new(
-            ctx.clone(),
-            Async(move |query: String| {
-                let t = t4.clone();
-                async move {
-                    let id = t.next_tool_id();
-                    t.emit(ToolEvent::Start {
-                        id,
-                        name: "skill_search".into(),
-                        args: cap_first_line(&query, 120),
-                    });
-                    let res = t.skill_search(&query).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,

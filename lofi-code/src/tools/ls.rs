@@ -15,8 +15,8 @@ impl BuiltinTools {
     /// exceeds [`MAX_LS_ENTRIES`].
     #[allow(clippy::unused_async)]
     pub async fn ls(&self, dir: &str) -> Result<Value> {
-        let resolved = resolve_under(&self.root, dir)?;
-        let root = self.root.clone();
+        let resolved = self.resolve_for_read(dir)?;
+        let strip_root = self.root_for(&resolved).to_path_buf();
         let label = dir.to_string();
         let mut entries = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let mut entries = Vec::new();
@@ -24,7 +24,7 @@ impl BuiltinTools {
                 let entry = entry?;
                 let rel = entry
                     .path()
-                    .strip_prefix(&root)
+                    .strip_prefix(&strip_root)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 entries.push(rel);

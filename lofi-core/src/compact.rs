@@ -788,7 +788,13 @@ fn build_brief(blocks: &[Block]) -> String {
                 let body = first_line(text, 100);
                 if body.is_empty() { continue; }
                 if last_header != "[tool_result]" { lines.push("[tool_result]".to_string()); last_header = "[tool_result]"; }
-                lines.push(body);
+                // Preserve the full-output path from bash truncation notices so
+                // the agent can still page through after compaction.
+                if let Some(path) = extract_full_output_path(text) {
+                    lines.push(format!("{body} ... Full output: {path}"));
+                } else {
+                    lines.push(body);
+                }
             }
         }
     }
@@ -997,6 +1003,14 @@ fn clip(text: &str, max: usize) -> String {
 fn first_line(text: &str, max: usize) -> String {
     let line = text.split('\n').next().unwrap_or("").trim();
     clip(line, max)
+}
+
+/// Extract the absolute path from a bash truncation notice like
+/// "Full output: /tmp/lofi-bash-xxxx.log. Use lofi.read(...)".
+fn extract_full_output_path(text: &str) -> Option<&str> {
+    let rest = text.split("Full output: ").nth(1)?;
+    let path = rest.split(". Use lofi.read").next()?.trim();
+    if path.starts_with('/') { Some(path) } else { None }
 }
 
 /// Non-empty, trimmed lines of text.

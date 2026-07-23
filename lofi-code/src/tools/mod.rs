@@ -23,7 +23,7 @@ pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
-pub mod bash_read;
+
 pub mod skills;
 pub mod truncate;
 pub mod util;
@@ -33,15 +33,15 @@ mod fs;
 pub use env::BashEnv;
 pub use truncate::{format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated};
 pub use util::{read_capped, PgrpKillGuard};
-use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_under, walk_files_capped, WalkLimit};
+use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit};
 
 /// Default `bash` timeout in milliseconds (120s).
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 
 /// Per-stream byte ceiling for captured `bash` output. Captured bytes are also
-/// the most `bash_read` can page back; output past this is discarded at the pipe.
+/// output past this is discarded at the pipe before `bash` writes the temp file.
 const MAX_BASH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// File-size ceiling for `read` and `bash_read`; larger files error.
+/// File-size ceiling for `read`; larger files error.
 const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
 /// File-size ceiling for `edit`; larger files error before replacement.
 const MAX_EDIT_BYTES: usize = 8 * 1024 * 1024;
@@ -69,7 +69,7 @@ const MAX_GREP_VISITED: usize = 65_536;
 pub struct BuiltinTools {
     root: PathBuf,
     /// Per-session tmp directory for full-output logs and other
-    /// agent-produced artifacts. Sandbox `bash_read` is rooted here.
+    /// agent-produced artifacts. Added as a read root so `lofi.read` can access files here.
     tmp_dir: PathBuf,
     /// Optional sink for native tool-call events (Start/End per call).
     tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
@@ -81,6 +81,10 @@ pub struct BuiltinTools {
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
     skills_dir: Option<PathBuf>,
+    /// Additional read-only root directories that `read`/`ls`/`find`/`grep`
+    /// can access via absolute paths. Includes the skills directory and the
+    /// per-session tmp directory (for bash output files).
+    read_roots: Vec<PathBuf>,
 }
 
 impl BuiltinTools {
@@ -118,6 +122,16 @@ impl BuiltinTools {
         skills_dir: Option<PathBuf>,
     ) -> Self {
         let root = root.canonicalize().unwrap_or(root);
+        // Read-only roots: skills directory + per-session tmp dir (for bash
+        // output files). These allow `read`/`ls`/`find`/`grep` to access
+        // paths outside the workspace root.
+        let mut read_roots = Vec::new();
+        let tmp_canon = tmp_dir.canonicalize().unwrap_or_else(|_| tmp_dir.clone());
+        read_roots.push(tmp_canon);
+        if let Some(sd) = &skills_dir {
+            let sd_canon = sd.canonicalize().unwrap_or_else(|_| sd.clone());
+            read_roots.push(sd_canon);
+        }
         Self {
             root,
             tmp_dir,
@@ -125,6 +139,7 @@ impl BuiltinTools {
             tool_counter: Arc::new(AtomicU64::new(0)),
             bash_env,
             skills_dir,
+            read_roots,
         }
     }
 
@@ -150,6 +165,27 @@ impl BuiltinTools {
     #[must_use]
     pub fn skills_dir(&self) -> Option<&Path> {
         self.skills_dir.as_deref()
+    }
+
+    /// Resolve a path for read-only operations (`read`/`ls`/`find`/`grep`).
+    /// Relative paths resolve under the workspace root. Absolute paths are
+    /// accepted if they fall under the workspace root or any read root.
+    pub(super) fn resolve_for_read(&self, p: &str) -> Result<PathBuf> {
+        resolve_for_read(&self.root, &self.read_roots, p)
+    }
+
+    /// Determine which root a resolved path is under, for `strip_prefix` in
+    /// `ls`/`find`/`grep` output. Falls back to the workspace root.
+    pub(super) fn root_for(&self, resolved: &Path) -> &Path {
+        if resolved.starts_with(&self.root) {
+            return &self.root;
+        }
+        for root in &self.read_roots {
+            if resolved.starts_with(root) {
+                return root;
+            }
+        }
+        &self.root
     }
 
     /// Allocate the next native tool-call id.
@@ -197,35 +233,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_read_reads_from_tmp_dir() {
-        let (_dir, tools) = tools();
-        std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
-        let v = tools.bash_read("log.txt", None, None).await.unwrap();
-        assert_eq!(v["ok"], json!(true));
-        assert_eq!(v["content"], json!("first\nsecond\nthird"));
-    }
-
-    #[tokio::test]
-    async fn bash_read_offset_and_limit() {
-        let (_dir, tools) = tools();
-        let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
-        std::fs::write(tools.tmp_dir().join("big.log"), content).unwrap();
-        let v = tools.bash_read("big.log", Some(3), Some(2)).await.unwrap();
-        let s = v["content"].as_str().unwrap();
-        assert!(s.starts_with("line2\nline3"));
-        assert_eq!(v["truncated"], json!(true));
-    }
-
-    #[tokio::test]
-    async fn bash_read_rejects_workspace_escape() {
-        let (_dir, tools) = tools();
-        // The tmp dir is separate from the workspace root; a path that
-        // escapes the tmp dir is rejected.
-        let err = tools.bash_read("../escape", None, None).await.unwrap_err();
-        assert!(matches!(err, Error::Tool(_)));
-    }
-
-    #[tokio::test]
     async fn read_file() {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("a.txt"), "hello").unwrap();
@@ -269,6 +276,25 @@ mod tests {
     async fn read_escape_rejected() {
         let (_dir, tools) = tools();
         let err = tools.read("../escape", None, None).await.unwrap_err();
+        assert!(matches!(err, Error::Tool(_)));
+    }
+
+    #[tokio::test]
+    async fn read_absolute_path_in_read_root() {
+        // An absolute path under a read root (tmp dir) should be readable,
+        // so the agent can page through bash output files.
+        let (_dir, tools) = tools();
+        std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
+        let path = tools.tmp_dir().join("log.txt").to_string_lossy().into_owned();
+        let v = tools.read(&path, None, None).await.unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["content"], json!("first\nsecond\nthird"));
+    }
+
+    #[tokio::test]
+    async fn read_absolute_path_outside_roots_rejected() {
+        let (_dir, tools) = tools();
+        let err = tools.read("/etc/passwd", None, None).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));
     }
 

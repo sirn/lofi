@@ -74,12 +74,12 @@ When a session grows long, lofi folds the older history into a structured summar
 
 ## Skills
 
-`lofi.skills() -> { ok, skills }` lists available skills. Each entry is `{ name, description, source, path }` where `source` is `"global"` (from `<config_dir>/skills/`) or `"workspace"` (from `<root>/.lofi/skills/`), and `path` is the skill directory's filesystem path (useful for `lofi.bash` access).
+`lofi.skills() -> { ok, skills }` lists available skills. Each entry is `{ name, description, source, path }` where `source` is `"global"` (from `<config_dir>/skills/`) or `"workspace"` (from `<root>/.lofi/skills/`), and `path` is the skill directory's filesystem path.
 
 `lofi.skill(name) -> { ok, name, source, file, path, content }` reads a single skill's `SKILL.md`. When both sources define the same name, the workspace version wins. `path` is the skill directory.
 
-`lofi.skill_read(name, file) -> { ok, name, source, file, path, content }` reads a companion file within a skill's directory (e.g. `examples/branching.md`). This is the only way to read files under global skills, which live outside the workspace root and are therefore unreachable via `lofi.read`.
-
-`lofi.skill_search(query) -> { ok, results }` searches across all skill `SKILL.md` files for a case-insensitive substring match. Each result is `{ name, description, source, path, matches }` where `matches` is an array of `{ line, text }` entries (up to 5 per skill).
-
 Skills are directories containing a `SKILL.md` file. The skill name is the directory path relative to the skills root, so `skills/git-workflow/SKILL.md` has name `git-workflow` and `skills/git-workflow/rebase/SKILL.md` has name `git-workflow/rebase`. The name may contain `/` as a namespace separator. Skills may also carry companion files alongside `SKILL.md` (examples, templates, etc.). Skills provide reusable instructions or domain knowledge you can load on demand. Use `lofi.skills()` to discover what is available, then `lofi.skill(name)` to read the one you need.
+
+The `path` from `lofi.skills()` or `lofi.skill()` is an absolute filesystem path under a **read root** — a whitelisted directory that `lofi.read`, `lofi.ls`, `lofi.find`, and `lofi.grep` can access in addition to the workspace root. To read a companion file, grep across a skill directory, or list its contents, pass the absolute `path` to the regular file tools (e.g. `lofi.read(path + "/examples/foo.md")`, `lofi.grep("pattern", path)`, `lofi.find("**/*.md", path)`).
+
+`lofi.bash` output that exceeds the inline limit is written to a temp file under the session tmp dir (also a read root). The truncated output includes the absolute path — use `lofi.read(path, offset, limit)` to page through it.

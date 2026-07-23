@@ -15,11 +15,11 @@ impl BuiltinTools {
     /// or a safety ceiling is exceeded.
     #[allow(clippy::unused_async)]
     pub async fn find(&self, glob: &str, dir: Option<&str>) -> Result<Value> {
-        let base = resolve_under(&self.root, dir.unwrap_or(""))?;
+        let base = self.resolve_for_read(dir.unwrap_or(""))?;
         let matcher = Glob::new(glob)
             .map_err(|e| Error::Tool(format!("invalid glob {glob:?}: {e}")))?
             .compile_matcher();
-        let root = self.root.clone();
+        let root = self.root_for(&base).to_path_buf();
         let glob_inner = glob.to_string();
         let paths = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let mut hits = Vec::new();

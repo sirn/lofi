@@ -65,88 +65,6 @@ impl BuiltinTools {
         Self::read_skill_file(&path, name, SKILL_FILE, source)
     }
 
-    /// Read a companion file within a skill's directory.
-    ///
-    /// `file` is a path relative to the skill directory (e.g.
-    /// `examples/branching.md`). `..`, absolute paths, and backslashes are
-    /// rejected. This is the only way to read files under global skills,
-    /// which live outside the workspace root and are therefore unreachable
-    /// via `lofi.read`.
-    ///
-    /// # Errors
-    /// Returns [`Error::Tool`] if the skill or file is not found, or the file
-    /// path is invalid.
-    #[allow(clippy::unused_async)]
-    pub async fn skill_read(&self, name: &str, file: &str) -> Result<Value> {
-        validate_skill_name(name)?;
-        validate_skill_file(file)?;
-
-        // Resolve the skill directory (not the SKILL.md file).
-        let (skill_dir, source) = self.resolve_skill_dir(name)?;
-        let file_path = skill_dir.join(file);
-        if !file_path.is_file() {
-            return Err(Error::Tool(format!(
-                "skill `{name}`: file `{file}` not found"
-            )));
-        }
-        Self::read_skill_file(&file_path, name, file, source)
-    }
-
-    /// Search across all skill `SKILL.md` files for a case-insensitive
-    /// substring match. Returns matching skills with their description and
-    /// up to 5 matching lines (with line numbers and context).
-    ///
-    /// # Errors
-    /// Returns [`Error::Tool`] if the query is empty or the walk fails.
-    #[allow(clippy::unused_async)]
-    pub async fn skill_search(&self, query: &str) -> Result<Value> {
-        if query.trim().is_empty() {
-            return Err(Error::Tool("skill_search: query must not be empty".into()));
-        }
-
-        let query_lower = query.to_lowercase();
-        let entries = self.scan_skills()?;
-
-        let mut results: Vec<Value> = Vec::new();
-        for entry in entries {
-            let name = entry["name"].as_str().unwrap_or_default();
-            let source = entry["source"].as_str().unwrap_or_default();
-            let desc = entry["description"].as_str().unwrap_or_default();
-            let skill_path = entry["path"].as_str().unwrap_or_default();
-
-            let (path, _) = self.resolve_skill_path(name)?;
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let mut matches: Vec<Value> = Vec::new();
-            for (i, line) in content.lines().enumerate() {
-                if line.to_lowercase().contains(&query_lower) {
-                    matches.push(json!({
-                        "line": i + 1,
-                        "text": line.trim(),
-                    }));
-                    if matches.len() >= 5 {
-                        break;
-                    }
-                }
-            }
-
-            if !matches.is_empty() {
-                results.push(json!({
-                    "name": name,
-                    "description": desc,
-                    "source": source,
-                    "path": skill_path,
-                    "matches": matches,
-                }));
-            }
-        }
-
-        Ok(json!({ "ok": true, "results": results }))
-    }
-
     /// Resolve a skill name to its `SKILL.md` path and source.
     /// Workspace wins over global on name collision.
     fn resolve_skill_path(&self, name: &str) -> Result<(PathBuf, &'static str)> {
@@ -164,28 +82,6 @@ impl BuiltinTools {
             let g_path = dir.join(name).join(SKILL_FILE);
             if g_path.is_file() {
                 return Ok((g_path, "global"));
-            }
-        }
-
-        Err(Error::Tool(format!(
-            "skill `{name}` not found"
-        )))
-    }
-
-    /// Resolve a skill name to its directory path and source.
-    fn resolve_skill_dir(&self, name: &str) -> Result<(PathBuf, &'static str)> {
-        validate_skill_name(name)?;
-
-        let ws_skills = self.root.join(".lofi").join("skills");
-        let ws_dir = ws_skills.join(name);
-        if ws_dir.is_dir() && ws_dir.join(SKILL_FILE).is_file() {
-            return Ok((ws_dir, "workspace"));
-        }
-
-        if let Some(dir) = &self.skills_dir {
-            let g_dir = dir.join(name);
-            if g_dir.is_dir() && g_dir.join(SKILL_FILE).is_file() {
-                return Ok((g_dir, "global"));
             }
         }
 
@@ -304,7 +200,7 @@ impl BuiltinTools {
         let content = std::fs::read_to_string(path).map_err(|e| {
             Error::Tool(format!("skill `{name}`: {e}"))
         })?;
-        let skill_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let skill_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         Ok(json!({
             "ok": true,
             "name": name,
@@ -332,27 +228,6 @@ fn validate_skill_name(name: &str) -> Result<()> {
         if component == ".." {
             return Err(Error::Tool(format!(
                 "skill: invalid name `{name}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Validate a file path within a skill directory: non-empty, no `..`, no
-/// leading `/`, no backslash. `/` is allowed for subdirectories.
-fn validate_skill_file(file: &str) -> Result<()> {
-    if file.is_empty() {
-        return Err(Error::Tool("skill: file path must not be empty".into()));
-    }
-    if file.starts_with('/') || file.contains('\\') {
-        return Err(Error::Tool(format!(
-            "skill: invalid file path `{file}`"
-        )));
-    }
-    for component in file.split('/') {
-        if component == ".." {
-            return Err(Error::Tool(format!(
-                "skill: invalid file path `{file}`"
             )));
         }
     }
@@ -575,65 +450,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_read_reads_companion() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "git-workflow", "# Git\n\nWorkflow.\n");
-        std::fs::create_dir_all(skills.path().join("git-workflow").join("examples"))
-            .unwrap();
-        std::fs::write(
-            skills.path().join("git-workflow").join("examples").join("branching.md"),
-            "Example branching strategy.\n",
-        )
-        .unwrap();
-        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_read("git-workflow", "examples/branching.md")
-            .await
-            .unwrap();
-        assert_eq!(v["ok"], json!(true));
-        assert_eq!(v["name"], json!("git-workflow"));
-        assert_eq!(v["file"], json!("examples/branching.md"));
-        assert_eq!(v["source"], json!("global"));
-        assert!(v["content"].as_str().unwrap().contains("Example branching"));
-    }
-
-    #[tokio::test]
-    async fn skill_read_not_found() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "git-workflow", "# Git\n");
-        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_read("git-workflow", "missing.txt")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn skill_read_rejects_dotdot() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "git-workflow", "# Git\n");
-        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_read("git-workflow", "../../../etc/passwd")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid file path"));
-    }
-
-    #[tokio::test]
-    async fn skill_read_rejects_leading_slash() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "git-workflow", "# Git\n");
-        let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_read("git-workflow", "/etc/passwd")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid file path"));
-    }
-
-    #[tokio::test]
     async fn skills_follows_symlinked_dir() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
@@ -714,87 +530,5 @@ mod tests {
         let skills_arr = v["skills"].as_array().unwrap();
         assert_eq!(skills_arr.len(), 1);
         assert_eq!(skills_arr[0]["name"], json!("bar"));
-    }
-
-    #[tokio::test]
-    async fn skill_search_finds_matches() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(
-            skills.path(),
-            "git-workflow",
-            "# Git Workflow\n\nAlways rebase before merging.\nUse conventional commits.\n",
-        );
-        make_skill(
-            skills.path(),
-            "deploy",
-            "# Deploy\n\nRun terraform apply.\n",
-        );
-        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_search("rebase")
-            .await
-            .unwrap();
-        let results = v["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"], json!("git-workflow"));
-        assert!(results[0]["description"].as_str().unwrap().contains("rebase"));
-        let matches = results[0]["matches"].as_array().unwrap();
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0]["line"], json!(3));
-        assert!(matches[0]["text"].as_str().unwrap().contains("rebase"));
-    }
-
-    #[tokio::test]
-    async fn skill_search_case_insensitive() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "lint", "# Lint\n\nRun CLIPPY and fmt.\n");
-        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_search("clippy")
-            .await
-            .unwrap();
-        let results = v["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"], json!("lint"));
-    }
-
-    #[tokio::test]
-    async fn skill_search_no_matches() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        make_skill(skills.path(), "git", "# Git\n\nSome workflow.\n");
-        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_search("nonexistent-term")
-            .await
-            .unwrap();
-        assert_eq!(v["results"].as_array().unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn skill_search_rejects_empty_query() {
-        let dir = tempdir().unwrap();
-        let err = tools(dir.path(), None)
-            .skill_search("")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("empty"));
-    }
-
-    #[tokio::test]
-    async fn skill_search_caps_matches_per_skill() {
-        let dir = tempdir().unwrap();
-        let skills = tempdir().unwrap();
-        // 6 lines all containing "match" — should cap at 5.
-        make_skill(
-            skills.path(),
-            "many",
-            "# Many\n\nmatch one\nmatch two\nmatch three\nmatch four\nmatch five\nmatch six\n",
-        );
-        let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_search("match")
-            .await
-            .unwrap();
-        let matches = v["results"][0]["matches"].as_array().unwrap();
-        assert_eq!(matches.len(), 5);
     }
 }

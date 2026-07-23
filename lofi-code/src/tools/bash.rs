@@ -24,9 +24,9 @@ impl BuiltinTools {
     ///
     /// Output is tail-truncated to 50 KB / 2000 lines (whichever is hit
     /// first), keeping the end where errors and final results land. When
-    /// truncated, the full captured output is written to a temp file and its
-    /// path is included in the notice so the model can `lofi.read` it in
-    /// pages.
+    /// truncated, the full captured output is written to a temp file under
+    /// the session tmp dir and its absolute path is included in the notice
+    /// so the model can `lofi.read` it in pages (the tmp dir is a read root).
     ///
     /// # Errors
     /// Returns [`Error::Io`] only if the process cannot be spawned.
@@ -167,32 +167,28 @@ impl BuiltinTools {
     let start_line = t.total_lines.saturating_sub(t.output_lines) + 1;
     let end_line = t.total_lines;
     // Write the full captured output to the session tmp dir so the model can
-    // page through it with `lofi.bash_read`.
+    // page through it with `lofi.read` (the tmp dir is a read root).
     let path = match self.write_bash_log(full) {
         Ok(p) => p,
         Err(_) => "<temp file unavailable>".to_string(),
     };
-    let basename = std::path::Path::new(&path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("<temp file unavailable>");
     if t.output_lines == 0 {
         // Single line exceeded the byte budget.
         let _ = write!(
             out,
-            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Page with lofi.bash_read(\"{basename}\")]",
+            "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             format_size(DEFAULT_MAX_BYTES),
         );
     } else if pipe_capped && !t.truncated {
         let _ = write!(
             out,
-            "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Page with lofi.bash_read(\"{basename}\").]",
+            "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             format_size(MAX_BASH_OUTPUT_BYTES)
         );
     } else {
         let _ = write!(
             out,
-            "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Page with lofi.bash_read(\"{basename}\").]",
+            "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             t.total_lines,
             format_size(DEFAULT_MAX_BYTES)
         );
