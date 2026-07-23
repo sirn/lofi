@@ -87,6 +87,16 @@ pub(super) fn handle_event(
         return;
     }
     match k.code {
+        KeyCode::Enter if current_run.is_some() && !app.input.is_empty() => {
+            // Agent is running — queue the prompt instead of blocking.
+            let prompt = std::mem::take(&mut app.input);
+            app.input_cursor = 0;
+            app.history_idx = None;
+            app.slash_complete = None;
+            app.history_nav.push(prompt.clone());
+            app.prompt_queue.push(prompt);
+            return;
+        }
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
@@ -169,6 +179,15 @@ pub(super) fn handle_event(
         KeyCode::Delete => app.delete_forward_char(),
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
+        KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => {
+            // Alt+Up: restore the last queued prompt (LIFO) into the input.
+            if let Some(prompt) = app.prompt_queue.pop() {
+                app.input = prompt;
+                app.input_cursor = app.input.chars().count();
+                app.history_idx = None;
+                app.refresh_slash_complete();
+            }
+        }
         KeyCode::Up if app.slash_complete.is_some() => app.slash_complete_up(),
         KeyCode::Down if app.slash_complete.is_some() => app.slash_complete_down(),
         KeyCode::Up => app.cursor_up(),
@@ -227,6 +246,61 @@ pub(super) fn handle_event(
 /// result, so the model resumes the turn. The engine emits `TurnContinue`,
 /// which the UI handles by appending to the current turn rather than pushing
 /// a new one. No-op when no model is configured.
+/// Start a new run with a queued prompt (FIFO pop at turn end). Shares
+/// the session-file creation and turn-freezing logic with the Enter
+/// handler but skips UI-only concerns (history nav, slash completion).
+pub(super) fn spawn_prompt(
+    app: &mut App,
+    agent: Option<&lofi_core::Agent>,
+    current_run: &mut Option<RunHandle>,
+    prompt: String,
+) {
+    let Some(agent) = agent else { return };
+    // Lazily create the transcript file on the first persisted prompt.
+    if app.session.path.is_none() {
+        if let Some(store) = &app.session.store {
+            if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
+                app.session.path = Some(p);
+            }
+        }
+    }
+    // Freeze the previous turn.
+    let prev = app.turns.len();
+    if prev > 0
+        && app
+            .turn_byte_ranges
+            .get(prev - 1)
+            .is_some_and(Option::is_some)
+    {
+        app.turns[prev - 1].blocks.clear();
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let history = Arc::clone(&app.history);
+    let session_path = app.session.path.clone();
+    let commit = session_path.as_ref().map(|p| SessionCommit {
+        path: p.clone(),
+        parent_hint: None,
+    });
+    let agent_clone = agent.clone();
+    let err_tx = tx.clone();
+    let handle = tokio::task::spawn_local(async move {
+        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+        let result = agent_clone
+            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false)
+            .await;
+        if let Ok(mut g) = history.lock() {
+            *g = messages;
+        }
+        if let Err(e) = result {
+            let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
+        }
+    });
+    *current_run = Some(RunHandle { handle, rx });
+    app.run = Some(0);
+    app.run_start = Some(Instant::now());
+    app.pinned = true;
+}
+
 pub(super) fn spawn_continue(
     app: &mut App,
     agent: Option<&lofi_core::Agent>,

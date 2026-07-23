@@ -92,6 +92,29 @@ impl App {
         Line::from(vec![Span::styled(segments.join(sep), Style::new().fg(t.muted))])
     }
 
+    /// Queue badge for the mode line: shows a preview of the first queued
+    /// prompt and a count of remaining items. Returns `None` when the queue
+    /// is empty.
+    pub(crate) fn queue_badge(&self) -> Option<String> {
+        if self.prompt_queue.is_empty() {
+            return None;
+        }
+        let n = self.prompt_queue.len();
+        let preview = &self.prompt_queue[0];
+        let truncated = if preview.chars().count() > 40 {
+            let mut s: String = preview.chars().take(39).collect();
+            s.push('…');
+            s
+        } else {
+            preview.clone()
+        };
+        Some(if n == 1 {
+            format!("Queue: {truncated}")
+        } else {
+            format!("Queue: {truncated} (+{})", n - 1)
+        })
+    }
+
     /// Text for the transient "Copied to clipboard" badge, or `None` if the
     /// yank notification has expired.
     pub(crate) fn yank_badge(&self) -> Option<&'static str> {

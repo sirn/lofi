@@ -668,6 +668,12 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
+    } else if let Some(queue) = app.queue_badge() {
+        // Persistent queue badge (does not expire like transient badges).
+        left.push(Span::styled(
+            format!(" {queue} "),
+            Style::new().fg(t.fg).bg(t.muted).add_modifier(bold),
+        ));
     } else if let Some((msg, kind)) = app.notify_badge() {
         let bg = match kind {
             NotifyKind::Info => t.muted,

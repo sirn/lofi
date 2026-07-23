@@ -35,6 +35,7 @@ impl App {
             total_out: 0,
             total_cache_read: 0,
             total_cache_write: 0,
+            prompt_queue: Vec::new(),
             run: None,
             run_start: None,
             retry: None,

@@ -677,6 +677,9 @@ pub(crate) struct App {
     total_cache_read: u64,
     /// Cumulative prompt-cache write tokens across the session.
     total_cache_write: u64,
+    /// Queued prompts waiting for the current run to finish. FIFO when
+    /// auto-popping at turn end; LIFO when restoring via Alt+Up.
+    prompt_queue: Vec<String>,
     /// Accumulated USD cost across turns (engine-computed, fed by
     /// `RoundUsage` per round and folded by `TurnEnd`).
     cost: f64,
@@ -1039,6 +1042,18 @@ async fn run_loop(
                                 }
                             } else {
                                 app.maybe_auto_compact();
+                                // Auto-pop the next queued prompt (FIFO).
+                                if app.run.is_none() {
+                                    if let Some(prompt) = app.prompt_queue.first().cloned() {
+                                        app.prompt_queue.remove(0);
+                                        spawn_prompt(
+                                            &mut app,
+                                            agent.as_ref(),
+                                            &mut current_run,
+                                            prompt,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

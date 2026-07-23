@@ -2729,6 +2729,52 @@ fn footer_shows_session_cache_metrics() {
     assert!(footer.contains("cache ↑800k ↓200k"), "footer: {footer}");
 }
 
+#[test]
+fn queue_badge_shows_preview_and_count() {
+    let mut a = app();
+    // Empty queue: no badge.
+    assert!(a.queue_badge().is_none());
+    // One item: "Queue: <preview>".
+    a.prompt_queue.push("fix the bug".to_string());
+    let badge = a.queue_badge().expect("badge for one item");
+    assert!(badge.contains("Queue: fix the bug"), "badge: {badge}");
+    // Two items: "Queue: <preview> (+1)".
+    a.prompt_queue.push("also add tests".to_string());
+    let badge = a.queue_badge().expect("badge for two items");
+    assert!(badge.contains("Queue: fix the bug (+1)"), "badge: {badge}");
+}
+
+#[test]
+fn queue_badge_truncates_long_prompt() {
+    let mut a = app();
+    let long = "x".repeat(100);
+    a.prompt_queue.push(long);
+    let badge = a.queue_badge().expect("badge");
+    assert!(badge.ends_with("…"), "badge should end with ellipsis: {badge}");
+    assert!(!badge.contains(&"x".repeat(50)), "badge should be truncated: {badge}");
+}
+
+#[test]
+fn alt_up_restores_queued_prompt_lifo() {
+    let mut a = app();
+    let mut run = None;
+    a.prompt_queue.push("first prompt".to_string());
+    a.prompt_queue.push("second prompt".to_string());
+    // Alt+Up restores the last queued (LIFO).
+    let ev = Event::Key(crossterm::event::KeyEvent::new_with_kind(
+        KeyCode::Up,
+        KeyModifiers::ALT,
+        KeyEventKind::Press,
+    ));
+    handle_event(&ev, &mut a, None, &mut run);
+    assert_eq!(a.input, "second prompt");
+    assert_eq!(a.prompt_queue.len(), 1);
+    // Again: restores the first.
+    handle_event(&ev, &mut a, None, &mut run);
+    assert_eq!(a.input, "first prompt");
+    assert!(a.prompt_queue.is_empty());
+}
+
 /// With no model configured, submitting a prompt must not start a run;
 /// it re-surfaces the configuration hint on the prompt's turn instead.
 #[test]
