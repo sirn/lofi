@@ -444,7 +444,12 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
                 sel.end = cell;
             }
         }
-        MouseEventKind::Up(MouseButton::Left) if can_select => app.yank_selection(),
+        MouseEventKind::Up(MouseButton::Left) if can_select => {
+            app.yank_selection();
+            // Return to Input mode after a drag-yank so the user can
+            // immediately type (mouse drag is a quick-peek action).
+            app.mode = Mode::Input;
+        }
         _ => {}
     }
 }
