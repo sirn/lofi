@@ -236,6 +236,10 @@ pub struct Agent {
     reserved_context_tokens: u64,
     /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
+    /// Optional skills directory (`<config_dir>/skills`). When set,
+    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
+    /// skill files from here and from `<root>/.lofi/skills/`.
+    skills_dir: Option<PathBuf>,
 }
 
 impl Agent {
@@ -263,6 +267,7 @@ impl Agent {
             max_output_tokens,
             reserved_context_tokens,
             bash_env,
+            skills_dir: None,
         }
     }
 
@@ -284,6 +289,7 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            skills_dir: self.skills_dir.clone(),
         }
     }
 
@@ -304,6 +310,25 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            skills_dir: self.skills_dir.clone(),
+        }
+    }
+
+    /// Return a new agent with its skills directory set. Used at startup
+    /// after the config directory is known.
+    #[must_use]
+    pub fn with_skills_dir(&self, skills_dir: Option<PathBuf>) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            root: self.root.clone(),
+            tmp_dir: self.tmp_dir.clone(),
+            retry: self.retry,
+            system_prompt: self.system_prompt.clone(),
+            max_output_tokens: self.max_output_tokens,
+            reserved_context_tokens: self.reserved_context_tokens,
+            bash_env: self.bash_env.clone(),
+            skills_dir,
         }
     }
 

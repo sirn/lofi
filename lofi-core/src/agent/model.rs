@@ -66,6 +66,10 @@ pub async fn build_agent(
         config_path.parent(),
         root,
     ));
+    // Set the skills directory (`<config_dir>/skills`) so the agent can
+    // discover and read skill files via `lofi.skills()` / `lofi.skill(name)`.
+    let skills_dir = config_path.parent().map(|p| p.join("skills"));
+    let agent = agent.with_skills_dir(skills_dir);
     Ok((agent, model_obj, level, config, registry))
 }
 

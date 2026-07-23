@@ -29,6 +29,7 @@ fn ctx(root: &Path) -> ExecCtx {
             recall: None,
             result: None,
         bash_env: BashEnv::default(),
+        skills_dir: None,
     }
 }
 
@@ -159,6 +160,7 @@ async fn strings_exposed_as_lofi_strings() {
             recall: None,
             result: None,
         bash_env: BashEnv::default(),
+        skills_dir: None,
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -240,6 +242,7 @@ async fn agent_call_emits_tool_events() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
+        skills_dir: None,
     };
     let src = "const r = await lofi.agent('do stuff'); return r;";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
@@ -271,6 +274,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
+        skills_dir: None,
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
                await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \

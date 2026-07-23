@@ -24,6 +24,7 @@ pub mod grep;
 pub mod ls;
 pub mod read;
 pub mod bash_read;
+pub mod skills;
 pub mod truncate;
 pub mod util;
 pub mod write;
@@ -76,6 +77,10 @@ pub struct BuiltinTools {
     tool_counter: Arc<AtomicU64>,
     /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
+    /// Optional skills directory (`<config_dir>/skills`). When set,
+    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
+    /// skill files from here and from `<root>/.lofi/skills/`.
+    skills_dir: Option<PathBuf>,
 }
 
 impl BuiltinTools {
@@ -99,6 +104,19 @@ impl BuiltinTools {
         tmp_dir: PathBuf,
         bash_env: BashEnv,
     ) -> Self {
+        Self::with_skills_dir(root, tool_cb, tmp_dir, bash_env, None)
+    }
+
+    /// Like [`with_tool_cb`](Self::with_tool_cb) but also sets the skills
+    /// directory for `lofi.skills()` / `lofi.skill(name)`.
+    #[must_use]
+    pub fn with_skills_dir(
+        root: PathBuf,
+        tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
+        tmp_dir: PathBuf,
+        bash_env: BashEnv,
+        skills_dir: Option<PathBuf>,
+    ) -> Self {
         let root = root.canonicalize().unwrap_or(root);
         Self {
             root,
@@ -106,6 +124,7 @@ impl BuiltinTools {
             tool_cb,
             tool_counter: Arc::new(AtomicU64::new(0)),
             bash_env,
+            skills_dir,
         }
     }
 
@@ -125,6 +144,12 @@ impl BuiltinTools {
     #[must_use]
     pub fn bash_env(&self) -> &BashEnv {
         &self.bash_env
+    }
+
+    /// The skills directory, if configured.
+    #[must_use]
+    pub fn skills_dir(&self) -> Option<&Path> {
+        self.skills_dir.as_deref()
     }
 
     /// Allocate the next native tool-call id.

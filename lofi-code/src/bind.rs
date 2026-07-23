@@ -16,11 +16,13 @@ pub(super) fn bind_tools<'js>(
     agent: Option<AgentFn>,
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
+    skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_agent_tool(ctx, lofi, tools, agent)?;
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
+    bind_skills_tools(ctx, lofi, tools, skills_dir)?;
     Ok(())
 }
 
@@ -355,6 +357,85 @@ fn bind_agent_tool<'js>(
             }),
         )?,
     )?;
+    Ok(())
+}
+
+/// Bind `lofi.skills()` and `lofi.skill(name)`.
+///
+/// Skills are markdown files discovered from a global directory (`<config_dir>/skills/`)
+/// and a per-workspace directory (`<root>/.lofi/skills/`). The `skills_dir`
+/// parameter is the global directory; the workspace directory is derived from
+/// the tool bundle's `root`.
+fn bind_skills_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+    skills_dir: Option<PathBuf>,
+) -> rquickjs::Result<()> {
+    // Build a fresh tool bundle with the skills_dir set so the methods can
+    // find the global skills directory.
+    let t = Arc::new(BuiltinTools::with_skills_dir(
+        tools.root().to_path_buf(),
+        None,
+        tools.tmp_dir().to_path_buf(),
+        tools.bash_env().clone(),
+        skills_dir,
+    ));
+
+    let t1 = t.clone();
+    lofi.set(
+        "skills",
+        Function::new(
+            ctx.clone(),
+            Async(move || {
+                let t = t1.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "skills".into(),
+                        args: String::new(),
+                    });
+                    let res = t.skills().await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t2 = t.clone();
+    lofi.set(
+        "skill",
+        Function::new(
+            ctx.clone(),
+            Async(move |name: String| {
+                let t = t2.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "skill".into(),
+                        args: cap_first_line(&name, 120),
+                    });
+                    let res = t.skill(&name).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
     Ok(())
 }
 

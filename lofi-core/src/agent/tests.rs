@@ -63,6 +63,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         max_output_tokens: None,
         reserved_context_tokens: 0,
         bash_env: lofi_code::BashEnv::default(),
+        skills_dir: None,
     }
 }
 
@@ -273,6 +274,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         max_output_tokens: None,
         reserved_context_tokens: 20, // hard cap = 100 - 20 = 80
         bash_env: lofi_code::BashEnv::default(),
+        skills_dir: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];

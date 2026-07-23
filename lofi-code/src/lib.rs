@@ -136,6 +136,10 @@ pub struct ExecCtx {
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     /// Resolved `bash` child-env policy + output-redaction set.
     pub bash_env: BashEnv,
+    /// Optional skills directory (`<config_dir>/skills`). When set,
+    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
+    /// skill files from here and from `<root>/.lofi/skills/`.
+    pub skills_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -149,6 +153,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("result", &self.result.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
             .field("bash_env", &self.bash_env)
+            .field("skills_dir", &self.skills_dir)
             .finish()
     }
 }
@@ -282,11 +287,12 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     let agent = ctx.agent.clone();
     let recall = ctx.recall.clone();
     let result = ctx.result.clone();
+    let skills_dir = ctx.skills_dir.clone();
     let logs = Arc::new(Mutex::new(String::new()));
 
     let outcome = tokio::time::timeout(opts.timeout, async {
         async_with!(&actx => |ctx| {
-            install_globals(&ctx, &tools, &strings, agent, recall, result, &logs)
+            install_globals(&ctx, &tools, &strings, agent, recall, result, skills_dir, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
                 .eval(js.as_str())
@@ -318,6 +324,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 }
 
 /// Install the `lofi` object, `print`, and the `lofi_strings` global.
+#[allow(clippy::too_many_arguments)]
 fn install_globals(
     ctx: &Ctx<'_>,
     tools: &Arc<BuiltinTools>,
@@ -325,10 +332,11 @@ fn install_globals(
     agent: Option<AgentFn>,
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
+    skills_dir: Option<PathBuf>,
     logs: &Arc<Mutex<String>>,
 ) -> rquickjs::Result<()> {
     let lofi = Object::new(ctx.clone())?;
-    bind_tools(ctx, &lofi, tools, agent, recall, result)?;
+    bind_tools(ctx, &lofi, tools, agent, recall, result, skills_dir)?;
     // Expose the per-session tmp dir path so the model knows where bash
     // full-output logs live (and can reference them if needed beyond
     // `lofi.bash_read`, which takes a basename relative to this dir).
@@ -474,6 +482,7 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            skills_dir: None,
         }
     }
 
@@ -638,6 +647,7 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            skills_dir: None,
         };
         let res = exec(
             "return lofi_strings.greeting;",

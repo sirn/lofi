@@ -776,6 +776,7 @@ impl Agent {
                 result: result.clone(),
                 on_tool_event: Some(on_tool_event),
                 bash_env: self.bash_env.clone(),
+                skills_dir: self.skills_dir.clone(),
             };
             let outcome = exec(&code, &exec_ctx, &ExecOptions::default()).await;
             // Drain the native tool calls that completed inside this exec into

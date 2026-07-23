@@ -70,4 +70,10 @@ return { files: files.entries, len: a.content.length };
 
 ## Compacted sessions
 
-When a session grows long, lofi folds the older history into a structured summary and injects it as a single user message at the head of the kept tail. The summary begins with a preamble ("This summary captures work done before the most recent messages in this session..."), followed by tagged sections ([Session Goal], [User Preferences], [Files And Changes], [Commits], [Outstanding Context]) and a compressed per-turn transcript ([user]/[assistant]/[tool_result]/[tool_error] headers with clipped content). Treat the summary as accurate context and continue from it — do not re-ask what it already answers. The full transcript remains on disk, so `/tree` can still roll back past the compaction point.
+When a session grows long, lofi folds the older history into a structured summary and injects it as a single user message at the head of the kept tail. The summary begins with a preamble ("This summary captures work done before the most recent messages in this session..."), followed by tagged sections ([Session Goal], [User Preferences], [Files And Changes], [Commits], [Outstanding Context]) and a compressed per-turn transcript ([user]/[assistant]/[tool_result]/[tool_error] headers with clipped content). Treat the summary as accurate context and continue from it — do not re-ask what it already answers. The full transcript remains on disk, so `/tree` can still roll back past the compaction point.## Skills
+
+`lofi.skills() -> { ok, skills }` lists available skill files. Each entry is `{ name, description, source }` where `source` is `"global"` (from `<config_dir>/skills/`) or `"workspace"` (from `<root>/.lofi/skills/`). Skills are markdown files named `<name>.md`; the file stem is the skill name.
+
+`lofi.skill(name) -> { ok, name, source, content }` reads a single skill's full content. When both sources define the same name, the workspace version wins.
+
+Skills provide reusable instructions or domain knowledge you can load on demand. Use `lofi.skills()` to discover what is available, then `lofi.skill(name)` to read the one you need.
