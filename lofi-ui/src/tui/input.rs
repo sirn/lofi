@@ -425,9 +425,9 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
         && m.row < app.log_rect.y + app.log_rect.height
         && m.column >= app.log_rect.x
         && m.column < app.log_rect.x + app.log_rect.width;
-    // Mouse drag-selection is an Input-mode convenience; Navigate/Select use
-    // the keyboard cursor. The wheel scrolls in every mode.
-    let can_select = app.mode == Mode::Input;
+    // Mouse drag-selection works in Input and Navigate; Select uses the
+    // keyboard cursor. The wheel scrolls in every mode.
+    let can_select = app.mode == Mode::Input || app.mode == Mode::Navigate;
     match m.kind {
         MouseEventKind::ScrollUp if in_log => app.scroll_nav(-3),
         MouseEventKind::ScrollDown if in_log => app.scroll_nav(3),
