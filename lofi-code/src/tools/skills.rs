@@ -77,7 +77,7 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if the skill or file is not found, or the file
     /// path is invalid.
     #[allow(clippy::unused_async)]
-    pub async fn skill_file(&self, name: &str, file: &str) -> Result<Value> {
+    pub async fn skill_read(&self, name: &str, file: &str) -> Result<Value> {
         validate_skill_name(name)?;
         validate_skill_file(file)?;
 
@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_file_reads_companion() {
+    async fn skill_read_reads_companion() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
         make_skill(skills.path(), "git-workflow", "# Git\n\nWorkflow.\n");
@@ -581,7 +581,7 @@ mod tests {
         )
         .unwrap();
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_file("git-workflow", "examples/branching.md")
+            .skill_read("git-workflow", "examples/branching.md")
             .await
             .unwrap();
         assert_eq!(v["ok"], json!(true));
@@ -592,36 +592,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_file_not_found() {
+    async fn skill_read_not_found() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
         make_skill(skills.path(), "git-workflow", "# Git\n");
         let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_file("git-workflow", "missing.txt")
+            .skill_read("git-workflow", "missing.txt")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]
-    async fn skill_file_rejects_dotdot() {
+    async fn skill_read_rejects_dotdot() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
         make_skill(skills.path(), "git-workflow", "# Git\n");
         let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_file("git-workflow", "../../../etc/passwd")
+            .skill_read("git-workflow", "../../../etc/passwd")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid file path"));
     }
 
     #[tokio::test]
-    async fn skill_file_rejects_leading_slash() {
+    async fn skill_read_rejects_leading_slash() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
         make_skill(skills.path(), "git-workflow", "# Git\n");
         let err = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skill_file("git-workflow", "/etc/passwd")
+            .skill_read("git-workflow", "/etc/passwd")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid file path"));

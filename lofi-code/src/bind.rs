@@ -438,7 +438,7 @@ fn bind_skills_tools<'js>(
 
     let t3 = t.clone();
     lofi.set(
-        "skill_file",
+        "skill_read",
         Function::new(
             ctx.clone(),
             Async(move |name: String, file: String| {
@@ -447,10 +447,10 @@ fn bind_skills_tools<'js>(
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
                         id,
-                        name: "skill_file".into(),
+                        name: "skill_read".into(),
                         args: cap_first_line(&format!("{name}: {file}"), 120),
                     });
-                    let res = t.skill_file(&name, &file).await;
+                    let res = t.skill_read(&name, &file).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,

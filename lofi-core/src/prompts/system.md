@@ -78,7 +78,7 @@ When a session grows long, lofi folds the older history into a structured summar
 
 `lofi.skill(name) -> { ok, name, source, file, content }` reads a single skill's `SKILL.md`. When both sources define the same name, the workspace version wins.
 
-`lofi.skill_file(name, file) -> { ok, name, source, file, content }` reads a companion file within a skill's directory (e.g. `examples/branching.md`). This is the only way to read files under global skills, which live outside the workspace root and are therefore unreachable via `lofi.read`.
+`lofi.skill_read(name, file) -> { ok, name, source, file, content }` reads a companion file within a skill's directory (e.g. `examples/branching.md`). This is the only way to read files under global skills, which live outside the workspace root and are therefore unreachable via `lofi.read`.
 
 `lofi.skill_search(query) -> { ok, results }` searches across all skill `SKILL.md` files for a case-insensitive substring match. Each result is `{ name, description, source, matches }` where `matches` is an array of `{ line, text }` entries (up to 5 per skill).
 
