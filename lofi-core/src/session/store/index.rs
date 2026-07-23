@@ -28,6 +28,17 @@ pub struct EventIndex {
 pub enum IndexKind {
     UserPrompt,
     AssistantMessage,
+    /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
+    /// so the tree can show it as a `tool:` node and `find_turn_outcome` can
+    /// follow it (it was previously `Other`, which caused `find_turn_outcome`
+    /// to miss turn outcomes for turns with tool calls — the function follows
+    /// non-`UserPrompt` children, but `Other` events were not tree nodes so the
+    /// outcome was never displayed).
+    ToolResult,
+    /// A native tool call inside an `exec` block (e.g. `lofi.read`).
+    /// Not a tree node — used to build the exec label's native-tool
+    /// summary in `/tree`.
+    NativeTool,
     TurnEnd,
     TurnFailed,
     /// An offline compaction marker. A tree node so `/tree` can revert to
@@ -115,15 +126,20 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
         if legacy_v1 || parent_id.is_none() {
             parent_id.clone_from(&prev_id);
         }
-        let kind = match skel.kind_type.as_str() {
-            "message" => match skel.role.as_deref() {
+        let role_kind = |role: Option<&str>| -> IndexKind {
+            match role {
                 Some("user") => IndexKind::UserPrompt,
                 Some("assistant") => IndexKind::AssistantMessage,
+                Some("tool") => IndexKind::ToolResult,
                 _ => IndexKind::Other,
-            },
+            }
+        };
+        let kind = match skel.kind_type.as_str() {
+            "message" | "" => role_kind(skel.role.as_deref()),
             "turn_end" => IndexKind::TurnEnd,
             "turn_failed" => IndexKind::TurnFailed,
             "compaction" => IndexKind::Compaction,
+            "native_tool" => IndexKind::NativeTool,
             _ => IndexKind::Other,
         };
         prev_id = Some(id.clone());

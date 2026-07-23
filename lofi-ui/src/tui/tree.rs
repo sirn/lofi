@@ -19,11 +19,25 @@ use super::*;
 ///   prompt and prefills the input (edit and resend).
 /// - `agent:` — a `turn_end`/`turn_failed`. Selecting rolls back to AFTER
 ///   the turn (inclusive), input empty (continue from here).
+///
+/// Shared context for tree-building functions — avoids passing many params
+/// through every recursive call.
+struct TreeCtx<'a> {
+    indices: &'a [store::EventIndex],
+    children_by_parent: &'a HashMap<&'a str, Vec<usize>>,
+    by_id: &'a HashMap<&'a str, usize>,
+    path: &'a Path,
+    native_tools: &'a HashMap<String, Vec<(String, String)>>,
+}
+
 pub(super) fn build_tree_entries(
     indices: &[store::EventIndex],
     leaf_id: Option<&str>,
     path: &Path,
 ) -> Vec<TreeEntry> {
+    // Build a map from exec tool-call id to its native tool calls
+    // (name, args) for the `exec:` label.
+    let native_tools = build_native_tool_map(indices, path);
     let mut children_by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&str, usize> = HashMap::new();
     for (i, ix) in indices.iter().enumerate() {
@@ -62,14 +76,18 @@ pub(super) fn build_tree_entries(
 
     let n = trunk.len();
     let mut out = Vec::new();
+    let ctx = TreeCtx {
+        indices,
+        children_by_parent: &children_by_parent,
+        by_id: &by_id,
+        path,
+        native_tools: &native_tools,
+    };
     for (pos, &idx) in trunk.iter().enumerate() {
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = if is_last { "   " } else { "│  " };
-        push_tree_entry(
-            idx, connector, active_set.contains(&idx),
-            indices, &by_id, path, &mut out,
-        );
+        push_tree_entry(&ctx, idx, connector, active_set.contains(&idx), &mut out);
         let mut branches: Vec<usize> = Vec::new();
         if indices[idx].kind == store::IndexKind::UserPrompt {
             if let Some(te_idx) = find_turn_outcome(idx, indices, &children_by_parent) {
@@ -89,10 +107,7 @@ pub(super) fn build_tree_entries(
             .collect();
         branches.extend(user_branches);
         if !branches.is_empty() {
-            render_branch_subtree(
-                &branches, indices, &children_by_parent, &by_id, path,
-                child_indent, &mut out,
-            );
+            render_branch_subtree(&ctx, &branches, child_indent, &mut out);
         }
     }
     // Rolled back to before the root prompt: the trunk is empty, so
@@ -123,12 +138,35 @@ pub(super) fn build_tree_entries(
             .map(|(i, _)| i)
             .collect();
         if !roots.is_empty() {
-            render_branch_subtree(
-                &roots, indices, &children_by_parent, &by_id, path, "", &mut out,
-            );
+            render_branch_subtree(&ctx, &roots, "", &mut out);
         }
     }
     out
+}
+
+/// Build a map from exec tool-call id to its native tool calls (name, args)
+/// for the `exec:` label in `/tree`. Scans the index for `NativeTool` events
+/// and loads each one from disk to extract the `parent` (exec tool-call id)
+/// and `name`/`args`.
+fn build_native_tool_map(
+    indices: &[store::EventIndex],
+    path: &Path,
+) -> HashMap<String, Vec<(String, String)>> {
+    let mut map: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for ix in indices {
+        if ix.kind != store::IndexKind::NativeTool {
+            continue;
+        }
+        let Ok(ev) = store::load_event_at(path, ix.offset) else {
+            continue;
+        };
+        if let SessionEventKind::NativeTool(rec) = ev.kind {
+            map.entry(rec.parent.clone())
+                .or_default()
+                .push((rec.name, one_line(&rec.args)));
+        }
+    }
+    map
 }
 
 /// Active path (root-first indices) from a leaf id, using the lightweight
@@ -157,15 +195,14 @@ pub(super) fn active_path_from_index(
 /// roots are siblings of each other — not flattened into one list. Only
 /// actual sub-branches (divergences within a chain) create further
 /// indentation.
-pub(super) fn render_branch_subtree(
+fn render_branch_subtree(
+    ctx: &TreeCtx,
     roots: &[usize],
-    indices: &[store::EventIndex],
-    children_by_parent: &HashMap<&str, Vec<usize>>,
-    by_id: &HashMap<&str, usize>,
-    path: &Path,
     prefix: &str,
     out: &mut Vec<TreeEntry>,
 ) {
+    let indices = ctx.indices;
+    let children_by_parent = ctx.children_by_parent;
     let n = roots.len();
     for (pos, &root) in roots.iter().enumerate() {
         let is_last = pos == n - 1;
@@ -184,7 +221,7 @@ pub(super) fn render_branch_subtree(
                 format!("{child_indent}{}", if cis_last { "└─ " } else { "├─ " })
             };
             let sub_indent = format!("{child_indent}{}", if cpos == cn - 1 { "   " } else { "│  " });
-            push_tree_entry(idx, &cprefix, false, indices, by_id, path, out);
+            push_tree_entry(ctx, idx, &cprefix, false, out);
             let mut sub_branches: Vec<usize> = Vec::new();
             if indices[idx].kind == store::IndexKind::UserPrompt {
                 if let Some(te_idx) = find_turn_outcome(idx, indices, children_by_parent) {
@@ -205,10 +242,7 @@ pub(super) fn render_branch_subtree(
                 .collect();
             sub_branches.extend(user_children);
             if !sub_branches.is_empty() {
-                render_branch_subtree(
-                    &sub_branches, indices, children_by_parent, by_id, path,
-                    &sub_indent, out,
-                );
+                render_branch_subtree(ctx, &sub_branches, &sub_indent, out);
             }
         }
     }
@@ -273,27 +307,51 @@ pub(super) fn walk_chain(
 
 /// Append one `TreeEntry` for index `idx`, loading the label lazily from
 /// disk via the event's byte offset.
-pub(super) fn push_tree_entry(
+fn push_tree_entry(
+    ctx: &TreeCtx,
     idx: usize,
     prefix: &str,
     is_active: bool,
-    indices: &[store::EventIndex],
-    by_id: &HashMap<&str, usize>,
-    path: &Path,
     out: &mut Vec<TreeEntry>,
 ) {
-    let ix = &indices[idx];
+    let ix = &ctx.indices[idx];
     let (label, prefill, branch_point) = match ix.kind {
         store::IndexKind::UserPrompt => {
-            let prompt = load_prompt_text(path, ix.offset);
+            let prompt = load_prompt_text(ctx.path, ix.offset);
             (
                 format!("user: {}", one_line(&prompt)),
                 prompt,
                 ix.parent_id.clone().unwrap_or_default(),
             )
         }
+        store::IndexKind::ToolResult => {
+            let (name, tool_use_id, content, is_error) =
+                load_tool_result(idx, ctx.indices, ctx.by_id, ctx.path);
+            let marker = if is_error { "\u{2717} " } else { "" };
+            // For `exec` tool results, show the native tool calls made
+            // inside the exec block instead of the raw result.
+            let label = if name == "exec" {
+                if let Some(tools) = ctx.native_tools.get(&tool_use_id) {
+                    let summary = tools
+                        .iter()
+                        .map(|(n, a)| format!("{n} {a}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("exec: {marker}{}", one_line(&summary))
+                } else {
+                    format!("exec: {marker}{}", one_line(&content))
+                }
+            } else {
+                format!("tool: {marker}{name}: {}", one_line(&content))
+            };
+            (
+                label,
+                String::new(),
+                ix.id.clone(),
+            )
+        }
         store::IndexKind::TurnEnd => {
-            let preview = load_assistant_preview(idx, indices, by_id, path);
+            let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.path);
             (
                 format!(
                     "agent: {}",
@@ -308,7 +366,7 @@ pub(super) fn push_tree_entry(
             )
         }
         store::IndexKind::TurnFailed => {
-            let error = load_failed_error(path, ix.offset);
+            let error = load_failed_error(ctx.path, ix.offset);
             (
                 format!("agent: {} (failed)", one_line(&error)),
                 String::new(),
@@ -316,7 +374,7 @@ pub(super) fn push_tree_entry(
             )
         }
         store::IndexKind::Compaction => {
-            let (summarized, kept) = load_compaction_counts(path, ix.offset);
+            let (summarized, kept) = load_compaction_counts(ctx.path, ix.offset);
             (
                 format!("compact: compacted {summarized} msgs \u{00b7} kept {kept}"),
                 String::new(),
@@ -327,7 +385,7 @@ pub(super) fn push_tree_entry(
                 ix.parent_id.clone().unwrap_or_default(),
             )
         }
-        store::IndexKind::AssistantMessage | store::IndexKind::Other => return,
+        store::IndexKind::AssistantMessage | store::IndexKind::NativeTool | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {
         prefix: prefix.to_string(),
@@ -343,6 +401,7 @@ pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
     matches!(
         kind,
         store::IndexKind::UserPrompt
+            | store::IndexKind::ToolResult
             | store::IndexKind::TurnEnd
             | store::IndexKind::TurnFailed
             | store::IndexKind::Compaction
@@ -423,6 +482,52 @@ pub(super) fn load_prompt_text(path: &Path, offset: u64) -> String {
         }
     }
     String::new()
+}
+
+/// Load a tool-result message and cross-reference the tool name from the
+/// parent assistant message's `ToolUse` block (matched by `tool_use_id`).
+/// Returns `(tool_name, result_content, is_error)`.
+pub(super) fn load_tool_result(
+    idx: usize,
+    indices: &[store::EventIndex],
+    by_id: &HashMap<&str, usize>,
+    path: &Path,
+) -> (String, String, String, bool) {
+    let ix = &indices[idx];
+    let Ok(ev) = store::load_event_at(path, ix.offset) else {
+        return (String::new(), String::new(), String::new(), false);
+    };
+    let SessionEventKind::Message(m) = ev.kind else {
+        return (String::new(), String::new(), String::new(), false);
+    };
+    let Some(block) = m.blocks.iter().find_map(|b| match b {
+        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            Some((tool_use_id.clone(), content.clone(), *is_error))
+        }
+        _ => None,
+    }) else {
+        return (String::new(), String::new(), String::new(), false);
+    };
+    let (tool_use_id, content, is_error) = block;
+    // Walk to the parent assistant message and find the matching ToolUse
+    // block to get the tool name.
+    let name = ix
+        .parent_id
+        .as_deref()
+        .and_then(|pid| by_id.get(pid).copied())
+        .and_then(|pidx| {
+            let pentry = &indices[pidx];
+            let pev = store::load_event_at(path, pentry.offset).ok()?;
+            let SessionEventKind::Message(pm) = pev.kind else { return None };
+            pm.blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolUse { id, name, .. } if id == &tool_use_id => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "?".to_string());
+    (name, tool_use_id, content, is_error)
 }
 
 /// Load an assistant-message event and extract its first text block.

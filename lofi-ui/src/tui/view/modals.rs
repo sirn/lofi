@@ -486,6 +486,8 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
                 t.secondary
             } else if e.label.starts_with("agent:") {
                 t.info
+            } else if e.label.starts_with("tool:") || e.label.starts_with("exec:") {
+                t.success
             } else {
                 t.muted // compact:
             };

@@ -1743,6 +1743,243 @@ fn tree_revert_to_root_then_reopens() {
 }
 
 #[test]
+fn tree_shows_tool_result_nodes() {
+    // user -> assistant(ToolUse) -> tool_result -> assistant(text) -> turn_end
+    // /tree must list a `tool:` node between the user prompt and the agent
+    // turn-end, showing the tool name and a result preview. Selecting the
+    // tool node rolls back to after the tool result (branch_point = its id).
+    use lofi_core::session::store::SessionStore;
+    use lofi_types::{ContentBlock, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let kinds = [
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "list files".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: "tu1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"cmd": "ls"}),
+            }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu1".into(),
+                content: "file_a.txt file_b.txt".into(),
+                is_error: false,
+            }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "done".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut batch: Vec<SessionEvent> = kinds
+        .into_iter()
+        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .collect();
+    store::append_events(&path, &mut batch, None).unwrap();
+    let (_meta, events, _o, _s) = store::load(&path).unwrap();
+    let tool_result_id = events[2].id.clone();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    // Tree: user, tool, agent (turn_end).
+    assert_eq!(picker.entries.len(), 3);
+    assert!(picker.entries[0].label.starts_with("user:"));
+    assert!(
+        picker.entries[1].label.starts_with("tool:"),
+        "expected tool: node, got {}",
+        picker.entries[1].label
+    );
+    assert!(picker.entries[2].label.starts_with("agent:"));
+    // The tool node shows the tool name (bash) and a result preview.
+    assert!(
+        picker.entries[1].label.contains("bash"),
+        "tool label should contain tool name, got {}",
+        picker.entries[1].label
+    );
+    assert!(
+        picker.entries[1].label.contains("file_a"),
+        "tool label should contain result preview, got {}",
+        picker.entries[1].label
+    );
+    // Tool node is branchable (branch_point = its own id, prefill empty).
+    assert_eq!(picker.entries[1].branch_point, tool_result_id);
+    assert!(picker.entries[1].prefill.is_empty());
+}
+
+#[test]
+fn tree_exec_label_shows_native_tools() {
+    // user -> assistant(exec ToolUse) -> tool_result -> native_tool(read) ->
+    // native_tool(edit) -> native_tool(read) -> assistant(text) -> turn_end
+    // /tree must show the exec tool result as `exec: read demo.txt, edit demo.txt, read demo.txt`
+    // instead of the raw exec result.
+    use lofi_core::session::store::SessionStore;
+    use lofi_types::{ContentBlock, NativeToolRecord, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let kinds = [
+        SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "do stuff".into() }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: "exec_0".into(),
+                name: "exec".into(),
+                input: serde_json::json!({"code": "..."}),
+            }],
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "exec_0".into(),
+                content: "exec result".into(),
+                is_error: false,
+            }],
+        }),
+        SessionEventKind::NativeTool(NativeToolRecord {
+            parent: "exec_0".into(),
+            call_id: 0,
+            name: "write".into(),
+            args: "demo.txt".into(),
+            result: "ok".into(),
+            is_error: false,
+        }),
+        SessionEventKind::NativeTool(NativeToolRecord {
+            parent: "exec_0".into(),
+            call_id: 1,
+            name: "edit".into(),
+            args: "demo.txt".into(),
+            result: "ok".into(),
+            is_error: false,
+        }),
+        SessionEventKind::NativeTool(NativeToolRecord {
+            parent: "exec_0".into(),
+            call_id: 2,
+            name: "read".into(),
+            args: "demo.txt".into(),
+            result: "ok".into(),
+            is_error: false,
+        }),
+        SessionEventKind::Message(Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text { text: "done".into() }],
+        }),
+        SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut batch: Vec<SessionEvent> = kinds
+        .into_iter()
+        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .collect();
+    store::append_events(&path, &mut batch, None).unwrap();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    // Find the exec entry (starts with "exec:")
+    let exec_entry = picker
+        .entries
+        .iter()
+        .find(|e| e.label.starts_with("exec:"))
+        .expect("should have an exec: node");
+    // The label should list the native tools, not the raw exec result.
+    assert!(
+        exec_entry.label.contains("write"),
+        "exec label should list write tool, got: {}",
+        exec_entry.label
+    );
+    assert!(
+        exec_entry.label.contains("edit"),
+        "exec label should list edit tool, got: {}",
+        exec_entry.label
+    );
+    assert!(
+        exec_entry.label.contains("read"),
+        "exec label should list read tool, got: {}",
+        exec_entry.label
+    );
+    assert!(
+        !exec_entry.label.contains("exec result"),
+        "exec label should not contain the raw result, got: {}",
+        exec_entry.label
+    );
+}
+
+#[test]
+fn tree_shows_tool_result_nodes_in_v1_session() {
+    // V1 session files have no `type` field on message lines and no
+    // turn_end events — just raw Message objects. The index scan must
+    // still classify role=tool messages as ToolResult so they appear as
+    // `tool:` nodes in /tree.
+    use lofi_types::{ContentBlock, Message, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    // Write a v1 header + raw message lines (no `type` field on messages).
+    let header = r#"{"type":"meta","version":1,"created":1784436411351,"cwd":"/x","model":"m"}
+"#;
+    let lines = [
+        serde_json::to_string(&Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: "list files".into() }],
+        }).unwrap(),
+        serde_json::to_string(&Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: "tu1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"cmd": "ls"}),
+            }],
+        }).unwrap(),
+        serde_json::to_string(&Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu1".into(),
+                content: "file_a.txt".into(),
+                is_error: false,
+            }],
+        }).unwrap(),
+    ];
+    std::fs::write(&path, format!("{header}{}\n", lines.join("\n"))).unwrap();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    // V1: user, tool (no turn_end, so no agent node).
+    assert!(picker.entries.iter().any(|e| e.label.starts_with("user:")), "should have user node");
+    assert!(
+        picker.entries.iter().any(|e| e.label.starts_with("tool:")),
+        "should have tool node in v1 session"
+    );
+}
+
+#[test]
 fn verbose_toggles() {
     let mut a = app();
     assert!(!a.verbose);
