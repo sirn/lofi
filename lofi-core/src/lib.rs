@@ -7,6 +7,9 @@
 //! in `lofi-ui`.
 
 pub mod agent;
+
+/// Re-export of [`lofi_code::docs`] for the CLI.
+pub use lofi_code::docs;
 pub mod compact;
 pub mod context_edit;
 pub mod recall;

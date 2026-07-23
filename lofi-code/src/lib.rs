@@ -46,6 +46,7 @@ use swc_ecma_visit::VisitMutWith;
 
 use lofi_error::{Error, Result};
 
+pub mod docs;
 mod convert;
 use convert::{js_to_json, json_to_js};
 
@@ -63,7 +64,7 @@ pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 /// Maximum heap the `QuickJS` runtime may allocate before `JS_SetMemoryLimit`
 /// rejects further growth. Generous but finite — prevents a runaway guest
 /// (e.g. building an unbounded array) from exhausting host memory.
-const GUEST_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+const GUEST_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 /// Maximum native call-stack depth the interpreter may use. `QuickJS` checks
 /// this at function-entry granularity, so a deeply recursive guest aborts
 /// with a stack-overflow exception rather than segfaulting the host.
@@ -986,5 +987,36 @@ mod tests {
         "#;
         let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
         assert_eq!(res.value, json!("done"));
+    }
+
+    #[tokio::test]
+    async fn exec_docs_index_and_entry() {
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions::default();
+        let src = r#"
+            const idx = await lofi.docs();
+            const names = idx.entries.map(e => e.name);
+            const hasRead = names.includes("lofi.read");
+            const entry = await lofi.docs("lofi.bash");
+            const hasContent = entry.content.includes("timeoutMs");
+            return { hasRead, hasContent, count: names.length };
+        "#;
+        let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+        assert_eq!(res.value["hasRead"], json!(true));
+        assert_eq!(res.value["hasContent"], json!(true));
+        assert!(res.value["count"].as_u64().unwrap() > 10);
+    }
+
+    #[tokio::test]
+    async fn exec_docs_search() {
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions::default();
+        let src = r#"
+            const res = await lofi.docs_search("write file");
+            const topName = res.results[0].name;
+            return topName;
+        "#;
+        let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+        assert_eq!(res.value, json!("lofi.write"));
     }
 }

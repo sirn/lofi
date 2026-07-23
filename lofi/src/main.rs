@@ -47,6 +47,12 @@ struct Cli {
     /// Do not persist a transcript.
     #[arg(long)]
     no_session: bool,
+    /// Print the embedded API reference index and exit.
+    #[arg(long)]
+    docs: bool,
+    /// Search the embedded API reference and print matching entries.
+    #[arg(long, value_name = "QUERY")]
+    docs_search: Option<String>,
 }
 
 #[tokio::main]
@@ -69,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
         list_models(&cli).await?;
     } else if cli.list_sessions {
         list_sessions(&root)?;
+    } else if cli.docs {
+        print_docs_index()?;
+    } else if let Some(query) = cli.docs_search.clone() {
+        print_docs_search(&query)?;
     } else if let Some(prompt) = cli.print.clone() {
         let opts = build_print_opts(&cli, prompt, root);
         lofi_ui::run_print(opts).await?;
@@ -124,6 +134,47 @@ fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
                 e.meta.model.label(),
                 e.message_count,
             );
+            handle.write_all(line.as_bytes())?;
+        }
+    }
+    if std::io::stdout().is_terminal() {
+        handle.flush()?;
+    }
+    Ok(())
+}
+
+/// Print the API reference index (`name — summary` per line) to stdout.
+fn print_docs_index() -> anyhow::Result<()> {
+    let idx = lofi_core::docs::docs_index();
+    let entries = idx["entries"].as_array().context("malformed docs index")?;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    for e in entries {
+        let name = e["name"].as_str().unwrap_or("?");
+        let summary = e["summary"].as_str().unwrap_or("");
+        let line = format!("{name} — {summary}\n");
+        handle.write_all(line.as_bytes())?;
+    }
+    if std::io::stdout().is_terminal() {
+        handle.flush()?;
+    }
+    Ok(())
+}
+
+/// Print search results (`name [score] — excerpt` per line) to stdout.
+fn print_docs_search(query: &str) -> anyhow::Result<()> {
+    let res = lofi_core::docs::docs_search(query);
+    let results = res["results"].as_array().context("malformed search results")?;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    if results.is_empty() {
+        handle.write_all(b"(no matches)\n")?;
+    } else {
+        for r in results {
+            let name = r["name"].as_str().unwrap_or("?");
+            let score = r["score"].as_u64().unwrap_or(0);
+            let excerpt = r["excerpt"].as_str().unwrap_or("");
+            let line = format!("{name} [{score}] — {excerpt}\n");
             handle.write_all(line.as_bytes())?;
         }
     }

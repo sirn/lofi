@@ -23,6 +23,7 @@ pub(super) fn bind_tools<'js>(
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
+    bind_docs_tools(ctx, lofi)?;
     Ok(())
 }
 
@@ -398,6 +399,53 @@ fn bind_skills_tools<'js>(
                         is_error,
                     });
                     tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    Ok(())
+}
+
+/// Bind `lofi.docs(name?)` and `lofi.docs_search(query)`.
+///
+/// These are pure computation on compile-time-embedded data (no I/O), but
+/// use `Async` closures to go through the same promise/`IntoJs` path as all
+/// other tool bindings — the sync `Function::new` path has different GC
+/// interactions under memory pressure.
+/// Bind `lofi.docs(name?)` and `lofi.docs_search(query)`.
+///
+/// These are pure computation on compile-time-embedded data (no I/O), but
+/// use `Async` closures to go through the same promise/`IntoJs` path as all
+/// other tool bindings.
+fn bind_docs_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+) -> rquickjs::Result<()> {
+    lofi.set(
+        "docs",
+        Function::new(
+            ctx.clone(),
+            Async(move |name: Opt<String>| {
+                let val = match &name.0 {
+                    Some(n) => crate::docs::docs_entry(n),
+                    None => crate::docs::docs_index(),
+                };
+                async move {
+                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
+                }
+            }),
+        )?,
+    )?;
+
+    lofi.set(
+        "docs_search",
+        Function::new(
+            ctx.clone(),
+            Async(move |query: String| {
+                let val = crate::docs::docs_search(&query);
+                async move {
+                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
                 }
             }),
         )?,
