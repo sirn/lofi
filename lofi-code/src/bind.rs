@@ -463,6 +463,33 @@ fn bind_skills_tools<'js>(
         )?,
     )?;
 
+    let t4 = t.clone();
+    lofi.set(
+        "skill_search",
+        Function::new(
+            ctx.clone(),
+            Async(move |query: String| {
+                let t = t4.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "skill_search".into(),
+                        args: cap_first_line(&query, 120),
+                    });
+                    let res = t.skill_search(&query).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
     Ok(())
 }
 

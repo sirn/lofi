@@ -80,4 +80,6 @@ When a session grows long, lofi folds the older history into a structured summar
 
 `lofi.skill_file(name, file) -> { ok, name, source, file, content }` reads a companion file within a skill's directory (e.g. `examples/branching.md`). This is the only way to read files under global skills, which live outside the workspace root and are therefore unreachable via `lofi.read`.
 
+`lofi.skill_search(query) -> { ok, results }` searches across all skill `SKILL.md` files for a case-insensitive substring match. Each result is `{ name, description, source, matches }` where `matches` is an array of `{ line, text }` entries (up to 5 per skill).
+
 Skills are directories containing a `SKILL.md` file. The skill name is the directory path relative to the skills root, so `skills/git-workflow/SKILL.md` has name `git-workflow` and `skills/git-workflow/rebase/SKILL.md` has name `git-workflow/rebase`. The name may contain `/` as a namespace separator. Skills may also carry companion files alongside `SKILL.md` (examples, templates, etc.). Skills provide reusable instructions or domain knowledge you can load on demand. Use `lofi.skills()` to discover what is available, then `lofi.skill(name)` to read the one you need.
