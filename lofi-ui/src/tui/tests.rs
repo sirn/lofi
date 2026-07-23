@@ -287,11 +287,11 @@ fn raw_map_snaps_to_markers_for_bold() {
 /// the same path as `feed_segment`.
 fn feed_lines(a: &mut App, rls: &[view::RenderLine]) {
     a.log_off = 0;
-    a.log_lines = rls.iter().map(|rl| {
-        rl.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    a.log_vis = rls.iter().map(|rl| view::VisLine {
+        rendered: rl.line.spans.iter().map(|s| s.content.as_ref()).collect(),
+        content: rl.content,
+        raw: rl.raw.clone(),
     }).collect();
-    a.log_content = rls.iter().map(|rl| rl.content).collect();
-    a.log_raw = rls.iter().map(|rl| rl.raw.clone()).collect();
 }
 
 #[test]
@@ -307,8 +307,8 @@ fn yank_heading_includes_prefix() {
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the heading row (source contains "##").
-    let row = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.contains("##"))
+    let row = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.contains("##"))
     }).expect("heading row");
     a.nav_cursor = row;
     assert_eq!(a.current_line_text().as_deref(), Some("## Hello World"));
@@ -326,8 +326,8 @@ fn yank_blockquote_includes_prefix() {
     let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    let row = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with('>'))
+    let row = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with('>'))
     }).expect("blockquote row");
     a.nav_cursor = row;
     assert_eq!(a.current_line_text().as_deref(), Some("> A quoted line"));
@@ -346,14 +346,14 @@ fn yank_table_row_returns_markdown() {
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the header data row (source starts with `| Name`).
-    let hdr = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with("| Name"))
+    let hdr = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with("| Name"))
     }).expect("header data row");
     a.nav_cursor = hdr;
     assert_eq!(a.current_line_text().as_deref(), Some("| Name | Age |"));
     // Find a data row.
-    let data = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with("| Ada"))
+    let data = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with("| Ada"))
     }).expect("data row");
     a.nav_cursor = data;
     assert_eq!(a.current_line_text().as_deref(), Some("| Ada | 36 |"));
@@ -373,8 +373,8 @@ fn yank_table_header_separator_returns_markdown() {
     feed_lines(&mut a, &rls);
     // The header-separator border (├─┼─┤) carries the markdown separator
     // line so yanking it recovers `|------|-----|`.
-    let sep = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with("|---") || r.source.starts_with("|--"))
+    let sep = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with("|---") || r.source.starts_with("|--"))
     }).expect("separator border row");
     a.nav_cursor = sep;
     assert_eq!(a.current_line_text().as_deref(), Some("|------|-----|"));
@@ -393,8 +393,8 @@ fn yank_table_border_returns_empty() {
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the top border row (raw exists but source is empty).
-    let border = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.is_empty())
+    let border = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.is_empty())
     }).expect("border row");
     a.nav_cursor = border;
     // Non-separator border rows carry no markdown source — yank should
@@ -415,8 +415,8 @@ fn yank_nested_list_preserves_indent() {
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the nested item row (source starts with "  -").
-    let nested = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with("  -"))
+    let nested = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with("  -"))
     }).expect("nested item row");
     a.nav_cursor = nested;
     assert_eq!(a.current_line_text().as_deref(), Some("  - Nested item"));
@@ -435,8 +435,8 @@ fn yank_code_block_preserves_indent() {
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the indented line (source starts with "  return").
-    let indented = a.log_raw.iter().position(|r| {
-        r.as_ref().is_some_and(|r| r.source.starts_with("  return"))
+    let indented = a.log_vis.iter().position(|v| {
+        v.raw.as_ref().is_some_and(|r| r.source.starts_with("  return"))
     }).expect("indented code line");
     a.nav_cursor = indented;
     assert_eq!(a.current_line_text().as_deref(), Some("  return 42;"));
@@ -456,7 +456,7 @@ fn selection_nested_list_preserves_indent() {
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select all lines.
-    a.sel = Some(Selection { start: (0, 0), end: (n - 1, a.log_lines[n - 1].chars().count()) });
+    a.sel = Some(Selection { start: (0, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
     let text = a.selection_text().expect("selection text");
     assert!(text.contains("  - Nested item"), "should preserve indent: {text}");
 }
@@ -475,7 +475,7 @@ fn selection_table_returns_markdown_not_grid() {
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select the entire table top to bottom.
-    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_lines[n - 1].chars().count()) });
+    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
     let text = a.selection_text().expect("selection text");
     // Non-separator borders are suppressed; the header, separator, and
     // data rows carry markdown source, joined by `\n`.
@@ -787,8 +787,7 @@ fn current_line_text_excludes_decoration() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_lines = vec!["  hello world   ".to_string()];
-    a.log_content = vec![(2, 13)]; // "hello world"
+    a.log_vis = vec![view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None }]; // "hello world"
     a.nav_cursor = 0;
     assert_eq!(a.current_line_text().as_deref(), Some("hello world"));
 }
@@ -798,8 +797,7 @@ fn vim_motions_move_within_content() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_lines = vec!["  aa bb cc".to_string()];
-    a.log_content = vec![(2, 10)]; // "aa bb cc"
+    a.log_vis = vec![view::VisLine { rendered: "  aa bb cc".to_string(), content: (2, 10), raw: None }]; // "aa bb cc"
     a.nav_cursor = 0;
     a.nav_col = 2;
     // ^ and 0 land on the first content char.
@@ -823,8 +821,7 @@ fn vim_word_motion_skips_punctuation() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_lines = vec!["  a.b c".to_string()];
-    a.log_content = vec![(2, 7)]; // "a.b c"
+    a.log_vis = vec![view::VisLine { rendered: "  a.b c".to_string(), content: (2, 7), raw: None }]; // "a.b c"
     a.nav_cursor = 0;
     a.nav_col = 2;
     // w from "a" lands on "." (punctuation is its own word).
@@ -2807,18 +2804,13 @@ fn selection_text_is_content_aware() {
     // trailing padding tail fall outside the content range, while the
     // content's own leading spaces (indentation) are inside it.
     a.log_off = 0;
-    a.log_lines = vec![
+    a.log_vis = vec![
         // gutter "  " + content "hello world" + padding "   "
-        "  hello world   ".to_string(),
+        view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None },
         // gutter "  " + rails "│ │ " + content "lofi-core…Agent {" + padding
-        "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(),
+        view::VisLine { rendered: "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(), content: (6, 51), raw: None },
         // gutter "  " + content "    let x = 1;" (indentation preserved!)
-        "      let x = 1;".to_string(),
-    ];
-    a.log_content = vec![
-        (2, 13),  // "hello world"
-        (6, 51),  // "lofi-core/src/agent.rs:233:pub struct Agent {"
-        (2, 16),  // "    let x = 1;"
+        view::VisLine { rendered: "      let x = 1;".to_string(), content: (2, 16), raw: None },
     ];
     a.sel = Some(Selection { start: (0, 0), end: (2, 40) });
     assert_eq!(
@@ -2835,13 +2827,15 @@ fn yank_line_returns_raw_markdown() {
     // snaps the whole-row yank to `source[0..8]` = `**bold**`.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec!["  bold".to_string()];
-    a.log_content = vec![(2, 6)]; // rendered "bold"
-    a.log_raw = vec![Some(view::RawLine::new(
-        Arc::from("**bold**"),
-        vec![0, 3, 4, 5, 8],
-        true,
-    ))];
+    a.log_vis = vec![view::VisLine {
+        rendered: "  bold".to_string(),
+        content: (2, 6), // rendered "bold"
+        raw: Some(view::RawLine::new(
+            Arc::from("**bold**"),
+            vec![0, 3, 4, 5, 8],
+            true,
+        )),
+    }];
     a.nav_cursor = 0;
     assert_eq!(a.current_line_text().as_deref(), Some("**bold**"));
 }
@@ -2852,9 +2846,7 @@ fn yank_line_falls_back_to_rendered_without_raw() {
     // content slice as before.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec!["  hello world   ".to_string()];
-    a.log_content = vec![(2, 13)];
-    a.log_raw = vec![None];
+    a.log_vis = vec![view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None }];
     a.nav_cursor = 0;
     assert_eq!(a.current_line_text().as_deref(), Some("hello world"));
 }
@@ -2865,13 +2857,15 @@ fn selection_text_raw_partial_includes_markers() {
     // raw `**bold**` — the map snaps the selection to the enclosing markers.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec!["  bold".to_string()];
-    a.log_content = vec![(2, 6)];
-    a.log_raw = vec![Some(view::RawLine::new(
-        Arc::from("**bold**"),
-        vec![0, 3, 4, 5, 8],
-        true,
-    ))];
+    a.log_vis = vec![view::VisLine {
+        rendered: "  bold".to_string(),
+        content: (2, 6),
+        raw: Some(view::RawLine::new(
+            Arc::from("**bold**"),
+            vec![0, 3, 4, 5, 8],
+            true,
+        )),
+    }];
     // Select display content [2, 6) = "bold".
     a.sel = Some(Selection { start: (0, 2), end: (0, 6) });
     assert_eq!(a.selection_text().as_deref(), Some("**bold**"));
@@ -2884,17 +2878,11 @@ fn selection_text_raw_skips_softwrap_newlines() {
     // `\n` — the soft-wrap boundary contributes no separator.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec![
-        "  hello ".to_string(),
-        "  world".to_string(),
-        "  second line".to_string(),
-    ];
-    a.log_content = vec![(2, 8), (2, 7), (2, 13)];
     let first: Arc<str> = Arc::from("hello world");
-    a.log_raw = vec![
-        Some(view::RawLine::linear(first.clone(), 0, 6, true)),
-        Some(view::RawLine::linear(first.clone(), 6, 5, false)),
-        Some(view::RawLine::linear(Arc::from("second line"), 0, 11, true)),
+    a.log_vis = vec![
+        view::VisLine { rendered: "  hello ".to_string(), content: (2, 8), raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)) },
+        view::VisLine { rendered: "  world".to_string(), content: (2, 7), raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)) },
+        view::VisLine { rendered: "  second line".to_string(), content: (2, 13), raw: Some(view::RawLine::linear(Arc::from("second line"), 0, 11, true)) },
     ];
     a.sel = Some(Selection { start: (0, 2), end: (2, 13) });
     assert_eq!(
@@ -2909,12 +2897,10 @@ fn selection_text_raw_char_level_on_continuation() {
     // level), not the whole source line — the map slices the row's fragment.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec!["  hello ".to_string(), "  world".to_string()];
-    a.log_content = vec![(2, 8), (2, 7)];
     let first: Arc<str> = Arc::from("hello world");
-    a.log_raw = vec![
-        Some(view::RawLine::linear(first.clone(), 0, 6, true)),
-        Some(view::RawLine::linear(first.clone(), 6, 5, false)),
+    a.log_vis = vec![
+        view::VisLine { rendered: "  hello ".to_string(), content: (2, 8), raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)) },
+        view::VisLine { rendered: "  world".to_string(), content: (2, 7), raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)) },
     ];
     a.sel = Some(Selection { start: (1, 2), end: (1, 7) });
     assert_eq!(a.selection_text().as_deref(), Some("world"));

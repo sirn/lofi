@@ -162,6 +162,20 @@ fn char_count(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
+/// A stashed *visible* log line: the rendered plain text, selectable
+/// content char range, and optional raw markdown source for yank.
+/// Populated at render time from [`RenderLine`] so mouse selection and
+/// cursor tracking can map screen coords back to text without re-rendering.
+pub struct VisLine {
+    /// Rendered plain text (all spans concatenated).
+    pub rendered: String,
+    /// Selectable content char range (excludes decoration and padding).
+    pub content: (usize, usize),
+    /// Raw markdown source for yank; `None` when the rendered text is
+    /// canonical (decoration, tool glyphs, etc.).
+    pub raw: Option<RawLine>,
+}
+
 /// Build a line from `deco` + `content` + optional `suffix` (trailing
 /// decoration, e.g. a dash fill), recording the content char range. The
 /// suffix is rendered but excluded from selection.

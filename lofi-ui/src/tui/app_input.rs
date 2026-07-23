@@ -269,7 +269,7 @@ impl App {
         // Prefer the raw markdown source (markers intact) when the rendered
         // line carries a position map; slice the source over the row's full
         // content range so a soft-wrapped row yields its raw fragment.
-        if let Some(rl) = self.log_raw.get(rel).and_then(|r| r.as_ref()) {
+        if let Some(rl) = self.log_vis.get(rel).and_then(|v| v.raw.as_ref()) {
             if rl.map.len() >= 2 {
                 let end = *rl.map.last()?;
                 // On the first visual row (hard_break), include leading
@@ -292,9 +292,10 @@ impl App {
             }
             return None;
         }
-        let s = self.log_lines.get(rel)?;
+        let vl = self.log_vis.get(rel)?;
+        let s = &vl.rendered;
         let n = s.chars().count();
-        let (cstart, cend) = self.log_content.get(rel).copied().unwrap_or((0, n));
+        let (cstart, cend) = vl.content;
         let cstart = cstart.min(n);
         let cend = cend.min(n);
         if cstart >= cend {

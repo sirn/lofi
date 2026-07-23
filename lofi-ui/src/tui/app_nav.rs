@@ -56,7 +56,7 @@ impl App {
     /// `nav_show_cursor` keeps the cursor on screen between events.
     pub(super) fn cursor_content_range(&self) -> (usize, usize) {
         let rel = self.nav_cursor.saturating_sub(self.log_off);
-        self.log_content.get(rel).copied().unwrap_or((0, 0))
+        self.log_vis.get(rel).map_or((0, 0), |v| v.content)
     }
 
     /// Move the cursor column by `delta` chars, clamped to the cursor line's
@@ -96,9 +96,10 @@ impl App {
             return cstart;
         }
         let rel = self.nav_cursor.saturating_sub(self.log_off);
-        let Some(s) = self.log_lines.get(rel) else {
+        let Some(s) = self.log_vis.get(rel) else {
             return cstart;
         };
+        let s = &s.rendered;
         for (i, c) in s.chars().enumerate() {
             if i >= cend {
                 break;
@@ -117,10 +118,10 @@ impl App {
             return cstart;
         }
         let rel = self.nav_cursor.saturating_sub(self.log_off);
-        let Some(s) = self.log_lines.get(rel) else {
+        let Some(vl) = self.log_vis.get(rel) else {
             return cstart;
         };
-        let chars: Vec<char> = s.chars().collect();
+        let chars: Vec<char> = vl.rendered.chars().collect();
         let content = &chars[cstart..cend];
         let n = content.len();
         let p = self.nav_col.clamp(cstart, cend - 1) - cstart;
@@ -574,11 +575,9 @@ impl App {
         if sl == el && sc == ec {
             return None;
         }
-        let lines = &self.log_lines;
-        let content = &self.log_content;
-        let raw = &self.log_raw;
+        let vis = &self.log_vis;
         let off = self.log_off;
-        let vis_len = lines.len();
+        let vis_len = vis.len();
         if vis_len == 0 || el < off || sl >= off + vis_len {
             return None;
         }
@@ -588,13 +587,14 @@ impl App {
         let mut prev_src: Option<std::sync::Arc<str>> = None;
         for rel in lo..=hi {
             let li_abs = off + rel;
-            let s = &lines[rel];
+            let vl = &vis[rel];
+            let s = &vl.rendered;
             let n = s.chars().count();
-            let (cstart, cend) = content.get(rel).copied().unwrap_or((0, n));
+            let (cstart, cend) = vl.content;
             let cs = (if li_abs == sl { sc } else { 0 }).clamp(cstart, cend);
             let ce = (if li_abs == el { ec } else { n }).clamp(cstart, cend);
             // Raw markdown: map the content-relative selection to a source slice.
-            if let Some(rl) = raw.get(rel).and_then(|r| r.as_ref()) {
+            if let Some(rl) = vl.raw.as_ref() {
                 if rl.map.len() >= 2 {
                     let start_rel = cs.saturating_sub(cstart).min(rl.map.len() - 1);
                     let end_rel = ce.saturating_sub(cstart).min(rl.map.len() - 1);

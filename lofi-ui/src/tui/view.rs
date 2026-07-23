@@ -33,7 +33,9 @@ mod modals;
 use modals::{render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
 
 pub(crate) use prim::RenderLine;
+#[allow(unused_imports)]
 pub(crate) use prim::RawLine;
+pub(crate) use prim::VisLine;
 
 pub(crate) use prim::HStack;
 
@@ -177,9 +179,7 @@ fn feed_segment(
     off: usize,
     want: &mut usize,
     vis: &mut Vec<Line<'static>>,
-    visp: &mut Vec<String>,
-    visc: &mut Vec<(usize, usize)>,
-    visr: &mut Vec<Option<RawLine>>,
+    visv: &mut Vec<VisLine>,
 ) {
     if *want == 0 {
         return;
@@ -193,15 +193,16 @@ fn feed_segment(
             continue;
         }
         vis.push(rl.line.clone());
-        visp.push(
-            rl.line
+        visv.push(VisLine {
+            rendered: rl
+                .line
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect(),
-        );
-        visc.push(rl.content);
-        visr.push(rl.raw.clone());
+            content: rl.content,
+            raw: rl.raw.clone(),
+        });
         *pos += 1;
         *want -= 1;
     }
@@ -336,9 +337,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // are cloned.
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
-    let mut visp: Vec<String> = Vec::with_capacity(height);
-    let mut visc: Vec<(usize, usize)> = Vec::with_capacity(height);
-    let mut visr: Vec<Option<RawLine>> = Vec::with_capacity(height);
+    let mut visv: Vec<VisLine> = Vec::with_capacity(height);
     let mut pos = 0usize;
     let mut want = height;
     if n_turns == 0 {
@@ -348,9 +347,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             off,
             &mut want,
             &mut vis,
-            &mut visp,
-            &mut visc,
-            &mut visr,
+            &mut visv,
         );
     } else {
         for i in 0..n_turns {
@@ -361,9 +358,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     off,
                     &mut want,
                     &mut vis,
-                    &mut visp,
-                    &mut visc,
-                    &mut visr,
+                    &mut visv,
                 );
                 if want == 0 {
                     break;
@@ -377,7 +372,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     app.ensure_frozen_turn(i, w);
                     if let Some(lines) = app.frozen_render.get(i) {
-                        feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visp, &mut visc, &mut visr);
+                        feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visv);
                     }
                 }
             } else {
@@ -387,9 +382,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     off,
                     &mut want,
                     &mut vis,
-                    &mut visp,
-                    &mut visc,
-                    &mut visr,
+                    &mut visv,
                 );
             }
             if want == 0 {
@@ -397,9 +390,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
-    app.log_lines = visp;
-    app.log_content = visc;
-    app.log_raw = visr;
+    app.log_vis = visv;
 
     // Highlight the active mouse selection over the visible window only.
     if let Some(sel) = &app.sel {
@@ -417,12 +408,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             let hi = el.min(off + vis_len - 1);
             for li in lo..=hi {
                 let rel = li - off;
-                let s = &app.log_lines[rel];
+                let s = &app.log_vis[rel].rendered;
                 let (cstart, cend) = app
-                    .log_content
+                    .log_vis
                     .get(rel)
-                    .copied()
-                    .unwrap_or((0, s.chars().count()));
+                    .map_or((0, s.chars().count()), |v| v.content);
                 // Clamp to the content range so the highlight covers only the
                 // content — never the leading gutter or the trailing padding.
                 let cs = if li == sl { sc } else { 0 };
@@ -445,7 +435,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         let cur = app.nav_cursor;
         if cur >= off && cur < off + vis.len() {
             let rel = cur - off;
-            let (cstart, cend) = app.log_content.get(rel).copied().unwrap_or((0, 0));
+            let (cstart, cend) = app.log_vis.get(rel).map_or((0, 0), |v| v.content);
             // Cursor cell column: within the content, or at the content start
             // for empty-content lines (e.g. a numbered exec line whose body
             // is blank) so the cursor sits at the first content position.

@@ -626,7 +626,7 @@ impl FrozenCache {
 
 /// The TUI's mutable state.
 /// Mouse selection in the log, in select-line + char-index space (absolute
-/// indices into `log_lines`).
+/// indices into `log_vis`).
 struct Selection {
     start: (usize, usize),
     end: (usize, usize),
@@ -771,18 +771,7 @@ pub(crate) struct App {
     /// Plain text of each *visible* log line (the viewport window only),
     /// stashed at render time so mouse selection can map screen coords to
     /// text. Window-relative: index 0 is the top visible line.
-    log_lines: Vec<String>,
-    /// Selectable content char range of each *visible* log line, parallel to
-    /// [`log_lines`]. Selection (highlight and copy) is clamped to this range
-    /// so it covers content only — never the decorative gutter/rails in front
-    /// or the background-padding tail at the end — while preserving content's
-    /// own leading spaces (indentation).
-    log_content: Vec<(usize, usize)>,
-    /// Raw markdown source line for each *visible* log line, parallel to
-    /// [`log_lines`]. `Some` on lines derived from a markdown source
-    /// (assistant text, code, user messages) so yank copies the raw source
-    /// rather than the rendered/stripped text; `None` on decoration.
-    log_raw: Vec<Option<view::RawLine>>,
+    log_vis: Vec<view::VisLine>,
     /// Absolute index of the top visible log line (`scroll` offset).
     log_off: usize,
     /// Top visible select row of the prompt input when it overflows its

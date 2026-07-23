@@ -533,7 +533,7 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
 }
 
 /// Map a screen cell inside the log viewport to (select-line index, char
-/// index) in `log_lines`, using display width so wide chars land correctly.
+/// index) in `log_vis`, using display width so wide chars land correctly.
 /// The char index is clamped to the line's content range so a press/drag in
 /// the gutter or padding snaps to the content edge — the selection never
 /// starts or ends in the decorative whitespace.
@@ -541,10 +541,11 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     let rel_y = row.saturating_sub(app.log_rect.y) as usize;
     let rel_x = column.saturating_sub(app.log_rect.x) as usize;
     let line_idx = app.log_off.saturating_add(rel_y);
-    // `log_lines` is the visible window only (window-relative); index by `rel_y`.
-    let line = app.log_lines.get(rel_y);
-    let col = line.map_or(rel_x, |s| {
-        let (cstart, cend) = app.log_content.get(rel_y).copied().unwrap_or((0, s.chars().count()));
+    // `log_vis` is the visible window only (window-relative); index by `rel_y`.
+    let line = app.log_vis.get(rel_y);
+    let col = line.map_or(rel_x, |vl| {
+        let s = &vl.rendered;
+        let (cstart, cend) = vl.content;
         col_to_char_idx(s, rel_x).clamp(cstart, cend)
     });
     (line_idx, col)
