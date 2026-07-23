@@ -3317,6 +3317,72 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
         "cursor cell should stay on the same content char after resize"
     );
 }
+
+#[test]
+fn resize_keeps_select_anchor_on_same_content_char() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let prompt =
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
+            .repeat(2);
+    a.turns.push(Turn {
+        prompt,
+        blocks: Vec::new(),
+    });
+    push_turn(&mut a);
+
+    // Narrow render; set up a selection spanning two lines inside turn 0.
+    let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    // Anchor on line 2, cursor on line 5 — both within turn 0.
+    let (anchor_intra, anchor_col, anchor_char) = {
+        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let intra = 2.min(narrow.len().saturating_sub(1));
+        let rl = &narrow[intra];
+        let col = rl.content.0 + (rl.content_len() / 2).max(1);
+        (intra, col, app_nav::cursor_char_pos(narrow, intra, col))
+    };
+    let (cur_intra, cur_col, cur_char) = {
+        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let intra = 5.min(narrow.len().saturating_sub(1));
+        let rl = &narrow[intra];
+        let col = rl.content.0 + (rl.content_len() / 2).max(1);
+        (intra, col, app_nav::cursor_char_pos(narrow, intra, col))
+    };
+    a.mode = Mode::Select;
+    a.select_anchor = (a.turn_start_line(0) + anchor_intra, anchor_col);
+    a.nav_cursor = a.turn_start_line(0) + cur_intra;
+    a.nav_col = cur_col;
+    a.sel = Some(a.select_sel());
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+
+    // Widen: both selection endpoints must stay on their content chars.
+    // Before the fix, the anchor kept its stale absolute line index and
+    // drifted onto the wrong content character.
+    let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+
+    let new_anchor_char = {
+        let intra = a.select_anchor.0 - a.turn_start_line(0);
+        assert!(intra < wide.len(), "anchor should land within turn 0");
+        app_nav::cursor_char_pos(wide, intra, a.select_anchor.1)
+    };
+    let new_cur_char = {
+        let intra = a.nav_cursor - a.turn_start_line(0);
+        assert!(intra < wide.len(), "cursor should land within turn 0");
+        app_nav::cursor_char_pos(wide, intra, a.nav_col)
+    };
+    assert_eq!(
+        new_anchor_char, anchor_char,
+        "select anchor should stay on the same content char after resize"
+    );
+    assert_eq!(
+        new_cur_char, cur_char,
+        "select cursor should stay on the same content char after resize"
+    );
+}
 #[test]
 fn resize_keeps_nav_cursor_at_its_viewport_row() {
     use ratatui::backend::TestBackend;

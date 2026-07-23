@@ -225,6 +225,15 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         None
     };
+    // Capture the Select-mode selection anchor's content position too: it's
+    // an absolute `(line, col)` that drifts across a re-wrap just like the
+    // cursor. Both endpoints must be re-seated so the selection survives a
+    // resize on the same content characters.
+    let sel_anchor = if width_changed && app.mode == Mode::Select {
+        app.sel_content_anchor()
+    } else {
+        None
+    };
     // Capture the cursor's previous viewport row so the viewport can be
     // re-anchored to keep the cursor on that row after the re-wrap. Content
     // tracking preserves the cursor's character, but the lines between the
@@ -286,6 +295,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // fits (e.g. a height shrink).
     if let Some(anchor) = nav_anchor {
         app.reseat_nav_cursor(anchor, &last_lines, w);
+    }
+    if let Some(anchor) = sel_anchor {
+        app.reseat_sel_anchor(anchor, &last_lines, w);
     }
     // Keep the cursor on its previous viewport row: the re-seat above put it
     // on its content character; shift the viewport top to match so the cursor

@@ -252,71 +252,83 @@ impl App {
         view::blocks::render_turn_lines(&cx, &turn)
     }
 
-    /// Capture the Navigate cursor's content anchor — its turn index and the
-    /// cumulative selectable-content char offset of its line's start within
-    /// that turn — so the cursor can be re-seated on the same content line
-    /// after a re-wrap. The content text is unchanged by a width change, so a
-    /// content offset is a stable anchor where an absolute line index is not.
+    /// Capture a content anchor for an arbitrary transcript position
+    /// `(cursor, col)` — its turn index and the cumulative selectable-content
+    /// char offset of its line's start within that turn — so the position can
+    /// be re-seated on the same content character after a re-wrap. The content
+    /// text is unchanged by a width change, so a content offset is a stable
+    /// anchor where an absolute line index is not.
     ///
     /// Must run *before* `ensure_frozen` clears the old-width frozen cache.
-    pub(super) fn nav_content_anchor(&self) -> Option<(usize, usize)> {
+    /// Used for both the Navigate cursor and the Select-mode selection anchor.
+    fn content_anchor_for(&self, cursor: usize, col: usize) -> Option<(usize, usize)> {
         let n = self.turns.len();
         if n == 0 {
             return None;
         }
-        let cur = self.nav_cursor;
         // Largest turn whose start line is at or below the cursor.
         let mut k = 0;
         for i in 0..n {
-            if self.turn_start_line(i) <= cur {
+            if self.turn_start_line(i) <= cursor {
                 k = i;
             } else {
                 break;
             }
         }
-        let intra = cur.saturating_sub(self.turn_start_line(k));
+        let intra = cursor.saturating_sub(self.turn_start_line(k));
         let last = k + 1 == n;
         // Old-width lines: the frozen cache (exact — rendered with
         // `active_turn = false`) when present, else a re-render at the old
         // width. The last turn is never frozen, so it always re-renders with
         // the live `active_turn` to match the previous frame.
         //
-        // The anchor is the cursor's exact content-char position — the line's
-        // cumulative content start plus the cursor's column mapped into the
-        // content — so both the line and `nav_col` can be re-seated onto the
-        // same character after the re-wrap (an absolute line index or a
-        // line-start offset alone would drift the cell).
+        // The anchor is the position's exact content-char offset — the line's
+        // cumulative content start plus the column mapped into the content —
+        // so both the line and column can be re-seated onto the same character
+        // after the re-wrap (an absolute line index or a line-start offset
+        // alone would drift the cell).
         let char_pos = if last {
             let v = self.render_turn_at(k, self.frozen_width, self.run_active());
-            cursor_char_pos(&v, intra, self.nav_col)
+            cursor_char_pos(&v, intra, col)
         } else if let Some(v) = self.frozen_render.get(k) {
-            cursor_char_pos(v, intra, self.nav_col)
+            cursor_char_pos(v, intra, col)
         } else {
             let v = self.render_turn_at(k, self.frozen_width, false);
-            cursor_char_pos(&v, intra, self.nav_col)
+            cursor_char_pos(&v, intra, col)
         };
         Some((k, char_pos))
     }
 
-    /// Re-seat the cursor on its previous content line after a re-wrap: find
-    /// the line in the (new-width) turn whose cumulative content offset is the
-    /// largest not exceeding the captured anchor. `last_lines` is the freshly
-    /// rendered last turn at the new width.
-    pub(super) fn reseat_nav_cursor(
-        &mut self,
+    /// Capture the Navigate cursor's content anchor.
+    pub(super) fn nav_content_anchor(&self) -> Option<(usize, usize)> {
+        self.content_anchor_for(self.nav_cursor, self.nav_col)
+    }
+
+    /// Capture the Select-mode selection anchor's content anchor.
+    pub(super) fn sel_content_anchor(&self) -> Option<(usize, usize)> {
+        self.content_anchor_for(self.select_anchor.0, self.select_anchor.1)
+    }
+
+    /// Re-seat an arbitrary position onto its previous content character after
+    /// a re-wrap: find the line in the (new-width) turn whose cumulative content
+    /// offset is the largest not exceeding the captured anchor, and the display
+    /// column that lands on that character. `last_lines` is the freshly rendered
+    /// last turn at the new width. Returns the absolute `(cursor, col)`.
+    fn reseat_position(
+        &self,
         anchor: (usize, usize),
         last_lines: &[view::RenderLine],
         width: usize,
-    ) {
+    ) -> Option<(usize, usize)> {
         let (k, char_pos) = anchor;
         let n = self.turns.len();
         if k >= n {
-            return;
+            return None;
         }
         let last = k + 1 == n;
         // Find the (new-width) line containing `char_pos` and the display
-        // column that lands on that character, so the cell cursor stays on the
-        // same content char instead of drifting to the new line's start.
+        // column that lands on that character, so the cell stays on the same
+        // content char instead of drifting to the new line's start.
         let seated = if last {
             reseat_at(last_lines, char_pos)
         } else if let Some(v) = self.frozen_render.get(k) {
@@ -324,13 +336,38 @@ impl App {
         } else {
             let v = self.render_turn_at(k, width, false);
             reseat_at(&v, char_pos)
-        };
-        if let Some((j, col)) = seated {
-            self.nav_cursor = self.turn_start_line(k).saturating_add(j);
+        }?;
+        Some((self.turn_start_line(k).saturating_add(seated.0), seated.1))
+    }
+
+    /// Re-seat the cursor on its previous content line after a re-wrap.
+    /// `last_lines` is the freshly rendered last turn at the new width.
+    pub(super) fn reseat_nav_cursor(
+        &mut self,
+        anchor: (usize, usize),
+        last_lines: &[view::RenderLine],
+        width: usize,
+    ) {
+        if let Some((cursor, col)) = self.reseat_position(anchor, last_lines, width) {
+            self.nav_cursor = cursor;
             self.nav_col = col;
             if self.mode == Mode::Select {
                 self.sel = Some(self.select_sel());
             }
+        }
+    }
+
+    /// Re-seat the Select-mode selection anchor on its previous content
+    /// character after a re-wrap, then rebuild the selection.
+    pub(super) fn reseat_sel_anchor(
+        &mut self,
+        anchor: (usize, usize),
+        last_lines: &[view::RenderLine],
+        width: usize,
+    ) {
+        if let Some((cursor, col)) = self.reseat_position(anchor, last_lines, width) {
+            self.select_anchor = (cursor, col);
+            self.sel = Some(self.select_sel());
         }
     }
 
