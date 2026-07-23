@@ -403,6 +403,65 @@ fn yank_table_border_returns_empty() {
 }
 
 #[test]
+fn yank_nested_list_preserves_indent() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "- Item A\n- Item B\n  - Nested item\n- Item C";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    // Find the nested item row (source starts with "  -").
+    let nested = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with("  -"))
+    }).expect("nested item row");
+    a.nav_cursor = nested;
+    assert_eq!(a.current_line_text().as_deref(), Some("  - Nested item"));
+}
+
+#[test]
+fn yank_code_block_preserves_indent() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "```ts\nfunction greet() {\n  return 42;\n}\n```";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    // Find the indented line (source starts with "  return").
+    let indented = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with("  return"))
+    }).expect("indented code line");
+    a.nav_cursor = indented;
+    assert_eq!(a.current_line_text().as_deref(), Some("  return 42;"));
+}
+
+#[test]
+fn selection_nested_list_preserves_indent() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "- Item A\n- Item B\n  - Nested item\n- Item C";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let n = rls.len();
+    feed_lines(&mut a, &rls);
+    // Select all lines.
+    a.sel = Some(Selection { start: (0, 0), end: (n - 1, a.log_lines[n - 1].chars().count()) });
+    let text = a.selection_text().expect("selection text");
+    assert!(text.contains("  - Nested item"), "should preserve indent: {text}");
+}
+
+#[test]
 fn selection_table_returns_markdown_not_grid() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;

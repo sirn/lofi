@@ -599,7 +599,11 @@ impl App {
                     let start_rel = cs.saturating_sub(cstart).min(rl.map.len() - 1);
                     let end_rel = ce.saturating_sub(cstart).min(rl.map.len() - 1);
                     if start_rel < end_rel {
-                        let start = rl.map[start_rel];
+                        let start = if start_rel == 0 && rl.hard_break {
+                            0
+                        } else {
+                            rl.map[start_rel]
+                        };
                         let end = rl.map[end_rel];
                         // A soft-wrap continuation of the same source line
                         // concatenates without a separator; anything else

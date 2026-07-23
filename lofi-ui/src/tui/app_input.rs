@@ -271,8 +271,13 @@ impl App {
         // content range so a soft-wrapped row yields its raw fragment.
         if let Some(rl) = self.log_raw.get(rel).and_then(|r| r.as_ref()) {
             if rl.map.len() >= 2 {
-                let start = *rl.map.first()?;
                 let end = *rl.map.last()?;
+                // On the first visual row (hard_break), include leading
+                // whitespace (indentation, list nesting) from source start.
+                if rl.hard_break && end > 0 {
+                    return Some(rl.source[..end].to_string());
+                }
+                let start = *rl.map.first()?;
                 if start < end {
                     return Some(rl.source[start..end].to_string());
                 }
