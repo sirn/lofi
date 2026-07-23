@@ -112,6 +112,7 @@ impl BuiltinTools {
             let name = entry["name"].as_str().unwrap_or_default();
             let source = entry["source"].as_str().unwrap_or_default();
             let desc = entry["description"].as_str().unwrap_or_default();
+            let skill_path = entry["path"].as_str().unwrap_or_default();
 
             let (path, _) = self.resolve_skill_path(name)?;
             let content = match std::fs::read_to_string(&path) {
@@ -137,6 +138,7 @@ impl BuiltinTools {
                     "name": name,
                     "description": desc,
                     "source": source,
+                    "path": skill_path,
                     "matches": matches,
                 }));
             }
@@ -195,7 +197,7 @@ impl BuiltinTools {
     /// Scan both skill directories and collect sorted, de-duplicated entries.
     fn scan_skills(&self) -> Result<Vec<Value>> {
         // name → (description, source)
-        let mut map: std::collections::BTreeMap<String, (String, String)> =
+        let mut map: std::collections::BTreeMap<String, (String, String, String)> =
             std::collections::BTreeMap::new();
 
         // Global skills.
@@ -215,11 +217,12 @@ impl BuiltinTools {
 
         Ok(map
             .into_iter()
-            .map(|(name, (desc, source))| {
+            .map(|(name, (desc, source, path))| {
                 json!({
                     "name": name,
                     "description": desc,
                     "source": source,
+                    "path": path,
                 })
             })
             .collect())
@@ -232,7 +235,7 @@ impl BuiltinTools {
     fn walk_skills(
         dir: &Path,
         source: &str,
-        map: &mut std::collections::BTreeMap<String, (String, String)>,
+        map: &mut std::collections::BTreeMap<String, (String, String, String)>,
     ) -> Result<()> {
         let mut visited = 0usize;
         Self::walk_skills_inner(dir, dir, source, map, 0, &mut visited)
@@ -244,7 +247,7 @@ impl BuiltinTools {
         dir: &Path,
         root: &Path,
         source: &str,
-        map: &mut std::collections::BTreeMap<String, (String, String)>,
+        map: &mut std::collections::BTreeMap<String, (String, String, String)>,
         depth: usize,
         visited: &mut usize,
     ) -> Result<()> {
@@ -281,7 +284,8 @@ impl BuiltinTools {
                     .to_string();
                 if !name.is_empty() {
                     let desc = read_description(&skill_file).unwrap_or_default();
-                    map.insert(name, (desc, source.to_string()));
+                    let dir_path = path.to_string_lossy().to_string();
+                    map.insert(name, (desc, source.to_string(), dir_path));
                 }
             }
             // Recurse into subdirectories for nested skills.
@@ -300,11 +304,13 @@ impl BuiltinTools {
         let content = std::fs::read_to_string(path).map_err(|e| {
             Error::Tool(format!("skill `{name}`: {e}"))
         })?;
+        let skill_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         Ok(json!({
             "ok": true,
             "name": name,
             "source": source,
             "file": file,
+            "path": skill_dir,
             "content": content,
         }))
     }
