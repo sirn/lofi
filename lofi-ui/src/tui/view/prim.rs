@@ -781,6 +781,36 @@ mod tests {
     }
 
     #[test]
+    fn wrap_content_length_is_stable_across_widths() {
+        // `wrap` collapses whitespace before wrapping, but `wrap_cells`
+        // keeps the break space as trailing content, so the total char
+        // count of the collapsed text is preserved across widths.
+        let s = "The quick  brown   fox jumps over the lazy dog and keeps going";
+        let collapsed: String = s.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+        let expected = collapsed.chars().count();
+        for &w in &[5usize, 10, 20, 40, 80] {
+            let segs = wrap(s, w);
+            let sum: usize = segs.iter().map(|seg| seg.chars().count()).sum();
+            assert_eq!(sum, expected, "width {w}");
+        }
+    }
+
+    #[test]
+    fn wrap_line_styled_content_length_is_stable_across_widths() {
+        // Same invariant for styled lines: `wrap_cells` keeps break spaces
+        // so the total content char count is stable across widths.
+        let line = Line::from(vec![
+            Span::raw("The quick brown fox jumps over the lazy dog".to_string()),
+        ]);
+        let expected: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        for &w in &[5usize, 10, 20, 40, 80] {
+            let wrapped = wrap_line_styled(&line, w);
+            let sum: usize = wrapped.iter().map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>()).sum();
+            assert_eq!(sum, expected, "width {w}");
+        }
+    }
+
+    #[test]
     fn render_excludes_leading_whitespace_from_content() {
         // `wrap_pre` re-prepends a line's indent to every wrapped row for
         // alignment; that indent must not be selectable content, or the
