@@ -96,20 +96,44 @@ pub fn blank() -> Line<'static> {
 /// code fences, user messages); `None` for decoration (borders, blanks,
 /// tool glyphs) where the rendered text is the canonical form.
 ///
-/// Every soft-wrap visual row of one source line shares the same `text`;
-/// only the first carries `hard_break = true`. Yank joins rows by walking
-/// this field — emitting a `\n` only at hard breaks — so a copied
-/// selection reconstructs the source markdown without spurious newlines at
-/// soft-wrap boundaries.
+/// `map` translates a *content-relative* display position (0 = before the
+/// first selectable content char, `len` = after the last) to a byte offset
+/// within `source`. Markdown markers stripped during rendering (the
+/// `**` in `**bold**`, backticks, `## ` prefixes) create gaps in the map,
+/// so a display selection `[cs, ce)` slices the raw source as
+/// `source[map[cs]..map[ce]]` — markers wrapped around the selection are
+/// included, while decoration (gutter, padding) is excluded. Soft-wrap
+/// continuation rows share their source line with the preceding row; their
+/// maps are contiguous (`row[i].map[last] == row[i+1].map[0]`), so a
+/// multi-row selection within one source line is a single source slice,
+/// and a `\n` is inserted only at hard breaks (a new source line).
 #[derive(Clone, Debug)]
 pub struct RawLine {
-    /// The full source line (markdown markers intact), shared by every
-    /// visual wrap-row of that source line. `Arc<str>` so a long source
-    /// line wrapped across many rows costs one allocation.
-    pub text: Arc<str>,
+    /// The full source line (markdown markers intact).
+    pub source: Arc<str>,
+    /// Content-relative display position (0..=`content_len`) → source byte
+    /// offset. Empty when no per-char mapping is available (whole-row yank
+    /// still uses `source`; partial falls back to rendered text).
+    pub map: Vec<usize>,
     /// `true` on the first visual row of a source line (begun at a hard
     /// newline); `false` on soft-wrap continuations.
     pub hard_break: bool,
+}
+
+impl RawLine {
+    /// Build a raw line with a position map.
+    pub fn new(source: Arc<str>, map: Vec<usize>, hard_break: bool) -> Self {
+        Self { source, map, hard_break }
+    }
+
+    /// Build a raw line whose entire source is one unbroken span (no
+    /// interior markers to skip): the map is the identity `0..=len`. Used
+    /// for code and other pre-formatted content where display chars map 1:1
+    /// to a contiguous source range starting at `start`.
+    pub fn linear(source: Arc<str>, start: usize, display_len: usize, hard_break: bool) -> Self {
+        let map = (0..=display_len).map(|k| start + k).collect();
+        Self { source, map, hard_break }
+    }
 }
 
 pub struct RenderLine {
@@ -127,11 +151,9 @@ impl RenderLine {
         self.content.1.saturating_sub(self.content.0)
     }
 
-    /// Attach raw markdown source to this line for clipboard yank. `text`
-    /// is the full source line shared across wrap-rows; `hard_break` marks
-    /// the first row of a source line (see [`RawLine`]).
-    pub fn with_raw(mut self, text: Arc<str>, hard_break: bool) -> Self {
-        self.raw = Some(RawLine { text, hard_break });
+    /// Attach raw markdown source to this line for clipboard yank.
+    pub fn with_raw(mut self, raw: RawLine) -> Self {
+        self.raw = Some(raw);
         self
     }
 }

@@ -266,11 +266,23 @@ impl App {
     /// bytes), excluding the decorative gutter and trailing padding.
     pub(super) fn current_line_text(&self) -> Option<String> {
         let rel = self.nav_cursor.saturating_sub(self.log_off);
-        // Prefer the raw markdown source line (markers intact) when the
-        // rendered line carries one; decoration-only lines fall through to
-        // the rendered content below.
-        if let Some(raw) = self.log_raw.get(rel).and_then(|r| r.as_ref()) {
-            return Some(raw.text.to_string());
+        // Prefer the raw markdown source (markers intact) when the rendered
+        // line carries a position map; slice the source over the row's full
+        // content range so a soft-wrapped row yields its raw fragment.
+        if let Some(rl) = self.log_raw.get(rel).and_then(|r| r.as_ref()) {
+            if rl.map.len() >= 2 {
+                let start = *rl.map.first()?;
+                let end = *rl.map.last()?;
+                if start < end {
+                    return Some(rl.source[start..end].to_string());
+                }
+            }
+            // Degenerate (whole-line) raw — no per-char map. The display
+            // (e.g. a table grid) doesn't map 1:1 to the source, so yank
+            // returns the full source line.
+            if !rl.source.is_empty() {
+                return Some(rl.source.to_string());
+            }
         }
         let s = self.log_lines.get(rel)?;
         let n = s.chars().count();

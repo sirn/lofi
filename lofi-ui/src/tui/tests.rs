@@ -254,6 +254,135 @@ fn inline_markdown_nested_bold_italic() {
 }
 
 #[test]
+fn raw_map_snaps_to_markers_for_bold() {
+    // Rendering `**bold** text` attaches a raw map that snaps display
+    // positions past the stripped `**` markers to the source, so a
+    // whole-row yank recovers `**bold** text` and a partial selection of
+    // the visible "bold" yields the raw `**bold**`.
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "**bold** text";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    // Find the assistant text line (source contains the markdown).
+    let rl = rls.iter().find(|r| {
+        r.raw.as_ref().is_some_and(|r| r.source.contains("**bold**"))
+    }).expect("a line with a raw map");
+    let raw = rl.raw.as_ref().unwrap();
+    // Whole content → full source.
+    let start = *raw.map.first().unwrap();
+    let end = *raw.map.last().unwrap();
+    assert_eq!(&raw.source[start..end], "**bold** text");
+    // The visible "bold" (display positions 0..4) snaps to source `**bold**`.
+    let s = raw.map[0];
+    let e = raw.map[4];
+    assert_eq!(&raw.source[s..e], "**bold**");
+}
+
+/// Populate the app's log fields from rendered lines so yank tests exercise
+/// the same path as `feed_segment`.
+fn feed_lines(a: &mut App, rls: &[view::RenderLine]) {
+    a.log_off = 0;
+    a.log_lines = rls.iter().map(|rl| {
+        rl.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }).collect();
+    a.log_content = rls.iter().map(|rl| rl.content).collect();
+    a.log_raw = rls.iter().map(|rl| rl.raw.clone()).collect();
+}
+
+#[test]
+fn yank_heading_includes_prefix() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "## Hello World";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    // Find the heading row (source contains "##").
+    let row = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.contains("##"))
+    }).expect("heading row");
+    a.nav_cursor = row;
+    assert_eq!(a.current_line_text().as_deref(), Some("## Hello World"));
+}
+
+#[test]
+fn yank_blockquote_includes_prefix() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "> A quoted line";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    let row = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with('>'))
+    }).expect("blockquote row");
+    a.nav_cursor = row;
+    assert_eq!(a.current_line_text().as_deref(), Some("> A quoted line"));
+}
+
+#[test]
+fn yank_table_row_returns_markdown() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "| Name | Age |\n|------|-----|\n| Ada | 36 |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    // Find the header data row (source starts with `| Name`).
+    let hdr = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with("| Name"))
+    }).expect("header data row");
+    a.nav_cursor = hdr;
+    assert_eq!(a.current_line_text().as_deref(), Some("| Name | Age |"));
+    // Find a data row.
+    let data = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with("| Ada"))
+    }).expect("data row");
+    a.nav_cursor = data;
+    assert_eq!(a.current_line_text().as_deref(), Some("| Ada | 36 |"));
+}
+
+#[test]
+fn selection_table_returns_markdown_not_grid() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "| Name | Age |\n|------|-----|\n| Ada | 36 |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let n = rls.len();
+    feed_lines(&mut a, &rls);
+    // Select the entire table top to bottom.
+    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_lines[n - 1].chars().count()) });
+    let text = a.selection_text().expect("selection text");
+    // Borders are suppressed; only the raw markdown data rows remain,
+    // joined by `\n`.
+    assert_eq!(text, "| Name | Age |\n| Ada | 36 |");
+    // No box-drawing characters survive.
+    assert!(!text.contains('│') && !text.contains('─'), "no grid chars: {text}");
+}
+
+#[test]
 fn inline_markdown_header_all_levels_bold() {
     use ratatui::style::Modifier;
     use crate::tui::view::blocks::render_turn_lines;
@@ -2291,19 +2420,21 @@ fn selection_text_is_content_aware() {
 
 #[test]
 fn yank_line_returns_raw_markdown() {
-    // A rendered line may strip markdown markers (e.g. **bold** → bold), but
-    // the raw source is retained for yank so the clipboard gets the original
-    // markdown, not the formatted text.
+    // A rendered line strips markdown markers (e.g. **bold** → bold), but the
+    // raw source is retained via a position map so yank copies the original
+    // markdown. The map `[0,3,4,5,8]` for source `**bold**` (display "bold")
+    // snaps the whole-row yank to `source[0..8]` = `**bold**`.
     let mut a = app();
     a.log_off = 0;
-    a.log_lines = vec!["  bold text".to_string()];
-    a.log_content = vec![(2, 11)]; // rendered "bold text"
-    a.log_raw = vec![Some(view::RawLine {
-        text: Arc::from("**bold** text"),
-        hard_break: true,
-    })];
+    a.log_lines = vec!["  bold".to_string()];
+    a.log_content = vec![(2, 6)]; // rendered "bold"
+    a.log_raw = vec![Some(view::RawLine::new(
+        Arc::from("**bold**"),
+        vec![0, 3, 4, 5, 8],
+        true,
+    ))];
     a.nav_cursor = 0;
-    assert_eq!(a.current_line_text().as_deref(), Some("**bold** text"));
+    assert_eq!(a.current_line_text().as_deref(), Some("**bold**"));
 }
 
 #[test]
@@ -2320,11 +2451,28 @@ fn yank_line_falls_back_to_rendered_without_raw() {
 }
 
 #[test]
+fn selection_text_raw_partial_includes_markers() {
+    // Selecting just the visible "bold" within `**bold**` still yields the
+    // raw `**bold**` — the map snaps the selection to the enclosing markers.
+    let mut a = app();
+    a.log_off = 0;
+    a.log_lines = vec!["  bold".to_string()];
+    a.log_content = vec![(2, 6)];
+    a.log_raw = vec![Some(view::RawLine::new(
+        Arc::from("**bold**"),
+        vec![0, 3, 4, 5, 8],
+        true,
+    ))];
+    // Select display content [2, 6) = "bold".
+    a.sel = Some(Selection { start: (0, 2), end: (0, 6) });
+    assert_eq!(a.selection_text().as_deref(), Some("**bold**"));
+}
+
+#[test]
 fn selection_text_raw_skips_softwrap_newlines() {
-    // Two source lines, the first soft-wrapped across two visual rows.
-    // Copying all three rows must yield the two source lines joined by a
-    // single `\n` — the soft-wrap boundary contributes no newline, and the
-    // first source line is emitted only once.
+    // `hello world` soft-wrapped across two rows; `second line` on a third.
+    // Selecting all three rows yields the two source lines joined by a single
+    // `\n` — the soft-wrap boundary contributes no separator.
     let mut a = app();
     a.log_off = 0;
     a.log_lines = vec![
@@ -2332,14 +2480,14 @@ fn selection_text_raw_skips_softwrap_newlines() {
         "  world".to_string(),
         "  second line".to_string(),
     ];
-    a.log_content = vec![(2, 7), (2, 6), (2, 12)];
+    a.log_content = vec![(2, 8), (2, 7), (2, 13)];
     let first: Arc<str> = Arc::from("hello world");
     a.log_raw = vec![
-        Some(view::RawLine { text: first.clone(), hard_break: true }),
-        Some(view::RawLine { text: first.clone(), hard_break: false }),
-        Some(view::RawLine { text: Arc::from("second line"), hard_break: true }),
+        Some(view::RawLine::linear(first.clone(), 0, 6, true)),
+        Some(view::RawLine::linear(first.clone(), 6, 5, false)),
+        Some(view::RawLine::linear(Arc::from("second line"), 0, 11, true)),
     ];
-    a.sel = Some(Selection { start: (0, 0), end: (2, 12) });
+    a.sel = Some(Selection { start: (0, 2), end: (2, 13) });
     assert_eq!(
         a.selection_text().as_deref(),
         Some("hello world\nsecond line")
@@ -2347,20 +2495,20 @@ fn selection_text_raw_skips_softwrap_newlines() {
 }
 
 #[test]
-fn selection_text_raw_starts_at_continuation() {
-    // Selection begins on a soft-wrap continuation row: the full source
-    // line is still emitted (the source is the unit, not the visual row).
+fn selection_text_raw_char_level_on_continuation() {
+    // Selecting only the continuation row "world" yields just `world` (char
+    // level), not the whole source line — the map slices the row's fragment.
     let mut a = app();
     a.log_off = 0;
     a.log_lines = vec!["  hello ".to_string(), "  world".to_string()];
-    a.log_content = vec![(2, 7), (2, 6)];
+    a.log_content = vec![(2, 8), (2, 7)];
     let first: Arc<str> = Arc::from("hello world");
     a.log_raw = vec![
-        Some(view::RawLine { text: first.clone(), hard_break: true }),
-        Some(view::RawLine { text: first.clone(), hard_break: false }),
+        Some(view::RawLine::linear(first.clone(), 0, 6, true)),
+        Some(view::RawLine::linear(first.clone(), 6, 5, false)),
     ];
-    a.sel = Some(Selection { start: (1, 0), end: (1, 6) });
-    assert_eq!(a.selection_text().as_deref(), Some("hello world"));
+    a.sel = Some(Selection { start: (1, 2), end: (1, 7) });
+    assert_eq!(a.selection_text().as_deref(), Some("world"));
 }
 
 fn ctrl_key(code: KeyCode) -> Event {

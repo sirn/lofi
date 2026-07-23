@@ -16,7 +16,7 @@ use crate::tui::theme::{active_indicator, user_indicator, Theme};
 use crate::tui::{App, Block, NativeTool, ThinkingBlock, ToolCall, Turn};
 
 use super::component::{Component, Cx, Stack};
-use super::prim::{self, RenderLine};
+use super::prim::{self, RawLine, RenderLine};
 
 /// Lines of preview/output shown before truncating with `… (N hidden)`.
 const PREVIEW_LINES: usize = 3;
@@ -109,16 +109,17 @@ impl Component for UserMessage<'_> {
         let body = Style::new().fg(t.fg);
         let mut out = Vec::new();
         let src: Arc<str> = Arc::from(self.prompt);
-        for (i, seg) in prim::wrap(self.prompt, content_w).into_iter().enumerate() {
-            // A single `❯` marks the prompt; continuation rows carry a
-            // 2-space margin so a multi-line message reads as one block
-            // without a rail down the whole left edge.
+        let rows = wrap_with_map(self.prompt, 0, self.prompt.len(), content_w);
+        for (i, (seg, map)) in rows.into_iter().enumerate() {
             let lead = if i == 0 {
                 vec![Span::styled("❯ ", mark)]
             } else {
                 vec![Span::raw("  ")]
             };
-            out.push(prim::rline(lead, vec![Span::styled(seg, body)]).with_raw(src.clone(), i == 0));
+            out.push(
+                prim::rline(lead, vec![Span::styled(seg, body)])
+                    .with_raw(RawLine::new(src.clone(), map, i == 0)),
+            );
         }
         out
     }
@@ -172,7 +173,12 @@ impl Component for AssistantText<'_> {
                         t.surface,
                         w,
                     )
-                    .with_raw(Arc::from(trimmed), true),
+                    .with_raw(RawLine::linear(
+                        Arc::from(trimmed),
+                        0,
+                        trimmed.chars().count(),
+                        true,
+                    )),
                 );
                 idx += 1;
                 continue;
@@ -180,16 +186,40 @@ impl Component for AssistantText<'_> {
             if in_code {
                 let avail = content_w.saturating_sub(2);
                 let src: Arc<str> = Arc::from(raw);
-                for (i, seg) in prim::wrap_pre(raw, avail).into_iter().enumerate() {
+                let indent_len = raw
+                    .bytes()
+                    .take_while(|&b| b == b' ' || b == b'\t')
+                    .count();
+                let body = &raw[indent_len..];
+                // Byte offsets of each body char boundary (0, after 1st, …, end).
+                let body_offs: Vec<usize> = std::iter::once(0)
+                    .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
+                    .collect();
+                let indent_chars = raw[..indent_len].chars().count();
+                let segments = prim::wrap_pre(raw, avail);
+                let mut cum = 0usize;
+                for (i, seg) in segments.into_iter().enumerate() {
+                    let body_chars =
+                        seg.chars().count().saturating_sub(indent_chars);
+                    let map: Vec<usize> = (0..=body_chars)
+                        .map(|k| {
+                            indent_len
+                                + body_offs.get(cum + k).copied().unwrap_or(body.len())
+                        })
+                        .collect();
                     out.push(
                         prim::rtile(
                             vec![Span::raw("  ")],
-                            vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
+                            vec![Span::styled(
+                                seg,
+                                Style::new().fg(t.fg).bg(t.surface),
+                            )],
                             t.surface,
                             w,
                         )
-                        .with_raw(src.clone(), i == 0),
+                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
                     );
+                    cum += body_chars;
                 }
                 idx += 1;
                 continue;
@@ -209,7 +239,11 @@ impl Component for AssistantText<'_> {
                     parse_table_row(tlines[1]).iter().map(|c| parse_align(c)).collect();
                 let data: Vec<Vec<String>> =
                     tlines[2..].iter().map(|l| parse_table_row(l)).collect();
-                out.extend(render_table(&header, &data, &aligns, content_w, t));
+                // Source lines for raw markdown yank: header then data rows.
+                let src_lines: Vec<&str> = std::iter::once(tlines[0])
+                    .chain(tlines[2..].iter().copied())
+                    .collect();
+                out.extend(render_table(&header, &data, &aligns, content_w, t, &src_lines));
                 continue;
             }
             let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
@@ -219,15 +253,17 @@ impl Component for AssistantText<'_> {
                 let head_fg = if hashes <= 2 { t.fg } else { t.muted };
                 let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
                 let src: Arc<str> = Arc::from(trimmed);
-                for (i, seg) in prim::wrap(h, content_w).into_iter().enumerate() {
+                let rows = wrap_with_map(h, hashes + 1, trimmed.len(), content_w);
+                for (i, (seg, map)) in rows.into_iter().enumerate() {
                     out.push(
                         prim::rline(lead.clone(), vec![Span::styled(seg, style)])
-                            .with_raw(src.clone(), i == 0),
+                            .with_raw(RawLine::new(src.clone(), map, i == 0)),
                     );
                 }
             } else if let Some(q) = trimmed.strip_prefix("> ") {
                 let src: Arc<str> = Arc::from(trimmed);
-                for (i, seg) in prim::wrap(q, content_w).into_iter().enumerate() {
+                let rows = wrap_with_map(q, 2, trimmed.len(), content_w);
+                for (i, (seg, map)) in rows.into_iter().enumerate() {
                     out.push(
                         prim::rline(
                             lead.clone(),
@@ -236,15 +272,30 @@ impl Component for AssistantText<'_> {
                                 Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
                             )],
                         )
-                        .with_raw(src.clone(), i == 0),
+                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
                     );
                 }
             } else {
-                let line = Line::from(inline_spans(raw, t, Style::new().fg(t.fg)));
+                let mapped = inline_spans_mapped(raw, t, Style::new().fg(t.fg));
+                let lead_ws = mapped
+                    .iter()
+                    .flat_map(|m| m.span.content.chars())
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .count();
+                let full_map = build_content_map(raw.len(), &mapped);
+                let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+                let line = Line::from(spans);
                 let src: Arc<str> = Arc::from(raw);
-                for (i, wrapped) in prim::wrap_line_styled(&line, content_w).into_iter().enumerate() {
+                let rows = prim::wrap_line_styled(&line, content_w);
+                let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
+                for (i, wrapped) in rows.into_iter().enumerate() {
                     out.push(
-                        prim::rline(lead.clone(), wrapped.spans).with_raw(src.clone(), i == 0),
+                        prim::rline(lead.clone(), wrapped.spans)
+                            .with_raw(RawLine::new(
+                                src.clone(),
+                                row_maps.get(i).cloned().unwrap_or_default(),
+                                i == 0,
+                            )),
                     );
                 }
             }
@@ -261,32 +312,251 @@ impl Component for AssistantText<'_> {
 /// marker pairs. Underscore markers are suppressed inside words so
 /// identifiers like `my_var_name` stay literal.
 fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
+    inline_spans_mapped(line, t, base)
+        .into_iter()
+        .map(|m| m.span)
+        .collect()
+}
+
+/// A styled span paired with the byte offsets it occupies in the source
+/// line, so a display selection can be mapped back to the raw markdown.
+/// `content_start` is where the span's text begins; `boundary_start` is
+/// where a selection *starting* at this span should slice from — the
+/// position of any opening marker (`**`, backtick) preceding the content,
+/// so wrapped markers come along with the selection.
+#[derive(Clone)]
+struct MappedSpan {
+    span: Span<'static>,
+    content_start: usize,
+    boundary_start: usize,
+}
+
+/// [`inline_spans`] with source-offset tracking. Returns mapped spans whose
+/// styles and content are identical to [`inline_spans`]' output.
+fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
-    let mut spans = Vec::new();
+    let mut out = Vec::new();
     let mut rest = line;
+    let mut pos = 0usize;
     while let Some(start) = rest.find('`') {
         if start > 0 {
-            spans.extend(parse_markers(&rest[..start], base));
+            out.extend(parse_markers_mapped(&rest[..start], pos, base, None));
         }
         let after = &rest[start + 1..];
         if let Some(end) = after.find('`') {
-            spans.push(Span::styled(after[..end].to_string(), code_style));
+            out.push(MappedSpan {
+                span: Span::styled(after[..end].to_string(), code_style),
+                content_start: pos + start + 1,
+                boundary_start: pos + start,
+            });
+            pos += start + 1 + end + 1;
             rest = &after[end + 1..];
         } else {
-            spans.extend(parse_markers(rest, base));
-            return nonempty(spans);
+            out.extend(parse_markers_mapped(rest, pos, base, None));
+            return nonempty_mapped(out);
         }
     }
-    spans.extend(parse_markers(rest, base));
-    nonempty(spans)
+    out.extend(parse_markers_mapped(rest, pos, base, None));
+    nonempty_mapped(out)
+}
+
+/// [`parse_markers`] with source-offset tracking. `base` is the byte offset
+/// of `text` within the source line; `pending_open` carries the byte offset
+/// of an enclosing marker so the first span of an inner group snaps its
+/// boundary to it (nested markers include the outermost open).
+fn parse_markers_mapped(
+    text: &str,
+    base: usize,
+    style: Style,
+    pending_open: Option<usize>,
+) -> Vec<MappedSpan> {
+    for (marker, modifier, check) in [
+        ("**", Modifier::BOLD, false),
+        ("__", Modifier::BOLD, true),
+        ("~~", Modifier::CROSSED_OUT, false),
+        ("*", Modifier::ITALIC, false),
+        ("_", Modifier::UNDERLINED, true),
+    ] {
+        let Some(open) = find_marker(text, marker, check, true) else { continue };
+        let after_open = &text[open + marker.len()..];
+        if let Some(close) = find_marker(after_open, marker, check, false) {
+            let before = &text[..open];
+            let inner = &after_open[..close];
+            let after = &after_open[close + marker.len()..];
+            let open_pos = base + open;
+            let inner_base = base + open + marker.len();
+            let after_base = inner_base + close + marker.len();
+            // The first span of `inner` snaps to the marker open. If `before`
+            // is empty, inherit the enclosing pending_open so a nested
+            // marker's outermost open is preserved.
+            let inner_pending = if before.is_empty() {
+                pending_open.or(Some(open_pos))
+            } else {
+                Some(open_pos)
+            };
+            let mut out = Vec::new();
+            out.extend(parse_markers_mapped(before, base, style, pending_open));
+            out.extend(parse_markers_mapped(
+                inner,
+                inner_base,
+                style.add_modifier(modifier),
+                inner_pending,
+            ));
+            out.extend(parse_markers_mapped(after, after_base, style, None));
+            return out;
+        }
+    }
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![MappedSpan {
+            span: Span::styled(text.to_string(), style),
+            content_start: base,
+            boundary_start: pending_open.unwrap_or(base),
+        }]
+    }
 }
 
 /// Ensure at least one span so empty input still produces a renderable row.
-fn nonempty(mut spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
     if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
+        spans.push(MappedSpan {
+            span: Span::raw(String::new()),
+            content_start: 0,
+            boundary_start: 0,
+        });
     }
     spans
+}
+
+/// Build a content-relative display-position → source-byte-offset map from
+/// mapped spans. Position 0 is the first selectable content char (after any
+/// leading whitespace, which [`prim::render`] excludes from the content
+/// range); position `len` is the source end. Marker gaps make the map
+/// non-linear: e.g. for source `**bold**` the map is `[0, 3, 4, 5, 8]`, so
+/// selecting the whole display "bold" slices `source[0..8]` = `**bold**`.
+fn build_content_map(source_len: usize, spans: &[MappedSpan]) -> Vec<usize> {
+    let mut full = Vec::new();
+    for m in spans {
+        let c = m.span.content.chars().count();
+        full.push(m.boundary_start);
+        let chars: Vec<(usize, char)> = m.span.content.char_indices().collect();
+        for k in 1..c {
+            // Boundary before the k-th char (0-indexed) = content_start +
+            // the byte offset of that char within the span.
+            let off = chars.get(k).map_or(m.span.content.len(), |(b, _)| *b);
+            full.push(m.content_start + off);
+        }
+    }
+    full.push(source_len);
+    // Drop leading-whitespace positions so the map is content-relative
+    // (render excludes leading whitespace from the selectable range).
+    let lead_ws = spans
+        .iter()
+        .flat_map(|m| m.span.content.chars())
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    if lead_ws < full.len() {
+        full.drain(..lead_ws);
+    }
+    full
+}
+
+/// Split a full-line content map into per-row maps. `full_map` is
+/// content-relative (leading whitespace already dropped) with
+/// `content_len + 1` entries. `lead_ws` is the leading-whitespace char
+/// count that [`prim::render`] excludes from row 0's selectable range;
+/// subsequent rows have none. Each row's map is a contiguous slice of
+/// `full_map`, so soft-wrap continuation rows are contiguous with their
+/// neighbors (`row[i].map[last] == row[i+1].map[0]`).
+fn split_map_by_rows(
+    full_map: &[usize],
+    lead_ws: usize,
+    rows: &[ratatui::text::Line<'static>],
+) -> Vec<Vec<usize>> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut pos = 0usize;
+    let mut first = true;
+    for row in rows {
+        let display_len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
+        let row_lead = if first { lead_ws } else { 0 };
+        let content_len = display_len.saturating_sub(row_lead);
+        let end = (pos + content_len + 1).min(full_map.len());
+        out.push(full_map[pos..end].to_vec());
+        pos += content_len;
+        first = false;
+    }
+    out
+}
+
+/// Mirror [`prim::wrap`]'s whitespace collapsing: split on `' '`, drop empty
+/// fragments, rejoin with single spaces. Returns the collapsed text and a
+/// map from each collapsed char index to its source byte offset (the join
+/// space maps to the first source space after the preceding word).
+fn collapse(source: &str) -> (String, Vec<usize>) {
+    let mut out = String::new();
+    let mut map = Vec::new();
+    let mut byte_pos = 0usize;
+    let mut prev_end: Option<usize> = None;
+    for word in source.split(' ') {
+        if word.is_empty() {
+            byte_pos += 1;
+            continue;
+        }
+        if let Some(pe) = prev_end {
+            out.push(' ');
+            map.push(pe);
+        }
+        for (b, c) in word.char_indices() {
+            out.push(c);
+            map.push(byte_pos + b);
+        }
+        byte_pos += word.len();
+        prev_end = Some(byte_pos);
+        byte_pos += 1;
+    }
+    (out, map)
+}
+
+/// Wrap `content` like [`prim::wrap`] (whitespace-collapsing) and return each
+/// row's text plus a content-relative position map. `prefix_len` offsets the
+/// map so positions address `source` (which prefixes `content`, e.g. `## `);
+/// `source_len` is the fallback for the final boundary.
+fn wrap_with_map(
+    content: &str,
+    prefix_len: usize,
+    source_len: usize,
+    max_w: usize,
+) -> Vec<(String, Vec<usize>)> {
+    let (collapsed, cmap) = collapse(content);
+    let rows = prim::wrap(&collapsed, max_w);
+    let mut offset = 0usize;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let len = row.chars().count();
+        let mut map = Vec::with_capacity(len + 1);
+        for k in 0..len {
+            let src = cmap.get(offset + k).copied().unwrap_or(content.len());
+            map.push(prefix_len + src);
+        }
+        let last = cmap
+            .get(offset + len)
+            .copied()
+            .unwrap_or(content.len());
+        // `last` is a byte offset within `content`; offset by `prefix_len`
+        // to address `source`, clamped to its end.
+        map.push((prefix_len + last).min(source_len));
+        // The first row's start boundary snaps to the source start so the
+        // prefix (e.g. `## `, `> `) is included in whole-row yank — the
+        // display strips it, but the raw markdown retains it. Continuation
+        // rows keep their contiguous start (the next row's beginning).
+        if out.is_empty() {
+            map[0] = 0;
+        }
+        out.push((row, map));
+        offset += len;
+    }
+    out
 }
 
 // ── Markdown table ───────────────────────────────────────────────────────
@@ -337,6 +607,7 @@ fn render_table(
     aligns: &[Align],
     content_w: usize,
     t: Theme,
+    src_lines: &[&str],
 ) -> Vec<RenderLine> {
     let lead: Vec<Span<'static>> = vec![Span::raw("  ")];
     let pad: Vec<Span<'static>> = vec![Span::raw("  ")];
@@ -385,14 +656,33 @@ fn render_table(
             }
             s.push(if i + 1 < n_cols { mid } else { right });
         }
-        prim::render(lead.clone(), vec![Span::styled(s, border)], pad.clone())
+        // Border rows carry an empty-source raw so they are suppressed
+        // in SELECT yank (no corresponding markdown source line).
+        let mut rl = prim::render(lead.clone(), vec![Span::styled(s, border)], pad.clone());
+        rl.raw = Some(RawLine::new(Arc::from(""), Vec::new(), true));
+        rl
     };
 
     out.push(border_row('┌', '┬', '┐'));
-    out.extend(table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad, t));
+    // Attach the raw markdown source to the first row of each header/data
+    // group so whole-line yank recovers the `| … |` line. The display grid
+    // doesn't map 1:1 to the source, so the map is empty (degenerate).
+    let mut hdr_rows = table_row(&col_w, header, aligns, hdr_style, border, &lead, &pad, t);
+    if let Some(first) = hdr_rows.first_mut() {
+        if let Some(src) = src_lines.first() {
+            first.raw = Some(RawLine::new(Arc::from(*src), Vec::new(), true));
+        }
+    }
+    out.extend(hdr_rows);
     out.push(border_row('├', '┼', '┤'));
     for (i, row) in data.iter().enumerate() {
-        out.extend(table_row(&col_w, row, aligns, body_style, border, &lead, &pad, t));
+        let mut rows = table_row(&col_w, row, aligns, body_style, border, &lead, &pad, t);
+        if let Some(first) = rows.first_mut() {
+            if let Some(src) = src_lines.get(1 + i) {
+                first.raw = Some(RawLine::new(Arc::from(*src), Vec::new(), true));
+            }
+        }
+        out.extend(rows);
         if i + 1 < data.len() {
             out.push(border_row('├', '┼', '┤'));
         }
@@ -501,39 +791,6 @@ fn align_spans(
             out.push(Span::styled(" ".repeat(pad - left), pad_style));
             out
         }
-    }
-}
-
-/// Recursively parse inline emphasis markers into styled spans. Markers are
-/// tried in priority order (longer first so `**` wins over `*`); the first
-/// marker with a matched open/close pair splits the text into before / inner
-/// (with the modifier stacked) / after, each parsed recursively.
-fn parse_markers(text: &str, base: Style) -> Vec<Span<'static>> {
-    // (marker, modifier, word_boundary_check)
-    for (marker, modifier, check) in [
-        ("**", Modifier::BOLD, false),
-        ("__", Modifier::BOLD, true),
-        ("~~", Modifier::CROSSED_OUT, false),
-        ("*", Modifier::ITALIC, false),
-        ("_", Modifier::UNDERLINED, true),
-    ] {
-        let Some(open) = find_marker(text, marker, check, true) else { continue };
-        let after_open = &text[open + marker.len()..];
-        if let Some(close) = find_marker(after_open, marker, check, false) {
-            let before = &text[..open];
-            let inner = &after_open[..close];
-            let after = &after_open[close + marker.len()..];
-            let mut spans = Vec::new();
-            spans.extend(parse_markers(before, base));
-            spans.extend(parse_markers(inner, base.add_modifier(modifier)));
-            spans.extend(parse_markers(after, base));
-            return spans;
-        }
-    }
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::styled(text.to_string(), base)]
     }
 }
 
