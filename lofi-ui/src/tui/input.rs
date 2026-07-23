@@ -88,11 +88,15 @@ pub(super) fn handle_event(
     }
     match k.code {
         KeyCode::Enter if current_run.is_some() && !app.input.is_empty() => {
-            // Agent is running — queue the prompt instead of blocking.
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
             app.history_idx = None;
             app.slash_complete = None;
+            // Slash commands run immediately even while the agent is busy;
+            // only real prompts are queued.
+            if app.slash_command(&prompt) {
+                return;
+            }
             app.history_nav.push(prompt.clone());
             app.prompt_queue.push(prompt);
             return;
