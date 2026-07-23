@@ -239,10 +239,9 @@ impl Component for AssistantText<'_> {
                     parse_table_row(tlines[1]).iter().map(|c| parse_align(c)).collect();
                 let data: Vec<Vec<String>> =
                     tlines[2..].iter().map(|l| parse_table_row(l)).collect();
-                // Source lines for raw markdown yank: header then data rows.
-                let src_lines: Vec<&str> = std::iter::once(tlines[0])
-                    .chain(tlines[2..].iter().copied())
-                    .collect();
+                // Source lines for raw markdown yank: header, separator,
+                // then data rows.
+                let src_lines: Vec<&str> = tlines.to_vec();
                 out.extend(render_table(&header, &data, &aligns, content_w, t, &src_lines));
                 continue;
             }
@@ -674,11 +673,17 @@ fn render_table(
         }
     }
     out.extend(hdr_rows);
-    out.push(border_row('├', '┼', '┤'));
+    // The header-separator border carries the markdown separator line
+    // (`|---|---|`) so yanking it recovers the table-header syntax.
+    let mut sep = border_row('├', '┼', '┤');
+    if let Some(src) = src_lines.get(1) {
+        sep.raw = Some(RawLine::new(Arc::from(*src), Vec::new(), true));
+    }
+    out.push(sep);
     for (i, row) in data.iter().enumerate() {
         let mut rows = table_row(&col_w, row, aligns, body_style, border, &lead, &pad, t);
         if let Some(first) = rows.first_mut() {
-            if let Some(src) = src_lines.get(1 + i) {
+            if let Some(src) = src_lines.get(2 + i) {
                 first.raw = Some(RawLine::new(Arc::from(*src), Vec::new(), true));
             }
         }

@@ -360,6 +360,27 @@ fn yank_table_row_returns_markdown() {
 }
 
 #[test]
+fn yank_table_header_separator_returns_markdown() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "| Name | Age |\n|------|-----|\n| Ada | 36 |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    feed_lines(&mut a, &rls);
+    // The header-separator border (├─┼─┤) carries the markdown separator
+    // line so yanking it recovers `|------|-----|`.
+    let sep = a.log_raw.iter().position(|r| {
+        r.as_ref().is_some_and(|r| r.source.starts_with("|---") || r.source.starts_with("|--"))
+    }).expect("separator border row");
+    a.nav_cursor = sep;
+    assert_eq!(a.current_line_text().as_deref(), Some("|------|-----|"));
+}
+
+#[test]
 fn yank_table_border_returns_empty() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -371,13 +392,13 @@ fn yank_table_border_returns_empty() {
     let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find a border row (raw exists but source is empty).
+    // Find the top border row (raw exists but source is empty).
     let border = a.log_raw.iter().position(|r| {
         r.as_ref().is_some_and(|r| r.source.is_empty())
     }).expect("border row");
     a.nav_cursor = border;
-    // Border rows carry no markdown source — yank should return nothing,
-    // not the rendered box-drawing characters.
+    // Non-separator border rows carry no markdown source — yank should
+    // return nothing, not the rendered box-drawing characters.
     assert_eq!(a.current_line_text(), None);
 }
 
@@ -397,9 +418,9 @@ fn selection_table_returns_markdown_not_grid() {
     // Select the entire table top to bottom.
     a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_lines[n - 1].chars().count()) });
     let text = a.selection_text().expect("selection text");
-    // Borders are suppressed; only the raw markdown data rows remain,
-    // joined by `\n`.
-    assert_eq!(text, "| Name | Age |\n| Ada | 36 |");
+    // Non-separator borders are suppressed; the header, separator, and
+    // data rows carry markdown source, joined by `\n`.
+    assert_eq!(text, "| Name | Age |\n|------|-----|\n| Ada | 36 |");
     // No box-drawing characters survive.
     assert!(!text.contains('│') && !text.contains('─'), "no grid chars: {text}");
 }
