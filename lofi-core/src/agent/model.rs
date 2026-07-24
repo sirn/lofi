@@ -203,6 +203,7 @@ pub fn rebuild_agent(
             None,
             config.compaction.reserved_context_tokens,
             &config.bash,
+            &config.shell_policy,
         )
         .with_retry(crate::retry::RetryPolicy::from(config.retry))
     };

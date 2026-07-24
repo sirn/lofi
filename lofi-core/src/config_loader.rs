@@ -47,6 +47,50 @@ pub fn user_config_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Resolve the path to the shell policy file.
+///
+/// Precedence: `$LOFI_POLICY` (used verbatim as the full file path), then
+/// the same directory as the config file with `policy.toml` appended.
+///
+/// # Errors
+/// Returns [`Error::Config`] only when no config base directory can be
+/// determined and `$LOFI_POLICY` is not set.
+pub fn policy_config_path(config_path: &Path) -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("LOFI_POLICY") {
+        return Ok(PathBuf::from(p));
+    }
+    let mut path = config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| Error::Config("config path has no parent directory".into()))?;
+    path.push("policy.toml");
+    Ok(path)
+}
+
+/// Load the shell policy from `policy.toml` if it exists, otherwise return
+/// the default. The file is parsed as [`lofi_types::ShellPolicyConfig`] at
+/// root level (no `[shell_policy]` wrapper).
+///
+/// # Errors
+/// [`Error::Config`] when the file exists but fails to read or parse.
+pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConfig> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
+            toml::from_str(&content)
+                .map_err(|e| Error::Config(format!("parse error in {}: {e}", path.display())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(
+            lofi_types::ShellPolicyConfig::default(),
+        ),
+        Err(e) => Err(Error::Config(format!(
+            "policy path {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
 /// Resolve a single config value (see module docs for the syntax).
 ///
 /// This is the low-level primitive used by [`load_config`]; callers may also
@@ -198,6 +242,9 @@ pub async fn load_config(path: &Path) -> Result<Config> {
         .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
     let mut cfg: Config =
         toml::from_str(&content).map_err(|e| Error::Config(format!("parse error: {e}")))?;
+    // Load shell policy from policy.toml (alongside config.toml).
+    let policy_path = policy_config_path(path)?;
+    cfg.shell_policy = load_policy_or_default(&policy_path)?;
     resolve_config(&mut cfg).await?;
     Ok(cfg)
 }
