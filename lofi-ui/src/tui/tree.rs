@@ -30,6 +30,7 @@ struct TreeCtx<'a> {
     native_tools: &'a HashMap<String, Vec<(String, String)>>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn build_tree_entries(
     indices: &[store::EventIndex],
     leaf_id: Option<&str>,

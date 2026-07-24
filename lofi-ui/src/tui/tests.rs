@@ -11,7 +11,12 @@ use std::sync::Arc;
 use lofi_types::{ContentBlock, Role, Usage};
 
 fn app() -> App {
-    App::new("openai/gpt-4o".to_string(), ThinkingLevel::Medium, 0, lofi_types::CompactionConfig::default())
+    App::new(
+        "openai/gpt-4o".to_string(),
+        ThinkingLevel::Medium,
+        0,
+        lofi_types::CompactionConfig::default(),
+    )
 }
 
 fn push_turn(app: &mut App) {
@@ -118,12 +123,26 @@ fn rich_header_suffix_for_read_and_bash() {
         })],
     });
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 80, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
-    let body: String = rls.iter().flat_map(|rl| rl.line.spans.iter())
-        .map(|s| s.content.as_ref()).collect();
-    assert!(body.contains("(lines 20-22)"), "read header should show line range: {body}");
-    assert!(body.contains("(took 1.5s)"), "bash header should show duration: {body}");
+    let body: String = rls
+        .iter()
+        .flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        body.contains("(lines 20-22)"),
+        "read header should show line range: {body}"
+    );
+    assert!(
+        body.contains("(took 1.5s)"),
+        "bash header should show duration: {body}"
+    );
 }
 
 #[test]
@@ -173,7 +192,12 @@ fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(markdown.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     render_turn_lines(&cx, turn)
         .into_iter()
         .flat_map(|rl| rl.line.spans)
@@ -183,22 +207,39 @@ fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
 
 #[test]
 
-
 fn inline_markdown_bold_italic_underscore() {
     use ratatui::style::Modifier;
     let spans = render_text_spans("**bold** *italic* _underline_");
-    let bold = spans.iter().find(|s| s.content == "bold").expect("bold span");
+    let bold = spans
+        .iter()
+        .find(|s| s.content == "bold")
+        .expect("bold span");
     assert!(bold.style.add_modifier == Modifier::BOLD, "bold: {bold:?}");
-    let italic = spans.iter().find(|s| s.content == "italic").expect("italic span");
-    assert!(italic.style.add_modifier == Modifier::ITALIC, "italic: {italic:?}");
-    let under = spans.iter().find(|s| s.content == "underline").expect("underline span");
-    assert!(under.style.add_modifier == Modifier::UNDERLINED, "underline: {under:?}");
+    let italic = spans
+        .iter()
+        .find(|s| s.content == "italic")
+        .expect("italic span");
+    assert!(
+        italic.style.add_modifier == Modifier::ITALIC,
+        "italic: {italic:?}"
+    );
+    let under = spans
+        .iter()
+        .find(|s| s.content == "underline")
+        .expect("underline span");
+    assert!(
+        under.style.add_modifier == Modifier::UNDERLINED,
+        "underline: {under:?}"
+    );
 }
 
 #[test]
 fn inline_markdown_code_stays_literal() {
     let spans = render_text_spans("use `inline_spans` here");
-    let code = spans.iter().find(|s| s.content == "inline_spans").expect("code span");
+    let code = spans
+        .iter()
+        .find(|s| s.content == "inline_spans")
+        .expect("code span");
     // Code spans have an inline_bg background; plain text does not.
     assert!(code.style.bg.is_some(), "code should have bg: {code:?}");
 }
@@ -217,18 +258,32 @@ fn inline_markdown_code_wraps_across_lines() {
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
     // Narrow enough to force the code span to wrap.
-    let cx = Cx { app: &a, theme: a.theme, width: 30, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 30,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
-    let spans: Vec<_> = rls.iter().flat_map(|rl| rl.line.spans.iter().cloned()).collect();
+    let spans: Vec<_> = rls
+        .iter()
+        .flat_map(|rl| rl.line.spans.iter().cloned())
+        .collect();
     let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
     // No backtick markers should survive in the output.
-    assert!(!body.contains('`'), "backtick markers should be stripped: {body}");
+    assert!(
+        !body.contains('`'),
+        "backtick markers should be stripped: {body}"
+    );
     // Every word from the code span should carry the code style (bg set).
     for word in ["git", "rebase", "interactive", "upstream", "main"] {
-        let found = spans.iter().any(|s| {
-            s.content.contains(word) && s.style.bg.is_some()
-        });
-        assert!(found, "word {word:?} should be in a code-styled span: {body}");
+        let found = spans
+            .iter()
+            .any(|s| s.content.contains(word) && s.style.bg.is_some());
+        assert!(
+            found,
+            "word {word:?} should be in a code-styled span: {body}"
+        );
     }
 }
 
@@ -237,20 +292,36 @@ fn inline_markdown_underscore_not_inword() {
     use ratatui::style::Modifier;
     // Identifiers with underscores must NOT be parsed as emphasis.
     let spans = render_text_spans("call my_var_name here");
-    let var = spans.iter().find(|s| s.content.contains("my_var_name"))
+    let var = spans
+        .iter()
+        .find(|s| s.content.contains("my_var_name"))
         .expect("var span");
-    assert_eq!(var.style.add_modifier, Modifier::empty(), "no emphasis: {var:?}");
-    assert!(!var.content.contains("**") && !var.content.contains("__"),
-        "underscores should be literal: {var:?}");
+    assert_eq!(
+        var.style.add_modifier,
+        Modifier::empty(),
+        "no emphasis: {var:?}"
+    );
+    assert!(
+        !var.content.contains("**") && !var.content.contains("__"),
+        "underscores should be literal: {var:?}"
+    );
 }
 
 #[test]
 fn inline_markdown_nested_bold_italic() {
     use ratatui::style::Modifier;
     let spans = render_text_spans("**bold *italic* bold**");
-    let inner = spans.iter().find(|s| s.content == "italic").expect("nested italic");
-    assert!(inner.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC),
-        "nested should be bold+italic: {inner:?}");
+    let inner = spans
+        .iter()
+        .find(|s| s.content == "italic")
+        .expect("nested italic");
+    assert!(
+        inner
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::ITALIC),
+        "nested should be bold+italic: {inner:?}"
+    );
 }
 
 #[test]
@@ -266,12 +337,22 @@ fn raw_map_snaps_to_markers_for_bold() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     // Find the assistant text line (source contains the markdown).
-    let rl = rls.iter().find(|r| {
-        r.raw.as_ref().is_some_and(|r| r.source.contains("**bold**"))
-    }).expect("a line with a raw map");
+    let rl = rls
+        .iter()
+        .find(|r| {
+            r.raw
+                .as_ref()
+                .is_some_and(|r| r.source.contains("**bold**"))
+        })
+        .expect("a line with a raw map");
     let raw = rl.raw.as_ref().unwrap();
     // Whole content → full source.
     let start = *raw.map.first().unwrap();
@@ -287,11 +368,14 @@ fn raw_map_snaps_to_markers_for_bold() {
 /// the same path as `feed_segment`.
 fn feed_lines(a: &mut App, rls: &[view::RenderLine]) {
     a.log_off = 0;
-    a.log_vis = rls.iter().map(|rl| view::VisLine {
-        rendered: rl.line.spans.iter().map(|s| s.content.as_ref()).collect(),
-        content: rl.content,
-        raw: rl.raw.clone(),
-    }).collect();
+    a.log_vis = rls
+        .iter()
+        .map(|rl| view::VisLine {
+            rendered: rl.line.spans.iter().map(|s| s.content.as_ref()).collect(),
+            content: rl.content,
+            raw: rl.raw.clone(),
+        })
+        .collect();
 }
 
 #[test]
@@ -303,13 +387,20 @@ fn yank_heading_includes_prefix() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the heading row (source contains "##").
-    let row = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.contains("##"))
-    }).expect("heading row");
+    let row = a
+        .log_vis
+        .iter()
+        .position(|v| v.raw.as_ref().is_some_and(|r| r.source.contains("##")))
+        .expect("heading row");
     a.nav_cursor = row;
     assert_eq!(a.current_line_text().as_deref(), Some("## Hello World"));
 }
@@ -323,12 +414,19 @@ fn yank_blockquote_includes_prefix() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    let row = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with('>'))
-    }).expect("blockquote row");
+    let row = a
+        .log_vis
+        .iter()
+        .position(|v| v.raw.as_ref().is_some_and(|r| r.source.starts_with('>')))
+        .expect("blockquote row");
     a.nav_cursor = row;
     assert_eq!(a.current_line_text().as_deref(), Some("> A quoted line"));
 }
@@ -342,19 +440,36 @@ fn yank_table_row_returns_markdown() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the header data row (source starts with `| Name`).
-    let hdr = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with("| Name"))
-    }).expect("header data row");
+    let hdr = a
+        .log_vis
+        .iter()
+        .position(|v| {
+            v.raw
+                .as_ref()
+                .is_some_and(|r| r.source.starts_with("| Name"))
+        })
+        .expect("header data row");
     a.nav_cursor = hdr;
     assert_eq!(a.current_line_text().as_deref(), Some("| Name | Age |"));
     // Find a data row.
-    let data = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with("| Ada"))
-    }).expect("data row");
+    let data = a
+        .log_vis
+        .iter()
+        .position(|v| {
+            v.raw
+                .as_ref()
+                .is_some_and(|r| r.source.starts_with("| Ada"))
+        })
+        .expect("data row");
     a.nav_cursor = data;
     assert_eq!(a.current_line_text().as_deref(), Some("| Ada | 36 |"));
 }
@@ -368,14 +483,25 @@ fn yank_table_header_separator_returns_markdown() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // The header-separator border (├─┼─┤) carries the markdown separator
     // line so yanking it recovers `|------|-----|`.
-    let sep = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with("|---") || r.source.starts_with("|--"))
-    }).expect("separator border row");
+    let sep = a
+        .log_vis
+        .iter()
+        .position(|v| {
+            v.raw
+                .as_ref()
+                .is_some_and(|r| r.source.starts_with("|---") || r.source.starts_with("|--"))
+        })
+        .expect("separator border row");
     a.nav_cursor = sep;
     assert_eq!(a.current_line_text().as_deref(), Some("|------|-----|"));
 }
@@ -389,13 +515,20 @@ fn yank_table_border_returns_empty() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the top border row (raw exists but source is empty).
-    let border = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.is_empty())
-    }).expect("border row");
+    let border = a
+        .log_vis
+        .iter()
+        .position(|v| v.raw.as_ref().is_some_and(|r| r.source.is_empty()))
+        .expect("border row");
     a.nav_cursor = border;
     // Non-separator border rows carry no markdown source — yank should
     // return nothing, not the rendered box-drawing characters.
@@ -411,13 +544,20 @@ fn yank_nested_list_preserves_indent() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the nested item row (source starts with "  -").
-    let nested = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with("  -"))
-    }).expect("nested item row");
+    let nested = a
+        .log_vis
+        .iter()
+        .position(|v| v.raw.as_ref().is_some_and(|r| r.source.starts_with("  -")))
+        .expect("nested item row");
     a.nav_cursor = nested;
     assert_eq!(a.current_line_text().as_deref(), Some("  - Nested item"));
 }
@@ -431,13 +571,24 @@ fn yank_code_block_preserves_indent() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
     // Find the indented line (source starts with "  return").
-    let indented = a.log_vis.iter().position(|v| {
-        v.raw.as_ref().is_some_and(|r| r.source.starts_with("  return"))
-    }).expect("indented code line");
+    let indented = a
+        .log_vis
+        .iter()
+        .position(|v| {
+            v.raw
+                .as_ref()
+                .is_some_and(|r| r.source.starts_with("  return"))
+        })
+        .expect("indented code line");
     a.nav_cursor = indented;
     assert_eq!(a.current_line_text().as_deref(), Some("  return 42;"));
 }
@@ -451,18 +602,33 @@ fn selection_blockquote_to_text_preserves_blank() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     for (i, rl) in rls.iter().enumerate() {
         let r: String = rl.line.spans.iter().map(|s| s.content.as_ref()).collect();
-        eprintln!("line {}: rendered={:?} content={:?} raw={:?} raw_src={:?} hard_break={:?}", i, r, rl.content, rl.raw.is_some(), rl.raw.as_ref().map(|r| r.source.as_ref()), rl.raw.as_ref().map(|r| r.hard_break));
+        eprintln!(
+            "line {}: rendered={:?} content={:?} raw={:?} raw_src={:?} hard_break={:?}",
+            i,
+            r,
+            rl.content,
+            rl.raw.is_some(),
+            rl.raw.as_ref().map(|r| r.source.as_ref()),
+            rl.raw.as_ref().map(|r| r.hard_break)
+        );
     }
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select all content lines (skip marker line 0 and gap line 1).
-    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    a.sel = Some(Selection {
+        start: (2, 0),
+        end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
+    });
     let text = a.selection_text().expect("selection text");
-    eprintln!("yanked: {:?}", text);
     assert_eq!(text, "> Quote line.\n\nNormal text after.");
 }
 
@@ -475,23 +641,45 @@ fn blockquote_renders_with_bar_and_empty_lines() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     // Every quote line should have the bar character.
-    let quote_lines: Vec<String> = rls.iter().skip(2).map(|rl| {
-        rl.line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }).collect();
-    assert!(quote_lines.iter().any(|s| s.contains("Line one") && s.contains("▎")),
-        "Line one should have bar: {:?}", quote_lines);
+    let quote_lines: Vec<String> = rls
+        .iter()
+        .skip(2)
+        .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert!(
+        quote_lines
+            .iter()
+            .any(|s| s.contains("Line one") && s.contains("▎")),
+        "Line one should have bar: {quote_lines:?}"
+    );
     // The bare > should produce a line with just the bar (not dropped).
-    assert!(quote_lines.iter().any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
-        "Empty quote line should render bar only: {:?}", quote_lines);
-    assert!(quote_lines.iter().any(|s| s.contains("Line three") && s.contains("▎")),
-        "Line three should have bar: {:?}", quote_lines);
+    assert!(
+        quote_lines
+            .iter()
+            .any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
+        "Empty quote line should render bar only: {quote_lines:?}"
+    );
+    assert!(
+        quote_lines
+            .iter()
+            .any(|s| s.contains("Line three") && s.contains("▎")),
+        "Line three should have bar: {quote_lines:?}"
+    );
     // Yanking the full quote should preserve the bare ">" line.
     let n = rls.len();
     feed_lines(&mut a, &rls);
-    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    a.sel = Some(Selection {
+        start: (2, 0),
+        end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
+    });
     let text = a.selection_text().expect("selection text");
     assert_eq!(text, "> Line one\n>\n> Line three");
 }
@@ -505,12 +693,20 @@ fn selection_blank_line_between_paragraphs_preserved() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select all content lines (skip turn marker at line 0 and gap at 1).
-    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    a.sel = Some(Selection {
+        start: (2, 0),
+        end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
+    });
     let text = a.selection_text().expect("selection text");
     assert_eq!(text, "First paragraph.\n\nSecond paragraph.");
 }
@@ -524,14 +720,25 @@ fn selection_nested_list_preserves_indent() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select all lines.
-    a.sel = Some(Selection { start: (0, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    a.sel = Some(Selection {
+        start: (0, 0),
+        end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
+    });
     let text = a.selection_text().expect("selection text");
-    assert!(text.contains("  - Nested item"), "should preserve indent: {text}");
+    assert!(
+        text.contains("  - Nested item"),
+        "should preserve indent: {text}"
+    );
 }
 
 #[test]
@@ -543,35 +750,60 @@ fn selection_table_returns_markdown_not_grid() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
     // Select the entire table top to bottom.
-    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    a.sel = Some(Selection {
+        start: (2, 0),
+        end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
+    });
     let text = a.selection_text().expect("selection text");
     // Non-separator borders are suppressed; the header, separator, and
     // data rows carry markdown source, joined by `\n`.
     assert_eq!(text, "| Name | Age |\n|------|-----|\n| Ada | 36 |");
     // No box-drawing characters survive.
-    assert!(!text.contains('│') && !text.contains('─'), "no grid chars: {text}");
+    assert!(
+        !text.contains('│') && !text.contains('─'),
+        "no grid chars: {text}"
+    );
 }
 
 #[test]
 fn inline_markdown_header_all_levels_bold() {
-    use ratatui::style::Modifier;
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
-    for md in ["# H1", "## H2", "### H3", "#### H4", "##### H5", "###### H6"] {
+    use ratatui::style::Modifier;
+    for md in [
+        "# H1",
+        "## H2",
+        "### H3",
+        "#### H4",
+        "##### H5",
+        "###### H6",
+    ] {
         let mut a = app();
         push_turn(&mut a);
         a.apply_event(AgentEvent::Text(md.to_string()));
         let turn = &a.turns[0];
-        let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+        let cx = Cx {
+            app: &a,
+            theme: a.theme,
+            width: 120,
+            active_turn: false,
+        };
         let rls = render_turn_lines(&cx, turn);
         let all_spans: Vec<_> = rls.iter().flat_map(|rl| rl.line.spans.iter()).collect();
         assert!(
-            all_spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            all_spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
             "header should be bold: {md} (spans: {all_spans:?})",
         );
     }
@@ -612,22 +844,46 @@ fn inline_markdown_table_fits_narrow_width() {
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 40, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 40,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     assert!(!rls.is_empty(), "table should render");
     for rl in &rls {
-        let w: usize = rl.line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let w: usize = rl
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
         assert!(w <= 40, "line too wide ({w} > 40): {:?}", rl.line);
     }
     // All content must be present (wrapped, not truncated). Words that fit
     // survive intact; long unbreakable tokens hard-break across rows.
-    let body: String = rls.iter().flat_map(|rl| rl.line.spans.iter())
-        .map(|s| s.content.as_ref()).collect();
-    assert!(body.contains("function"), "content should not be truncated: {body}");
-    assert!(body.contains("initial"), "content should not be truncated: {body}");
-    assert!(body.contains("version"), "content should not be truncated: {body}");
-    assert!(body.contains("src/mai") && body.contains("n.rs"),
-        "long token should hard-break: {body}");
+    let body: String = rls
+        .iter()
+        .flat_map(|rl| rl.line.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        body.contains("function"),
+        "content should not be truncated: {body}"
+    );
+    assert!(
+        body.contains("initial"),
+        "content should not be truncated: {body}"
+    );
+    assert!(
+        body.contains("version"),
+        "content should not be truncated: {body}"
+    );
+    assert!(
+        body.contains("src/mai") && body.contains("n.rs"),
+        "long token should hard-break: {body}"
+    );
     assert!(!body.contains('…'), "no ellipsis: {body}");
 }
 
@@ -651,19 +907,35 @@ fn inline_markdown_table_renders_inline_formatting() {
     let spans = render_text_spans(md);
     let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
     // Markers should be stripped.
-    assert!(!body.contains("**"), "bold markers should be stripped: {body}");
-    assert!(!body.contains('`'), "code markers should be stripped: {body}");
+    assert!(
+        !body.contains("**"),
+        "bold markers should be stripped: {body}"
+    );
+    assert!(
+        !body.contains('`'),
+        "code markers should be stripped: {body}"
+    );
     // Content should be present.
     assert!(body.contains("bold"), "bold text should be present: {body}");
     assert!(body.contains("code"), "code text should be present: {body}");
     // The bold cell should have BOLD modifier.
-    let bold_span = spans.iter().find(|s| s.content == "bold").expect("bold span");
-    assert!(bold_span.style.add_modifier.contains(Modifier::BOLD),
-        "bold cell should be BOLD: {bold_span:?}");
+    let bold_span = spans
+        .iter()
+        .find(|s| s.content == "bold")
+        .expect("bold span");
+    assert!(
+        bold_span.style.add_modifier.contains(Modifier::BOLD),
+        "bold cell should be BOLD: {bold_span:?}"
+    );
     // The code cell should have the code style (fg = info).
-    let code_span = spans.iter().find(|s| s.content == "code").expect("code span");
-    assert!(code_span.style.fg.is_some(),
-        "code cell should have fg color: {code_span:?}");
+    let code_span = spans
+        .iter()
+        .find(|s| s.content == "code")
+        .expect("code span");
+    assert!(
+        code_span.style.fg.is_some(),
+        "code cell should have fg color: {code_span:?}"
+    );
 }
 
 /// A numbered `read` line whose body is empty must still carry its line
@@ -720,8 +992,16 @@ fn numbered_empty_body_line_keeps_its_number() {
         .iter()
         .find(|rl| rl.content.0 > 0 && rl.content.0 == rl.content.1 && !rl.line.spans.is_empty())
         .expect("empty-body numbered line should keep its decoration");
-    let s: String = empty.line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(s.contains(" 2 ") || s.contains(" 2"), "number preserved: {s:?}");
+    let s: String = empty
+        .line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        s.contains(" 2 ") || s.contains(" 2"),
+        "number preserved: {s:?}"
+    );
 }
 
 #[test]
@@ -730,49 +1010,90 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e1".to_string(),
-        code: "lofi.read('a.txt'); lofi.write(...); lofi.edit(...); lofi.bash('echo x')".to_string(),
+        code: "lofi.read('a.txt'); lofi.write(...); lofi.edit(...); lofi.bash('echo x')"
+            .to_string(),
         label: Some("mixed".to_string()),
     });
     // A read (hidden in non-verbose), mutating tools bash/write/edit (kept),
     // and a failed read whose error stays visible even when read results hide.
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 0, name: "read".to_string(), args: "a.txt".to_string(),
+        parent: "e1".to_string(),
+        id: 0,
+        name: "read".to_string(),
+        args: "a.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
         parent: "e1".to_string(), id: 0, result: serde_json::json!({ "content": "secret line one", "start_line": 1, "total_lines": 1, "truncated": false }).to_string(), is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 1, name: "write".to_string(), args: "b.txt".to_string(),
+        parent: "e1".to_string(),
+        id: 1,
+        name: "write".to_string(),
+        args: "b.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 1, result: serde_json::json!({ "ok": true, "content": "written content here" }).to_string(), is_error: false,
+        parent: "e1".to_string(),
+        id: 1,
+        result: serde_json::json!({ "ok": true, "content": "written content here" }).to_string(),
+        is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 2, name: "edit".to_string(), args: "c.txt".to_string(),
+        parent: "e1".to_string(),
+        id: 2,
+        name: "edit".to_string(),
+        args: "c.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 2, result: serde_json::json!({ "ok": true, "old": "old text", "new": "edited content here" }).to_string(), is_error: false,
+        parent: "e1".to_string(),
+        id: 2,
+        result: serde_json::json!({ "ok": true, "old": "old text", "new": "edited content here" })
+            .to_string(),
+        is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 3, name: "bash".to_string(), args: "echo x".to_string(),
+        parent: "e1".to_string(),
+        id: 3,
+        name: "bash".to_string(),
+        args: "echo x".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 3, result: serde_json::json!({ "ok": true, "output": "bash output here", "code": 0 }).to_string(), is_error: false,
+        parent: "e1".to_string(),
+        id: 3,
+        result: serde_json::json!({ "ok": true, "output": "bash output here", "code": 0 })
+            .to_string(),
+        is_error: false,
     });
     a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(), id: 4, name: "read".to_string(), args: "missing.txt".to_string(),
+        parent: "e1".to_string(),
+        id: 4,
+        name: "read".to_string(),
+        args: "missing.txt".to_string(),
     });
     a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 4, result: "no such file".to_string(), is_error: true,
+        parent: "e1".to_string(),
+        id: 4,
+        result: "no such file".to_string(),
+        is_error: true,
     });
     a.apply_event(AgentEvent::ToolEnd {
-        id: "e1".to_string(), result: "{\"value\":null}".to_string(), is_error: false, elapsed_ms: 0,
+        id: "e1".to_string(),
+        result: "{\"value\":null}".to_string(),
+        is_error: false,
+        elapsed_ms: 0,
     });
     let text = |a: &App| -> String {
-        let cx = Cx { app: a, theme: a.theme, width: 80, active_turn: false };
+        let cx = Cx {
+            app: a,
+            theme: a.theme,
+            width: 80,
+            active_turn: false,
+        };
         render_turn_lines(&cx, &a.turns[0])
             .iter()
             .flat_map(|rl| rl.line.spans.iter())
@@ -783,17 +1104,41 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
     // content, the error, and every tool header stay visible.
     a.verbose = false;
     let nv = text(&a);
-    assert!(!nv.contains("secret line one"), "non-verbose read body should hide: {nv}");
-    assert!(nv.contains("bash output here"), "non-verbose bash body should show: {nv}");
-    assert!(nv.contains("written content here"), "non-verbose write body should show its content: {nv}");
-    assert!(nv.contains("edited content here"), "non-verbose edit body should show its content: {nv}");
-    assert!(nv.contains("no such file"), "non-verbose error should stay visible: {nv}");
-    assert!(nv.contains("Tool read"), "read header should still show: {nv}");
-    assert!(nv.contains("Tool write"), "write header should still show: {nv}");
+    assert!(
+        !nv.contains("secret line one"),
+        "non-verbose read body should hide: {nv}"
+    );
+    assert!(
+        nv.contains("bash output here"),
+        "non-verbose bash body should show: {nv}"
+    );
+    assert!(
+        nv.contains("written content here"),
+        "non-verbose write body should show its content: {nv}"
+    );
+    assert!(
+        nv.contains("edited content here"),
+        "non-verbose edit body should show its content: {nv}"
+    );
+    assert!(
+        nv.contains("no such file"),
+        "non-verbose error should stay visible: {nv}"
+    );
+    assert!(
+        nv.contains("Tool read"),
+        "read header should still show: {nv}"
+    );
+    assert!(
+        nv.contains("Tool write"),
+        "write header should still show: {nv}"
+    );
     // Verbose: the hidden read body comes back.
     a.verbose = true;
     let v = text(&a);
-    assert!(v.contains("secret line one"), "verbose read body should show: {v}");
+    assert!(
+        v.contains("secret line one"),
+        "verbose read body should show: {v}"
+    );
 }
 
 #[test]
@@ -801,7 +1146,12 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let text = |a: &App| -> String {
-        let cx = Cx { app: a, theme: a.theme, width: 80, active_turn: false };
+        let cx = Cx {
+            app: a,
+            theme: a.theme,
+            width: 80,
+            active_turn: false,
+        };
         render_turn_lines(&cx, &a.turns[0])
             .iter()
             .flat_map(|rl| rl.line.spans.iter())
@@ -813,7 +1163,10 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
     // the work) but the Succeed status header stays; verbose brings it back.
     let mut a = app();
     push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e1".to_string(),
         code: "const x = 1;".to_string(),
@@ -827,17 +1180,29 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
     });
     a.verbose = false;
     let nv = text(&a);
-    assert!(!nv.contains("all done marker"), "non-verbose exec result body should hide: {nv}");
-    assert!(nv.contains("Succeed"), "non-verbose exec status header should stay: {nv}");
+    assert!(
+        !nv.contains("all done marker"),
+        "non-verbose exec result body should hide: {nv}"
+    );
+    assert!(
+        nv.contains("Succeed"),
+        "non-verbose exec status header should stay: {nv}"
+    );
     a.verbose = true;
     let v = text(&a);
-    assert!(v.contains("all done marker"), "verbose exec result body should show: {v}");
+    assert!(
+        v.contains("all done marker"),
+        "verbose exec result body should show: {v}"
+    );
 
     // A failed exec keeps its error body even in non-verbose so a failure is
     // never silently swallowed.
     let mut a = app();
     push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart { id: "e2".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e2".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e2".to_string(),
         code: "throw new Error('x')".to_string(),
@@ -851,8 +1216,14 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
     });
     a.verbose = false;
     let nv = text(&a);
-    assert!(nv.contains("exec blew up here"), "non-verbose exec error body should stay: {nv}");
-    assert!(nv.contains("Failed"), "non-verbose exec error status should stay: {nv}");
+    assert!(
+        nv.contains("exec blew up here"),
+        "non-verbose exec error body should stay: {nv}"
+    );
+    assert!(
+        nv.contains("Failed"),
+        "non-verbose exec error status should stay: {nv}"
+    );
 }
 
 #[test]
@@ -860,7 +1231,11 @@ fn current_line_text_excludes_decoration() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_vis = vec![view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None }]; // "hello world"
+    a.log_vis = vec![view::VisLine {
+        rendered: "  hello world   ".to_string(),
+        content: (2, 13),
+        raw: None,
+    }]; // "hello world"
     a.nav_cursor = 0;
     assert_eq!(a.current_line_text().as_deref(), Some("hello world"));
 }
@@ -870,7 +1245,11 @@ fn vim_motions_move_within_content() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_vis = vec![view::VisLine { rendered: "  aa bb cc".to_string(), content: (2, 10), raw: None }]; // "aa bb cc"
+    a.log_vis = vec![view::VisLine {
+        rendered: "  aa bb cc".to_string(),
+        content: (2, 10),
+        raw: None,
+    }]; // "aa bb cc"
     a.nav_cursor = 0;
     a.nav_col = 2;
     // ^ and 0 land on the first content char.
@@ -894,7 +1273,11 @@ fn vim_word_motion_skips_punctuation() {
     let mut a = app();
     push_turn(&mut a);
     a.log_off = 0;
-    a.log_vis = vec![view::VisLine { rendered: "  a.b c".to_string(), content: (2, 7), raw: None }]; // "a.b c"
+    a.log_vis = vec![view::VisLine {
+        rendered: "  a.b c".to_string(),
+        content: (2, 7),
+        raw: None,
+    }]; // "a.b c"
     a.nav_cursor = 0;
     a.nav_col = 2;
     // w from "a" lands on "." (punctuation is its own word).
@@ -1389,8 +1772,12 @@ fn session_info_opens_modal() {
     assert!(a.turns.is_empty());
     let info = a.info.as_ref().expect("modal opened");
     assert_eq!(info.title, "Session");
-    let body: String = info.lines.iter().flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref()).collect();
+    let body: String = info
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
     assert!(body.contains("(none)"));
     assert!(body.contains("No session file"));
 }
@@ -1401,11 +1788,24 @@ fn session_info_modal_shows_id_when_path_set() {
     a.session.path = Some(std::path::PathBuf::from("/tmp/sessions/abc123.jsonl"));
     assert!(a.slash_command("/session"));
     let info = a.info.as_ref().expect("modal opened");
-    let body: String = info.lines.iter().flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref()).collect();
-    assert!(body.contains("abc123"), "body should contain the session id: {body}");
-    assert!(body.contains("Workspace"), "body should have a workspace section: {body}");
-    assert!(body.contains("Model"), "body should have a model section: {body}");
+    let body: String = info
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        body.contains("abc123"),
+        "body should contain the session id: {body}"
+    );
+    assert!(
+        body.contains("Workspace"),
+        "body should have a workspace section: {body}"
+    );
+    assert!(
+        body.contains("Model"),
+        "body should have a model section: {body}"
+    );
 }
 
 #[test]
@@ -1462,7 +1862,10 @@ fn tree_picker_is_centered() {
         .expect("tree modal border found");
     // 2 entries => height 4; bottom-anchored would put the border at y=18,
     // centered at ~9. Insist on centered.
-    assert!(top_y < 15, "tree modal should be centered, got top_y={top_y}");
+    assert!(
+        top_y < 15,
+        "tree modal should be centered, got top_y={top_y}"
+    );
 }
 
 #[test]
@@ -1513,7 +1916,7 @@ fn slash_complete_filters_and_accepts() {
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
     assert_eq!(sc.candidates, vec![8]); // /tree is index 8
-    // Typing the full command dismisses (nothing left to complete).
+                                        // Typing the full command dismisses (nothing left to complete).
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
     assert!(a.slash_complete.is_none());
@@ -1598,15 +2001,21 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "first".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1616,11 +2025,15 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         },
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "second".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "second".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "world".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "world".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1631,7 +2044,11 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
     // Read back the ids so the test can assert against them.
@@ -1646,7 +2063,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // Tree: user1, agent1 (turn_end1), user2, agent2 (turn_end2).
     assert_eq!(picker.entries.len(), 4);
     assert_eq!(picker.selected, 3); // defaults to the last entry
-    // Find the "edit turn 2" entry (prefill = "second").
+                                    // Find the "edit turn 2" entry (prefill = "second").
     let edit_idx = picker
         .entries
         .iter()
@@ -1676,15 +2093,21 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "first".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1702,11 +2125,15 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         },
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "second".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "second".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "world".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "world".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1717,7 +2144,11 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
     let (_meta, events, _o, _s) = store::load(&path).unwrap();
@@ -1729,7 +2160,10 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     // Trunk: user1, agent1, compact, user2, agent2.
-    assert!(picker.entries.iter().any(|e| e.label.starts_with("compact:")));
+    assert!(picker
+        .entries
+        .iter()
+        .any(|e| e.label.starts_with("compact:")));
     let comp_idx = picker
         .entries
         .iter()
@@ -1766,7 +2200,11 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
         },
     ]
     .into_iter()
-    .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+    .map(|kind| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind,
+    })
     .collect();
     store::append_events(&path, &mut original, None).unwrap();
     let pre_compaction_leaf = original[2].id.clone();
@@ -1787,7 +2225,11 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().unwrap();
     assert_eq!(
-        picker.entries.iter().filter(|e| e.label.starts_with("user: first")).count(),
+        picker
+            .entries
+            .iter()
+            .filter(|e| e.label.starts_with("user: first"))
+            .count(),
         1,
         "checkpoint copy must not appear as another tree turn"
     );
@@ -1808,15 +2250,21 @@ fn modal_tab_cycles_with_wraparound() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "first".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1826,11 +2274,15 @@ fn modal_tab_cycles_with_wraparound() {
         },
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "second".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "second".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "world".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "world".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1841,7 +2293,11 @@ fn modal_tab_cycles_with_wraparound() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
     let mut a = app();
@@ -1884,7 +2340,9 @@ fn tree_revert_to_root_then_reopens() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::System,
@@ -1892,11 +2350,15 @@ fn tree_revert_to_root_then_reopens() {
         }),
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "first".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "hello".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1906,11 +2368,15 @@ fn tree_revert_to_root_then_reopens() {
         },
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "second".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "second".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "world".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "world".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1921,7 +2387,11 @@ fn tree_revert_to_root_then_reopens() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
 
@@ -1955,11 +2425,15 @@ fn tree_shows_tool_result_nodes() {
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "list files".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "list files".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
@@ -1979,7 +2453,9 @@ fn tree_shows_tool_result_nodes() {
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "done".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -1990,7 +2466,11 @@ fn tree_shows_tool_result_nodes() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
     let (_meta, events, _o, _s) = store::load(&path).unwrap();
@@ -2036,11 +2516,15 @@ fn tree_exec_label_shows_native_tools() {
     use lofi_types::{ContentBlock, NativeToolRecord, Role};
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
-    let path = store.create(std::path::Path::new("/x"), &"m".into()).unwrap();
+    let path = store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "do stuff".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "do stuff".into(),
+            }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
@@ -2084,7 +2568,9 @@ fn tree_exec_label_shows_native_tools() {
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "done".into() }],
+            blocks: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
         }),
         SessionEventKind::TurnEnd {
             model: "m".into(),
@@ -2095,7 +2581,11 @@ fn tree_exec_label_shows_native_tools() {
     ];
     let mut batch: Vec<SessionEvent> = kinds
         .into_iter()
-        .map(|k| SessionEvent { id: String::new(), parent_id: None, kind: k })
+        .map(|k| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: k,
+        })
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
 
@@ -2148,8 +2638,11 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
     let lines = [
         serde_json::to_string(&Message {
             role: Role::User,
-            blocks: vec![ContentBlock::Text { text: "list files".into() }],
-        }).unwrap(),
+            blocks: vec![ContentBlock::Text {
+                text: "list files".into(),
+            }],
+        })
+        .unwrap(),
         serde_json::to_string(&Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
@@ -2157,7 +2650,8 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
                 name: "bash".into(),
                 input: serde_json::json!({"cmd": "ls"}),
             }],
-        }).unwrap(),
+        })
+        .unwrap(),
         serde_json::to_string(&Message {
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
@@ -2165,7 +2659,8 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
                 content: "file_a.txt".into(),
                 is_error: false,
             }],
-        }).unwrap(),
+        })
+        .unwrap(),
     ];
     std::fs::write(&path, format!("{header}{}\n", lines.join("\n"))).unwrap();
 
@@ -2175,7 +2670,10 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     // V1: user, tool (no turn_end, so no agent node).
-    assert!(picker.entries.iter().any(|e| e.label.starts_with("user:")), "should have user node");
+    assert!(
+        picker.entries.iter().any(|e| e.label.starts_with("user:")),
+        "should have user node"
+    );
     assert!(
         picker.entries.iter().any(|e| e.label.starts_with("tool:")),
         "should have tool node in v1 session"
@@ -2212,16 +2710,28 @@ fn verbose_expands_compaction_summary() {
     // Collapsed: only the one-line marker; the folded text is absent.
     let collapsed = render_turns(&a, 80);
     let collapsed_s = join_rendered(&collapsed);
-    assert!(collapsed_s.contains("Compacted 7 messages"), "collapsed: {collapsed_s}");
-    assert!(!collapsed_s.contains("Build a coding agent"), "collapsed leaked summary: {collapsed_s}");
+    assert!(
+        collapsed_s.contains("Compacted 7 messages"),
+        "collapsed: {collapsed_s}"
+    );
+    assert!(
+        !collapsed_s.contains("Build a coding agent"),
+        "collapsed leaked summary: {collapsed_s}"
+    );
 
     // Expanded: the marker plus the folded summary text.
     a.toggle_verbose();
     let expanded = render_turns(&a, 80);
     let expanded_s = join_rendered(&expanded);
     assert!(expanded_s.contains("Compacted 7 messages"));
-    assert!(expanded_s.contains("Build a coding agent"), "expanded missing summary: {expanded_s}");
-    assert!(expanded_s.contains("Use Rust."), "expanded missing summary: {expanded_s}");
+    assert!(
+        expanded_s.contains("Build a coding agent"),
+        "expanded missing summary: {expanded_s}"
+    );
+    assert!(
+        expanded_s.contains("Use Rust."),
+        "expanded missing summary: {expanded_s}"
+    );
 }
 
 fn join_rendered(text: &ratatui::text::Text<'static>) -> String {
@@ -2249,23 +2759,49 @@ fn turn_failed_wraps_error_below_header() {
         }],
     });
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 40, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 40,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     // Line 0 is the status header: model, level, duration only — the error
     // must not appear inline there (it used to, and got clipped).
-    let header: String = rls[0].line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(header.contains("Failed in"), "header missing status: {header}");
-    assert!(header.contains("openai/gpt-4o"), "header missing label: {header}");
-    assert!(!header.contains("503"), "header must not carry the error inline: {header}");
+    let header: String = rls[0]
+        .line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        header.contains("Failed in"),
+        "header missing status: {header}"
+    );
+    assert!(
+        header.contains("openai/gpt-4o"),
+        "header missing label: {header}"
+    );
+    assert!(
+        !header.contains("503"),
+        "header must not carry the error inline: {header}"
+    );
     // The error text lives on later, indented lines that each fit the column.
     let body: String = rls[1..]
         .iter()
         .flat_map(|rl| rl.line.spans.iter())
         .map(|s| s.content.as_ref())
         .collect();
-    assert!(body.contains("503"), "wrapped error missing from body: {body}");
+    assert!(
+        body.contains("503"),
+        "wrapped error missing from body: {body}"
+    );
     for rl in &rls[1..] {
-        assert!(rl.line.width() <= 40, "body line overflows: {}", rl.line.width());
+        assert!(
+            rl.line.width() <= 40,
+            "body line overflows: {}",
+            rl.line.width()
+        );
     }
 }
 
@@ -2287,7 +2823,12 @@ fn turn_failed_dedups_after_fatal_error_block() {
         ],
     });
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 80, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     // The provider emits the error twice on a stream failure — as a fatal
     // `✗` line and again in the TurnFailed marker. The dedup must collapse
@@ -2297,7 +2838,11 @@ fn turn_failed_dedups_after_fatal_error_block() {
         .flat_map(|rl| rl.line.spans.iter())
         .map(|s| s.content.as_ref())
         .collect();
-    assert_eq!(all.matches("stream interrupted").count(), 1, "dedup failed: {all}");
+    assert_eq!(
+        all.matches("stream interrupted").count(),
+        1,
+        "dedup failed: {all}"
+    );
 }
 
 #[test]
@@ -2306,7 +2851,10 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e1".to_string(),
         code: "lofi.bash('echo t')".to_string(),
@@ -2335,11 +2883,20 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
         elapsed_ms: 0,
     });
     let turn = &a.turns[0];
-    let cx = Cx { app: &a, theme: a.theme, width: 28, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 28,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     // No row overflows the column — wrapping keeps every line in bounds.
     for rl in &rls {
-        assert!(rl.line.width() <= 28, "row overflows 28: {}", rl.line.width());
+        assert!(
+            rl.line.width() <= 28,
+            "row overflows 28: {}",
+            rl.line.width()
+        );
     }
     // The tail of the long line is visible (wrapping, not truncation).
     let all = rls
@@ -2353,12 +2910,20 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
         })
         .collect::<Vec<_>>()
         .join("|");
-    assert!(all.contains("hij"), "result tail clipped (no wrapping): {all}");
+    assert!(
+        all.contains("hij"),
+        "result tail clipped (no wrapping): {all}"
+    );
 }
 
 #[test]
 fn footer_shows_model_and_thinking() {
-    let a = App::new("openai/gpt-5.6-sol".to_string(), ThinkingLevel::XHigh, 0, lofi_types::CompactionConfig::default());
+    let a = App::new(
+        "openai/gpt-5.6-sol".to_string(),
+        ThinkingLevel::XHigh,
+        0,
+        lofi_types::CompactionConfig::default(),
+    );
     let r: String = a
         .render_footer_right()
         .spans
@@ -2371,7 +2936,12 @@ fn footer_shows_model_and_thinking() {
 
 #[test]
 fn footer_hides_thinking_when_off() {
-    let a = App::new("openai/gpt-4o".to_string(), ThinkingLevel::Off, 0, lofi_types::CompactionConfig::default());
+    let a = App::new(
+        "openai/gpt-4o".to_string(),
+        ThinkingLevel::Off,
+        0,
+        lofi_types::CompactionConfig::default(),
+    );
     let r: String = a
         .render_footer_right()
         .spans
@@ -2474,7 +3044,11 @@ fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
     ]);
 
     let turns = turns_from_session_events(&events);
-    assert_eq!(turns.len(), 2, "checkpoint copies must not duplicate UI turns");
+    assert_eq!(
+        turns.len(),
+        2,
+        "checkpoint copies must not duplicate UI turns"
+    );
     assert_eq!(turns[0].prompt, "old prompt");
     assert_eq!(turns[1].prompt, "kept prompt");
 
@@ -2499,7 +3073,9 @@ fn turns_from_events_links_tool_results() {
         Message {
             role: Role::Assistant,
             blocks: vec![
-                ContentBlock::Text { text: "ok".to_string() },
+                ContentBlock::Text {
+                    text: "ok".to_string(),
+                },
                 ContentBlock::ToolUse {
                     id: "t1".to_string(),
                     name: "exec".to_string(),
@@ -2517,7 +3093,9 @@ fn turns_from_events_links_tool_results() {
         },
         Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "done".to_string() }],
+            blocks: vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
         },
     ];
     let events: Vec<SessionEvent> = sev_chain(messages.into_iter().map(msg));
@@ -2556,9 +3134,14 @@ fn turns_from_events_restores_timings() {
         }),
         msg(Message {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: "done".to_string() }],
+            blocks: vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
         }),
-        SessionEventKind::ToolTiming { tool_call_id: "t1".into(), elapsed_ms: 7 },
+        SessionEventKind::ToolTiming {
+            tool_call_id: "t1".into(),
+            elapsed_ms: 7,
+        },
         SessionEventKind::TurnEnd {
             model: "proxy/gemini-3-flash · medium".into(),
             elapsed_ms: 2000,
@@ -2570,7 +3153,9 @@ fn turns_from_events_restores_timings() {
     assert_eq!(turns.len(), 1);
     let blocks = &turns[0].blocks;
     // Tool elapsed is restored from the ToolTiming event.
-    let Block::Tool(t) = &blocks[0] else { unreachable!() };
+    let Block::Tool(t) = &blocks[0] else {
+        unreachable!()
+    };
     assert_eq!(t.elapsed, Some(Duration::from_millis(7)));
     // The trailing block is the restored turn-end marker.
     match blocks.last() {
@@ -2595,7 +3180,11 @@ fn messages_from_events_excludes_failed_turn_branch() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    std::fs::write(&path, "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n").unwrap();
+    std::fs::write(
+        &path,
+        "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
 
     // First (successful) turn: two messages + a TurnEnd, chained from
     // the root so append_events assigns linear ids.
@@ -2610,7 +3199,11 @@ fn messages_from_events_excludes_failed_turn_branch() {
         },
     ]
     .into_iter()
-    .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+    .map(|kind| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind,
+    })
     .collect();
     store::append_events(&path, &mut t1_events, None).unwrap();
     let checkpoint = last_event_id(&path).unwrap().unwrap();
@@ -2630,7 +3223,11 @@ fn messages_from_events_excludes_failed_turn_branch() {
         },
     ]
     .into_iter()
-    .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+    .map(|kind| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind,
+    })
     .collect();
     store::append_events(&path, &mut t2_events, Some(&checkpoint)).unwrap();
 
@@ -2639,12 +3236,26 @@ fn messages_from_events_excludes_failed_turn_branch() {
     // the failed turn's messages (they're ancestors of TurnFailed).
     let path_idx = active_path_from_leaf(&events);
     assert_eq!(path_idx.len(), 6, "active path includes failed turn's msgs");
-    assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "hi")));
-    assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
-    assert!(matches!(&events[path_idx[2]].kind, SessionEventKind::TurnEnd { .. }));
-    assert!(matches!(&events[path_idx[3]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "oops")));
-    assert!(matches!(&events[path_idx[4]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
-    assert!(matches!(&events[path_idx[5]].kind, SessionEventKind::TurnFailed { .. }));
+    assert!(
+        matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "hi"))
+    );
+    assert!(
+        matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
+    );
+    assert!(matches!(
+        &events[path_idx[2]].kind,
+        SessionEventKind::TurnEnd { .. }
+    ));
+    assert!(
+        matches!(&events[path_idx[3]].kind, SessionEventKind::Message(m) if m.role == Role::User && matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "oops"))
+    );
+    assert!(
+        matches!(&events[path_idx[4]].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
+    );
+    assert!(matches!(
+        &events[path_idx[5]].kind,
+        SessionEventKind::TurnFailed { .. }
+    ));
 
     // messages_from_events yields only the checkpoint's messages,
     // excluding the failed turn's messages via the TurnFailed boundary.
@@ -2689,7 +3300,11 @@ fn messages_from_events_prepends_compaction_summary() {
         SessionEventKind::Message(assistant("continued")),
     ]
     .into_iter()
-    .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+    .map(|kind| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind,
+    })
     .collect();
     store::append_events(&path, &mut events, None).unwrap();
     // Patch the marker's first_kept_entry_id to the kept-prompt event id.
@@ -2701,7 +3316,11 @@ fn messages_from_events_prepends_compaction_summary() {
         .id
         .clone();
     for e in &mut events {
-        if let SessionEventKind::Compaction { first_kept_entry_id, .. } = &mut e.kind {
+        if let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            ..
+        } = &mut e.kind
+        {
             *first_kept_entry_id = kept_prompt_id.clone();
         }
     }
@@ -2769,25 +3388,21 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             }],
         }
     };
-    let exec_call_full = |id: &str| {
-        Message {
-            role: Role::Assistant,
-            blocks: vec![ContentBlock::ToolUse {
-                id: id.to_string(),
-                name: "exec".to_string(),
-                input: serde_json::json!({"code": "return 1"}),
-            }],
-        }
+    let exec_call_full = |id: &str| Message {
+        role: Role::Assistant,
+        blocks: vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "exec".to_string(),
+            input: serde_json::json!({"code": "return 1"}),
+        }],
     };
-    let exec_result_full = |id: &str, out: &str| {
-        Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: out.to_string(),
-                is_error: false,
-            }],
-        }
+    let exec_result_full = |id: &str, out: &str| Message {
+        role: Role::User,
+        blocks: vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: out.to_string(),
+            is_error: false,
+        }],
     };
 
     // On-disk layout after compact_now:
@@ -2817,15 +3432,26 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
 
     // Kept tail: read verbatim from disk (already edited by compact_now).
-    let ContentBlock::ToolResult { content, .. } = &msgs[4].blocks[0] else { panic!() };
+    let ContentBlock::ToolResult { content, .. } = &msgs[4].blocks[0] else {
+        panic!()
+    };
     assert_eq!(content, "out-2");
-    let ContentBlock::ToolResult { content, .. } = &msgs[2].blocks[0] else { panic!() };
-    assert!(content.contains("lofi.result"), "older kept-tail result should be the stub written by compact_now, got {content}");
+    let ContentBlock::ToolResult { content, .. } = &msgs[2].blocks[0] else {
+        panic!()
+    };
+    assert!(
+        content.contains("lofi.result"),
+        "older kept-tail result should be the stub written by compact_now, got {content}"
+    );
 
     // Post-compaction: verbatim, full results.
-    let ContentBlock::ToolResult { content, .. } = &msgs[6].blocks[0] else { panic!() };
+    let ContentBlock::ToolResult { content, .. } = &msgs[6].blocks[0] else {
+        panic!()
+    };
     assert_eq!(content, "post-compaction-result");
-    let ContentBlock::ToolUse { input, .. } = &msgs[5].blocks[0] else { panic!() };
+    let ContentBlock::ToolUse { input, .. } = &msgs[5].blocks[0] else {
+        panic!()
+    };
     let code = input.get("code").and_then(|v| v.as_str()).unwrap_or("");
     assert_eq!(code, "return 1");
 }
@@ -2835,7 +3461,8 @@ fn user_text(m: &lofi_types::Message) -> &str {
         [lofi_types::ContentBlock::Text { text }] => text,
         _ => "",
     }
-}    #[test]
+}
+#[test]
 fn compact_count_formats() {
     assert_eq!(compact_count(0), "0");
     assert_eq!(compact_count(500), "500");
@@ -2909,7 +3536,10 @@ fn footer_and_header_show_cost_and_usage() {
         .collect();
     assert!(header.contains("lofi"), "header: {header}");
     // Cost lives in the footer now, not the header.
-    assert!(!header.contains('$'), "header should not show cost: {header}");
+    assert!(
+        !header.contains('$'),
+        "header should not show cost: {header}"
+    );
 }
 
 #[test]
@@ -2957,8 +3587,14 @@ fn queue_badge_truncates_long_prompt() {
     let long = "x".repeat(100);
     a.prompt_queue.push(long);
     let badge = a.queue_badge().expect("badge");
-    assert!(badge.ends_with("…"), "badge should end with ellipsis: {badge}");
-    assert!(!badge.contains(&"x".repeat(50)), "badge should be truncated: {badge}");
+    assert!(
+        badge.ends_with("…"),
+        "badge should end with ellipsis: {badge}"
+    );
+    assert!(
+        !badge.contains(&"x".repeat(50)),
+        "badge should be truncated: {badge}"
+    );
 }
 
 #[test]
@@ -3001,7 +3637,9 @@ fn no_model_submit_surfaces_hint_without_running() {
     let last = a.turns.last().unwrap();
     assert_eq!(last.prompt, "hello");
     assert!(
-        last.blocks.iter().any(|b| matches!(b, Block::Error(m) if m == "set OPENAI_API_KEY")),
+        last.blocks
+            .iter()
+            .any(|b| matches!(b, Block::Error(m) if m == "set OPENAI_API_KEY")),
         "the hint should be attached to the turn"
     );
 }
@@ -3016,13 +3654,28 @@ fn selection_text_is_content_aware() {
     a.log_off = 0;
     a.log_vis = vec![
         // gutter "  " + content "hello world" + padding "   "
-        view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None },
+        view::VisLine {
+            rendered: "  hello world   ".to_string(),
+            content: (2, 13),
+            raw: None,
+        },
         // gutter "  " + rails "│ │ " + content "lofi-core…Agent {" + padding
-        view::VisLine { rendered: "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(), content: (6, 51), raw: None },
+        view::VisLine {
+            rendered: "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(),
+            content: (6, 51),
+            raw: None,
+        },
         // gutter "  " + content "    let x = 1;" (indentation preserved!)
-        view::VisLine { rendered: "      let x = 1;".to_string(), content: (2, 16), raw: None },
+        view::VisLine {
+            rendered: "      let x = 1;".to_string(),
+            content: (2, 16),
+            raw: None,
+        },
     ];
-    a.sel = Some(Selection { start: (0, 0), end: (2, 40) });
+    a.sel = Some(Selection {
+        start: (0, 0),
+        end: (2, 40),
+    });
     assert_eq!(
         a.selection_text().as_deref(),
         Some("hello world\nlofi-core/src/agent.rs:233:pub struct Agent {\n    let x = 1;")
@@ -3056,7 +3709,11 @@ fn yank_line_falls_back_to_rendered_without_raw() {
     // content slice as before.
     let mut a = app();
     a.log_off = 0;
-    a.log_vis = vec![view::VisLine { rendered: "  hello world   ".to_string(), content: (2, 13), raw: None }];
+    a.log_vis = vec![view::VisLine {
+        rendered: "  hello world   ".to_string(),
+        content: (2, 13),
+        raw: None,
+    }];
     a.nav_cursor = 0;
     assert_eq!(a.current_line_text().as_deref(), Some("hello world"));
 }
@@ -3077,7 +3734,10 @@ fn selection_text_raw_partial_includes_markers() {
         )),
     }];
     // Select display content [2, 6) = "bold".
-    a.sel = Some(Selection { start: (0, 2), end: (0, 6) });
+    a.sel = Some(Selection {
+        start: (0, 2),
+        end: (0, 6),
+    });
     assert_eq!(a.selection_text().as_deref(), Some("**bold**"));
 }
 
@@ -3090,11 +3750,26 @@ fn selection_text_raw_skips_softwrap_newlines() {
     a.log_off = 0;
     let first: Arc<str> = Arc::from("hello world");
     a.log_vis = vec![
-        view::VisLine { rendered: "  hello ".to_string(), content: (2, 8), raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)) },
-        view::VisLine { rendered: "  world".to_string(), content: (2, 7), raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)) },
-        view::VisLine { rendered: "  second line".to_string(), content: (2, 13), raw: Some(view::RawLine::linear(Arc::from("second line"), 0, 11, true)) },
+        view::VisLine {
+            rendered: "  hello ".to_string(),
+            content: (2, 8),
+            raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)),
+        },
+        view::VisLine {
+            rendered: "  world".to_string(),
+            content: (2, 7),
+            raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)),
+        },
+        view::VisLine {
+            rendered: "  second line".to_string(),
+            content: (2, 13),
+            raw: Some(view::RawLine::linear(Arc::from("second line"), 0, 11, true)),
+        },
     ];
-    a.sel = Some(Selection { start: (0, 2), end: (2, 13) });
+    a.sel = Some(Selection {
+        start: (0, 2),
+        end: (2, 13),
+    });
     assert_eq!(
         a.selection_text().as_deref(),
         Some("hello world\nsecond line")
@@ -3109,10 +3784,21 @@ fn selection_text_raw_char_level_on_continuation() {
     a.log_off = 0;
     let first: Arc<str> = Arc::from("hello world");
     a.log_vis = vec![
-        view::VisLine { rendered: "  hello ".to_string(), content: (2, 8), raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)) },
-        view::VisLine { rendered: "  world".to_string(), content: (2, 7), raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)) },
+        view::VisLine {
+            rendered: "  hello ".to_string(),
+            content: (2, 8),
+            raw: Some(view::RawLine::linear(first.clone(), 0, 6, true)),
+        },
+        view::VisLine {
+            rendered: "  world".to_string(),
+            content: (2, 7),
+            raw: Some(view::RawLine::linear(first.clone(), 6, 5, false)),
+        },
     ];
-    a.sel = Some(Selection { start: (1, 2), end: (1, 7) });
+    a.sel = Some(Selection {
+        start: (1, 2),
+        end: (1, 7),
+    });
     assert_eq!(a.selection_text().as_deref(), Some("world"));
 }
 
@@ -3579,6 +4265,31 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
 }
 
 #[test]
+fn apply_model_switch_with_no_context_window_uses_default() {
+    let mut a = app();
+    a.ctx_limit = 100_000;
+    let model = lofi_types::Model {
+        id: "local".into(),
+        name: "Local".into(),
+        provider: "ollama".into(),
+        api: lofi_types::Api::OpenAiResponses,
+        reasoning: false,
+        thinking: ThinkingLevel::Off,
+        supports_image: false,
+        context_window: None,
+        max_tokens: None,
+        base_url: None,
+        input_price: None,
+        output_price: None,
+        cache_read_price: None,
+        cache_write_price: None,
+        per_request_price: None,
+    };
+    a.apply_model_switch(&model, ThinkingLevel::Off);
+    assert_eq!(a.ctx_limit, DEFAULT_CTX_LIMIT);
+}
+
+#[test]
 fn thinking_picker_open_preselects_current() {
     let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium
     a.model_choices = vec![lofi_types::ModelChoice {
@@ -3594,7 +4305,11 @@ fn thinking_picker_open_preselects_current() {
     // off first, then the model's declared levels.
     assert_eq!(
         picker.levels,
-        vec![ThinkingLevel::Off, ThinkingLevel::Medium, ThinkingLevel::High]
+        vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High
+        ]
     );
     // Medium is the current level.
     assert_eq!(picker.selected, 1);
@@ -3632,7 +4347,10 @@ fn thinking_picker_confirm_sets_pending_switch() {
     // Move to High (index 2).
     a.thinking_picker.as_mut().unwrap().selected = 2;
     a.thinking_picker_confirm();
-    assert_eq!(a.pending_model_switch.as_deref(), Some("openai/gpt-4o:high"));
+    assert_eq!(
+        a.pending_model_switch.as_deref(),
+        Some("openai/gpt-4o:high")
+    );
     assert!(a.thinking_picker.is_none());
 }
 
@@ -3777,7 +4495,10 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let base_narrow = a.last_base;
-    assert!(base_narrow > 0, "narrow transcript should overflow the viewport");
+    assert!(
+        base_narrow > 0,
+        "narrow transcript should overflow the viewport"
+    );
     a.pinned = false;
     a.top_line = base_narrow / 2;
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
@@ -3791,7 +4512,10 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     // position and stays scrolled up.
     let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    assert!(!a.pinned, "resize should not snap a scrolled-up view to the bottom");
+    assert!(
+        !a.pinned,
+        "resize should not snap a scrolled-up view to the bottom"
+    );
     assert!(
         a.log_off < a.last_base,
         "view should remain scrolled up after resize, not pinned to the bottom"
@@ -3826,7 +4550,11 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     let (intra, c) = {
         let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 4.min(narrow.len().saturating_sub(1));
-        let c: usize = narrow.iter().take(intra).map(view::RenderLine::content_len).sum();
+        let c: usize = narrow
+            .iter()
+            .take(intra)
+            .map(view::RenderLine::content_len)
+            .sum();
         (intra, c)
     };
     a.nav_cursor = a.turn_start_line(0) + intra;
@@ -3841,7 +4569,11 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
         let wide = a.frozen_render.get(0).expect("turn 0 frozen");
         let new_intra = a.nav_cursor - a.turn_start_line(0);
         assert!(new_intra < wide.len(), "cursor should land within turn 0");
-        let start: usize = wide.iter().take(new_intra).map(view::RenderLine::content_len).sum();
+        let start: usize = wide
+            .iter()
+            .take(new_intra)
+            .map(view::RenderLine::content_len)
+            .sum();
         let len = wide[new_intra].content_len();
         let on_screen = a.nav_cursor >= a.log_off && a.nav_cursor < a.log_off + a.log_view_h;
         (start, len, on_screen)
@@ -3987,7 +4719,10 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
     // Narrow render; place the cursor a few rows into the viewport.
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    assert!(a.log_total > a.log_view_h, "transcript overflows the viewport");
+    assert!(
+        a.log_total > a.log_view_h,
+        "transcript overflows the viewport"
+    );
     // Place the cursor on a content line near the top (turn 2) and park the
     // viewport so it sits at row 4, unpinned (so the viewport can follow it).
     let k = 2;
@@ -4039,7 +4774,10 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     // Shrink the height (same width) so the old row no longer fits.
     let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    assert!(a.log_view_h <= row, "new viewport shorter than the old cursor row");
+    assert!(
+        a.log_view_h <= row,
+        "new viewport shorter than the old cursor row"
+    );
     assert_eq!(
         a.nav_cursor,
         a.log_off + a.log_view_h - 1,
@@ -4052,7 +4790,9 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart { prompt: "p".to_string() });
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "p".to_string(),
+    });
     // Long flow text that wraps with break spaces (exercises `wrap`).
     a.apply_event(AgentEvent::Text(
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".repeat(3),
@@ -4061,7 +4801,10 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     // cursor's exec header — its per-row indent must not count as content,
     // or the header's cumulative offset drifts on resize (exercises
     // `wrap_pre` + the leading-whitespace exclusion in `render`).
-    a.apply_event(AgentEvent::ToolStart { id: "e1".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e1".to_string(),
         code: "    const p = \"TODO.md\";\n    const s = await read(p);\n    return s.indexOf(\"## Sub\");".to_string(),
@@ -4074,7 +4817,10 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         elapsed_ms: 100,
     });
     // The cursor's exec header.
-    a.apply_event(AgentEvent::ToolStart { id: "e2".to_string(), name: "exec".to_string() });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e2".to_string(),
+        name: "exec".to_string(),
+    });
     a.apply_event(AgentEvent::ToolInput {
         id: "e2".to_string(),
         code: "    const r = await run();".to_string(),
@@ -4100,20 +4846,36 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         let n = a.turns.len();
         let mut k = 0;
         for i in 0..n {
-            if a.turn_start_line(i) <= abs { k = i; } else { break; }
+            if a.turn_start_line(i) <= abs {
+                k = i;
+            } else {
+                break;
+            }
         }
         let intra = abs - a.turn_start_line(k);
         let last = k + 1 == n;
         let text_of = |v: &Vec<view::RenderLine>| {
-            v.get(intra).map(|rl| {
-                let chars: Vec<char> = rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
-                let s = rl.content.0.min(chars.len());
-                let e = rl.content.1.min(chars.len());
-                chars[s..e].iter().collect::<String>()
-            }).unwrap_or_default()
+            v.get(intra)
+                .map(|rl| {
+                    let chars: Vec<char> = rl
+                        .line
+                        .spans
+                        .iter()
+                        .flat_map(|s| s.content.chars())
+                        .collect();
+                    let s = rl.content.0.min(chars.len());
+                    let e = rl.content.1.min(chars.len());
+                    chars[s..e].iter().collect::<String>()
+                })
+                .unwrap_or_default()
         };
         if last {
-            let cx = view::component::Cx { app: a, theme: a.theme, width: a.frozen_width, active_turn: a.run_active() };
+            let cx = view::component::Cx {
+                app: a,
+                theme: a.theme,
+                width: a.frozen_width,
+                active_turn: a.run_active(),
+            };
             let v = view::blocks::render_turn_lines(&cx, &a.turns[k]);
             text_of(&v)
         } else {
@@ -4157,21 +4919,35 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     a.turns.push(Turn {
         prompt: String::new(),
         blocks: vec![Block::Text(
-            "before\n```rust\nlet x = 1;\n```\nafter".to_string()
+            "before\n```rust\nlet x = 1;\n```\nafter".to_string(),
         )],
     });
     let turn = &a.turns[0];
     let w = 40usize;
-    let cx = Cx { app: &a, theme: a.theme, width: w, active_turn: false };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: w,
+        active_turn: false,
+    };
     let rls = render_turn_lines(&cx, turn);
     let lines: Vec<String> = rls
         .iter()
         .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     // Locate the opening fence, code line, and closing fence.
-    let open = lines.iter().find(|l| l.starts_with("  ```rust")).expect("opening ```rust");
-    let code = lines.iter().find(|l| l.contains("let x = 1;")).expect("code line");
-    let close = lines.iter().find(|l| l.trim() == "```").expect("closing ```");
+    let open = lines
+        .iter()
+        .find(|l| l.starts_with("  ```rust"))
+        .expect("opening ```rust");
+    let code = lines
+        .iter()
+        .find(|l| l.contains("let x = 1;"))
+        .expect("code line");
+    let close = lines
+        .iter()
+        .find(|l| l.trim() == "```")
+        .expect("closing ```");
     // No frame art survives.
     for l in &lines {
         assert!(!l.contains('╭'), "stray frame art: {l}");
@@ -4185,12 +4961,21 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     }
     // The content range excludes the leading gutter and the trailing bg
     // padding, so the gutter and right gutter never get selected/copied.
-    let open_rl = rls.iter().find(|rl| {
-        rl.line.spans.iter().any(|s| s.content.starts_with("```rust"))
-    }).expect("open rl");
-    let chars: String = open_rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+    let open_rl = rls
+        .iter()
+        .find(|rl| {
+            rl.line
+                .spans
+                .iter()
+                .any(|s| s.content.starts_with("```rust"))
+        })
+        .expect("open rl");
+    let chars: String = open_rl
+        .line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .collect();
     let content: String = chars[open_rl.content.0..open_rl.content.1].to_string();
     assert_eq!(content, "```rust");
 }
-
-

@@ -464,11 +464,10 @@ impl App {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
         self.thinking = level;
-        if let Some(cw) = model.context_window {
-            if cw > 0 {
-                self.ctx_limit = cw;
-            }
-        }
+        self.ctx_limit = model
+            .context_window
+            .filter(|&l| l > 0)
+            .unwrap_or(DEFAULT_CTX_LIMIT);
         self.notify(
             NotifyKind::Info,
             format!(
@@ -538,7 +537,7 @@ impl App {
         self.branch_from(entry.branch_point);
         if !entry.prefill.is_empty() {
             self.input = entry.prefill;
-            self.input_cursor = self.input.chars().count();
+            self.input_cursor = self.input.len();
         }
     }
 
