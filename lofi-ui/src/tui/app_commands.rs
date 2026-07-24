@@ -97,7 +97,9 @@ impl App {
             .filter(|(_, (cmd, _))| cmd.starts_with(input))
             .map(|(i, _)| i)
             .collect();
-        if candidates.is_empty() || (candidates.len() == 1 && SLASH_COMMANDS[candidates[0]].0 == input) {
+        if candidates.is_empty()
+            || (candidates.len() == 1 && SLASH_COMMANDS[candidates[0]].0 == input)
+        {
             self.slash_complete = None;
             return;
         }
@@ -109,7 +111,10 @@ impl App {
                 .and_then(|&idx| candidates.iter().position(|&c| c == idx))
         });
         let selected = prev.unwrap_or(0);
-        self.slash_complete = Some(SlashComplete { candidates, selected });
+        self.slash_complete = Some(SlashComplete {
+            candidates,
+            selected,
+        });
     }
 
     /// Accept the selected autocomplete candidate: replace the input with
@@ -147,10 +152,18 @@ impl App {
         lines.push(info_kv(t, "Alt+Enter", "newline (Ctrl+J)"));
         lines.push(info_kv(t, "Alt+Up", "restore queued prompt"));
         lines.push(info_kv(t, "↑ / ↓", "move line; recall at edge"));
-        lines.push(info_kv(t, "PgUp/PgDn", "scroll page (Input); move cursor page (Nav)"));
+        lines.push(info_kv(
+            t,
+            "PgUp/PgDn",
+            "scroll page (Input); move cursor page (Nav)",
+        ));
         lines.push(info_kv(t, "Tab", "switch mode: Input ↔ Navigate"));
         lines.push(info_kv(t, "Esc", "clear input"));
-        lines.push(info_kv(t, "Ctrl+C", "cancel · clear · 2× quit (Input); back (Nav)"));
+        lines.push(info_kv(
+            t,
+            "Ctrl+C",
+            "cancel · clear · 2× quit (Input); back (Nav)",
+        ));
         lines.push(info_kv(t, "Ctrl+D", "delete char; quit on empty"));
         lines.push(Line::from(""));
         lines.push(info_section(t, "Navigate"));
@@ -173,7 +186,11 @@ impl App {
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
-        lines.push(info_kv(t, "/recall [query]", "search session history (incl. compacted)"));
+        lines.push(info_kv(
+            t,
+            "/recall [query]",
+            "search session history (incl. compacted)",
+        ));
         lines.push(info_kv(t, "/new", "start a fresh session"));
         lines.push(info_kv(t, "/resume", "pick a past session"));
         lines.push(info_kv(t, "/tree", "roll back to a past turn"));
@@ -183,7 +200,10 @@ impl App {
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(Line::from(""));
-        lines.push(info_note(t, "Type / for slash-command autocomplete (↑/↓ and Tab)."));
+        lines.push(info_note(
+            t,
+            "Type / for slash-command autocomplete (↑/↓ and Tab).",
+        ));
         self.info = Some(InfoModal {
             title: "Help".to_string(),
             lines,
@@ -199,10 +219,7 @@ impl App {
         #[allow(clippy::single_match_else)]
         match &self.session.path {
             Some(p) => {
-                let id = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?");
+                let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
                 lines.push(info_kv(t, "id", id));
                 lines.push(info_kv(t, "file", &p.display().to_string()));
                 let size = std::fs::metadata(p).map_or(0, |m| m.len());
@@ -263,18 +280,12 @@ impl App {
     /// Populate the '/resume' picker with sessions for this workspace.
     pub(super) fn open_picker(&mut self) {
         let Some(store) = &self.session.store else {
-            self.notify(
-                NotifyKind::Warn,
-                "sessions are disabled (--no-session)",
-            );
+            self.notify(NotifyKind::Warn, "sessions are disabled (--no-session)");
             return;
         };
         match store.list_for_cwd(&self.session.cwd) {
             Ok(entries) if entries.is_empty() => {
-                self.notify(
-                    NotifyKind::Info,
-                    "no saved sessions for this workspace",
-                );
+                self.notify(NotifyKind::Info, "no saved sessions for this workspace");
             }
             Ok(entries) => {
                 self.picker = Some(PickerState {
@@ -318,8 +329,7 @@ impl App {
                 for ev in replay_session_events(&events) {
                     self.apply_event(ev);
                 }
-                self.turn_byte_ranges =
-                    turn_byte_ranges_from_events(&events, &offsets, file_size);
+                self.turn_byte_ranges = turn_byte_ranges_from_events(&events, &offsets, file_size);
                 // Freeze all but the last turn (file-backed; see `run_loop`).
                 if self.turns.len() > 1 {
                     let n = self.turns.len();
@@ -392,8 +402,7 @@ impl App {
     pub(super) fn model_picker_confirm(&mut self) {
         if let Some(picker) = self.model_picker.take() {
             if let Some(choice) = picker.choices.get(picker.selected) {
-                self.pending_model_switch =
-                    Some(format!("{}/{}", choice.provider, choice.id));
+                self.pending_model_switch = Some(format!("{}/{}", choice.provider, choice.id));
             }
         }
     }
@@ -411,10 +420,7 @@ impl App {
             );
             return;
         }
-        let selected = levels
-            .iter()
-            .position(|&l| l == self.thinking)
-            .unwrap_or(0);
+        let selected = levels.iter().position(|&l| l == self.thinking).unwrap_or(0);
         self.thinking_picker = Some(ThinkingPickerState { levels, selected });
     }
 
@@ -454,14 +460,9 @@ impl App {
     /// Apply a completed model switch: update the label, thinking-level
     /// suffix, and context-window gauge. Called by the run loop after it
     /// rebuilds the agent.
-    pub(super) fn apply_model_switch(
-        &mut self,
-        model: &lofi_types::Model,
-        level: ThinkingLevel,
-    ) {
+    pub(super) fn apply_model_switch(&mut self, model: &lofi_types::Model, level: ThinkingLevel) {
         self.model_label = format!("{}/{}", model.provider, model.id);
-        self.thinking_label = (level != ThinkingLevel::Off)
-            .then(|| format!(":{}", level.as_str()));
+        self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
         self.thinking = level;
         if let Some(cw) = model.context_window {
             if cw > 0 {
@@ -470,7 +471,12 @@ impl App {
         }
         self.notify(
             NotifyKind::Info,
-            format!("switched to {}/{}{}", model.provider, model.id, self.thinking_label.as_deref().unwrap_or("")),
+            format!(
+                "switched to {}/{}{}",
+                model.provider,
+                model.id,
+                self.thinking_label.as_deref().unwrap_or("")
+            ),
         );
         self.bump_render_epoch();
     }
@@ -500,10 +506,7 @@ impl App {
         };
         let entries = build_tree_entries(&indices, self.branch_hint.as_deref(), path);
         if entries.is_empty() {
-            self.notify(
-                NotifyKind::Info,
-                "no branch points in this session yet",
-            );
+            self.notify(NotifyKind::Info, "no branch points in this session yet");
             return;
         }
         let selected = entries.len().saturating_sub(1);
@@ -639,7 +642,12 @@ impl App {
     /// key (so the caller skips normal Input-mode processing).
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         /// Which overlay slot is active, for per-slot confirm/cancel.
-        enum Slot { Picker, Tree, Model, Thinking }
+        enum Slot {
+            Picker,
+            Tree,
+            Model,
+            Thinking,
+        }
         let slot = if self.picker.is_some() {
             Slot::Picker
         } else if self.tree_picker.is_some() {
@@ -702,7 +710,9 @@ impl App {
             // Confirm/cancel consumed the overlay; nothing left to navigate.
             return true;
         }
-        let Some(m) = self.active_modal_mut() else { return true };
+        let Some(m) = self.active_modal_mut() else {
+            return true;
+        };
         if len == 0 {
             return true;
         }
@@ -779,8 +789,7 @@ impl App {
             }
             _ => {}
         }
-        let Some(popover) = self.slash_complete.as_mut().map(|p| p as &mut dyn Popover)
-        else {
+        let Some(popover) = self.slash_complete.as_mut().map(|p| p as &mut dyn Popover) else {
             return false;
         };
         if len == 0 {
@@ -834,8 +843,7 @@ impl App {
     /// the rolled-back branches remain and are reachable via `/tree` again.
     pub(super) fn rollback_to(&mut self, events: &[SessionEvent], leaf_id: &str) {
         let path = store::active_path(events, leaf_id);
-        let rolled_back: Vec<SessionEvent> =
-            path.iter().map(|&i| events[i].clone()).collect();
+        let rolled_back: Vec<SessionEvent> = path.iter().map(|&i| events[i].clone()).collect();
         let messages = messages_from_events(&rolled_back, &self.compaction.edit);
         if let Ok(mut m) = self.history.lock() {
             *m = messages;

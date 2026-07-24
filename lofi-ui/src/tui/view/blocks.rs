@@ -52,7 +52,9 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
 pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
     let mut stack = Stack::new();
     if !turn.prompt.is_empty() {
-        stack.push(UserMessage { prompt: &turn.prompt });
+        stack.push(UserMessage {
+            prompt: &turn.prompt,
+        });
     }
     for block in &turn.blocks {
         match block {
@@ -67,9 +69,16 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             }
             Block::Error(msg) => stack.push(ErrorLine { msg }),
             Block::TurnEnd { label, elapsed } => {
-                stack.push(TurnEnd { label: label.clone(), elapsed: *elapsed });
+                stack.push(TurnEnd {
+                    label: label.clone(),
+                    elapsed: *elapsed,
+                });
             }
-            Block::TurnFailed { label, elapsed, error } => {
+            Block::TurnFailed {
+                label,
+                elapsed,
+                error,
+            } => {
                 // A provider stream error is emitted twice: once as
                 // AgentEvent::Error (rendered as a fatal line via ErrorLine)
                 // and again here as the turn's `error` ("provider error:
@@ -77,10 +86,22 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
                 // block the message is already on screen, so drop it here to
                 // avoid duplicating it below the `failed in Ns` header.
                 let has_fatal = turn.blocks.iter().any(|b| matches!(b, Block::Error(_)));
-                let error = if has_fatal { String::new() } else { error.clone() };
-                stack.push(TurnFailed { label: label.clone(), elapsed: *elapsed, error });
+                let error = if has_fatal {
+                    String::new()
+                } else {
+                    error.clone()
+                };
+                stack.push(TurnFailed {
+                    label: label.clone(),
+                    elapsed: *elapsed,
+                    error,
+                });
             }
-            Block::Compaction { summarized, kept, summary } => {
+            Block::Compaction {
+                summarized,
+                kept,
+                summary,
+            } => {
                 stack.push(CompactionLine {
                     summarized: *summarized,
                     kept: *kept,
@@ -106,13 +127,20 @@ impl Component for UserMessage<'_> {
         let w = cx.width;
         let content_w = w.saturating_sub(2);
         let mark = Style::new().fg(user_indicator(t));
-        render_markdown_body(self.prompt.trim(), t, w, content_w, Style::new().fg(t.fg), move |i| {
-            if i == 0 {
-                vec![Span::styled("❯ ", mark)]
-            } else {
-                vec![Span::raw("  ")]
-            }
-        })
+        render_markdown_body(
+            self.prompt.trim(),
+            t,
+            w,
+            content_w,
+            Style::new().fg(t.fg),
+            move |i| {
+                if i == 0 {
+                    vec![Span::styled("❯ ", mark)]
+                } else {
+                    vec![Span::raw("  ")]
+                }
+            },
+        )
     }
 }
 
@@ -200,10 +228,7 @@ fn render_markdown_body(
         if in_code {
             let avail = content_w.saturating_sub(2);
             let src: Arc<str> = Arc::from(raw);
-            let indent_len = raw
-                .bytes()
-                .take_while(|&b| b == b' ' || b == b'\t')
-                .count();
+            let indent_len = raw.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
             let body = &raw[indent_len..];
             // Byte offsets of each body char boundary (0, after 1st, …, end).
             let body_offs: Vec<usize> = std::iter::once(0)
@@ -213,21 +238,14 @@ fn render_markdown_body(
             let segments = prim::wrap_pre(raw, avail);
             let mut cum = 0usize;
             for (i, seg) in segments.into_iter().enumerate() {
-                let body_chars =
-                    seg.chars().count().saturating_sub(indent_chars);
+                let body_chars = seg.chars().count().saturating_sub(indent_chars);
                 let map: Vec<usize> = (0..=body_chars)
-                    .map(|k| {
-                        indent_len
-                            + body_offs.get(cum + k).copied().unwrap_or(body.len())
-                    })
+                    .map(|k| indent_len + body_offs.get(cum + k).copied().unwrap_or(body.len()))
                     .collect();
                 out.push(
                     prim::rtile(
                         lead_fn(row),
-                        vec![Span::styled(
-                            seg,
-                            Style::new().fg(t.fg).bg(t.surface),
-                        )],
+                        vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
                         t.surface,
                         w,
                     )
@@ -250,23 +268,29 @@ fn render_markdown_body(
             }
             let tlines = &lines[start..idx];
             let header = parse_table_row(tlines[0]);
-            let aligns: Vec<Align> =
-                parse_table_row(tlines[1]).iter().map(|c| parse_align(c)).collect();
-            let data: Vec<Vec<String>> =
-                tlines[2..].iter().map(|l| parse_table_row(l)).collect();
+            let aligns: Vec<Align> = parse_table_row(tlines[1])
+                .iter()
+                .map(|c| parse_align(c))
+                .collect();
+            let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
             // Source lines for raw markdown yank: header, separator,
             // then data rows.
             let src_lines: Vec<&str> = tlines.to_vec();
             let before = out.len();
-            out.extend(render_table(&header, &data, &aligns, content_w, t, &src_lines, row, &lead_fn));
+            out.extend(render_table(
+                &header, &data, &aligns, content_w, t, &src_lines, row, &lead_fn,
+            ));
             row += out.len() - before;
             continue;
         }
         let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ')
-        {
+        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
             let h = &trimmed[hashes + 1..];
-            let head_fg = if hashes <= 2 { base_style.fg.unwrap_or(t.fg) } else { t.muted };
+            let head_fg = if hashes <= 2 {
+                base_style.fg.unwrap_or(t.fg)
+            } else {
+                t.muted
+            };
             let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
             let src: Arc<str> = Arc::from(trimmed);
             let rows = wrap_with_map(h, hashes + 1, trimmed.len(), content_w);
@@ -288,15 +312,10 @@ fn render_markdown_body(
             let q_lines = &lines[start..idx];
             let quote_style = Style::new().fg(t.muted);
             let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
-            for qraw in q_lines.iter() {
+            for qraw in q_lines {
                 let qtrimmed = qraw.trim_end();
-                // Strip "> " or ">" to get the body.
-                let body = if let Some(b) = qtrimmed.strip_prefix("> ") {
-                    b
-                } else {
-                    // Bare ">" — empty body line.
-                    ""
-                };
+                // Strip "> " or treat a bare ">" as an empty body line.
+                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
                 let src: Arc<str> = Arc::from(qtrimmed);
                 if body.is_empty() {
                     // Empty quote line (bare ">"): just the bar.  Build
@@ -321,16 +340,18 @@ fn render_markdown_body(
                     continue;
                 }
                 let prefix_len = qtrimmed.len() - body.len(); // length of "> " or ">"
-                let rows = wrap_with_map(body, prefix_len, qtrimmed.len(), content_w.saturating_sub(2));
+                let rows = wrap_with_map(
+                    body,
+                    prefix_len,
+                    qtrimmed.len(),
+                    content_w.saturating_sub(2),
+                );
                 for (i, (seg, map)) in rows.into_iter().enumerate() {
                     let mut lead = lead_fn(row);
                     lead.push(bar.clone());
                     out.push(
-                        prim::rline(
-                            lead,
-                            vec![Span::styled(seg, quote_style)],
-                        )
-                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
+                        prim::rline(lead, vec![Span::styled(seg, quote_style)])
+                            .with_raw(RawLine::new(src.clone(), map, i == 0)),
                     );
                     row += 1;
                 }
@@ -351,12 +372,11 @@ fn render_markdown_body(
             let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
             for (i, wrapped) in rows.into_iter().enumerate() {
                 out.push(
-                    prim::rline(lead_fn(row), wrapped.spans)
-                        .with_raw(RawLine::new(
-                            src.clone(),
-                            row_maps.get(i).cloned().unwrap_or_default(),
-                            i == 0,
-                        )),
+                    prim::rline(lead_fn(row), wrapped.spans).with_raw(RawLine::new(
+                        src.clone(),
+                        row_maps.get(i).cloned().unwrap_or_default(),
+                        i == 0,
+                    )),
                 );
                 row += 1;
             }
@@ -438,7 +458,9 @@ fn parse_markers_mapped(
         ("*", Modifier::ITALIC, false),
         ("_", Modifier::UNDERLINED, true),
     ] {
-        let Some(open) = find_marker(text, marker, check, true) else { continue };
+        let Some(open) = find_marker(text, marker, check, true) else {
+            continue;
+        };
         let after_open = &text[open + marker.len()..];
         if let Some(close) = find_marker(after_open, marker, check, false) {
             let before = &text[..open];
@@ -600,10 +622,7 @@ fn wrap_with_map(
             let src = cmap.get(offset + k).copied().unwrap_or(content.len());
             map.push(prefix_len + src);
         }
-        let last = cmap
-            .get(offset + len)
-            .copied()
-            .unwrap_or(content.len());
+        let last = cmap.get(offset + len).copied().unwrap_or(content.len());
         // `last` is a byte offset within `content`; offset by `prefix_len`
         // to address `source`, clamped to its end.
         map.push((prefix_len + last).min(source_len));
@@ -633,8 +652,7 @@ enum Align {
 /// A table separator line contains only `|`, `-`, `:`, and spaces, with at
 /// least one dash.
 fn is_table_separator(line: &str) -> bool {
-    line.contains('-')
-        && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    line.contains('-') && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
 /// Split a `|`-delimited row into trimmed cell strings.
@@ -731,7 +749,9 @@ fn render_table(
     // Attach the raw markdown source to the first row of each header/data
     // group so whole-line yank recovers the `| … |` line. The display grid
     // doesn't map 1:1 to the source, so the map is empty (degenerate).
-    let hdr_rows = table_row(&col_w, header, aligns, hdr_style, border, &pad, t, tr, lead_fn);
+    let hdr_rows = table_row(
+        &col_w, header, aligns, hdr_style, border, &pad, t, tr, lead_fn,
+    );
     let hdr_len = hdr_rows.len();
     let mut hdr_rows = hdr_rows;
     if let Some(first) = hdr_rows.first_mut() {
@@ -750,7 +770,9 @@ fn render_table(
     out.push(sep);
     tr += 1;
     for (i, row) in data.iter().enumerate() {
-        let rows = table_row(&col_w, row, aligns, body_style, border, &pad, t, tr, lead_fn);
+        let rows = table_row(
+            &col_w, row, aligns, body_style, border, &pad, t, tr, lead_fn,
+        );
         let rows_len = rows.len();
         let mut rows = rows;
         if let Some(first) = rows.first_mut() {
@@ -803,14 +825,22 @@ fn table_row(
             let cell_spans = wrapped[i]
                 .get(line_idx)
                 .map_or(Vec::new(), |l| l.spans.clone());
-            let aligned =
-                align_spans(cell_spans, w, aligns.get(i).copied().unwrap_or(Align::Left), style);
+            let aligned = align_spans(
+                cell_spans,
+                w,
+                aligns.get(i).copied().unwrap_or(Align::Left),
+                style,
+            );
             spans.push(Span::raw(" "));
             spans.extend(aligned);
             spans.push(Span::raw(" "));
             spans.push(Span::styled("│", border));
         }
-        out.push(prim::render(lead_fn(start_row + line_idx), spans, pad.to_vec()));
+        out.push(prim::render(
+            lead_fn(start_row + line_idx),
+            spans,
+            pad.to_vec(),
+        ));
     }
     out
 }
@@ -882,9 +912,15 @@ fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<u
         let pos = search + rel;
         if check {
             let ok = if is_open {
-                text[..pos].chars().next_back().is_none_or(|c| !c.is_alphanumeric())
+                text[..pos]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_alphanumeric())
             } else {
-                text[pos + marker.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric())
+                text[pos + marker.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric())
             };
             if !ok {
                 search = pos + marker.len();
@@ -921,7 +957,10 @@ impl Component for Thinking<'_> {
             if !out.is_empty() {
                 out.push(prim::rblank());
             }
-            out.push(prim::rline(vec![Span::raw("  ")], vec![Span::styled("Thinking...", body)]));
+            out.push(prim::rline(
+                vec![Span::raw("  ")],
+                vec![Span::styled("Thinking...", body)],
+            ));
         } else if let Some(d) = self.block.elapsed {
             if !d.is_zero() {
                 if !out.is_empty() {
@@ -931,10 +970,13 @@ impl Component for Thinking<'_> {
                     Span::raw("  "),
                     Span::styled("◇ ", Style::new().fg(t.subtle)),
                 ];
-                out.push(prim::rline(thought_lead, vec![Span::styled(
-                    format!("Thought for {}", prim::fmt_duration(d)),
-                    Style::new().fg(t.subtle),
-                )]));
+                out.push(prim::rline(
+                    thought_lead,
+                    vec![Span::styled(
+                        format!("Thought for {}", prim::fmt_duration(d)),
+                        Style::new().fg(t.subtle),
+                    )],
+                ));
             }
         }
         out
@@ -983,12 +1025,7 @@ impl Component for ExecBlock<'_> {
 
         // Trim a trailing newline so a terminated command doesn't render an
         // empty rail line at the bottom of the code body.
-        let code: Vec<&str> = self
-            .tool
-            .input
-            .trim_end_matches('\n')
-            .split('\n')
-            .collect();
+        let code: Vec<&str> = self.tool.input.trim_end_matches('\n').split('\n').collect();
         let lw = code.len().to_string().len().max(3);
         let rail = prim::rail(t, bg);
         let avail = w.saturating_sub(4).saturating_sub(lw + 1);
@@ -1147,27 +1184,57 @@ fn native_body(nt: &NativeTool) -> NativeBody {
     let name = nt.name.as_str();
     let raw = nt.result.as_deref().unwrap_or("");
     if nt.is_error {
-        return NativeBody { lines: split_lines(raw), numbered: false, start_line: 1, is_diff: false, notice: None };
+        return NativeBody {
+            lines: split_lines(raw),
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        };
     }
     let v: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         // Non-JSON result (e.g. a plain error string or an older
         // persisted string): show it verbatim rather than dropping it.
-        Err(_) => return NativeBody {
-            lines: split_lines(raw),
-            numbered: matches!(name, "read" | "view" | "bash_read"),
+        Err(_) => {
+            return NativeBody {
+                lines: split_lines(raw),
+                numbered: matches!(name, "read" | "view" | "bash_read"),
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+    let b = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    match name {
+        "write" => NativeBody {
+            lines: split_lines(s("content")),
+            numbered: false,
             start_line: 1,
             is_diff: false,
             notice: None,
         },
-    };
-    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
-    let b = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
-    match name {
-        "write" => NativeBody { lines: split_lines(s("content")), numbered: false, start_line: 1, is_diff: false, notice: None },
-        "edit" => NativeBody { lines: edit_diff(s("old"), s("new")), numbered: false, start_line: 1, is_diff: true, notice: None },
-        "bash" => NativeBody { lines: split_lines(s("output")), numbered: false, start_line: 1, is_diff: false, notice: None },
+        "edit" => NativeBody {
+            lines: edit_diff(s("old"), s("new")),
+            numbered: false,
+            start_line: 1,
+            is_diff: true,
+            notice: None,
+        },
+        "bash" => NativeBody {
+            lines: split_lines(s("output")),
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
         "read" | "view" | "bash_read" => {
             let start = n("start_line").max(1);
             let total = n("total_lines");
@@ -1177,36 +1244,84 @@ fn native_body(nt: &NativeTool) -> NativeBody {
                 start + lines.len().saturating_sub(1),
                 next = start + lines.len()
             ));
-            NativeBody { lines, numbered: true, start_line: start, is_diff: false, notice }
+            NativeBody {
+                lines,
+                numbered: true,
+                start_line: start,
+                is_diff: false,
+                notice,
+            }
         }
         "ls" => {
-            let lines = v.get("entries").and_then(|x| x.as_array())
-                .map_or_else(|| split_lines(raw), |a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect());
-            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+            let lines = v.get("entries").and_then(|x| x.as_array()).map_or_else(
+                || split_lines(raw),
+                |a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(String::from))
+                        .collect()
+                },
+            );
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: b("truncated").then_some("(truncated)".into()),
+            }
         }
         "find" => {
-            let lines = v.get("matches").and_then(|x| x.as_array())
-                .map_or_else(|| split_lines(raw), |a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect());
-            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+            let lines = v.get("matches").and_then(|x| x.as_array()).map_or_else(
+                || split_lines(raw),
+                |a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(String::from))
+                        .collect()
+                },
+            );
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: b("truncated").then_some("(truncated)".into()),
+            }
         }
         "grep" => {
             let mut lines = Vec::new();
             if let Some(arr) = v.get("matches").and_then(|x| x.as_array()) {
                 for m in arr {
                     let file = m.get("file").and_then(|x| x.as_str()).unwrap_or("");
-                    let line = m.get("line").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let line = m
+                        .get("line")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("");
                     lines.push(format!("{file}:{line}:{content}"));
                 }
             }
-            NativeBody { lines, numbered: false, start_line: 1, is_diff: false, notice: b("truncated").then_some("(truncated)".into()) }
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: b("truncated").then_some("(truncated)".into()),
+            }
         }
-        _ => NativeBody { lines: split_lines(raw), numbered: false, start_line: 1, is_diff: false, notice: None },
+        _ => NativeBody {
+            lines: split_lines(raw),
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
     }
 }
 
 fn split_lines(s: &str) -> Vec<String> {
-    s.trim_end_matches('\n').split('\n').map(String::from).collect()
+    s.trim_end_matches('\n')
+        .split('\n')
+        .map(String::from)
+        .collect()
 }
 
 /// A short parenthetical annotation for the tool header, derived from the
@@ -1299,13 +1414,7 @@ impl Component for ExecBlockBranch<'_> {
             Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
             Span::styled(" ".repeat(name_w), Style::new().bg(bg)),
         ];
-        out.extend(prim::rtile_wrapped(
-            header_deco,
-            cont_deco,
-            content,
-            bg,
-            w,
-        ));
+        out.extend(prim::rtile_wrapped(header_deco, &cont_deco, content, bg, w));
 
         let Some(result) = &self.nt.result else {
             return out;
@@ -1326,8 +1435,8 @@ impl Component for ExecBlockBranch<'_> {
         }
 
         let indent = 2 + 2 + 2; // gutter + exec-rail col + own rail
-        // Each native tool returns structured output; interpret it per tool to
-        // derive the body lines (and how to label / color them).
+                                // Each native tool returns structured output; interpret it per tool to
+                                // derive the body lines (and how to label / color them).
         let body = native_body(self.nt);
         let all: Vec<&str> = body.lines.iter().map(String::as_str).collect();
         let numbered = body.numbered;
@@ -1413,8 +1522,6 @@ impl Component for ExecBlockBranch<'_> {
     }
 }
 
-
-
 // ── Non-exec tool ────────────────────────────────────────────────────────
 
 /// A non-`exec` tool — e.g. a hallucinated name the model emitted despite
@@ -1429,7 +1536,10 @@ impl Component for ToolLine<'_> {
         let t = cx.theme;
         let working = !self.tool.done && cx.active_turn;
         let icon = prim::status_icon(t, Color::Reset, working, self.tool.is_error, cx.spinner());
-        let mut content = vec![Span::styled(self.tool.name.clone(), Style::new().fg(t.info))];
+        let mut content = vec![Span::styled(
+            self.tool.name.clone(),
+            Style::new().fg(t.info),
+        )];
         if let Some(first) = self.tool.input.split('\n').next() {
             if !first.is_empty() {
                 content.push(prim::subtle(format!(" {first}"), t, Color::Reset));
@@ -1482,7 +1592,10 @@ impl Component for TurnEnd {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
         vec![prim::render(
-            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.subtle))],
+            vec![
+                Span::raw("  "),
+                Span::styled("◇ ", Style::new().fg(t.subtle)),
+            ],
             vec![
                 Span::styled(format!("Done in {dur} with "), Style::new().fg(t.subtle)),
                 Span::styled(self.label.clone(), Style::new().fg(t.muted)),
@@ -1513,7 +1626,10 @@ impl Component for TurnFailed {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
         let mut out = vec![prim::render(
-            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.error))],
+            vec![
+                Span::raw("  "),
+                Span::styled("◇ ", Style::new().fg(t.error)),
+            ],
             vec![
                 Span::styled(format!("Failed in {dur} with "), Style::new().fg(t.error)),
                 Span::styled(self.label.clone(), Style::new().fg(t.error)),
@@ -1565,7 +1681,10 @@ impl Component for CompactionLine {
             self.summarized, self.kept
         );
         let marker = prim::render(
-            vec![Span::raw("  "), Span::styled("◇ ", Style::new().fg(t.subtle))],
+            vec![
+                Span::raw("  "),
+                Span::styled("◇ ", Style::new().fg(t.subtle)),
+            ],
             vec![Span::styled(body, Style::new().fg(t.muted))],
             vec![],
         );

@@ -24,16 +24,16 @@
 //! await — the task clones out, runs, and writes back in two brief locks) so
 //! the sync handler can also read it.
 
-pub mod view;
-mod app_lifecycle;
-mod app_input;
-mod app_nav;
 mod app_commands;
+mod app_input;
+mod app_lifecycle;
+mod app_nav;
 mod app_render;
-mod replay;
-mod tree;
-mod text;
 mod input;
+mod replay;
+mod text;
+mod tree;
+pub mod view;
 
 #[cfg(test)]
 mod tests;
@@ -43,22 +43,30 @@ mod tests;
 #[allow(clippy::wildcard_imports)]
 use {input::*, replay::*, text::*, tree::*};
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use crossterm::execute;
-use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
 use lofi_core::session::store::{self, SessionEntry, SessionStore};
-use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind, ThinkingLevel, Usage};
+use lofi_types::{
+    ContentBlock, Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind,
+    ThinkingLevel, Usage,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -68,15 +76,15 @@ use ratatui::Terminal;
 use base64::Engine;
 
 pub(crate) mod theme;
-pub(crate) use theme::Theme;
 use std::time::Instant;
+pub(crate) use theme::Theme;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
+use crate::tui::view::HStack;
 use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions, SessionCommit};
 use lofi_error::{Error, Result};
-use crate::tui::view::HStack;
 
 /// Retained model registry + config so `/model` can rebuild the agent
 /// mid-session without re-running remote discovery. The registry is taken
@@ -97,7 +105,12 @@ impl ModelSwitcher {
         root: PathBuf,
     ) -> Self {
         let choices = registry.choices();
-        Self { registry, config, root, choices }
+        Self {
+            registry,
+            config,
+            root,
+            choices,
+        }
     }
 
     /// The selectable models, in registry order.
@@ -224,19 +237,30 @@ enum Block {
     Error(String),
     /// Turn-end rule: `<label> done in Ns` followed by a dash
     /// fill, appended when a run finishes.
-    TurnEnd { label: String, elapsed: Duration },
+    TurnEnd {
+        label: String,
+        elapsed: Duration,
+    },
     /// Turn-failed rule: `<label> failed in Ns · <error>` in the error
     /// tint, appended when a run ends in a non-retryable error or is
     /// cancelled. The turn's partial messages precede it; the marker is the
     /// leaf of the failed branch.
-    TurnFailed { label: String, elapsed: Duration, error: String },
+    TurnFailed {
+        label: String,
+        elapsed: Duration,
+        error: String,
+    },
     /// An offline compaction marker: `◇ Compacted N messages · kept M` in the
     /// muted tint, appended to the current turn when `/compact` (or the
     /// auto-trigger) folds the older history into a summary. The summary
     /// text is carried along so `/verbose` can expand it inline; the default
     /// (collapsed) view shows only the one-line marker. The summary is also
     /// injected into the agent's history, not just the visible transcript.
-    Compaction { summarized: usize, kept: usize, summary: String },
+    Compaction {
+        summarized: usize,
+        kept: usize,
+        summary: String,
+    },
 }
 
 /// A user prompt and the blocks produced in response.
@@ -321,8 +345,7 @@ impl SessionConfig {
     pub(crate) fn last_run_model(&self) -> Option<RunModel> {
         store::last_run_model(&self.events)
     }
-
-    }
+}
 
 /// State for the '/resume' session-picker overlay.
 #[derive(Debug, Clone)]
@@ -902,14 +925,24 @@ pub(crate) async fn run(
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         let backend = CrosstermBackend::new(stdout);
         Terminal::new(backend)
     })();
     let terminal = match setup {
         Ok(t) => t,
         Err(e) => {
-            let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
+            let _ = execute!(
+                io::stdout(),
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(Error::Io(e));
         }
@@ -962,11 +995,7 @@ async fn run_loop(
     let edit = compaction.edit.clone();
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.model_choices = model_choices;
-    app.session = SessionState {
-        store,
-        path,
-        cwd,
-    };
+    app.session = SessionState { store, path, cwd };
     let messages = messages_from_events(&events, &edit);
     if let Ok(mut m) = app.history.lock() {
         m.clone_from(&messages);
@@ -1189,4 +1218,3 @@ async fn run_loop(
 // A single large key dispatcher; splitting per-key handlers would fragment
 // the picker/submit/run-creation flow and hurt readability more than the line
 // count helps.
-
