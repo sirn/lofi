@@ -783,11 +783,12 @@ impl Agent {
             let on_tool_event: Arc<dyn Fn(ToolEvent) + Send + Sync> = {
                 let native_pending = native_pending.clone();
                 let native_completed = native_completed.clone();
+                let event_parent = parent.clone();
                 Arc::new(move |ev: ToolEvent| match ev {
                     ToolEvent::Start { id, name, args } => {
                         lock(&native_pending).insert(id, (name.clone(), args.clone()));
                         let _ = native_tx.send(AgentEvent::NativeToolStart {
-                            parent: parent.clone(),
+                            parent: event_parent.clone(),
                             id,
                             name,
                             args,
@@ -806,7 +807,7 @@ impl Agent {
                         let result = cap_tool_result(&result);
                         if let Some((name, args)) = lock(&native_pending).remove(&id) {
                             lock(&native_completed).push(NativeToolRecord {
-                                parent: parent.clone(),
+                                parent: event_parent.clone(),
                                 call_id: id,
                                 name,
                                 args,
@@ -815,7 +816,7 @@ impl Agent {
                             });
                         }
                         let _ = native_tx.send(AgentEvent::NativeToolEnd {
-                            parent: parent.clone(),
+                            parent: event_parent.clone(),
                             id,
                             result,
                             is_error,
@@ -888,6 +889,37 @@ impl Agent {
                 }
                 Err(e) => (cap_exec_result(&e.to_string()), true),
             };
+            if is_error {
+                // A rejected guest promise can short-circuit concurrent native
+                // calls before their futures emit `ToolEvent::End`. Close every
+                // still-pending row explicitly so the live UI cannot leave a
+                // spinner behind after the parent exec has already failed.
+                // These synthetic cancellations are also persisted, making
+                // resume reproduce the settled state.
+                let pending = {
+                    let mut pending = lock(&native_pending);
+                    pending.drain().collect::<Vec<_>>()
+                };
+                for (call_id, (name, args)) in pending {
+                    let result = "cancelled because parent exec failed".to_string();
+                    if let Some(s) = stats.as_deref_mut() {
+                        s.native_tools.push(NativeToolRecord {
+                            parent: parent.clone(),
+                            call_id,
+                            name,
+                            args,
+                            result: result.clone(),
+                            is_error: true,
+                        });
+                    }
+                    let _ = relay_tx.send(AgentEvent::NativeToolEnd {
+                        parent: parent.clone(),
+                        id: call_id,
+                        result,
+                        is_error: true,
+                    });
+                }
+            }
             let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
             if !emit(
                 tx,

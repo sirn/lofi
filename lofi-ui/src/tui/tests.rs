@@ -27,6 +27,41 @@ fn push_turn(app: &mut App) {
 }
 
 #[test]
+fn failed_exec_settles_pending_native_tools() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(),
+        id: 0,
+        name: "agent".to_string(),
+        args: "inspect".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(),
+        result: "sandbox error: timed out".to_string(),
+        is_error: true,
+        elapsed_ms: 1,
+    });
+
+    let Block::Tool(exec) = &a.turns[0].blocks[0] else {
+        panic!("expected an exec tool block");
+    };
+    assert!(exec.done);
+    assert!(exec.is_error);
+    let native = &exec.native[0];
+    assert!(native.done);
+    assert!(native.is_error);
+    assert_eq!(
+        native.result.as_deref(),
+        Some("cancelled because parent exec failed")
+    );
+}
+
+#[test]
 fn native_tool_events_nest_under_their_exec() {
     let mut a = app();
     push_turn(&mut a);
