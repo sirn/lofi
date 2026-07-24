@@ -1050,6 +1050,9 @@ async fn run_loop(
                                 if app.run.is_none() {
                                     if let Some(prompt) = app.prompt_queue.first().cloned() {
                                         app.prompt_queue.remove(0);
+                                        // Pre-compact before starting the
+                                        // queued run, same as the Enter path.
+                                        app.maybe_auto_compact();
                                         spawn_prompt(
                                             &mut app,
                                             agent.as_ref(),

@@ -172,7 +172,14 @@ impl Agent {
                     // the next round would overflow the window and let the UI
                     // force-compact + continue.
                     if let Some(threshold) = self.hard_compact_threshold() {
-                        if stats.usage.input_tokens > threshold {
+                        // Use the full prompt size (non-cached + cached) so
+                        // heavy prompt caching doesn't mask the real context
+                        // pressure. Without this, a session with 990k cached
+                        // tokens and 5k non-cached would never trip the hard
+                        // cap until the API rejects the request.
+                        let prompt_tokens = stats.usage.input_tokens
+                            + stats.usage.cache_read_tokens;
+                        if prompt_tokens > threshold {
                             context_pressure = true;
                             break;
                         }

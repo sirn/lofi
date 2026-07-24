@@ -52,7 +52,7 @@ pub(super) fn handle_event(
             app.pin_to_latest();
             return;
         }
-        handle_ctrl_c(app, current_run);
+        handle_ctrl_c(app, agent, current_run);
         return;
     }
 
@@ -152,6 +152,11 @@ pub(super) fn handle_event(
                 }
                 return;
             };
+            // Pre-compact if the context is already above the soft threshold.
+            // This fires at the earliest opportunity — before the run starts
+            // — rather than waiting for the turn to finish or hitting the
+            // hard cap mid-run.
+            app.maybe_auto_compact();
             // The new turn is pushed by `AgentEvent::TurnStart` when the
             // engine begins the run — keeping turn creation in one place
             // (the event handler) for both live and resumed sessions.
@@ -565,3 +570,5 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     });
     (line_idx, col)
 }
+
+
