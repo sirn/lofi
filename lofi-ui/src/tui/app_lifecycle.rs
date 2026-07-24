@@ -27,6 +27,7 @@ impl App {
             compaction,
             prev_ctx_tokens: None,
             last_compact_msg_count: 0,
+            compacted: false,
             context_pressure: false,
             cost: 0.0,
             turn_cost: 0.0,
@@ -176,6 +177,7 @@ impl App {
                 self.total_cache_read += usage.cache_read_tokens;
                 self.total_cache_write += usage.cache_write_tokens;
                 self.status_usage = Some(usage);
+                self.compacted = false;
                 return;
             }
             AgentEvent::TurnEnd { cost, usage, .. } => {
@@ -196,6 +198,9 @@ impl App {
                 }
                 self.turn_cost = 0.0;
                 self.turn_has_round_usage = false;
+                // Any TurnEnd with usage data means we have a real context
+                // size — clear the "just compacted" indicator.
+                self.compacted = false;
             }
             AgentEvent::TurnFailed { cost, usage, .. } => {
                 // A failed turn's consumed tokens count honestly. Same
@@ -239,6 +244,11 @@ impl App {
                 self.turn_has_round_usage = false;
                 self.context_pressure = true;
                 return;
+            }
+            AgentEvent::Compaction { .. } => {
+                // Marker block only; do not set the compacted flag here.
+                // That flag tracks the live "just compacted, no usage yet"
+                // window. During replay, TurnEnd events carry real usage.
             }
             _ => {}
         }
@@ -475,22 +485,55 @@ impl App {
         if let Ok(mut g) = self.history.lock() {
             *g = new_history;
         }
-        // Persist the marker so resume rebuilds the compacted history. The
-        // marker chains off the active leaf; subsequent turns chain off it.
+        // Persist the edited kept-tail messages AND the compaction marker so
+        // the transcript is the complete checkpoint. Resume reads verbatim
+        // — no in-memory edit_tail re-creation needed.
+        //
+        // On-disk layout after this append:
+        //   [old original events] -> [edited kept-tail msgs] -> [marker]
+        //                              ^first_kept_entry_id points here
+        //
+        // The active-path walk (leaf-first) hits the marker, sets the
+        // boundary to first_kept_entry_id (the first edited kept-tail msg),
+        // then collects kept-tail msgs until the boundary. The old originals
+        // are never reached. Subsequent turns chain off the marker.
         if let Some(path) = self.session.path.clone() {
-            if let Some(first_kept) = c.first_kept_event_id.clone() {
+            // 1. Write the edited kept-tail messages (ids assigned by append_events).
+            let mut kept_events: Vec<SessionEvent> = c.kept_messages.iter().map(|m| SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(m.clone()),
+            }).collect();
+            if kept_events.is_empty() {
+                // No kept tail (compact-all): just write the marker.
                 let mut ev = SessionEvent {
                     id: String::new(),
                     parent_id: None,
                     kind: SessionEventKind::Compaction {
                         summary: c.summary.clone(),
-                        first_kept_entry_id: first_kept,
+                        first_kept_entry_id: String::new(),
                         summarized_range: c.summarized_range.unwrap_or_default(),
                         summarized: c.summarized_count,
                         kept: c.kept_count,
                     },
                 };
                 let _ = store::append_events(&path, std::slice::from_mut(&mut ev), None);
+            } else {
+                let _ = store::append_events(&path, &mut kept_events, None);
+                let first_kept_id = kept_events[0].id.clone();
+                // 2. Write the marker, chaining off the last kept-tail message.
+                let mut marker = SessionEvent {
+                    id: String::new(),
+                    parent_id: Some(kept_events.last().unwrap().id.clone()),
+                    kind: SessionEventKind::Compaction {
+                        summary: c.summary.clone(),
+                        first_kept_entry_id: first_kept_id,
+                        summarized_range: c.summarized_range.unwrap_or_default(),
+                        summarized: c.summarized_count,
+                        kept: c.kept_count,
+                    },
+                };
+                let _ = store::append_events(&path, std::slice::from_mut(&mut marker), None);
             }
         }
         // Render the marker. Attach to the last turn when one exists; push a
@@ -509,6 +552,7 @@ impl App {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
         self.last_compact_msg_count = self.messages_since_last_compact();
+        self.compacted = true;
         self.bump_render_epoch();
         true
     }
@@ -638,6 +682,71 @@ impl App {
             }
         }
         n
+    }
+
+    /// Derive compaction-related state from the transcript's active path
+    /// after a resume or rollback. The transcript is the source of truth:
+    ///
+    /// - `compacted`: `true` when the active path ends with a `Compaction`
+    ///   marker and no `TurnEnd`/`TurnFailed`/`ContextPressure` follows it
+    ///   (i.e. we compacted but haven't run a new turn yet, so the context
+    ///   gauge has no real usage to show and should display `c`).
+    ///
+    /// - `last_compact_msg_count`: the number of assistant messages after
+    ///   the last `Compaction` marker on the active path, so the auto-compact
+    ///   cooldown works immediately on resume instead of being disabled.
+    ///
+    /// - `prev_ctx_tokens`: the last completed turn's prompt size
+    ///   (`input_tokens + cache_read_tokens`), so the auto-compact
+    ///   hysteresis has a proper baseline and doesn't fire on the first
+    ///   post-resume turn when the context was already above threshold.
+    pub(super) fn restore_compaction_state(&mut self, events: &[SessionEvent]) {
+        let path = store::active_path_from_leaf(events);
+        let mut last_compaction_idx: Option<usize> = None;
+        let mut last_usage: Option<Usage> = None;
+        for &i in &path {
+            match &events[i].kind {
+                SessionEventKind::Compaction { .. } => {
+                    last_compaction_idx = Some(i);
+                }
+                SessionEventKind::TurnEnd { usage, .. }
+                | SessionEventKind::TurnFailed { usage, .. } => {
+                    last_usage = Some(usage.clone());
+                }
+                _ => {}
+            }
+        }
+        // `compacted`: true only when the last event on the active path is a
+        // Compaction marker (no TurnEnd/TurnFailed after it).
+        self.compacted = match last_compaction_idx {
+            Some(idx) => path.last().is_some_and(|&last| last == idx),
+            None => false,
+        };
+        // `last_compact_msg_count`: count assistant messages after the last
+        // Compaction marker, same logic as `messages_since_last_compact`.
+        self.last_compact_msg_count = match last_compaction_idx {
+            Some(ci) => {
+                let mut n = 0usize;
+                for &i in &path {
+                    if i == ci {
+                        n = 0;
+                        continue;
+                    }
+                    if i > ci {
+                        if let SessionEventKind::Message(m) = &events[i].kind {
+                            if m.role == Role::Assistant {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                n
+            }
+            None => 0,
+        };
+        // `prev_ctx_tokens`: from the last TurnEnd/TurnFailed's usage, so the
+        // hysteresis has a baseline and doesn't immediately re-trigger.
+        self.prev_ctx_tokens = last_usage.map(|u| u.input_tokens + u.cache_read_tokens);
     }
 
     /// Gather the active-path events for compaction: load the transcript

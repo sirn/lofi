@@ -253,6 +253,7 @@ impl App {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
         self.last_compact_msg_count = 0;
+        self.compacted = false;
         self.cost = 0.0;
         self.turn_cost = 0.0;
         self.turn_has_round_usage = false;
@@ -313,6 +314,7 @@ impl App {
                 self.status_usage = None;
                 self.prev_ctx_tokens = None;
                 self.last_compact_msg_count = 0;
+                self.compacted = false;
                 for ev in replay_session_events(&events) {
                     self.apply_event(ev);
                 }
@@ -325,6 +327,7 @@ impl App {
                         turn.blocks.clear();
                     }
                 }
+                self.restore_compaction_state(&events);
                 self.bump_render_epoch();
                 self.session.path = Some(entry.path);
                 self.pinned = true;
@@ -847,9 +850,11 @@ impl App {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
         self.last_compact_msg_count = 0;
+        self.compacted = false;
         for ev in replay_session_events(&rolled_back) {
             self.apply_event(ev);
         }
+        self.restore_compaction_state(&rolled_back);
         self.bump_render_epoch();
         self.pinned = true;
         self.top_line = 0;

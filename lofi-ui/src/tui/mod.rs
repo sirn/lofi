@@ -715,6 +715,9 @@ pub(crate) struct App {
     /// is not re-compacted every turn (which would waste tokens for no
     /// benefit). Reset on rollback/resume.
     last_compact_msg_count: usize,
+    /// Whether the session has been compacted at least once. Drives a `c`
+    /// prefix on the context gauge so the user can tell the history is folded.
+    compacted: bool,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
     /// hard context cap. The run loop reads (and clears) it on channel close
     /// to drive the force-compact + silent continue, instead of the soft
@@ -981,6 +984,10 @@ async fn run_loop(
             turn.blocks.clear();
         }
     }
+    // Derive compaction state from the transcript so auto-compact's
+    // hysteresis and cooldown work immediately on resume, and the context
+    // gauge shows "c" when the session was compacted but not yet continued.
+    app.restore_compaction_state(&events);
     // The event log was only needed to rebuild the view and history; free it
     // now so a large transcript isn't held for the session's lifetime.
     drop(events);

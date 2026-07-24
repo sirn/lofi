@@ -83,9 +83,14 @@ impl App {
                 None
             }
         });
+        let used_str = if self.compacted {
+            "c".to_string()
+        } else {
+            compact_count(used)
+        };
         segments.push(format!(
             "context {}/{}{}",
-            compact_count(used),
+            used_str,
             compact_count(self.ctx_limit),
             cached_suffix.unwrap_or_default()
         ));
