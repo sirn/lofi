@@ -487,7 +487,7 @@ fn blockquote_renders_with_bar_and_empty_lines() {
     assert!(quote_lines.iter().any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
         "Empty quote line should render bar only: {:?}", quote_lines);
     assert!(quote_lines.iter().any(|s| s.contains("Line three") && s.contains("▎")),
-        "Line three should have bar: {:?}", quote_lines);
+        "Line three should have bar: {quote_lines:?}");
     // Yanking the full quote should preserve the bare ">" line.
     let n = rls.len();
     feed_lines(&mut a, &rls);
@@ -3524,7 +3524,7 @@ fn resume_model_switch_when_model_differs() {
     a.model_choices = vec![lofi_types::ModelChoice {
         provider: "anthropic".into(),
         id: "claude".into(),
-        name: String::new(),
+        name: String::new(        name: String::new(),
         thinking_levels: vec![],
         supports_image: false,
         context_window: None,

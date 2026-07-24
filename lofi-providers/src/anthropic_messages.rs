@@ -28,16 +28,16 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// POSTs to `model.base_url` verbatim; see
 /// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
 /// resolution contract.
-pub struct AnthropicMessagesProvider {
+pub(crate) struct AnthropicMessagesProvider {
     /// Provider host root, used as the fallback when a model does not carry
     /// its own `base_url`.
-    pub base_url: String,
+    pub(crate) base_url: String,
     /// Resolved `x-api-key` value.
-    pub api_key: String,
+    pub(crate) api_key: String,
     /// Extra resolved headers from config.
-    pub headers: HashMap<String, String>,
+    pub(crate) headers: HashMap<String, String>,
     /// Shared HTTP client.
-    pub client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 #[async_trait]
@@ -60,7 +60,7 @@ impl super::Provider for AnthropicMessagesProvider {
             .header("anthropic-version", ANTHROPIC_VERSION),
             &self.headers,
         );
-        let resp = req.send().await.map_err(Error::Http)?;
+        let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
         let resp = super::ensure_ok(resp).await?;
         Ok(map_sse_response(resp, AnthropicMapper::default()))
     }
@@ -92,5 +92,3 @@ impl SseMapper for AnthropicMapper {
         false
     }
 }
-
-

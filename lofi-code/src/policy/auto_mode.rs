@@ -87,15 +87,13 @@ pub fn parse_decision(text: &str) -> Option<AutoModeDecision> {
 /// code blocks.
 fn extract_json_object(text: &str) -> Option<String> {
     // Try fenced code block first.
-    let fenced = text
-        .find("```")
-        .and_then(|start| {
-            let rest = &text[start + 3..];
-            // Skip optional language tag on the first line.
-            let rest = rest.find('\n').map_or(rest, |nl| &rest[nl + 1..]);
-            let end = rest.find("```")?;
-            Some(rest[..end].trim().to_string())
-        });
+    let fenced = text.find("```").and_then(|start| {
+        let rest = &text[start + 3..];
+        // Skip optional language tag on the first line.
+        let rest = rest.find('\n').map_or(rest, |nl| &rest[nl + 1..]);
+        let end = rest.find("```")?;
+        Some(rest[..end].trim().to_string())
+    });
     let body = fenced.as_deref().unwrap_or(text);
     let start = body.find('{')?;
     let end = body.rfind('}')?;

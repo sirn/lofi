@@ -452,7 +452,7 @@ impl App {
                 self.top_line = self.top_line.saturating_sub(h);
                 self.pinned = false;
             }
-            Mode::Navigate | Mode::Select => self.nav_move(-step)
+            Mode::Navigate | Mode::Select => self.nav_move(-step),
         }
     }
 
@@ -498,7 +498,7 @@ impl App {
     /// back to it. Not saved when the cursor is on the last line (the
     /// transcript-follow case) — in that case `enter_nav` follows as usual.
     fn save_yank_cursor(&mut self) {
- let last = self.log_total.saturating_sub(1);
+        let last = self.log_total.saturating_sub(1);
         if self.nav_cursor < last {
             self.yank_cursor = Some((self.nav_cursor, self.nav_col));
         } else {
@@ -552,7 +552,11 @@ impl App {
     /// pinned, otherwise `top_line` clamped to `base`.
     pub(super) fn view_off(&self) -> usize {
         let base = self.last_base;
-        if self.pinned { base } else { self.top_line.min(base) }
+        if self.pinned {
+            base
+        } else {
+            self.top_line.min(base)
+        }
     }
 
     /// Mouse-wheel scroll: enter Navigate and move the viewport, clamping the
@@ -638,7 +642,9 @@ impl App {
                         // concatenates without a separator; anything else
                         // starts a new line.
                         let cont = !rl.hard_break
-                            && prev_src.as_ref().is_some_and(|p| std::sync::Arc::ptr_eq(p, &rl.source));
+                            && prev_src
+                                .as_ref()
+                                .is_some_and(|p| std::sync::Arc::ptr_eq(p, &rl.source));
                         if !cont && !out.is_empty() {
                             out.push('\n');
                         }
@@ -653,7 +659,11 @@ impl App {
                     if rl.hard_break && !out.is_empty() {
                         out.push('\n');
                     }
-                    prev_src = if rl.hard_break { None } else { Some(rl.source.clone()) };
+                    prev_src = if rl.hard_break {
+                        None
+                    } else {
+                        Some(rl.source.clone())
+                    };
                     continue;
                 }
                 // Degenerate raw (no per-char map): table data/header rows
@@ -661,7 +671,9 @@ impl App {
                 // empty source and are suppressed.
                 if !rl.source.is_empty() && cs < ce {
                     let cont = !rl.hard_break
-                        && prev_src.as_ref().is_some_and(|p| std::sync::Arc::ptr_eq(p, &rl.source));
+                        && prev_src
+                            .as_ref()
+                            .is_some_and(|p| std::sync::Arc::ptr_eq(p, &rl.source));
                     if !cont && !out.is_empty() {
                         out.push('\n');
                     }
@@ -682,15 +694,27 @@ impl App {
             }
             // Decoration-only line: rendered content slice, hard break.
             let chars: Vec<(usize, char)> = s.char_indices().collect();
-            let b0 = if cs == 0 || cs >= ce { 0 } else { chars[cs - 1].0 + chars[cs - 1].1.len_utf8() };
-            let b1 = if ce == 0 || cs >= ce { 0 } else { chars[ce - 1].0 + chars[ce - 1].1.len_utf8() };
+            let b0 = if cs == 0 || cs >= ce {
+                0
+            } else {
+                chars[cs - 1].0 + chars[cs - 1].1.len_utf8()
+            };
+            let b1 = if ce == 0 || cs >= ce {
+                0
+            } else {
+                chars[ce - 1].0 + chars[ce - 1].1.len_utf8()
+            };
             if !out.is_empty() {
                 out.push('\n');
             }
             out.push_str(&s[b0..b1]);
             prev_src = None;
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     pub(super) fn clear_log(&mut self) {
@@ -705,7 +729,11 @@ impl App {
 /// Cumulative selectable-content char offset of line `intra`'s start within a
 /// turn's rendered lines. Blanks contribute zero, so separators don't shift it.
 fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
-    lines.iter().take(intra).map(view::RenderLine::content_len).sum()
+    lines
+        .iter()
+        .take(intra)
+        .map(view::RenderLine::content_len)
+        .sum()
 }
 
 /// Cursor's content-char position within a turn: the line's cumulative content

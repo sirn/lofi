@@ -5,7 +5,7 @@
 //! with `deny > ask > allow > default` precedence. Fails closed to
 //! `ask` on parse errors or unmatched commands.
 
-use lofi_types::{CommandEntry, MatchMode, PolicyAction, RedirectPolicy, HeredocPolicy};
+use lofi_types::{CommandEntry, HeredocPolicy, MatchMode, PolicyAction, RedirectPolicy};
 
 use super::extract::{extract_commands, CommandSource, ExtractedCommand, WrapperRuleMap};
 use super::token::tokenize;
@@ -129,7 +129,9 @@ impl ResolvedPolicy {
 
             let allow_match = self.allow.iter().find(|e| match_entry(cmd, e));
             if allow_match.is_some() {
-                if result == PolicyAction::Allow && (cmd.source != CommandSource::Direct || !saw_direct_unmatched) {
+                if result == PolicyAction::Allow
+                    && (cmd.source != CommandSource::Direct || !saw_direct_unmatched)
+                {
                     reason = format!("allowed: {}", cmd.name);
                     matched = Some(cmd.full_text.clone());
                 }
@@ -179,21 +181,33 @@ impl ResolvedPolicy {
                 }
             }
         }
-        Decision { action: PolicyAction::Allow, reason: String::new(), matched_command: None }
+        Decision {
+            action: PolicyAction::Allow,
+            reason: String::new(),
+            matched_command: None,
+        }
     }
 
     fn evaluate_heredocs(&self, cmds: &[ExtractedCommand]) -> Decision {
         for cmd in cmds {
-            if cmd.redirects.iter().any(|(op, _)| op == "<<" || op == "<<-")
-                && self.heredocs.action != PolicyAction::Allow {
-                    return Decision {
-                        action: self.heredocs.action,
-                        reason: "heredoc detected".into(),
-                        matched_command: Some(cmd.full_text.clone()),
-                    };
-                }
+            if cmd
+                .redirects
+                .iter()
+                .any(|(op, _)| op == "<<" || op == "<<-")
+                && self.heredocs.action != PolicyAction::Allow
+            {
+                return Decision {
+                    action: self.heredocs.action,
+                    reason: "heredoc detected".into(),
+                    matched_command: Some(cmd.full_text.clone()),
+                };
+            }
         }
-        Decision { action: PolicyAction::Allow, reason: String::new(), matched_command: None }
+        Decision {
+            action: PolicyAction::Allow,
+            reason: String::new(),
+            matched_command: None,
+        }
     }
 }
 
@@ -217,21 +231,41 @@ fn match_entry(cmd: &ExtractedCommand, entry: &CommandEntry) -> bool {
         }
         MatchMode::Substring => {
             let match_tokens: Vec<&str> = entry.match_str.split_whitespace().collect();
-            if match_tokens.is_empty() || match_tokens.len() > cmd.words.len() { return false; }
+            if match_tokens.is_empty() || match_tokens.len() > cmd.words.len() {
+                return false;
+            }
             let cmd_lower: Vec<String> = cmd.words.iter().map(|w| w.to_ascii_lowercase()).collect();
-            let match_lower: Vec<String> = match_tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
+            let match_lower: Vec<String> = match_tokens
+                .iter()
+                .map(|t| t.to_ascii_lowercase())
+                .collect();
             (0..=cmd_lower.len().saturating_sub(match_lower.len())).any(|i| {
-                cmd_lower[i..i + match_lower.len()].iter().zip(&match_lower).all(|(a, b)| a == b)
+                cmd_lower[i..i + match_lower.len()]
+                    .iter()
+                    .zip(&match_lower)
+                    .all(|(a, b)| a == b)
             })
         }
         MatchMode::Args => {
             let (prefix, required) = parse_args_pattern(&entry.match_str);
             if prefix != "*"
-                && !cmd.full_text.trim_start().to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
-                    return false;
-                }
-            let prefix_words = if prefix == "*" { 0 } else { prefix.split_whitespace().count() };
-            let cmd_args: Vec<String> = cmd.words[prefix_words..].iter().map(|w| w.to_ascii_lowercase()).collect();
+                && !cmd
+                    .full_text
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+            {
+                return false;
+            }
+            let prefix_words = if prefix == "*" {
+                0
+            } else {
+                prefix.split_whitespace().count()
+            };
+            let cmd_args: Vec<String> = cmd.words[prefix_words..]
+                .iter()
+                .map(|w| w.to_ascii_lowercase())
+                .collect();
             required.iter().all(|r| cmd_args.iter().any(|a| a == r))
         }
     }
@@ -254,12 +288,15 @@ fn parse_args_pattern(pattern: &str) -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use super::super::defaults;
     use super::*;
     use lofi_types::*;
-    use super::super::defaults;
 
     fn policy_for(mode: ShellPolicyMode) -> ResolvedPolicy {
-        defaults::resolve(&ShellPolicyConfig { mode, ..Default::default() })
+        defaults::resolve(&ShellPolicyConfig {
+            mode,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -334,14 +371,22 @@ mod tests {
 
     #[test]
     fn yolo_allows_ask() {
-        let p = defaults::resolve(&ShellPolicyConfig { mode: ShellPolicyMode::WorkspaceWrite, yolo: true, ..Default::default() });
+        let p = defaults::resolve(&ShellPolicyConfig {
+            mode: ShellPolicyMode::WorkspaceWrite,
+            yolo: true,
+            ..Default::default()
+        });
         let d = p.evaluate("rm file.txt");
         assert_eq!(d.action, PolicyAction::Allow);
     }
 
     #[test]
     fn yolo_still_denies_sudo() {
-        let p = defaults::resolve(&ShellPolicyConfig { mode: ShellPolicyMode::WorkspaceWrite, yolo: true, ..Default::default() });
+        let p = defaults::resolve(&ShellPolicyConfig {
+            mode: ShellPolicyMode::WorkspaceWrite,
+            yolo: true,
+            ..Default::default()
+        });
         let d = p.evaluate("sudo rm -rf /");
         assert_eq!(d.action, PolicyAction::Deny);
     }
@@ -407,7 +452,10 @@ mod tests {
     fn custom_allow_rule() {
         let p = defaults::resolve(&ShellPolicyConfig {
             mode: ShellPolicyMode::ReadOnly,
-            allow: vec![CommandEntry { match_str: "my-tool".into(), mode: MatchMode::Prefix }],
+            allow: vec![CommandEntry {
+                match_str: "my-tool".into(),
+                mode: MatchMode::Prefix,
+            }],
             ..Default::default()
         });
         let d = p.evaluate("my-tool --check");
@@ -418,7 +466,10 @@ mod tests {
     fn custom_deny_overrides_mode_allow() {
         let p = defaults::resolve(&ShellPolicyConfig {
             mode: ShellPolicyMode::WorkspaceWrite,
-            deny: vec![CommandEntry { match_str: "cargo".into(), mode: MatchMode::Prefix }],
+            deny: vec![CommandEntry {
+                match_str: "cargo".into(),
+                mode: MatchMode::Prefix,
+            }],
             ..Default::default()
         });
         let d = p.evaluate("cargo build");
@@ -429,7 +480,10 @@ mod tests {
     fn args_mode_match() {
         let p = defaults::resolve(&ShellPolicyConfig {
             mode: ShellPolicyMode::Unrestricted,
-            ask: vec![CommandEntry { match_str: "*:-X POST".into(), mode: MatchMode::Args }],
+            ask: vec![CommandEntry {
+                match_str: "*:-X POST".into(),
+                mode: MatchMode::Args,
+            }],
             ..Default::default()
         });
         let d = p.evaluate("curl -X POST http://example.com");

@@ -83,7 +83,9 @@ impl CompactionHook for CodeCompactionHook {
         seen.insert("exec".to_string());
 
         for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else { continue };
+            let CompactBlock::ToolCall { native, .. } = b else {
+                continue;
+            };
             for rec in native {
                 if seen.insert(rec.name.clone()) {
                     items.push(tool_description(&rec.name, &rec.args));
@@ -107,15 +109,23 @@ impl CompactionHook for CodeCompactionHook {
         let mut read: HashSet<String> = HashSet::new();
 
         for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else { continue };
+            let CompactBlock::ToolCall { native, .. } = b else {
+                continue;
+            };
             for rec in native {
                 if rec.is_error || rec.args.is_empty() {
                     continue;
                 }
                 match file_effect(&rec.name) {
-                    Some(FileEffect::Modify) => { modified.insert(rec.args.clone()); }
-                    Some(FileEffect::Create) => { created.insert(rec.args.clone()); }
-                    Some(FileEffect::Read) => { read.insert(rec.args.clone()); }
+                    Some(FileEffect::Modify) => {
+                        modified.insert(rec.args.clone());
+                    }
+                    Some(FileEffect::Create) => {
+                        created.insert(rec.args.clone());
+                    }
+                    Some(FileEffect::Read) => {
+                        read.insert(rec.args.clone());
+                    }
                     None => {}
                 }
             }
@@ -155,13 +165,15 @@ impl CompactionHook for CodeCompactionHook {
         let mut seen: HashSet<String> = HashSet::new();
 
         for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else { continue };
+            let CompactBlock::ToolCall { native, .. } = b else {
+                continue;
+            };
             for rec in native {
                 if rec.name != "bash" || !rec.args.contains("git commit") {
                     continue;
                 }
-                let msg = extract_commit_message(&rec.args)
-                    .unwrap_or_else(|| "(git commit)".to_string());
+                let msg =
+                    extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
                 let hash = first_hash(&rec.result);
                 let line = match hash {
                     Some(h) => format!("{h} {msg}"),
@@ -231,15 +243,23 @@ fn clip(text: &str, max: usize) -> String {
     }
     let mut end_byte = 0;
     for (i, (b, _)) in text.char_indices().enumerate() {
-        if i == max { end_byte = b; break; }
+        if i == max {
+            end_byte = b;
+            break;
+        }
     }
     let window = &text[..end_byte];
-    let mut cut = window.rfind(' ').filter(|&i| i > end_byte * 3 / 5).unwrap_or(end_byte);
+    let mut cut = window
+        .rfind(' ')
+        .filter(|&i| i > end_byte * 3 / 5)
+        .unwrap_or(end_byte);
     if cut > 0 && text.is_char_boundary(cut) {
         let prev = &text[..cut];
         if let Some(last) = prev.chars().next_back() {
             if ((last as u32) & 0xFFFF) >= 0xD800 && (last as u32) <= 0xDBFF {
-                if let Some((p, _)) = prev.char_indices().next_back() { cut = p; }
+                if let Some((p, _)) = prev.char_indices().next_back() {
+                    cut = p;
+                }
             }
         }
     }
@@ -269,7 +289,10 @@ fn first_hash(text: &str) -> Option<String> {
 fn compress_json_result(text: &str, max: usize) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = v.as_object()?;
-    let priority = ["output", "error", "stderr", "stdout", "path", "value", "result", "content", "message", "text"];
+    let priority = [
+        "output", "error", "stderr", "stdout", "path", "value", "result", "content", "message",
+        "text",
+    ];
     let mut parts: Vec<String> = Vec::new();
 
     for key in &priority {
@@ -313,10 +336,18 @@ fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Array(a) => {
-            if a.is_empty() { "[]".to_string() } else { format!("[{} items]", a.len()) }
+            if a.is_empty() {
+                "[]".to_string()
+            } else {
+                format!("[{} items]", a.len())
+            }
         }
         serde_json::Value::Object(o) => {
-            if o.is_empty() { "{}".to_string() } else { format!("{{{} fields}}", o.len()) }
+            if o.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{{} fields}}", o.len())
+            }
         }
     }
 }

@@ -182,7 +182,10 @@ mod tests {
 
     #[test]
     fn head_truncates_by_lines() {
-        let big = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..100)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let t = truncate_head_with(&big, 10, 1_000_000);
         assert!(t.truncated);
         assert_eq!(t.output_lines, 10);
@@ -205,7 +208,10 @@ mod tests {
 
     #[test]
     fn tail_keeps_last_lines() {
-        let big = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..100)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let t = truncate_tail_with(&big, 10, 1_000_000);
         assert!(t.truncated);
         assert_eq!(t.output_lines, 10);

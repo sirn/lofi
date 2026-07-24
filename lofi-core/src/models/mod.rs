@@ -113,7 +113,9 @@ impl ModelRegistry {
         let mut any_refreshed = false;
 
         for (name, pcfg) in &mut augmented.providers {
-            let Some(am) = pcfg.auto_models.as_mut() else { continue };
+            let Some(am) = pcfg.auto_models.as_mut() else {
+                continue;
+            };
             if !am.enabled {
                 continue;
             }
@@ -384,7 +386,10 @@ mod tests {
     use super::auto::{inject_discovered, parse_auto_models, read_auto_cache, write_auto_cache};
 
     use super::*;
-    use lofi_types::{Api, ApiTypeMapping, AutoModelsConfig, FieldMappings, PricingConvention, PricingFieldMappings};
+    use lofi_types::{
+        Api, ApiTypeMapping, AutoModelsConfig, FieldMappings, PricingConvention,
+        PricingFieldMappings,
+    };
 
     fn mapping() -> ApiTypeMapping {
         ApiTypeMapping {
@@ -455,7 +460,7 @@ mod tests {
             agent: lofi_types::AgentConfig::default(),
             compaction: lofi_types::CompactionConfig::default(),
             bash: lofi_types::BashConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
+            shell_policy: lofi_types::ShellPolicyConfig::default(),
             retry: lofi_types::RetryConfig::default(),
             default_provider: None,
             default_model: None,
@@ -487,7 +492,10 @@ mod tests {
         // A static model with no per-model base_url inherits the endpoint URL
         // resolved from the provider's default api-type mapping path joined
         // onto the provider base_url.
-        let providers = IndexMap::from([("openai".to_string(), pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])))]);
+        let providers = IndexMap::from([(
+            "openai".to_string(),
+            pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])),
+        )]);
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let m = reg.resolve("openai/gpt-4o").unwrap();
         assert_eq!(
@@ -532,13 +540,19 @@ mod tests {
         let entries = vec![("claude".to_string(), mc_named("claude", "Claude").1)];
         inject_discovered(&mut models, &entries);
         assert!(models.contains_key("claude"));
-        assert_eq!(models.get("claude").unwrap().name.as_deref(), Some("Claude"));
+        assert_eq!(
+            models.get("claude").unwrap().name.as_deref(),
+            Some("Claude")
+        );
     }
 
     #[test]
     fn resolve_and_split_qualified() {
         let mut providers = IndexMap::new();
-        providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])));
+        providers.insert(
+            "openai".to_string(),
+            pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])),
+        );
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let m = reg.resolve("openai/gpt-4o").unwrap();
         assert_eq!(m.id, "gpt-4o");
@@ -554,17 +568,33 @@ mod tests {
         m.insert("gpt-4o-mini".to_string(), mc("gpt-4o-mini").1);
         providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, m));
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
-        assert_eq!(reg.resolve_by_pattern("openai/gpt-4o").map(|m| m.id.clone()), Some("gpt-4o".to_string()));
-        assert_eq!(reg.resolve_by_pattern("gpt-4o-mini").map(|m| m.id.clone()), Some("gpt-4o-mini".to_string()));
-        assert_eq!(reg.resolve_by_pattern("GPT 4o").map(|m| m.id.clone()), Some("gpt-4o".to_string()));
-        assert_eq!(reg.resolve_by_pattern("mini").map(|m| m.id.clone()), Some("gpt-4o-mini".to_string()));
+        assert_eq!(
+            reg.resolve_by_pattern("openai/gpt-4o")
+                .map(|m| m.id.clone()),
+            Some("gpt-4o".to_string())
+        );
+        assert_eq!(
+            reg.resolve_by_pattern("gpt-4o-mini").map(|m| m.id.clone()),
+            Some("gpt-4o-mini".to_string())
+        );
+        assert_eq!(
+            reg.resolve_by_pattern("GPT 4o").map(|m| m.id.clone()),
+            Some("gpt-4o".to_string())
+        );
+        assert_eq!(
+            reg.resolve_by_pattern("mini").map(|m| m.id.clone()),
+            Some("gpt-4o-mini".to_string())
+        );
         assert!(reg.resolve_by_pattern("nope").is_none());
     }
 
     #[test]
     fn available_filters_by_resolved_key() {
         let mut providers = IndexMap::new();
-        providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])));
+        providers.insert(
+            "openai".to_string(),
+            pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])),
+        );
         let keyed = pcfg(Api::OpenAiCompletions, models(&["m2"]));
         let mut empty = pcfg(Api::OpenAiCompletions, models(&["m3"]));
         empty.api_key = None;
@@ -600,15 +630,20 @@ mod tests {
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let choices = reg.choices();
         // Sorted by qualified `provider/id`.
-        let qualified: Vec<String> =
-            choices.iter().map(|c| format!("{}/{}", c.provider, c.id)).collect();
+        let qualified: Vec<String> = choices
+            .iter()
+            .map(|c| format!("{}/{}", c.provider, c.id))
+            .collect();
         assert_eq!(
             qualified,
             vec!["anthropic/claude", "openai/gpt-4o", "openai/gpt-4o-mini"]
         );
         let by_id: std::collections::HashMap<&str, &lofi_types::ModelChoice> =
             choices.iter().map(|c| (c.id.as_str(), c)).collect();
-        assert_eq!(by_id["gpt-4o"].thinking_levels, vec![ThinkingLevel::Medium, ThinkingLevel::High]);
+        assert_eq!(
+            by_id["gpt-4o"].thinking_levels,
+            vec![ThinkingLevel::Medium, ThinkingLevel::High]
+        );
         assert!(by_id["gpt-4o-mini"].thinking_levels.is_empty());
         assert!(by_id["gpt-4o"].supports_image);
         assert!(!by_id["gpt-4o-mini"].supports_image);
@@ -647,7 +682,10 @@ mod tests {
         let mut cache: HashMap<String, Vec<(String, ModelConfig)>> = HashMap::new();
         cache.insert(
             "anthropic".to_string(),
-            vec![("claude-opus-4".to_string(), mc_named("claude-opus-4", "Claude Opus 4").1)],
+            vec![(
+                "claude-opus-4".to_string(),
+                mc_named("claude-opus-4", "Claude Opus 4").1,
+            )],
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auto.json");
@@ -669,7 +707,10 @@ mod tests {
         let mut p = pcfg(Api::OpenAiCompletions, IndexMap::new());
         p.api_types.insert(
             "anthropic-messages".to_string(),
-            ApiTypeMapping { path: None, pricing_field_mappings: None },
+            ApiTypeMapping {
+                path: None,
+                pricing_field_mappings: None,
+            },
         );
         let am = AutoModelsConfig {
             enabled: true,
@@ -677,9 +718,7 @@ mod tests {
             models_url: None,
             path: "data".to_string(),
             api_type_field: Some("preferred_api".to_string()),
-            api_type_mappings: HashMap::from([
-                ("messages".to_string(), Api::AnthropicMessages),
-            ]),
+            api_type_mappings: HashMap::from([("messages".to_string(), Api::AnthropicMessages)]),
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![ThinkingLevel::Medium],
             thinking_level: None,
@@ -774,14 +813,16 @@ mod tests {
             ]
         });
         let mut p = pcfg(Api::OpenAiCompletions, IndexMap::new());
-        p.api_types.get_mut("openai-completions").unwrap().pricing_field_mappings =
-            Some(PricingFieldMappings {
-                input: Some("cost.in".to_string()),
-                output: Some("cost.out".to_string()),
-                cache_read: None,
-                cache_write: None,
-                per_request: None,
-            });
+        p.api_types
+            .get_mut("openai-completions")
+            .unwrap()
+            .pricing_field_mappings = Some(PricingFieldMappings {
+            input: Some("cost.in".to_string()),
+            output: Some("cost.out".to_string()),
+            cache_read: None,
+            cache_write: None,
+            per_request: None,
+        });
         let am = AutoModelsConfig {
             enabled: true,
             auth: true,
@@ -815,7 +856,10 @@ mod tests {
         let mut cache: HashMap<String, Vec<(String, ModelConfig)>> = HashMap::new();
         cache.insert(
             "anthropic".to_string(),
-            vec![("claude-opus-4".to_string(), mc_named("claude-opus-4", "Claude Opus 4").1)],
+            vec![(
+                "claude-opus-4".to_string(),
+                mc_named("claude-opus-4", "Claude Opus 4").1,
+            )],
         );
         write_auto_cache(&cache_path, &cache).unwrap();
 

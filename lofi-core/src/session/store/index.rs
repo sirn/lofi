@@ -10,7 +10,8 @@ use lofi_error::{Error, Result};
 use lofi_types::SessionEvent;
 use serde::Deserialize;
 
-use super::{parse_event, short_id, Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION};/// Lightweight per-event index entry: just enough to build the event tree
+use super::{parse_event, short_id, Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION};
+/// Lightweight per-event index entry: just enough to build the event tree
 /// structure (id, `parent_id`, offset) and identify tree-node kinds, without
 /// deserializing message content. Used by `/tree` to avoid a full `load`.
 #[derive(Debug, Clone)]
@@ -92,8 +93,8 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             break line.to_string();
         }
     };
-    let header: Header = serde_json::from_str(&header_line)
-        .map_err(|e| Error::State(format!("json: {e}")))?;
+    let header: Header =
+        serde_json::from_str(&header_line).map_err(|e| Error::State(format!("json: {e}")))?;
     if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return Err(Error::State(format!(
             "unsupported session version {} in {}",
@@ -143,7 +144,12 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             _ => IndexKind::Other,
         };
         prev_id = Some(id.clone());
-        indices.push(EventIndex { id, parent_id, offset: line_start, kind });
+        indices.push(EventIndex {
+            id,
+            parent_id,
+            offset: line_start,
+            kind,
+        });
     }
     Ok((header.meta, indices, pos))
 }

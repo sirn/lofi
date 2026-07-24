@@ -17,8 +17,7 @@
 
 use std::path::Path;
 
-use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind,
-    Usage};
+use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind, Usage};
 
 use crate::session::store;
 use lofi_error::Result;
@@ -143,7 +142,10 @@ impl SessionRecorder {
             return Ok(None);
         }
         self.flushed = true;
-        let has_terminal = !matches!(outcome, TurnOutcome::Cancelled | TurnOutcome::ContextPressure);
+        let has_terminal = !matches!(
+            outcome,
+            TurnOutcome::Cancelled | TurnOutcome::ContextPressure
+        );
         if messages.is_empty()
             && summary.tool_elapsed.is_empty()
             && summary.thinking_elapsed.is_empty()
@@ -219,7 +221,8 @@ impl SessionRecorder {
             }
             TurnOutcome::ContextPressure | TurnOutcome::Cancelled => {}
         }
-        let (start, end) = store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
+        let (start, end) =
+            store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
         if end > start {
             Ok(Some((start, end)))
         } else {
@@ -308,7 +311,10 @@ mod tests {
             .unwrap()
             .expect("wrote something");
         // Second flush is a no-op.
-        assert!(rec.flush(&messages, &TurnOutcome::Finished, &summary(100)).unwrap().is_none());
+        assert!(rec
+            .flush(&messages, &TurnOutcome::Finished, &summary(100))
+            .unwrap()
+            .is_none());
         let (_meta, events, _offsets, _size) = store::load(&path).unwrap();
         // Expected order: 3 messages, native tool, tool timing, thinking
         // timing, turn end.
@@ -329,7 +335,10 @@ mod tests {
         }
         i += 1;
         match &events[i].kind {
-            SessionEventKind::ToolTiming { tool_call_id, elapsed_ms } => {
+            SessionEventKind::ToolTiming {
+                tool_call_id,
+                elapsed_ms,
+            } => {
                 assert_eq!(tool_call_id, "t1");
                 assert_eq!(*elapsed_ms, 7);
             }
@@ -342,7 +351,12 @@ mod tests {
         }
         i += 1;
         match &events[i].kind {
-            SessionEventKind::TurnEnd { model, elapsed_ms, cost, .. } => {
+            SessionEventKind::TurnEnd {
+                model,
+                elapsed_ms,
+                cost,
+                ..
+            } => {
                 assert_eq!(model, &RunModel::from("m"));
                 assert_eq!(*elapsed_ms, 100);
                 assert!((cost - 0.01).abs() < 1e-9);
@@ -367,13 +381,12 @@ mod tests {
         std::fs::write(&path, header()).unwrap();
         let mut rec = SessionRecorder::new(path.clone(), "m".into());
         let messages = vec![user_msg("go"), assistant_text("hi")];
-        rec.flush(&messages, &TurnOutcome::Cancelled, &summary(50)).unwrap();
+        rec.flush(&messages, &TurnOutcome::Cancelled, &summary(50))
+            .unwrap();
         let (_meta, events, _, _) = store::load(&path).unwrap();
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e.kind, SessionEventKind::TurnEnd { .. }))
-        );
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e.kind, SessionEventKind::TurnEnd { .. })));
     }
 
     #[test]
@@ -403,40 +416,41 @@ mod tests {
         std::fs::write(&path, header()).unwrap();
         // First turn: a completed user -> assistant exchange.
         let mut rec1 = SessionRecorder::new(path.clone(), "m".into());
-        rec1
-            .flush(
-                &[user_msg("first"), assistant_text("reply")],
-                &TurnOutcome::Finished,
-                &TurnSummary {
-                    elapsed_ms: 10,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                    tool_elapsed: vec![],
-                    thinking_elapsed: vec![],
-                    native_tools: vec![],
-                },
-            )
-            .unwrap();
+        rec1.flush(
+            &[user_msg("first"), assistant_text("reply")],
+            &TurnOutcome::Finished,
+            &TurnSummary {
+                elapsed_ms: 10,
+                cost: 0.0,
+                usage: Usage::default(),
+                tool_elapsed: vec![],
+                thinking_elapsed: vec![],
+                native_tools: vec![],
+            },
+        )
+        .unwrap();
 
         // Second turn: failed. Its messages + TurnFailed marker chain
         // linearly off the first turn's TurnEnd (same shape as a successful
         // turn), so the failed turn's content stays on the active path and
         // remains visible on resume.
         let mut rec2 = SessionRecorder::new(path.clone(), "m".into());
-        rec2
-            .flush(
-                &[user_msg("second"), assistant_text("partial")],
-                &TurnOutcome::Failed("boom".into()),
-                &TurnSummary {
-                    elapsed_ms: 5,
-                    cost: 0.02,
-                    usage: Usage { input_tokens: 1, ..Usage::default() },
-                    tool_elapsed: vec![],
-                    thinking_elapsed: vec![],
-                    native_tools: vec![],
+        rec2.flush(
+            &[user_msg("second"), assistant_text("partial")],
+            &TurnOutcome::Failed("boom".into()),
+            &TurnSummary {
+                elapsed_ms: 5,
+                cost: 0.02,
+                usage: Usage {
+                    input_tokens: 1,
+                    ..Usage::default()
                 },
-            )
-            .unwrap();
+                tool_elapsed: vec![],
+                thinking_elapsed: vec![],
+                native_tools: vec![],
+            },
+        )
+        .unwrap();
         let (_meta, events, _, _) = store::load(&path).unwrap();
         // The TurnFailed marker's parent is the failed turn's last message,
         // NOT the checkpoint — so the failed turn's content is on the active
