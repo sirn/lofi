@@ -14,6 +14,9 @@ use lofi_error::{Error, Result};
 use lofi_types::ThinkingLevel;
 
 pub mod tui;
+mod cli;
+
+pub use cli::run_cli;
 
 /// Options for the interactive TUI session.
 ///
