@@ -23,6 +23,7 @@
 //! NativeToolRecords on the active path rather than from per-tool messages.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind};
 
@@ -40,7 +41,7 @@ pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the m
 /// summary without carrying durable facts).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-enum Block {
+pub enum Block {
     User { text: String },
     Assistant { text: String },
     /// An exec tool call. code is the TypeScript source; label is the
@@ -50,6 +51,33 @@ enum Block {
     /// The result of an exec call. text is the surfaced value (or the
     /// error message); is_error marks failures.
     ToolResult { id: String, text: String, is_error: bool },
+}
+
+/// A named section produced by a compaction hook.
+///
+/// Each hook returns zero or more sections; each section is a title and a
+/// list of bullet items (`- item` lines). Sections are inserted into the
+/// summary between the stable sections (Goal, Preferences, Files, Commits)
+/// and the volatile section (Outstanding Context). Hook sections are treated
+/// as stable: they merge by dedup across compactions.
+#[derive(Debug, Clone)]
+pub struct SummarySection {
+    /// The section title, shown as `[Title]` in the summary.
+    pub title: String,
+    /// Bullet items, each shown as `- item`.
+    pub items: Vec<String>,
+}
+
+/// Hook trait allowing external crates (lofi-code) to inject custom summary
+/// sections into the compaction output. The hook receives the normalized
+/// [`Block`] transcript and returns additional sections.
+///
+/// This avoids hardcoding tool-specific knowledge (like API descriptions)
+/// in lofi-core; instead lofi-code registers a hook that knows its own tools.
+pub trait CompactionHook: Send + Sync {
+    /// Return additional summary sections for this compaction.
+    /// `blocks` is the normalized transcript of the summarized prefix.
+    fn sections(&self, blocks: &[Block]) -> Vec<SummarySection>;
 }
 
 /// A live message on the active path with the event id of the
@@ -110,6 +138,10 @@ pub struct CompactOptions {
     /// [`crate::context_edit`]). When `enabled` is false the tail is carried
     /// verbatim.
     pub edit: lofi_types::EditConfig,
+    /// Compaction hooks (e.g. lofi-code's tool-API section). Each hook
+    /// receives the normalized transcript blocks and returns additional
+    /// summary sections.
+    pub hooks: Vec<Arc<dyn CompactionHook>>,
 }
 
 /// Minimum number of live messages the summarized prefix must contain for a
@@ -199,7 +231,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
 
     let prefix_messages: Vec<&Message> = live[..plan.summarized].iter().map(|lm| &lm.message).collect();
     let blocks = normalize(&prefix_messages, &native_by_parent);
-    let fresh = build_summary(&blocks);
+    let fresh = build_summary(&blocks, &opts.hooks);
     let summary = match &previous_summary {
         Some(prev) => merge_previous(prev, &fresh),
         None => fresh,
@@ -507,7 +539,7 @@ const SEPARATOR: &str = "\n\n---\n\n";
 
 /// Build the full fresh summary (no merging): preamble + ordered sections +
 /// brief transcript.
-fn build_summary(blocks: &[Block]) -> String {
+fn build_summary(blocks: &[Block], hooks: &[Arc<dyn CompactionHook>]) -> String {
     let goal = extract_session_goal(blocks);
     let prefs = extract_preferences(blocks);
     let files = extract_files(blocks);
@@ -515,7 +547,7 @@ fn build_summary(blocks: &[Block]) -> String {
     let outstanding = extract_outstanding(blocks);
     let brief = build_brief(blocks);
 
-    let stable: Vec<String> = [
+    let mut stable: Vec<String> = [
         section("Session Goal", &goal),
         section("User Preferences", &prefs),
         section("Files And Changes", &files),
@@ -524,6 +556,18 @@ fn build_summary(blocks: &[Block]) -> String {
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
+
+    // Hook sections (e.g. APIs Used from lofi-code) go after the stable
+    // built-in sections, before the volatile Outstanding Context.
+    for hook in hooks {
+        for sec in hook.sections(blocks) {
+            let s = section(&sec.title, &sec.items);
+            if !s.is_empty() {
+                stable.push(s);
+            }
+        }
+    }
+
     let volatile: Vec<String> = [section("Outstanding Context", &outstanding)]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -711,7 +755,7 @@ fn extract_outstanding(blocks: &[Block]) -> Vec<String> {
     for b in tail {
         match b {
             Block::ToolResult { text, is_error: true, .. } => {
-                let s = format!("[ERROR] {}", first_line(text, 150));
+                let s = format!("[ERROR] {}", compress_tool_result(text, 150));
                 if seen.insert(s.clone()) { items.push(s); }
             }
             Block::ToolCall { native, .. } => {
@@ -745,6 +789,8 @@ fn extract_outstanding(blocks: &[Block]) -> Vec<String> {
 const BRIEF_MAX_LINES: usize = 120;
 const TRUNC_USER: usize = 256;
 const TRUNC_ASSISTANT: usize = 200;
+const TOOL_CALLS_PER_TURN: usize = 8;
+const BASH_CAP: usize = 120;
 
 /// Build the compressed per-turn transcript: [user]/[assistant] sections
 /// with clipped text and one-liner tool actions.
@@ -779,13 +825,13 @@ fn build_brief(blocks: &[Block]) -> String {
                 }
             }
             Block::ToolResult { text, is_error: true, .. } => {
-                let body = first_line(text, 150);
+                let body = compress_tool_result(text, 150);
                 if body.is_empty() { continue; }
                 if last_header != "[tool_error]" { lines.push("[tool_error]".to_string()); last_header = "[tool_error]"; }
                 lines.push(body);
             }
             Block::ToolResult { text, is_error: false, .. } => {
-                let body = first_line(text, 100);
+                let body = compress_tool_result(text, 120);
                 if body.is_empty() { continue; }
                 if last_header != "[tool_result]" { lines.push("[tool_result]".to_string()); last_header = "[tool_result]"; }
                 // Preserve the full-output path from bash truncation notices so
@@ -839,10 +885,28 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     let (fresh_headers, fresh_brief) = split_headers_brief(&fresh);
 
     let mut merged_headers: Vec<String> = Vec::new();
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
     for header in SECTION_HEADERS {
+        handled.insert((*header).to_string());
         let p = section_of(&prev_headers, header);
         let f = section_of(&fresh_headers, header);
         let merged = merge_section(header, &p, &f);
+        if !merged.is_empty() {
+            merged_headers.push(merged);
+        }
+    }
+
+    // Carry forward hook-provided sections (any [Header] not in
+    // SECTION_HEADERS). Fresh sections replace prev ones of the same name;
+    // prev-only sections are kept so hook data is never lost on re-compact.
+    for header in extra_section_names(&prev_headers, &fresh_headers, &handled) {
+        let p = section_of(&prev_headers, &header);
+        let f = section_of(&fresh_headers, &header);
+        let merged = if f.is_empty() {
+            format!("[{header}]\n{p}")
+        } else {
+            merge_section(&header, &p, &f)
+        };
         if !merged.is_empty() {
             merged_headers.push(merged);
         }
@@ -891,6 +955,27 @@ fn section_of(headers: &str, name: &str) -> String {
     let rest = &headers[start..];
     let end = rest.find("\n[").unwrap_or(rest.len());
     rest[..end].trim().to_string()
+}
+
+/// Collect `[Header]` names from both prev and fresh headers that are not in
+/// the built-in `SECTION_HEADERS` set. These are hook-provided sections that
+/// must be carried through merges. Returns names in order of first appearance
+/// (prev then fresh), deduplicated.
+fn extra_section_names(prev: &str, fresh: &str, builtin: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for text in [prev, fresh] {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let name = name.to_string();
+                if !builtin.contains(&name) && seen.insert(name.clone()) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Merge one section. Outstanding Context is volatile (fresh only). Files And
@@ -1003,6 +1088,106 @@ fn clip(text: &str, max: usize) -> String {
 fn first_line(text: &str, max: usize) -> String {
     let line = text.split('\n').next().unwrap_or("").trim();
     clip(line, max)
+}
+
+/// Compress a tool result into a compact, meaningful summary.
+///
+/// Instead of just taking the first line (which may be `{` for JSON output),
+/// this tries to extract the most useful information:
+/// - For JSON objects, it picks out key fields like `output`, `ok`, `code`, etc.
+/// - For multi-line text, it takes the first few non-empty lines.
+/// - Falls back to first_line for single-line results.
+fn compress_tool_result(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Single-line results: just clip.
+    if !trimmed.contains('\n') {
+        return clip(trimmed, max);
+    }
+
+    // Try JSON parsing for structured tool output.
+    if trimmed.starts_with('{') {
+        if let Some(summary) = compress_json_result(trimmed, max) {
+            return summary;
+        }
+    }
+
+    // For multi-line text, take up to 3 non-empty lines and join with " | ".
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let joined = lines.join(" | ");
+    clip(&joined, max)
+}
+
+/// Extract a compact summary from a JSON tool result object.
+/// Picks out the most informative fields and formats them as `key=value` pairs.
+fn compress_json_result(text: &str, max: usize) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = v.as_object()?;
+    // Priority fields that carry the most useful info.
+    let priority = ["output", "error", "stderr", "stdout", "path", "value", "result", "content", "message", "text"];
+    let mut parts: Vec<String> = Vec::new();
+
+    // First, grab priority fields.
+    for key in &priority {
+        if let Some(val) = obj.get(*key) {
+            let s = json_value_brief(val, 60);
+            if !s.is_empty() {
+                parts.push(format!("{key}={s}"));
+            }
+        }
+    }
+
+    // Then grab status-ish fields.
+    for key in &["ok", "code", "status", "signal", "is_error", "duration_ms"] {
+        if let Some(val) = obj.get(*key) {
+            let s = json_value_brief(val, 30);
+            if !s.is_empty() {
+                parts.push(format!("{key}={s}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        // No recognised fields; show first 3 keys.
+        for (k, v) in obj.iter().take(3) {
+            let s = json_value_brief(v, 40);
+            if !s.is_empty() {
+                parts.push(format!("{k}={s}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(clip(&parts.join(" "), max))
+}
+
+/// Render a JSON value as a brief string for inclusion in a compressed summary.
+fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
+    match v {
+        serde_json::Value::String(s) => clip(s.trim(), max),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Array(a) => {
+            if a.is_empty() { "[]".to_string() } else { format!("[{} items]", a.len()) }
+        }
+        serde_json::Value::Object(o) => {
+            if o.is_empty() { "{}".to_string() } else { format!("{{{} fields}}", o.len()) }
+        }
+    }
 }
 
 /// Extract the absolute path from a bash truncation notice like
