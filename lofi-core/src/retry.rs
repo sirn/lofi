@@ -201,13 +201,21 @@ mod tests {
     #[test]
     fn retryable_provider_errors() {
         assert!(is_retryable_error(&Error::Provider("overloaded".into())));
-        assert!(is_retryable_error(&Error::Provider("HTTP 429 Too Many Requests".into())));
-        assert!(is_retryable_error(&Error::Provider("503 service unavailable".into())));
-        assert!(is_retryable_error(&Error::Provider("stream idle timeout".into())));
+        assert!(is_retryable_error(&Error::Provider(
+            "HTTP 429 Too Many Requests".into()
+        )));
+        assert!(is_retryable_error(&Error::Provider(
+            "503 service unavailable".into()
+        )));
+        assert!(is_retryable_error(&Error::Provider(
+            "stream idle timeout".into()
+        )));
         assert!(is_retryable_error(&Error::Provider(
             "connection refused: upstream connect".into()
         )));
-        assert!(is_retryable_error(&Error::Provider("socket hang up".into())));
+        assert!(is_retryable_error(&Error::Provider(
+            "socket hang up".into()
+        )));
         assert!(is_retryable_error(&Error::Provider(
             "Please retry your request".into()
         )));
@@ -232,7 +240,9 @@ mod tests {
     #[test]
     fn non_error_variants_are_not_retryable() {
         assert!(!is_retryable_error(&Error::Cancelled));
-        assert!(!is_retryable_error(&Error::Tool("some tool failure".into())));
+        assert!(!is_retryable_error(&Error::Tool(
+            "some tool failure".into()
+        )));
     }
 
     #[test]

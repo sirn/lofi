@@ -45,8 +45,6 @@ const CLIP_SUMMARY: usize = 300;
 const CLIP_THINKING: usize = 150;
 const CLIP_TOOL_RESULT: usize = 200;
 
-
-
 /// A flat, rendered view of one message: the unit recall returns. `index` is
 /// the message's global index in file order (stable across scopes), so
 /// `expand` indices line up regardless of which scope produced them.
@@ -87,7 +85,10 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     let mut native_by_parent: HashMap<String, Vec<&NativeToolRecord>> = HashMap::new();
     for e in events {
         if let SessionEventKind::NativeTool(rec) = &e.kind {
-            native_by_parent.entry(rec.parent.clone()).or_default().push(rec);
+            native_by_parent
+                .entry(rec.parent.clone())
+                .or_default()
+                .push(rec);
         }
     }
 
@@ -113,13 +114,20 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
                 text: format!(
                     "Cannot expand indices outside {}: {}",
                     scope_label(&scope),
-                    invalid.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ")
+                    invalid
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 status: format!("{} invalid", invalid.len()),
             };
         }
         let text = format_recall_output(&expanded, None, None);
-        return RecallOutcome { text, status: format!("expanded {}", expanded.len()) };
+        return RecallOutcome {
+            text,
+            status: format!("expanded {}", expanded.len()),
+        };
     }
 
     // Load clipped entries + keep the raw messages for full-text search and
@@ -131,7 +139,11 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         // Browse mode: most recent DEFAULT_RECENT entries, flat.
         let start = entries.len().saturating_sub(DEFAULT_RECENT);
         let recent = &entries[start..];
-        let label = if matches!(scope, Scope::All) { Some("Scope: all".to_string()) } else { None };
+        let label = if matches!(scope, Scope::All) {
+            Some("Scope: all".to_string())
+        } else {
+            None
+        };
         let text = format_recall_output(recent, None, label);
         let status = format!("{} entries", recent.len());
         return RecallOutcome { text, status };
@@ -160,19 +172,25 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         };
     }
     let start = (page - 1) * PAGE_SIZE;
-    let mut page_hits: Vec<SearchHit> = all_hits[start..(start + PAGE_SIZE).min(all_hits.len())].to_vec();
+    let mut page_hits: Vec<SearchHit> =
+        all_hits[start..(start + PAGE_SIZE).min(all_hits.len())].to_vec();
 
     // Expand: swap the clipped snippet for full content on paged hits whose
     // index is in expand_set. Re-render from the parallel raw message.
     let mut expanded: Vec<usize> = Vec::new();
     if has_expand {
-        let raw_by_index: HashMap<usize, &Message> =
-            raw_messages.iter().enumerate().map(|(i, m)| (entries[i].index, m)).collect();
+        let raw_by_index: HashMap<usize, &Message> = raw_messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (entries[i].index, m))
+            .collect();
         for hit in &mut page_hits {
             if !expand_set.contains(&hit.entry.index) {
                 continue;
             }
-            let Some(raw) = raw_by_index.get(&hit.entry.index) else { continue };
+            let Some(raw) = raw_by_index.get(&hit.entry.index) else {
+                continue;
+            };
             let full = render_message(raw, hit.entry.index, true, &native_by_parent);
             hit.entry.summary.clone_from(&full.summary);
             hit.snippet = Some(full.summary);
@@ -181,7 +199,11 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     }
 
     let header = if total_pages > 1 {
-        format!("Page {page}/{total_pages} ({} total matches{})", all_hits.len(), scope_suffix(&scope))
+        format!(
+            "Page {page}/{total_pages} ({} total matches{})",
+            all_hits.len(),
+            scope_suffix(&scope)
+        )
     } else {
         format!("{} matches{}", all_hits.len(), scope_suffix(&scope))
     };
@@ -189,25 +211,48 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     if page < total_pages && page < MAX_PAGES {
         footer.push(format!("--- Use page:{} for more results ---", page + 1));
     } else if total_pages > MAX_PAGES {
-        footer.push(format!("--- Results truncated at {MAX_PAGES} pages. Narrow the query or scope. ---"));
+        footer.push(format!(
+            "--- Results truncated at {MAX_PAGES} pages. Narrow the query or scope. ---"
+        ));
     }
     if has_expand {
-        let not_expanded: Vec<usize> = req.expand.iter().copied().filter(|i| !expanded.contains(i)).collect();
-        let noun = if expanded.len() == 1 { "entry" } else { "entries" };
+        let not_expanded: Vec<usize> = req
+            .expand
+            .iter()
+            .copied()
+            .filter(|i| !expanded.contains(i))
+            .collect();
+        let noun = if expanded.len() == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
         if !expanded.is_empty() && not_expanded.is_empty() {
-            footer.push(format!("--- expanded {} {} to full content ---", expanded.len(), noun));
+            footer.push(format!(
+                "--- expanded {} {} to full content ---",
+                expanded.len(),
+                noun
+            ));
         } else if !expanded.is_empty() {
             footer.push(format!(
                 "--- expanded {} {} to full content; not on this page: {} ---",
                 expanded.len(),
                 noun,
-                not_expanded.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ")
+                not_expanded
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         } else {
             footer.push("--- no expand indices on this page ---".to_string());
         }
     }
-    let footer_text = if footer.is_empty() { String::new() } else { format!("\n{}", footer.join("\n")) };
+    let footer_text = if footer.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", footer.join("\n"))
+    };
 
     // format_recall_output takes entries; map hits back to entries (snippet
     // carried separately). We render via the segment formatter by passing
@@ -215,7 +260,10 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     // hand the hits to a dedicated formatter.
     let mut text = format_search_output(&page_hits, query, &header);
     text.push_str(&footer_text);
-    RecallOutcome { text, status: format!("{} matches", all_hits.len()) }
+    RecallOutcome {
+        text,
+        status: format!("{} matches", all_hits.len()),
+    }
 }
 
 // ── scope resolution ──────────────────────────────────────────────────────
@@ -226,7 +274,10 @@ enum Scope {
     Lineage(std::collections::HashSet<String>),
     All,
     /// `ids` is the summarized range's event ids; `label` is for display.
-    Compaction { ids: std::collections::HashSet<String>, label: String },
+    Compaction {
+        ids: std::collections::HashSet<String>,
+        label: String,
+    },
 }
 
 fn resolve_scope(events: &[SessionEvent], scope: &RecallScope) -> Scope {
@@ -254,7 +305,9 @@ fn resolve_scope(events: &[SessionEvent], scope: &RecallScope) -> Scope {
                 return Scope::Lineage(default_lineage_ids(events));
             };
             let range = match &target_ev.kind {
-                SessionEventKind::Compaction { summarized_range, .. } => summarized_range.clone(),
+                SessionEventKind::Compaction {
+                    summarized_range, ..
+                } => summarized_range.clone(),
                 _ => unreachable!(),
             };
             // Map the [first, last] event ids to every message event id in
@@ -264,10 +317,13 @@ fn resolve_scope(events: &[SessionEvent], scope: &RecallScope) -> Scope {
             let ids = collect_range_ids(events, &range[0], &range[1]);
             Scope::Compaction {
                 ids,
-                label: format!("scope:compaction:{}", match target {
-                    CompactionTarget::Latest => "latest".to_string(),
-                    CompactionTarget::Index(n) => n.to_string(),
-                }),
+                label: format!(
+                    "scope:compaction:{}",
+                    match target {
+                        CompactionTarget::Latest => "latest".to_string(),
+                        CompactionTarget::Index(n) => n.to_string(),
+                    }
+                ),
             }
         }
     }
@@ -437,7 +493,11 @@ fn render_assistant(
     for eid in &exec_ids {
         if let Some(recs) = native_by_parent.get(eid) {
             for rec in recs {
-                tools.push(format!("lofi.{}({})", rec.name, summarize_native_args(&rec.name, &rec.args)));
+                tools.push(format!(
+                    "lofi.{}({})",
+                    rec.name,
+                    summarize_native_args(&rec.name, &rec.args)
+                ));
                 if let Some(p) = extract_path(&rec.name, &rec.args) {
                     files.push(p);
                 }
@@ -459,13 +519,21 @@ fn render_assistant(
         let clip_len = if full { usize::MAX } else { CLIP_SUMMARY };
         summary.push_str(&clip(&t, clip_len));
     }
-    RecallEntry { index, role: "assistant", summary: summary.trim_end().to_string(), files }
+    RecallEntry {
+        index,
+        role: "assistant",
+        summary: summary.trim_end().to_string(),
+        files,
+    }
 }
 
 fn render_tool_result(msg: &Message, full: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     for b in &msg.blocks {
-        if let ContentBlock::ToolResult { content, is_error, .. } = b {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = b
+        {
             let prefix = if *is_error { "ERROR " } else { "" };
             let clip_len = if full { usize::MAX } else { CLIP_TOOL_RESULT };
             parts.push(format!("{prefix}[exec] {}", clip(content, clip_len)));
@@ -557,7 +625,11 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
         for (i, hay) in docs.iter().enumerate() {
             if re.is_match(hay) {
                 let snip = line_snippet(&full_text(&messages[i]), &re);
-                hits.push(SearchHit { entry: entries[i].clone(), snippet: snip, match_count: 1 });
+                hits.push(SearchHit {
+                    entry: entries[i].clone(),
+                    snippet: snip,
+                    match_count: 1,
+                });
                 if hits.len() >= MAX_SEARCH_RESULTS {
                     break;
                 }
@@ -571,11 +643,18 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
     if terms.is_empty() {
         return Vec::new();
     }
-    let patterns: Vec<regex::Regex> = terms.iter().map(|t| regex::Regex::new(&regex::escape(t)).unwrap()).collect();
+    let patterns: Vec<regex::Regex> = terms
+        .iter()
+        .map(|t| regex::Regex::new(&regex::escape(t)).unwrap())
+        .collect();
 
     // BM25 context.
     let n = docs.len();
-    let avg_dl = docs.iter().map(|d| d.split_whitespace().count()).sum::<usize>() as f64 / n.max(1) as f64;
+    let avg_dl = docs
+        .iter()
+        .map(|d| d.split_whitespace().count())
+        .sum::<usize>() as f64
+        / n.max(1) as f64;
     let mut df: Vec<usize> = vec![0; terms.len()];
     for d in &docs {
         for (i, p) in patterns.iter().enumerate() {
@@ -600,15 +679,30 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
             let idf = (((n - df[j]) as f64 + 0.5) / (df[j] as f64 + 0.5) + 1.0).ln();
             let k = 1.2;
             let b = 0.75;
-            let tfn = (tf as f64 * (k + 1.0)) / (tf as f64 + k * (1.0 - b + b * dl / avg_dl.max(1.0)));
+            let tfn =
+                (tf as f64 * (k + 1.0)) / (tf as f64 + k * (1.0 - b + b * dl / avg_dl.max(1.0)));
             score += idf * tfn;
         }
         if mc < min_match {
             continue;
         }
-        let snip_re = regex::Regex::new(&patterns.iter().map(regex::Regex::as_str).collect::<Vec<_>>().join("|")).unwrap();
+        let snip_re = regex::Regex::new(
+            &patterns
+                .iter()
+                .map(regex::Regex::as_str)
+                .collect::<Vec<_>>()
+                .join("|"),
+        )
+        .unwrap();
         let snip = line_snippet(&full_text(&messages[i]), &snip_re);
-        scored.push((score, SearchHit { entry: entries[i].clone(), snippet: snip, match_count: mc }));
+        scored.push((
+            score,
+            SearchHit {
+                entry: entries[i].clone(),
+                snippet: snip,
+                match_count: mc,
+            },
+        ));
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -666,7 +760,8 @@ fn safe_regex(pattern: &str) -> regex::Regex {
         let head: String = pattern.chars().take(64).collect();
         return regex::Regex::new(&regex::escape(&head)).unwrap();
     }
-    regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new(&regex::escape(pattern)).unwrap())
+    regex::Regex::new(pattern)
+        .unwrap_or_else(|_| regex::Regex::new(&regex::escape(pattern)).unwrap())
 }
 
 /// ±2 lines around the first regex match, with elision markers.
@@ -679,7 +774,11 @@ fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
     if start > 0 {
         parts.push(format!("...({start} lines above)"));
     }
-    parts.extend(lines[start..end].iter().map(std::string::ToString::to_string));
+    parts.extend(
+        lines[start..end]
+            .iter()
+            .map(std::string::ToString::to_string),
+    );
     if end < lines.len() {
         parts.push(format!("...({} lines below)", lines.len() - end));
     }
@@ -688,13 +787,13 @@ fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
 
 const STOPWORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "shall",
-    "of", "in", "to", "for", "with", "on", "at", "from", "by", "as", "into", "through",
-    "during", "before", "after", "above", "below", "between", "out", "off", "over", "under",
-    "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all",
-    "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not",
-    "only", "own", "same", "so", "than", "too", "very", "just", "about", "it", "its", "that",
-    "this", "what", "which", "who", "whom", "these", "those",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "shall", "of",
+    "in", "to", "for", "with", "on", "at", "from", "by", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "out", "off", "over", "under", "again",
+    "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "both",
+    "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+    "same", "so", "than", "too", "very", "just", "about", "it", "its", "that", "this", "what",
+    "which", "who", "whom", "these", "those",
 ];
 
 fn filter_stopwords<'a>(terms: &[&'a str]) -> Vec<&'a str> {
@@ -713,11 +812,16 @@ fn filter_stopwords<'a>(terms: &[&'a str]) -> Vec<&'a str> {
 // ── output formatting ──────────────────────────────────────────────────────
 
 /// Browse mode: one flat block per entry.
-fn format_recall_output(entries: &[RecallEntry], _query: Option<&str>, header_override: Option<String>) -> String {
+fn format_recall_output(
+    entries: &[RecallEntry],
+    _query: Option<&str>,
+    header_override: Option<String>,
+) -> String {
     if entries.is_empty() {
         return "No entries in session history.".to_string();
     }
-    let header = header_override.unwrap_or_else(|| format!("Session history ({} entries):", entries.len()));
+    let header =
+        header_override.unwrap_or_else(|| format!("Session history ({} entries):", entries.len()));
     let body = entries
         .iter()
         .map(|e| {
@@ -757,8 +861,19 @@ fn format_search_output(hits: &[SearchHit], query: &str, header: &str) -> String
         } else {
             format!(" files:[{}]", hit.entry.files.join(", "))
         };
-        let body = hit.snippet.clone().unwrap_or_else(|| hit.entry.summary.clone());
-        lines.push(format!("{mark} #{} [{}]{} ({} term{}) {}", hit.entry.index, hit.entry.role, file_suffix, hit.match_count, if hit.match_count == 1 { "" } else { "s" }, body));
+        let body = hit
+            .snippet
+            .clone()
+            .unwrap_or_else(|| hit.entry.summary.clone());
+        lines.push(format!(
+            "{mark} #{} [{}]{} ({} term{}) {}",
+            hit.entry.index,
+            hit.entry.role,
+            file_suffix,
+            hit.match_count,
+            if hit.match_count == 1 { "" } else { "s" },
+            body
+        ));
     }
     lines.join("\n")
 }
@@ -814,19 +929,33 @@ mod tests {
     use super::*;
 
     fn ev(id: &str, kind: SessionEventKind) -> SessionEvent {
-        SessionEvent { id: id.to_string(), parent_id: None, kind }
+        SessionEvent {
+            id: id.to_string(),
+            parent_id: None,
+            kind,
+        }
     }
     fn user(id: &str, text: &str) -> SessionEvent {
-        ev(id, SessionEventKind::Message(Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::Text { text: text.to_string() }],
-        }))
+        ev(
+            id,
+            SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+            }),
+        )
     }
     fn assistant(id: &str, text: &str) -> SessionEvent {
-        ev(id, SessionEventKind::Message(Message {
-            role: Role::Assistant,
-            blocks: vec![ContentBlock::Text { text: text.to_string() }],
-        }))
+        ev(
+            id,
+            SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+            }),
+        )
     }
 
     #[test]
@@ -834,7 +963,13 @@ mod tests {
         let events: Vec<SessionEvent> = (0..30)
             .map(|i| user(&format!("u{i}"), &format!("prompt {i}")))
             .collect();
-        let out = recall(&events, &RecallRequest { scope: RecallScope::All, ..Default::default() });
+        let out = recall(
+            &events,
+            &RecallRequest {
+                scope: RecallScope::All,
+                ..Default::default()
+            },
+        );
         // Last 25 entries.
         assert!(out.text.contains("#5 [user]"));
         assert!(out.text.contains("#29 [user]"));
@@ -857,7 +992,11 @@ mod tests {
         };
         let out = recall(&events, &req);
         assert!(out.text.contains("#2 [user]"), "matched user: {}", out.text);
-        assert!(out.text.contains("#3 [assistant]"), "matched assistant: {}", out.text);
+        assert!(
+            out.text.contains("#3 [assistant]"),
+            "matched assistant: {}",
+            out.text
+        );
         assert!(out.status.contains("matches"));
     }
 
@@ -888,13 +1027,16 @@ mod tests {
             assistant("b", "old reply one"),
             user("c", "kept prompt"),
             assistant("d", "kept reply"),
-            ev("cmp", SessionEventKind::Compaction {
-                summary: "SUMMARY".to_string(),
-                first_kept_entry_id: "c".to_string(),
-                summarized_range: ["a".to_string(), "b".to_string()],
-                summarized: 2,
-                kept: 2,
-            }),
+            ev(
+                "cmp",
+                SessionEventKind::Compaction {
+                    summary: "SUMMARY".to_string(),
+                    first_kept_entry_id: "c".to_string(),
+                    summarized_range: ["a".to_string(), "b".to_string()],
+                    summarized: 2,
+                    kept: 2,
+                },
+            ),
         ];
         let req = RecallRequest {
             query: Some("old".to_string()),
@@ -902,7 +1044,11 @@ mod tests {
             ..Default::default()
         };
         let out = recall(&events, &req);
-        assert!(out.text.contains("#0 [user]"), "folded message visible via recall: {}", out.text);
+        assert!(
+            out.text.contains("#0 [user]"),
+            "folded message visible via recall: {}",
+            out.text
+        );
         assert!(out.text.contains("#1 [assistant]"));
         // Kept messages are outside the compaction range.
         assert!(!out.text.contains("#2 [user]"));

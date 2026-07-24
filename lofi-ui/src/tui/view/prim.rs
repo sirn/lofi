@@ -25,9 +25,7 @@ pub fn width(s: &str) -> usize {
 /// Byte offset of the `char_idx`-th char of `s` (i.e. where the substring
 /// starting at that char begins). `char_idx == char_count` yields `s.len()`.
 fn char_byte_offset(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map_or(s.len(), |(b, _)| b)
+    s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
 }
 
 /// Paint a selection background over the char range `[start, end)` of a line
@@ -68,10 +66,7 @@ pub fn apply_selection(line: &mut Line<'static>, start: usize, end: usize, bg: C
             out.push(Span::styled(content[..b_lo].to_string(), style));
         }
         let sel_style = style.bg(bg);
-        out.push(Span::styled(
-            content[b_lo..b_hi].to_string(),
-            sel_style,
-        ));
+        out.push(Span::styled(content[b_lo..b_hi].to_string(), sel_style));
         if hi < n {
             out.push(Span::styled(content[b_hi..].to_string(), style));
         }
@@ -123,7 +118,11 @@ pub struct RawLine {
 impl RawLine {
     /// Build a raw line with a position map.
     pub fn new(source: Arc<str>, map: Vec<usize>, hard_break: bool) -> Self {
-        Self { source, map, hard_break }
+        Self {
+            source,
+            map,
+            hard_break,
+        }
     }
 
     /// Build a raw line whose entire source is one unbroken span (no
@@ -132,7 +131,11 @@ impl RawLine {
     /// to a contiguous source range starting at `start`.
     pub fn linear(source: Arc<str>, start: usize, display_len: usize, hard_break: bool) -> Self {
         let map = (0..=display_len).map(|k| start + k).collect();
-        Self { source, map, hard_break }
+        Self {
+            source,
+            map,
+            hard_break,
+        }
     }
 }
 
@@ -234,9 +237,10 @@ pub fn rtile(
 ) -> RenderLine {
     let mut rl = render(deco, content, Vec::new());
     let used = char_count(&rl.line.spans);
-    rl.line
-        .spans
-        .push(Span::styled(" ".repeat(width.saturating_sub(used)), Style::new().bg(bg)));
+    rl.line.spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used)),
+        Style::new().bg(bg),
+    ));
     rl
 }
 
@@ -252,7 +256,7 @@ pub fn rtile(
 /// padding rows, icons).
 pub fn rtile_wrapped(
     deco: Vec<Span<'static>>,
-    cont_deco: Vec<Span<'static>>,
+    cont_deco: &[Span<'static>],
     content: Vec<Span<'static>>,
     bg: Color,
     width: usize,
@@ -263,7 +267,11 @@ pub fn rtile_wrapped(
     let wrapped = wrap_line_styled(&line, avail);
     let mut out = Vec::new();
     for (i, wl) in wrapped.into_iter().enumerate() {
-        let d = if i == 0 { deco.clone() } else { cont_deco.clone() };
+        let d = if i == 0 {
+            deco.clone()
+        } else {
+            cont_deco.to_owned()
+        };
         out.push(rtile(d, wl.spans, bg, width));
     }
     if out.is_empty() {
@@ -347,7 +355,10 @@ pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
         }
         // Indent = leading ASCII whitespace, stripped before wrapping and
         // prepended to every output row.
-        let indent_len = line.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let indent_len = line
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
         let indent = &line[..indent_len];
         let body = &line[indent_len..];
         let content_w = max_w.saturating_sub(width(indent));
@@ -358,7 +369,10 @@ pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
         }
         let cells: Vec<(char, Style)> = body.chars().map(|c| (c, Style::default())).collect();
         for group in wrap_cells(&cells, content_w) {
-            out.push(format!("{indent}{}", group.iter().map(|(c, _)| *c).collect::<String>()));
+            out.push(format!(
+                "{indent}{}",
+                group.iter().map(|(c, _)| *c).collect::<String>()
+            ));
         }
     }
     if out.is_empty() {
@@ -470,8 +484,6 @@ fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
     Line::from(spans)
 }
 
-
-
 /// Format a duration compactly: `12s` past ten seconds, `3.4s` below.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn fmt_duration(d: std::time::Duration) -> String {
@@ -505,13 +517,7 @@ pub fn branch(t: Theme, bg: Color, is_last: bool) -> Span<'static> {
 
 /// A status icon: a spinner frame while `working`, `✗` on error, `✓` on done.
 /// `frame` is the current spinner frame index (from [`Cx::spinner`]).
-pub fn status_icon(
-    t: Theme,
-    bg: Color,
-    working: bool,
-    error: bool,
-    frame: usize,
-) -> Span<'static> {
+pub fn status_icon(t: Theme, bg: Color, working: bool, error: bool, frame: usize) -> Span<'static> {
     if working {
         Span::styled(
             format!("{} ", SPINNER[frame % SPINNER.len()]),
@@ -526,7 +532,10 @@ pub fn status_icon(
 
 /// Bold foreground span on `bg`.
 pub fn bold(text: String, t: Theme, bg: Color) -> Span<'static> {
-    Span::styled(text, Style::new().fg(t.fg).add_modifier(Modifier::BOLD).bg(bg))
+    Span::styled(
+        text,
+        Style::new().fg(t.fg).add_modifier(Modifier::BOLD).bg(bg),
+    )
 }
 
 /// Muted foreground span on `bg`.
@@ -669,9 +678,7 @@ mod tests {
 
     #[test]
     fn hstack_center_is_centered() {
-        let line = HStack::new(10)
-            .center([Span::raw("ab")])
-            .build();
+        let line = HStack::new(10).center([Span::raw("ab")]).build();
         assert_eq!(line.width(), 10);
         assert_eq!(spans_of(&line), "    ab    ");
     }
@@ -822,7 +829,11 @@ mod tests {
         // keeps the break space as trailing content, so the total char
         // count of the collapsed text is preserved across widths.
         let s = "The quick  brown   fox jumps over the lazy dog and keeps going";
-        let collapsed: String = s.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+        let collapsed: String = s
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let expected = collapsed.chars().count();
         for &w in &[5usize, 10, 20, 40, 80] {
             let segs = wrap(s, w);
@@ -835,13 +846,21 @@ mod tests {
     fn wrap_line_styled_content_length_is_stable_across_widths() {
         // Same invariant for styled lines: `wrap_cells` keeps break spaces
         // so the total content char count is stable across widths.
-        let line = Line::from(vec![
-            Span::raw("The quick brown fox jumps over the lazy dog".to_string()),
-        ]);
+        let line = Line::from(vec![Span::raw(
+            "The quick brown fox jumps over the lazy dog".to_string(),
+        )]);
         let expected: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         for &w in &[5usize, 10, 20, 40, 80] {
             let wrapped = wrap_line_styled(&line, w);
-            let sum: usize = wrapped.iter().map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>()).sum();
+            let sum: usize = wrapped
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.chars().count())
+                        .sum::<usize>()
+                })
+                .sum();
             assert_eq!(sum, expected, "width {w}");
         }
     }
@@ -853,7 +872,12 @@ mod tests {
         // cumulative content length (the Navigate cursor's anchor) depends
         // on the number of wraps — i.e. on width.
         let rl = rline(vec![Span::raw("  ")], vec![Span::raw("    indented body")]);
-        let chars: Vec<char> = rl.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+        let chars: Vec<char> = rl
+            .line
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .collect();
         let content: String = chars[rl.content.0..rl.content.1].iter().collect();
         assert_eq!(content, "indented body");
         assert_eq!(rl.content_len(), "indented body".len());

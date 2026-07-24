@@ -25,8 +25,6 @@ pub enum CompactionTarget {
     Latest,
 }
 
-
-
 /// A recall request — the union of the `/recall` command's args and the
 /// `lofi.recall` tool's parameters.
 #[derive(Debug, Clone, Default)]

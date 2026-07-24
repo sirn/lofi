@@ -9,8 +9,8 @@ impl App {
         ctx_limit: u64,
         compaction: lofi_types::CompactionConfig,
     ) -> Self {
-        let thinking_label = (thinking != ThinkingLevel::Off)
-            .then(|| format!(":{}", thinking.as_str()));
+        let thinking_label =
+            (thinking != ThinkingLevel::Off).then(|| format!(":{}", thinking.as_str()));
         Self {
             turns: Vec::new(),
             input: String::new(),
@@ -23,7 +23,11 @@ impl App {
             thinking_label,
             thinking,
             status_usage: None,
-            ctx_limit: if ctx_limit > 0 { ctx_limit } else { DEFAULT_CTX_LIMIT },
+            ctx_limit: if ctx_limit > 0 {
+                ctx_limit
+            } else {
+                DEFAULT_CTX_LIMIT
+            },
             compaction,
             prev_ctx_tokens: None,
             last_compact_msg_count: 0,
@@ -137,7 +141,12 @@ impl App {
         }
         // Status-only events the turn builder doesn't own.
         match ev {
-            AgentEvent::RetryStart { attempt, max_attempts, delay_ms, error } => {
+            AgentEvent::RetryStart {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error,
+            } => {
                 self.retry = Some(RetryState {
                     attempt,
                     max_attempts,
@@ -155,7 +164,10 @@ impl App {
                 }
                 return;
             }
-            AgentEvent::TurnCommitted { byte_start, byte_end } => {
+            AgentEvent::TurnCommitted {
+                byte_start,
+                byte_end,
+            } => {
                 // The just-finished turn is now durably in the transcript
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
@@ -246,11 +258,8 @@ impl App {
                 self.context_pressure = true;
                 return;
             }
-            AgentEvent::Compaction { .. } => {
-                // Marker block only; do not set the compacted flag here.
-                // That flag tracks the live "just compacted, no usage yet"
-                // window. During replay, TurnEnd events carry real usage.
-            }
+            // Remaining status/marker events do not mutate App-owned
+            // counters here; the shared turn builder handles them.
             _ => {}
         }
         // Everything else (and the block-building part of `TurnEnd`) goes
@@ -322,8 +331,7 @@ impl App {
             if f.seek(SeekFrom::Start(start)).is_err() {
                 return empty;
             }
-            let mut buf =
-                Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
+            let mut buf = Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
             if f.take(end - start).read_to_end(&mut buf).is_err() {
                 return empty;
             }
@@ -399,9 +407,7 @@ impl App {
         if self.frozen_heights.len() > target {
             self.frozen_heights.truncate(target);
             // Drop any cached entries beyond the new frozen range.
-            self.frozen_render
-                .map
-                .retain(|idx, _| *idx < target);
+            self.frozen_render.map.retain(|idx, _| *idx < target);
             self.frozen_render.order.retain(|idx| *idx < target);
         }
     }
@@ -471,8 +477,7 @@ impl App {
             .compaction
             .soft_threshold(limit)
             .or_else(|| self.compaction.hard_threshold(limit))
-            .map(|t| (t / 2) as usize) // keep tail under ~50% of the threshold
-            .unwrap_or(0);
+            .map_or(0, |t| (t / 2) as usize); // keep tail under ~50% of threshold
         let opts = CompactOptions {
             max_kept_tokens: budget,
             edit: self.compaction.edit.clone(),
@@ -482,70 +487,50 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
-        let new_history = compacted_history(&c);
-        if let Ok(mut g) = self.history.lock() {
-            *g = new_history;
-        }
-        // Persist the edited kept-tail messages AND the compaction marker so
-        // the transcript is the complete checkpoint. Resume reads verbatim
-        // — no in-memory edit_tail re-creation needed.
-        //
-        // On-disk layout after this append:
-        //   [old original events] -> [edited kept-tail msgs] -> [marker]
-        //                              ^first_kept_entry_id points here
-        //
-        // The active-path walk (leaf-first) hits the marker, sets the
-        // boundary to first_kept_entry_id (the first edited kept-tail msg),
-        // then collects kept-tail msgs until the boundary. The old originals
-        // are never reached. Subsequent turns chain off the marker.
-        if let Some(path) = self.session.path.clone() {
-            // 1. Write the edited kept-tail messages (ids assigned by append_events).
-            let mut kept_events: Vec<SessionEvent> = c.kept_messages.iter().map(|m| SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(m.clone()),
-            }).collect();
-            if kept_events.is_empty() {
-                // No kept tail (compact-all): just write the marker.
-                let mut ev = SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: SessionEventKind::Compaction {
-                        summary: c.summary.clone(),
-                        first_kept_entry_id: String::new(),
-                        summarized_range: c.summarized_range.unwrap_or_default(),
-                        summarized: c.summarized_count,
-                        kept: c.kept_count,
-                    },
-                };
-                let _ = store::append_events(&path, std::slice::from_mut(&mut ev), None);
-            } else {
-                let _ = store::append_events(&path, &mut kept_events, None);
-                let first_kept_id = kept_events[0].id.clone();
-                // 2. Write the marker, chaining off the last kept-tail message.
-                let mut marker = SessionEvent {
-                    id: String::new(),
-                    parent_id: Some(kept_events.last().unwrap().id.clone()),
-                    kind: SessionEventKind::Compaction {
-                        summary: c.summary.clone(),
-                        first_kept_entry_id: first_kept_id,
-                        summarized_range: c.summarized_range.unwrap_or_default(),
-                        summarized: c.summarized_count,
-                        kept: c.kept_count,
-                    },
-                };
-                let _ = store::append_events(&path, std::slice::from_mut(&mut marker), None);
+        // Persist before replacing the live history. Otherwise a failed write
+        // leaves the running context compacted while resume reconstructs the
+        // old context. The store emits the kept tail and marker as one
+        // rollback-on-error batch.
+        if let Some(path) = &self.session.path {
+            if let Err(error) = store::append_compaction(
+                path,
+                &c.kept_messages,
+                c.summary.clone(),
+                c.summarized_range.clone().unwrap_or_default(),
+                c.summarized_count,
+                c.kept_count,
+            ) {
+                self.notify(
+                    NotifyKind::Error,
+                    format!("could not persist compaction: {error}"),
+                );
+                return false;
             }
         }
+        let new_history = compacted_history(&c);
+        let Ok(mut history) = self.history.lock() else {
+            self.notify(NotifyKind::Error, "could not update compacted history");
+            return false;
+        };
+        *history = new_history;
+        drop(history);
         // Render the marker. Attach to the last turn when one exists; push a
         // fresh turn otherwise (e.g. compaction invoked before any turn).
         if self.turns.is_empty() {
             self.push_turn(Turn {
                 prompt: String::new(),
-                blocks: vec![Block::Compaction { summarized: c.summarized_count, kept: c.kept_count, summary: c.summary.clone() }],
+                blocks: vec![Block::Compaction {
+                    summarized: c.summarized_count,
+                    kept: c.kept_count,
+                    summary: c.summary.clone(),
+                }],
             });
         } else {
-            self.apply_event(AgentEvent::Compaction { summarized: c.summarized_count, kept: c.kept_count, summary: c.summary.clone() });
+            self.apply_event(AgentEvent::Compaction {
+                summarized: c.summarized_count,
+                kept: c.kept_count,
+                summary: c.summary.clone(),
+            });
         }
         // The context gauge's last reading reflects the pre-compaction fill;
         // drop it so the auto-trigger does not re-fire on the same crossing
@@ -604,7 +589,15 @@ impl App {
         let outcome = recall(&events, &req);
         // Render inline as a read-only turn so the result lives in the log
         // alongside the conversation; the prompt line echoes the invocation.
-        let prompt = format!("/recall{}{}", if rest.is_empty() { String::new() } else { " ".to_string() }, rest);
+        let prompt = format!(
+            "/recall{}{}",
+            if rest.is_empty() {
+                String::new()
+            } else {
+                " ".to_string()
+            },
+            rest
+        );
         self.push_turn(Turn {
             prompt,
             blocks: vec![Block::Text(outcome.text)],
@@ -617,9 +610,13 @@ impl App {
         if !self.compaction.auto.enable {
             return;
         }
-        let Some(usage) = self.status_usage else { return };
+        let Some(usage) = self.status_usage else {
+            return;
+        };
         let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
-        let Some(threshold) = self.compaction.soft_threshold(limit) else { return };
+        let Some(threshold) = self.compaction.soft_threshold(limit) else {
+            return;
+        };
         // Use the full prompt size (non-cached + cached) so heavy prompt
         // caching doesn't mask the real context size. Without this, a session
         // with 150k cached tokens and 9k non-cached would read as 9k — well
@@ -664,7 +661,9 @@ impl App {
     /// alone is too big and compacting again cannot help (the run errors
     /// out). Returns a large count when no compaction has happened yet.
     pub(super) fn messages_since_last_compact(&self) -> usize {
-        let Some(events) = self.compaction_events() else { return usize::MAX };
+        let Some(events) = self.compaction_events() else {
+            return usize::MAX;
+        };
         let path = store::active_path_from_leaf(&events);
         // Walk root-first; start counting only after the last Compaction
         // marker on the path (the newest one, which is closest to the leaf).
@@ -712,7 +711,7 @@ impl App {
                 }
                 SessionEventKind::TurnEnd { usage, .. }
                 | SessionEventKind::TurnFailed { usage, .. } => {
-                    last_usage = Some(usage.clone());
+                    last_usage = Some(*usage);
                 }
                 _ => {}
             }
@@ -756,7 +755,9 @@ impl App {
     /// Returns None when the history is empty.
     fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
         if let Some(path) = &self.session.path {
-            return store::load(path).ok().map(|(_meta, events, _off, _size)| events);
+            return store::load(path)
+                .ok()
+                .map(|(_meta, events, _off, _size)| events);
         }
         let msgs = self.history.lock().ok()?;
         if msgs.is_empty() {
@@ -766,7 +767,11 @@ impl App {
         for (i, m) in msgs.iter().enumerate() {
             events.push(SessionEvent {
                 id: i.to_string(),
-                parent_id: if i == 0 { None } else { Some((i - 1).to_string()) },
+                parent_id: if i == 0 {
+                    None
+                } else {
+                    Some((i - 1).to_string())
+                },
                 kind: SessionEventKind::Message(m.clone()),
             });
         }
@@ -809,8 +814,10 @@ fn parse_recall_args(raw: &str) -> (lofi_core::recall::RecallScope, String) {
 /// Pull a `page:N` token (1-based) out of the argument string, defaulting to 1.
 fn parse_recall_page(rest: &str) -> usize {
     rest.split_whitespace()
-        .find_map(|t| t.strip_prefix("page:").and_then(|n| n.parse::<usize>().ok()))
+        .find_map(|t| {
+            t.strip_prefix("page:")
+                .and_then(|n| n.parse::<usize>().ok())
+        })
         .unwrap_or(1)
         .max(1)
 }
-

@@ -17,23 +17,28 @@ use serde_json::Value;
 use crate::ToolEvent;
 use lofi_error::{Error, Result};
 pub mod bash;
-pub mod env;
 pub mod edit;
+pub mod env;
 pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
 
+mod fs;
 pub mod skills;
 pub mod truncate;
 pub mod util;
 pub mod write;
-mod fs;
 
 pub use env::BashEnv;
-pub use truncate::{format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated};
+use fs::{
+    default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf,
+    resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
+};
+pub use truncate::{
+    format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
+};
 pub use util::{read_capped, PgrpKillGuard};
-use fs::{default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit};
 
 /// Default `bash` timeout in milliseconds (120s).
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
@@ -102,8 +107,14 @@ impl BuiltinTools {
     /// fresh directory under the system temp dir.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self::with_tool_cb(root, None, default_tmp_dir(), BashEnv::default(),
-            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()), None)
+        Self::with_tool_cb(
+            root,
+            None,
+            default_tmp_dir(),
+            BashEnv::default(),
+            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            None,
+        )
     }
 
     /// Like [`new`](Self::new) but also forwards native tool-call events to
@@ -117,7 +128,16 @@ impl BuiltinTools {
         shell_policy: crate::policy::ResolvedPolicy,
         confirm: Option<crate::ConfirmFn>,
     ) -> Self {
-        Self::with_skills_dir(root, tool_cb, tmp_dir, bash_env, shell_policy, confirm, None, None)
+        Self::with_skills_dir(
+            root,
+            tool_cb,
+            tmp_dir,
+            bash_env,
+            shell_policy,
+            confirm,
+            None,
+            None,
+        )
     }
 
     /// Like [`with_tool_cb`](Self::with_tool_cb) but also sets the skills
@@ -297,7 +317,10 @@ mod tests {
     #[tokio::test]
     async fn read_offset_skips_lines() {
         let (_dir, tools) = tools();
-        let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let content = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(tools.root().join("big.txt"), content).unwrap();
         let v = tools.read("big.txt", Some(3), None).await.unwrap();
         let s = v["content"].as_str().unwrap();
@@ -308,7 +331,10 @@ mod tests {
     #[tokio::test]
     async fn read_limit_caps_line_count() {
         let (_dir, tools) = tools();
-        let content = (0..10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let content = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(tools.root().join("big.txt"), content).unwrap();
         let v = tools.read("big.txt", Some(1), Some(3)).await.unwrap();
         // 3 lines kept; truncation is signalled structurally.
@@ -338,7 +364,11 @@ mod tests {
         // so the agent can page through bash output files.
         let (_dir, tools) = tools();
         std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
-        let path = tools.tmp_dir().join("log.txt").to_string_lossy().into_owned();
+        let path = tools
+            .tmp_dir()
+            .join("log.txt")
+            .to_string_lossy()
+            .into_owned();
         let v = tools.read(&path, None, None).await.unwrap();
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["content"], json!("first\nsecond\nthird"));
@@ -378,7 +408,12 @@ mod tests {
         std::fs::create_dir(tools.root().join("sub")).unwrap();
         std::fs::write(tools.root().join("sub/c.txt"), "c").unwrap();
         let v = tools.ls("").await.unwrap();
-        let entries: Vec<&str> = v["entries"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        let entries: Vec<&str> = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect();
         assert_eq!(v["ok"], json!(true));
         assert!(entries.contains(&"b.txt"));
         assert!(entries.contains(&"sub"));
@@ -392,7 +427,12 @@ mod tests {
         std::fs::write(tools.root().join("src/b.txt"), "").unwrap();
         std::fs::write(tools.root().join("root.rs"), "").unwrap();
         let v = tools.find("**/*.rs", None).await.unwrap();
-        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect();
         assert_eq!(v["ok"], json!(true));
         assert!(matches.contains(&"root.rs"));
         assert!(matches.contains(&"src/a.rs"));
@@ -407,7 +447,12 @@ mod tests {
         std::fs::write(tools.root().join("real.rs"), "").unwrap();
         symlink("real.rs", tools.root().join("link.rs")).unwrap();
         let v = tools.find("**/*.rs", None).await.unwrap();
-        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect();
         assert!(matches.contains(&"link.rs"), "matches: {matches:?}");
         assert!(matches.contains(&"real.rs"));
     }
@@ -421,8 +466,89 @@ mod tests {
         std::fs::write(tools.root().join("realdir/inner.rs"), "").unwrap();
         symlink("realdir", tools.root().join("linkdir")).unwrap();
         let v = tools.find("**/*.rs", None).await.unwrap();
-        let matches: Vec<&str> = v["matches"].as_array().unwrap().iter().filter_map(|e| e.as_str()).collect();
-        assert!(matches.contains(&"linkdir/inner.rs"), "matches: {matches:?}");
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect();
+        assert!(
+            matches.contains(&"linkdir/inner.rs"),
+            "matches: {matches:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_does_not_follow_symlinked_dir_outside_read_root() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.rs"), "secret").unwrap();
+        symlink(outside.path(), tools.root().join("outside")).unwrap();
+
+        let v = tools.find("**/*.rs", None).await.unwrap();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect();
+        assert!(
+            !matches.contains(&"outside/secret.rs"),
+            "matches: {matches:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_does_not_follow_symlinked_dir_outside_read_root() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
+        symlink(outside.path(), tools.root().join("outside")).unwrap();
+
+        let v = tools.grep(json!("needle"), None).await.unwrap();
+        assert!(v["matches"].as_array().unwrap().is_empty(), "result: {v}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_tools_keep_subdir_walk_inside_its_read_root() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        std::fs::create_dir_all(tools.root().join("sub")).unwrap();
+        std::fs::write(tools.root().join("peer.txt"), "needle\n").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
+        symlink(outside.path(), tools.root().join("sub/outside")).unwrap();
+
+        let found = tools.find("**/*.txt", Some("sub")).await.unwrap();
+        assert!(
+            found["matches"].as_array().unwrap().is_empty(),
+            "result: {found}"
+        );
+        let grepped = tools.grep(json!("needle"), Some("sub")).await.unwrap();
+        assert!(
+            grepped["matches"].as_array().unwrap().is_empty(),
+            "result: {grepped}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_tools_skip_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        std::fs::create_dir_all(tools.root().join("sub")).unwrap();
+        std::fs::write(tools.root().join("sub/a.txt"), "needle\n").unwrap();
+        symlink("..", tools.root().join("sub/loop")).unwrap();
+
+        let found = tools.find("**/*.txt", None).await.unwrap();
+        assert_eq!(found["matches"], json!(["sub/a.txt"]));
+        let grepped = tools.grep(json!("needle"), None).await.unwrap();
+        assert_eq!(grepped["matches"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

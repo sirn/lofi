@@ -1,6 +1,6 @@
 use super::{
-    format_size, parse_grep_args, walk_files_capped, BuiltinTools,
-    MAX_GREP_FILE_BYTES, MAX_GREP_OUTPUT_BYTES, MAX_GREP_ROWS, MAX_GREP_VISITED,
+    format_size, parse_grep_args, walk_files_capped, BuiltinTools, MAX_GREP_FILE_BYTES,
+    MAX_GREP_OUTPUT_BYTES, MAX_GREP_ROWS, MAX_GREP_VISITED,
 };
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
@@ -35,7 +35,13 @@ impl BuiltinTools {
                     files.push(base.clone());
                     false
                 } else {
-                    walk_files_capped(&base, &mut files, &mut visited, MAX_GREP_VISITED)?
+                    walk_files_capped(
+                        &base,
+                        &root,
+                        &mut files,
+                        &mut visited,
+                        MAX_GREP_VISITED,
+                    )?
                 };
                 if traversal_capped {
                     return Err(Error::Tool(format!(

@@ -59,10 +59,17 @@ pub(super) fn fmt_cost(c: f64) -> String {
 /// One component of an abbreviated path: `Dev` -> `D`, `~sirn` -> `~s`.
 pub(super) fn abbrev_component(c: &str) -> String {
     if let Some(rest) = c.strip_prefix('~') {
-        let head = rest.chars().next().map(|ch| ch.to_string()).unwrap_or_default();
+        let head = rest
+            .chars()
+            .next()
+            .map(|ch| ch.to_string())
+            .unwrap_or_default();
         format!("~{head}")
     } else {
-        c.chars().next().map(|ch| ch.to_string()).unwrap_or_default()
+        c.chars()
+            .next()
+            .map(|ch| ch.to_string())
+            .unwrap_or_default()
     }
 }
 
