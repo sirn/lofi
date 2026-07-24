@@ -290,7 +290,7 @@ impl Agent {
         bash: &BashConfig,
         shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
-        let bash_env = BashEnv::from_config(bash);
+        let bash_env = crate::bash_env::resolve_bash_env(bash);
         let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
         Self {
             provider: Arc::from(provider),

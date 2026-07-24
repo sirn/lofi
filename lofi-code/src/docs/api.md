@@ -97,21 +97,9 @@ Unix signal number (null unless killed by a signal); `duration_ms` is wall
 time; `status` is `"exited"`, `"signaled"`, or `"timeout"`. Output is
 tail-truncated to 2000 lines / 50 KB (keeping the end where errors land); when
 truncated, the full output is saved to a file under `lofi.tmp_dir` and the
-notice names it — page through it with `lofi.bash_read(basename)`. The child
-env is stripped to a minimal baseline by default; env vars the user approved
-are present but their values are replaced with `[redacted]` in the output.
-
-## lofi.bash_read(handle, opts?)
-
-Read the full output of a bash result by handle, with the same shape and
-range/limit semantics as `lofi.read`.
-
-**Parameters:**
-- `handle` (string, required) — a basename relative to `lofi.tmp_dir`
-  (e.g. `lofi-bash-<hex>.log`).
-- `opts` (object, optional) — `{ offset?, limit? }`.
-
-**Returns:** `{ ok, content, start_line, total_lines, truncated }`.
+notice names it — page through it with `lofi.read(path)`. The child env is
+stripped to a minimal baseline by default; env vars the user approved are
+present but their values are replaced with `[redacted]` in the output.
 
 ## lofi.tmp_dir
 
@@ -213,7 +201,7 @@ descending, limited to the top 10.
 
 Two kinds of "too much" are handled differently:
 
-- **Content tools page.** `read` and `bash_read` return a window of a file
+- **Content tools page.** `read` returns a window of a file
   (head-truncated to 2000 lines / 50 KB) carrying a `truncated` flag plus
   `total_lines`/`start_line`. Before you `.filter`/`.map`/`.includes`/`.split`
   their `content`, check `.truncated`: if `true`, more lines remain — page with

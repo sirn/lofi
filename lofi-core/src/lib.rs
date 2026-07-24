@@ -7,6 +7,7 @@
 //! in `lofi-ui`.
 
 pub mod agent;
+pub mod bash_env;
 
 /// Re-export of [`lofi_code::docs`] for the CLI.
 pub use lofi_code::docs;

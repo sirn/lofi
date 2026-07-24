@@ -503,4 +503,18 @@ mod tests {
         let d = p.evaluate("env FOO=bar sudo rm /etc");
         assert_eq!(d.action, PolicyAction::Deny);
     }
+
+    #[test]
+    fn process_substitution_checked() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        let d = p.evaluate("diff <(sudo rm /etc/passwd) <(ls)");
+        assert_eq!(d.action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn quoted_cmd_substitution_checked() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        let d = p.evaluate("echo \"$(sudo rm -rf /)\"");
+        assert_eq!(d.action, PolicyAction::Deny);
+    }
 }
