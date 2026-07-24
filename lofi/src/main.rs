@@ -53,6 +53,10 @@ struct Cli {
     /// Search the embedded API reference and print matching entries.
     #[arg(long, value_name = "QUERY")]
     docs_search: Option<String>,
+    /// Dry-run: evaluate a command against the shell policy and print the
+    /// decision without executing anything.
+    #[arg(long, value_name = "COMMAND")]
+    policy_explain: Option<String>,
 }
 
 #[tokio::main]
@@ -79,12 +83,42 @@ async fn main() -> anyhow::Result<()> {
         print_docs_index()?;
     } else if let Some(query) = cli.docs_search.clone() {
         print_docs_search(&query)?;
+    } else if let Some(cmd) = cli.policy_explain.clone() {
+        policy_explain(&root, &cmd)?;
     } else if let Some(prompt) = cli.print.clone() {
         let opts = build_print_opts(&cli, prompt, root);
         lofi_ui::run_print(opts).await?;
     } else {
         let opts = build_interactive_opts(&cli, root);
         lofi_ui::run_interactive(opts).await?;
+    }
+    Ok(())
+}
+
+/// Evaluate a command against the resolved shell policy and print the
+/// decision. Used by `--policy-explain` for dry-run diagnostics.
+fn policy_explain(root: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
+    let _ = root;
+    let config_path = lofi_core::config_loader::user_config_path()
+        .context("resolve user config path")?;
+    let policy_path = lofi_core::config_loader::policy_config_path(&config_path)
+        .context("resolve policy file path")?;
+    let policy_cfg = lofi_core::config_loader::load_policy_or_default(&policy_path)?;
+    let policy = lofi_code::policy::defaults::resolve(&policy_cfg);
+    let decision = policy.evaluate(cmd);
+    let action_str = match decision.action {
+        lofi_types::PolicyAction::Allow => "allow",
+        lofi_types::PolicyAction::Ask => "ask",
+        lofi_types::PolicyAction::Deny => "deny",
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "action: {action_str}")?;
+    if !decision.reason.is_empty() {
+        writeln!(out, "reason: {}", decision.reason)?;
+    }
+    if let Some(matched) = &decision.matched_command {
+        writeln!(out, "matched: {matched}")?;
     }
     Ok(())
 }

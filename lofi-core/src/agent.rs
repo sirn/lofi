@@ -37,11 +37,25 @@ use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
 use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
+use lofi_code::policy::ResolvedPolicy;
+use tokio::sync::oneshot;
 use lofi_error::{Error, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
 use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;
 use lofi_providers::ir::codec::assemble_message;
 use lofi_providers::{open, Provider};
+
+/// A confirmation request from the shell policy, sent to the UI.
+#[derive(Debug)]
+pub struct ConfirmRequest {
+    /// Unique id for matching the response.
+    pub id: u64,
+    /// The command text awaiting confirmation.
+    pub command: String,
+    /// Send `true` to allow, `false` to deny.
+    pub respond: oneshot::Sender<bool>,
+}
 
 /// The system prompt shipped with lofi, `include_str!`'d from
 /// `prompts/system.md`.
@@ -238,6 +252,13 @@ pub struct Agent {
     reserved_context_tokens: u64,
     /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
+    /// Resolved shell policy for `lofi.bash`.
+    shell_policy: ResolvedPolicy,
+    /// Channel for sending confirmation requests to the UI.
+    /// When `None` (headless), `ask` decisions block the command.
+    confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
+    /// Counter for confirmation request ids.
+    confirm_counter: Arc<AtomicU64>,
     /// Optional skills directory (`<config_dir>/skills`). When set,
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
@@ -257,8 +278,10 @@ impl Agent {
         max_output_tokens: Option<u64>,
         reserved_context_tokens: u64,
         bash: &BashConfig,
+        shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
         let bash_env = BashEnv::from_config(bash);
+        let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
         Self {
             provider: Arc::from(provider),
             model,
@@ -269,6 +292,9 @@ impl Agent {
             max_output_tokens,
             reserved_context_tokens,
             bash_env,
+            shell_policy,
+            confirm_tx: None,
+            confirm_counter: Arc::new(AtomicU64::new(0)),
             skills_dir: None,
         }
     }
@@ -291,6 +317,9 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
+            confirm_tx: self.confirm_tx.clone(),
+            confirm_counter: self.confirm_counter.clone(),
             skills_dir: self.skills_dir.clone(),
         }
     }
@@ -312,6 +341,9 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
+            confirm_tx: self.confirm_tx.clone(),
+            confirm_counter: self.confirm_counter.clone(),
             skills_dir: self.skills_dir.clone(),
         }
     }
@@ -330,7 +362,24 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
+            confirm_tx: self.confirm_tx.clone(),
+            confirm_counter: self.confirm_counter.clone(),
             skills_dir,
+        }
+    }
+
+    /// Set the confirmation channel so the shell policy can ask the UI
+    /// before executing `ask`-classified commands. The matching receiver
+    /// is returned for the caller to poll.
+    #[must_use]
+    pub fn with_confirm_tx(
+        &self,
+        confirm_tx: tokio::sync::mpsc::UnboundedSender<ConfirmRequest>,
+    ) -> Self {
+        Self {
+            confirm_tx: Some(confirm_tx),
+            ..self.clone()
         }
     }
 

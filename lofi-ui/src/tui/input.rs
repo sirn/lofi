@@ -37,6 +37,16 @@ pub(super) fn handle_event(
         return;
     }
 
+    // Shell-policy confirmation: y = allow, anything else = deny.
+    if app.mode == Mode::Confirm {
+        let approved = k.code == KeyCode::Char('y') || k.code == KeyCode::Char('Y');
+        if let Some(req) = app.pending_confirm.take() {
+            let _ = req.respond.send(approved);
+        }
+        app.mode = Mode::Input;
+        return;
+    }
+
     // Ctrl+C cancels a run, clears the draft, or quits on double-press in
     // Input. In Navigate/Select it returns to Input and snaps the viewport
     // to the latest transcript line (a run, if active, keeps running — press
@@ -57,7 +67,7 @@ pub(super) fn handle_event(
         match app.mode {
             Mode::Navigate => handle_nav_key(k, app),
             Mode::Select => handle_select_key(k, app),
-            Mode::Input => {}
+            Mode::Input | Mode::Confirm => {}
         }
         return;
     }

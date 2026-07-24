@@ -208,4 +208,13 @@ pub enum AgentEvent {
         kept: usize,
         summary: String,
     },
+    /// The shell policy needs user confirmation before running a command.
+    /// The UI shows a yes/no prompt; the response goes back through the
+    /// dedicated confirm channel (not through [`AgentEvent`]).
+    ConfirmationRequest {
+        /// Unique id matching the [`ConfirmRequest`] on the confirm channel.
+        id: u64,
+        /// The command text awaiting confirmation.
+        command: String,
+    },
 }

@@ -365,7 +365,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::ContextPressure { .. }
                 // Compaction is a TUI-only marker; never produced in
                 // --print mode.
-                | AgentEvent::Compaction { .. } => Ok(()),
+                | AgentEvent::Compaction { .. }
+                | AgentEvent::ConfirmationRequest { .. } => Ok(()),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),

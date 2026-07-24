@@ -10,6 +10,7 @@ impl App {
             Mode::Input => ("INPUT", t.muted),
             Mode::Navigate => ("NAV", t.primary),
             Mode::Select => ("SELECT", t.warn),
+            Mode::Confirm => ("CONFIRM", t.warn),
         }
     }
 
