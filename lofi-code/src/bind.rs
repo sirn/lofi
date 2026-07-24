@@ -338,20 +338,11 @@ fn bind_skills_tools<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
-    skills_dir: Option<PathBuf>,
+    _skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
-    // Build a fresh tool bundle with the skills_dir set so the methods can
-    // find the global skills directory.
-    let t = Arc::new(BuiltinTools::with_skills_dir(
-        tools.root().to_path_buf(),
-        None,
-        tools.tmp_dir().to_path_buf(),
-        tools.bash_env().clone(),
-        tools.shell_policy().clone(),
-        tools.confirm().cloned(),
-        tools.auto_mode().cloned(),
-        skills_dir,
-    ));
+    // Use the existing tool bundle, which already carries skills_dir and
+    // the event callback. A separate bundle would drop tool events.
+    let t = tools.clone();
 
     let t1 = t.clone();
     lofi.set(

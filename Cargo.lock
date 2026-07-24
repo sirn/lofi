@@ -1490,7 +1490,6 @@ dependencies = [
  "anyhow",
  "lofi-ui",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 

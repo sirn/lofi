@@ -280,7 +280,6 @@ pub struct NativeToolRecord {
 /// intermediate representation for the compaction section extractors and the
 /// brief transcript builder.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum CompactBlock {
     User {
         text: String,
@@ -610,11 +609,14 @@ impl RunModel {
                 i.to_string(),
                 ThinkingLevel::parse(lvl.trim()).unwrap_or_default(),
             )
-        } else if let Some((i, lvl)) = rest.split_once(':') {
-            (
-                i.to_string(),
-                ThinkingLevel::parse(lvl.trim()).unwrap_or_default(),
-            )
+        } else if let Some((i, lvl)) = rest.rsplit_once(':') {
+            // Only treat the suffix as a thinking level when it parses;
+            // otherwise the colon is part of the model id (core's model
+            // query allows colons in ids) and must be preserved.
+            match ThinkingLevel::parse(lvl.trim()) {
+                Some(t) => (i.to_string(), t),
+                None => (rest.to_string(), ThinkingLevel::Off),
+            }
         } else {
             (rest.to_string(), ThinkingLevel::Off)
         };
@@ -1143,7 +1145,7 @@ pub struct BashConfig {
     /// running a command. `false` inherits the full parent environment (an
     /// explicit trust opt-out; redaction of `pass_env`/`env_file` values still
     /// applies). Defaults to `true`.
-    #[serde(default = "default_bash_strip_env")]
+    #[serde(default = "default_true")]
     pub strip_env: bool,
     /// Env var names to copy from the parent environment into the child on
     /// top of the baseline (or the inherited env when `strip_env` is false).
@@ -1158,14 +1160,10 @@ pub struct BashConfig {
     pub env_file: Option<PathBuf>,
 }
 
-fn default_bash_strip_env() -> bool {
-    true
-}
-
 impl Default for BashConfig {
     fn default() -> Self {
         Self {
-            strip_env: default_bash_strip_env(),
+            strip_env: default_true(),
             pass_env: Vec::new(),
             env_file: None,
         }
