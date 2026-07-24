@@ -462,7 +462,7 @@ fn selection_blockquote_to_text_preserves_blank() {
     // Select all content lines (skip marker line 0 and gap line 1).
     a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
     let text = a.selection_text().expect("selection text");
-    eprintln!("yanked: {:?}", text);
+    eprintln!("yanked: {text:?}");
     assert_eq!(text, "> Quote line.\n\nNormal text after.");
 }
 
@@ -482,12 +482,12 @@ fn blockquote_renders_with_bar_and_empty_lines() {
         rl.line.spans.iter().map(|s| s.content.as_ref()).collect()
     }).collect();
     assert!(quote_lines.iter().any(|s| s.contains("Line one") && s.contains("▎")),
-        "Line one should have bar: {:?}", quote_lines);
+        "Line one should have bar: {quote_lines:?}");
     // The bare > should produce a line with just the bar (not dropped).
     assert!(quote_lines.iter().any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
-        "Empty quote line should render bar only: {:?}", quote_lines);
+        "Empty quote line should render bar only: {quote_lines:?}");
     assert!(quote_lines.iter().any(|s| s.contains("Line three") && s.contains("▎")),
-        "Line three should have bar: {:?}", quote_lines);
+        "Line three should have bar: {quote_lines:?}");
     // Yanking the full quote should preserve the bare ">" line.
     let n = rls.len();
     feed_lines(&mut a, &rls);

@@ -345,7 +345,7 @@ pub fn append_compaction(
     kept: usize,
 ) -> Result<(u64, u64)> {
     let parent = match parent_hint {
-        Some(id) if id.is_empty() => None,
+        Some("") => None,
         Some(id) => Some(id.to_string()),
         None => last_event_id(path)?,
     };

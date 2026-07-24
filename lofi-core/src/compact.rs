@@ -121,6 +121,7 @@ const MIN_SUMMARIZED: usize = 5;
 /// Returns None when there is nothing worth compacting (no live messages,
 /// or too few to fold).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compaction> {
     let path = store::active_path_from_leaf(events);
     if path.is_empty() {
