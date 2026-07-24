@@ -1,13 +1,14 @@
-//! Error type for `lofi-core`.
+//! Shared error types for the `lofi` workspace.
 //!
-//! A single enum covers all fallible surfaces in the crate. Provider/tool/state
-//! failures carry a free-form message; I/O failures use `#[from]` for ergonomic
-//! `?` propagation. Transport-specific crates map their concrete errors into
-//! the HTTP message variant, keeping this foundational crate transport-agnostic.
+//! A single enum covers all fallible surfaces across the workspace.
+//! Provider/tool/state failures carry a free-form message; I/O failures use
+//! `#[from]` for ergonomic `?` propagation. Transport-specific crates map their
+//! concrete errors into the HTTP message variant, keeping this foundational
+//! crate transport-agnostic.
 
 use thiserror::Error;
 
-/// The error type returned by `lofi-core` operations.
+/// The error type returned by `lofi` workspace operations.
 #[derive(Debug, Error)]
 pub enum Error {
     /// A filesystem or std I/O failure.
@@ -29,7 +30,7 @@ pub enum Error {
     /// `no_auth`. Distinct from [`Config`](Self::Config) so the interactive
     /// UI can surface a friendly "no models configured" message instead of
     /// a hard error, while `--print` still exits non-zero.
-    #[error("no models configured: {0}")]
+    #[error("{0}")]
     NoModels(String),
 
     /// An agent-owned state-tree failure.
@@ -55,5 +56,5 @@ pub enum Error {
     Cancelled,
 }
 
-/// Convenience `Result` alias used throughout the crate.
+/// Convenience `Result` alias used throughout the workspace.
 pub type Result<T> = std::result::Result<T, Error>;
