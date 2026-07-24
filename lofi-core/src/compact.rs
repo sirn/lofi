@@ -163,6 +163,33 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         }
     }
 
+    // When there is a prior compaction on the active path, the on-disk
+    // transcript stores the *original* unedited messages from the old kept
+    // tail (the span between the prior Compaction marker's
+    // first_kept_entry_id and the marker itself). The in-memory history the
+    // agent runs on was context-edited at the previous compact time, but
+    // that edit was never written back to disk. Loading the originals
+    // verbatim inflates the live list with huge tool results the agent no
+    // longer sees, so a re-compact barely shrinks the context and plan_cut's
+    // token estimates are wrong.
+    //
+    // Fix: apply edit_tail to the entire live list before plan_cut when a
+    // prior compaction is in effect. The keep_* counters count from the end
+    // (newest messages), so recent results/thinking/calls in the new turns
+    // are kept verbatim while the old kept tail's results are stubbed —
+    // exactly matching what the agent sees. This is cache-safe: compact()
+    // already rebuilds the prefix. The final edit_tail on the kept tail after
+    // plan_cut is then idempotent (stubs stay stubs).
+    if previous_summary.is_some() && opts.edit.enabled && !live.is_empty() {
+        let pairs: Vec<(String, Message)> = live.iter()
+            .map(|lm| (lm.event_id.clone(), lm.message.clone()))
+            .collect();
+        let edited = crate::context_edit::edit_tail(&pairs, &opts.edit);
+        for (lm, msg) in live.iter_mut().zip(edited.into_iter()) {
+            lm.message = msg;
+        }
+    }
+
     // Strip a leading prior-summary user message from the live list: it is
     // not a real turn and must not be re-summarized — its content is merged
     // in via previous_summary. (On the first compaction there is none.)
@@ -1329,5 +1356,101 @@ mod tests {
         let merged = merge_previous(&prev, &fresh);
         assert!(merged.contains("goal one"));
         assert!(merged.contains("goal two"));
+    }
+
+    /// On a re-compact, the on-disk transcript still has the *original* unedited
+    /// messages from the prior compaction's kept tail. The live list must apply
+    /// edit_tail to that old span so the second compact sees the same lightweight
+    /// prefix the agent does, not the bloated originals.
+    #[test]
+    fn re_compact_edits_old_kept_tail_from_disk() {
+        // Simulate the on-disk state after a hard-compact + continue:
+        // [old turn with large tool results] [Compaction marker] [new turn]
+        //
+        // The old turn's tool results are huge on disk. Without the fix,
+        // compact() loads them verbatim and the live list is inflated.
+        // With the fix, edit_tail is applied to the old kept tail span,
+        // shrinking the stubbed results before plan_cut runs.
+        let big_result = "x".repeat(10_000);
+        let mut events = events_of(&[
+            user("do task"),
+            exec_call("t1", "lofi.read"),
+            exec_result("t1", &big_result),
+            assistant("done"),
+            // --- prior compaction kept tail starts here (e4) ---
+            user("now continue"),
+            exec_call("t2", "lofi.read"),
+            exec_result("t2", &big_result),
+            assistant("ok"),
+            // --- prior compaction kept tail ends here ---
+        ]);
+        // Add a Compaction marker after e7. first_kept_entry_id = "e4".
+        events.push(SessionEvent {
+            id: "c1".to_string(),
+            parent_id: Some("e7".to_string()),
+            kind: SessionEventKind::Compaction {
+                summary: format!("{HANDOFF_PREAMBLE}\n\n[prior summary]"),
+                first_kept_entry_id: "e4".to_string(),
+                summarized_range: ["e0".to_string(), "e3".to_string()],
+                summarized: 4,
+                kept: 4,
+            },
+        });
+        // New messages after the compaction marker (the continuation).
+        events.push(SessionEvent {
+            id: "e8".to_string(),
+            parent_id: Some("c1".to_string()),
+            kind: SessionEventKind::Message(user("what did you do?")),
+        });
+        events.push(SessionEvent {
+            id: "e9".to_string(),
+            parent_id: Some("e8".to_string()),
+            kind: SessionEventKind::Message(assistant("I read a file")),
+        });
+        events.push(SessionEvent {
+            id: "e10".to_string(),
+            parent_id: Some("e9".to_string()),
+            kind: SessionEventKind::Message(user("ok now add tests")),
+        });
+        events.push(SessionEvent {
+            id: "e11".to_string(),
+            parent_id: Some("e10".to_string()),
+            kind: SessionEventKind::Message(exec_call("t3", "lofi.write")),
+        });
+        events.push(SessionEvent {
+            id: "e12".to_string(),
+            parent_id: Some("e11".to_string()),
+            kind: SessionEventKind::Message(exec_result("t3", &big_result)),
+        });
+        events.push(SessionEvent {
+            id: "e13".to_string(),
+            parent_id: Some("e12".to_string()),
+            kind: SessionEventKind::Message(assistant("Done adding tests")),
+        });
+
+        let opts = CompactOptions {
+            edit: lofi_types::EditConfig { enabled: true, keep_results: 1, keep_thinking: 0, keep_calls: 1 },
+            ..Default::default()
+        };
+
+        let c = compact(&events, &opts).expect("compaction should succeed");
+
+        // The old kept tail's tool result (e6, 10k chars) should have been
+        // edited to a short stub before plan_cut, so it does NOT appear in
+        // the summary. Without the fix, the 10k-char result would be loaded
+        // verbatim and inflate the prefix that gets summarized.
+        assert!(c.summary.contains("[prior summary]"));
+        assert!(
+            !c.summary.contains(&"x".repeat(100)),
+            "summary should not contain the big result from the old kept tail"
+        );
+
+        // The old kept tail's tool result that ended up in the summarized
+        // prefix should have been stubbed — verify by checking the summary
+        // contains the stub marker, not the raw content.
+        assert!(
+            c.summary.contains("cleared") || !c.summary.contains(&big_result),
+            "old kept tail results should be stubbed, not carried verbatim into summary"
+        );
     }
 }

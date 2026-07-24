@@ -420,7 +420,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
 
 pub(super) fn messages_from_events(
     events: &[SessionEvent],
-    edit: &lofi_types::EditConfig,
+    _edit: &lofi_types::EditConfig,
 ) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
     // Kept tail as (event_id, message) pairs so `edit_tail` can embed the
@@ -469,19 +469,11 @@ pub(super) fn messages_from_events(
         }
     }
     // `out` is leaf-first; reverse to root-first for the model.
+    // Read verbatim — the transcript is the checkpoint. At compact time the
+    // edited kept-tail messages are written to the transcript, so no
+    // in-memory edit_tail is needed here.
     out.reverse();
-    // Apply tiered-retention context editing to the kept tail when a
-    // compaction is in effect (a boundary was set). This mirrors what
-    // `compact_now` did at compact time, so a resumed/rolled-back session
-    // rebuilds the same lightweight, recall-recoverable prefix instead of the
-    // verbatim on-disk tail. When no compaction has run (no boundary), the
-    // tail is carried verbatim — matching the live path before the first
-    // compact. Cache-safe: resume/rollback already breaks any prefix cache.
-    let mut messages: Vec<Message> = if boundary.is_some() {
-        lofi_core::context_edit::edit_tail(&out, edit)
-    } else {
-        out.into_iter().map(|(_, m)| m).collect()
-    };
+    let mut messages: Vec<Message> = out.into_iter().map(|(_, m)| m).collect();
     // The summary leads: it is the oldest context (the folded prefix), so it
     // must come before the kept tail and any post-compaction continuation.
     if let Some(s) = summary_msg {

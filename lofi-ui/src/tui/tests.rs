@@ -2549,14 +2549,37 @@ fn messages_from_events_prepends_compaction_summary() {
 }
 
 #[test]
-fn messages_from_events_elides_kept_tail_on_resume() {
-    // After a compaction, resuming must rebuild the kept tail in its elided
-    // (lightweight, recall-recoverable) form — not the verbatim on-disk tail.
-    // Two exec results in the kept tail; with keep_results=1 only the most
-    // recent survives verbatim, the older becomes a lofi.result stub.
+fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
+    // compact_now writes the EDITED kept-tail messages to the transcript.
+    // messages_from_events reads verbatim — no in-memory edit_tail needed.
+    // This test simulates the on-disk layout: edited kept-tail messages
+    // (already stubbed by compact_now), then the marker, then post-compaction
+    // messages with full results.
     use lofi_types::{ContentBlock, SessionEvent, SessionEventKind};
 
-    let exec_call = |id: &str| {
+    let exec_call_stub = |id: &str, eid: &str| {
+        // Already edit_tail'd: code replaced with a lofi.result stub.
+        Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "exec".to_string(),
+                input: serde_json::json!({"code": format!("[code cleared — re-expand with lofi.result(\"{eid}\")]" )}),
+            }],
+        }
+    };
+    let exec_result_stub = |id: &str, eid: &str| {
+        // Already edit_tail'd: content replaced with a lofi.result stub.
+        Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
+                is_error: false,
+            }],
+        }
+    };
+    let exec_call_full = |id: &str| {
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
@@ -2566,7 +2589,7 @@ fn messages_from_events_elides_kept_tail_on_resume() {
             }],
         }
     };
-    let exec_result = |id: &str, out: &str| {
+    let exec_result_full = |id: &str, out: &str| {
         Message {
             role: Role::User,
             blocks: vec![ContentBlock::ToolResult {
@@ -2577,13 +2600,15 @@ fn messages_from_events_elides_kept_tail_on_resume() {
         }
     };
 
-    // e0 summarized; e1..e4 kept tail; e5 marker (first_kept_entry_id = e1).
+    // On-disk layout after compact_now:
+    // [old summarized msg] [edited kept-tail: stubbed t1 + verbatim t2] [marker]
+    // [post-compaction: full t3]
     let events: Vec<SessionEvent> = sev_chain([
         msg(user("old prompt")),
-        msg(exec_call("t1")),
-        msg(exec_result("t1", "out-1")),
-        msg(exec_call("t2")),
-        msg(exec_result("t2", "out-2")),
+        msg(exec_call_stub("t1", "e1")),
+        msg(exec_result_stub("t1", "e2")),
+        msg(exec_call_stub("t2", "e3")),
+        msg(exec_result_full("t2", "out-2")), // most recent kept-tail result, kept verbatim by edit_tail
         SessionEventKind::Compaction {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: "e1".to_string(),
@@ -2591,33 +2616,27 @@ fn messages_from_events_elides_kept_tail_on_resume() {
             summarized: 1,
             kept: 4,
         },
+        msg(exec_call_full("t3")),
+        msg(exec_result_full("t3", "post-compaction-result")),
     ]);
 
-    let edit = lofi_types::EditConfig {
-        enabled: true,
-        keep_results: 1,
-        keep_thinking: 0,
-        keep_calls: 0,
-    };
-    let msgs = messages_from_events(&events, &edit);
-    // [SUMMARY, exec_call t1, result out-1, exec_call t2, result out-2]
-    assert_eq!(msgs.len(), 5);
+    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    // [SUMMARY, edited kept-tail(4), post-compaction(2)] = 7
+    assert_eq!(msgs.len(), 7);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
-    // Most recent result kept verbatim.
+
+    // Kept tail: read verbatim from disk (already edited by compact_now).
     let ContentBlock::ToolResult { content, .. } = &msgs[4].blocks[0] else { panic!() };
     assert_eq!(content, "out-2");
-    // Older result elided to a recoverable stub naming its event id (e2).
     let ContentBlock::ToolResult { content, .. } = &msgs[2].blocks[0] else { panic!() };
-    assert!(content.contains("lofi.result(\"e2\")"), "got {content}");
-    // Older tool-call code elided too.
-    let ContentBlock::ToolUse { input, .. } = &msgs[1].blocks[0] else { panic!() };
-    let code = input.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(code.contains("lofi.result(\"e1\")"), "got {code}");
+    assert!(content.contains("lofi.result"), "older kept-tail result should be the stub written by compact_now, got {content}");
 
-    // With editing disabled, the tail comes back verbatim.
-    let verbatim = messages_from_events(&events, &lofi_types::EditConfig { enabled: false, ..edit });
-    let ContentBlock::ToolResult { content, .. } = &verbatim[2].blocks[0] else { panic!() };
-    assert_eq!(content, "out-1");
+    // Post-compaction: verbatim, full results.
+    let ContentBlock::ToolResult { content, .. } = &msgs[6].blocks[0] else { panic!() };
+    assert_eq!(content, "post-compaction-result");
+    let ContentBlock::ToolUse { input, .. } = &msgs[5].blocks[0] else { panic!() };
+    let code = input.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(code, "return 1");
 }
 
 fn user_text(m: &lofi_types::Message) -> &str {
