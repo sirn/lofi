@@ -4,18 +4,17 @@
 //! This is the single place that shapes `SessionEvent`s, so the agent loop
 //! (`agent::run_continuation`) is free of on-disk-format concerns — it emits
 //! `AgentEvent`s to the live channel and, at turn end, hands the recorder the
-//! finalized message slice plus a [`TurnSummary`] of the engine's
-//! accumulators. The recorder pairs them into `SessionEvent`s and writes one
-//! append block per turn.
+//! growing message slice plus a [`TurnSummary`] of the engine's accumulators.
+//! The recorder appends the newly completed suffix after each round, then
+//! writes the terminal marker when the turn settles.
 //!
-//! The recorder is flush-time rather than a streaming subscriber because the
-//! engine's native-tool events reach the live channel through an unbounded
-//! relay (they originate in a sync sandbox callback), and re-teeing that relay
-//! into the recorder would duplicate the fan-out machinery. The engine already
-//! accumulates the durable-relevant state in `TurnStats`; the recorder borrows
-//! a snapshot of it at flush, keeping the on-disk translation in one module.
+//! The recorder is checkpoint-based rather than a streaming subscriber:
+//! native-tool events originate in a synchronous sandbox callback and are
+//! accumulated in `TurnStats`. Snapshotting at clean provider-round boundaries
+//! keeps complete assistant/tool-result cycles durable without duplicating the
+//! live event fan-out machinery.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind, Usage};
 
@@ -87,6 +86,12 @@ pub struct SessionRecorder {
     /// branch as a sibling of `id`'s existing children.
     parent_hint: Option<String>,
     flushed: bool,
+    message_count: usize,
+    native_tool_count: usize,
+    thinking_timing_count: usize,
+    tool_timing_ids: HashSet<String>,
+    byte_start: Option<u64>,
+    byte_end: Option<u64>,
 }
 
 impl SessionRecorder {
@@ -100,6 +105,12 @@ impl SessionRecorder {
             model,
             parent_hint: None,
             flushed: false,
+            message_count: 0,
+            native_tool_count: 0,
+            thinking_timing_count: 0,
+            tool_timing_ids: HashSet::new(),
+            byte_start: None,
+            byte_end: None,
         }
     }
 
@@ -113,25 +124,38 @@ impl SessionRecorder {
             model,
             parent_hint: Some(parent_hint),
             flushed: false,
+            message_count: 0,
+            native_tool_count: 0,
+            thinking_timing_count: 0,
+            tool_timing_ids: HashSet::new(),
+            byte_start: None,
+            byte_end: None,
         }
     }
 
-    /// Flush the durable subset for this turn to the transcript and return the
-    /// byte range of the appended lines (`None` if nothing was written).
-    ///
-    /// `messages` is the slice of conversation messages produced this turn
-    /// (user prompt, assistant turns, tool-result turns), in order. `outcome`
-    /// selects the terminal marker: [`TurnOutcome::Finished`] writes a
-    /// `TurnEnd`, [`TurnOutcome::Failed`] writes a `TurnFailed` (chained
-    /// linearly off the turn's last message, just like `TurnEnd`, so the
-    /// failed turn's content stays on the active path and remains visible on
-    /// resume; `messages_from_events` then skips that content when building
-    /// the agent's history), and [`TurnOutcome::Cancelled`] writes no marker.
-    /// `summary` carries the engine's timing/cost/native-tool accumulators
-    /// that become `ToolTiming`/`ThinkingTiming`/`NativeTool`/terminal events.
+    /// Append everything completed since the previous checkpoint, without a
+    /// terminal marker. Called after each provider/tool round so a long turn
+    /// is durable before the whole agent loop settles.
     ///
     /// # Errors
-    /// Propagates [`lofi_error::Error`] from disk write/serialization.
+    /// Propagates transcript serialization and I/O failures.
+    pub fn checkpoint(
+        &mut self,
+        messages: &[Message],
+        summary: &TurnSummary,
+    ) -> Result<Option<(u64, u64)>> {
+        if self.flushed {
+            return Ok(None);
+        }
+        self.append_pending(messages, summary, None)
+    }
+
+    /// Flush the remaining durable data and terminal marker for this turn.
+    /// Messages/timings already written by [`checkpoint`](Self::checkpoint)
+    /// are not duplicated.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
     pub fn flush(
         &mut self,
         messages: &[Message],
@@ -142,88 +166,103 @@ impl SessionRecorder {
             return Ok(None);
         }
         self.flushed = true;
-        let has_terminal = !matches!(
-            outcome,
-            TurnOutcome::Cancelled | TurnOutcome::ContextPressure
-        );
-        if messages.is_empty()
-            && summary.tool_elapsed.is_empty()
-            && summary.thinking_elapsed.is_empty()
-            && summary.native_tools.is_empty()
-            && !has_terminal
-        {
-            return Ok(None);
-        }
-        let mut events: Vec<SessionEvent> = messages
+        let terminal = match outcome {
+            TurnOutcome::Finished => Some(SessionEventKind::TurnEnd {
+                model: self.model.clone(),
+                elapsed_ms: summary.elapsed_ms,
+                cost: summary.cost,
+                usage: summary.usage,
+            }),
+            TurnOutcome::Failed(error) => Some(SessionEventKind::TurnFailed {
+                model: self.model.clone(),
+                elapsed_ms: summary.elapsed_ms,
+                error: error.clone(),
+                cost: summary.cost,
+                usage: summary.usage,
+            }),
+            TurnOutcome::ContextPressure | TurnOutcome::Cancelled => None,
+        };
+        self.append_pending(messages, summary, terminal)?;
+        Ok(self.byte_start.zip(self.byte_end))
+    }
+
+    fn append_pending(
+        &mut self,
+        messages: &[Message],
+        summary: &TurnSummary,
+        terminal: Option<SessionEventKind>,
+    ) -> Result<Option<(u64, u64)>> {
+        let new_messages = messages.get(self.message_count..).unwrap_or_default();
+        let new_native = summary
+            .native_tools
+            .get(self.native_tool_count..)
+            .unwrap_or_default();
+        let new_thinking = summary
+            .thinking_elapsed
+            .get(self.thinking_timing_count..)
+            .unwrap_or_default();
+        let mut events = Vec::new();
+        events.extend(new_messages.iter().cloned().map(|message| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(message),
+        }));
+        events.extend(new_native.iter().cloned().map(|record| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::NativeTool(record),
+        }));
+        let new_tool_timings: Vec<(&String, &u64)> = summary
+            .tool_elapsed
             .iter()
-            .cloned()
-            .map(|m| SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(m),
-            })
+            .filter(|(id, _)| !self.tool_timing_ids.contains(id))
+            .map(|(id, elapsed_ms)| (id, elapsed_ms))
             .collect();
-        for rec in &summary.native_tools {
-            events.push(SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(rec.clone()),
-            });
-        }
-        for (id, ms) in &summary.tool_elapsed {
+        for (id, elapsed_ms) in &new_tool_timings {
             events.push(SessionEvent {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::ToolTiming {
-                    tool_call_id: id.clone(),
-                    elapsed_ms: *ms,
+                    tool_call_id: (*id).clone(),
+                    elapsed_ms: **elapsed_ms,
                 },
             });
         }
-        for ms in &summary.thinking_elapsed {
+        events.extend(new_thinking.iter().copied().map(|elapsed_ms| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::ThinkingTiming { elapsed_ms },
+        }));
+        if let Some(kind) = terminal {
             events.push(SessionEvent {
                 id: String::new(),
                 parent_id: None,
-                kind: SessionEventKind::ThinkingTiming { elapsed_ms: *ms },
+                kind,
             });
         }
-        match outcome {
-            TurnOutcome::Finished => {
-                events.push(SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: SessionEventKind::TurnEnd {
-                        model: self.model.clone(),
-                        elapsed_ms: summary.elapsed_ms,
-                        cost: summary.cost,
-                        usage: summary.usage,
-                    },
-                });
-            }
-            TurnOutcome::Failed(error) => {
-                // Chain linearly off the turn's last message (same as
-                // `TurnEnd`) so the failed turn's content stays on the active
-                // path and remains visible on resume. The agent-history walk
-                // in `messages_from_events` skips the failed turn's messages
-                // via the `TurnFailed` boundary, so the model is not fed
-                // partial/errored content.
-                events.push(SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: SessionEventKind::TurnFailed {
-                        model: self.model.clone(),
-                        elapsed_ms: summary.elapsed_ms,
-                        error: error.clone(),
-                        cost: summary.cost,
-                        usage: summary.usage,
-                    },
-                });
-            }
-            TurnOutcome::ContextPressure | TurnOutcome::Cancelled => {}
+        if events.is_empty() {
+            return Ok(None);
         }
+        let parent_hint = self.parent_hint.take();
         let (start, end) =
-            store::append_events(&self.path, &mut events, self.parent_hint.as_deref())?;
+            match store::append_events(&self.path, &mut events, parent_hint.as_deref()) {
+                Ok(range) => range,
+                Err(error) => {
+                    // Do not advance cursors or consume the explicit branch
+                    // point: a later checkpoint/final flush retries the
+                    // complete unwritten suffix from the same parent.
+                    self.parent_hint = parent_hint;
+                    return Err(error);
+                }
+            };
+        self.message_count = messages.len();
+        self.native_tool_count = summary.native_tools.len();
+        self.thinking_timing_count = summary.thinking_elapsed.len();
+        self.tool_timing_ids
+            .extend(new_tool_timings.into_iter().map(|(id, _)| id.clone()));
         if end > start {
+            self.byte_start.get_or_insert(start);
+            self.byte_end = Some(end);
             Ok(Some((start, end)))
         } else {
             Ok(None)
@@ -372,6 +411,69 @@ mod tests {
             assert_eq!(w[1].parent_id.as_deref(), Some(w[0].id.as_str()));
         }
         let _ = range;
+    }
+
+    #[test]
+    fn checkpoints_each_round_without_duplicate_final_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let mut rec = SessionRecorder::new(path.clone(), "m".into());
+        let mut first_summary = summary(10);
+        first_summary.native_tools.clear();
+        first_summary.thinking_elapsed.clear();
+        first_summary.tool_elapsed = vec![("t1".into(), 7)];
+        let first = vec![user_msg("go"), assistant_text("round one")];
+
+        let first_range = rec
+            .checkpoint(&first, &first_summary)
+            .unwrap()
+            .expect("first round persisted");
+        let (_, checkpoint_events, _, checkpoint_size) = store::load(&path).unwrap();
+        assert_eq!(
+            checkpoint_events
+                .iter()
+                .filter(|event| matches!(event.kind, SessionEventKind::Message(_)))
+                .count(),
+            2
+        );
+        assert!(!checkpoint_events.iter().any(|event| matches!(
+            event.kind,
+            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. }
+        )));
+        assert_eq!(first_range.1, checkpoint_size);
+
+        let mut all = first;
+        all.push(assistant_text("round two"));
+        let mut final_summary = first_summary;
+        final_summary.elapsed_ms = 20;
+        final_summary.thinking_elapsed.push(3);
+        let full_range = rec
+            .flush(&all, &TurnOutcome::Finished, &final_summary)
+            .unwrap()
+            .expect("final suffix persisted");
+        let (_, events, _, file_size) = store::load(&path).unwrap();
+        assert_eq!(full_range, (first_range.0, file_size));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, SessionEventKind::Message(_)))
+                .count(),
+            3,
+            "checkpointed messages must not be duplicated"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, SessionEventKind::ToolTiming { .. }))
+                .count(),
+            1,
+            "checkpointed timings must not be duplicated"
+        );
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(SessionEventKind::TurnEnd { .. })
+        ));
     }
 
     #[test]

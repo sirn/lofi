@@ -27,6 +27,33 @@ fn push_turn(app: &mut App) {
 }
 
 #[test]
+fn failed_exec_settles_pending_native_tools() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".into(),
+        name: "exec".into(),
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".into(),
+        id: 0,
+        name: "agent".into(),
+        args: "inspect".into(),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".into(),
+        result: "sandbox error: timed out".into(),
+        is_error: true,
+        elapsed_ms: 1,
+    });
+    let Block::Tool(exec) = &a.turns[0].blocks[0] else {
+        panic!("expected exec")
+    };
+    assert!(exec.native[0].done);
+    assert!(exec.native[0].is_error);
+}
+
+#[test]
 fn native_tool_events_nest_under_their_exec() {
     let mut a = app();
     push_turn(&mut a);
@@ -1475,6 +1502,24 @@ fn tool_input_and_end_land_under_matching_id() {
     assert!(t1.done);
     assert_eq!(t2.result.as_deref(), Some("r2"));
     assert!(t2.done);
+}
+
+#[test]
+fn turn_committed_extends_existing_range_across_silent_continuation() {
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 100,
+        byte_end: 200,
+    });
+    a.apply_event(AgentEvent::TurnContinue);
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 250,
+        byte_end: 300,
+    });
+    assert_eq!(a.turn_byte_ranges, vec![Some((100, 300))]);
 }
 
 #[test]

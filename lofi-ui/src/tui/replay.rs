@@ -171,6 +171,19 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         }
         AgentEvent::ToolEnd { id, result, is_error, elapsed_ms } => {
             if let Some(t) = tool_mut(&mut turn.blocks, &id) {
+                if is_error {
+                    // A rejected exec promise cancels sibling native-tool
+                    // futures. Their End events may never be produced (or may
+                    // still be queued behind this parent event), so settle any
+                    // open rows now rather than leaving stale spinners behind.
+                    for nt in &mut t.native {
+                        if !nt.done {
+                            nt.result = Some("cancelled because parent exec failed".to_string());
+                            nt.is_error = true;
+                            nt.done = true;
+                        }
+                    }
+                }
                 t.result = Some(result);
                 t.is_error = is_error;
                 t.done = true;

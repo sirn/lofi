@@ -172,7 +172,17 @@ impl App {
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
                 if let Some(r) = self.turn_byte_ranges.last_mut() {
-                    *r = Some((byte_start, byte_end));
+                    // A hard-cap compaction silently continues the same
+                    // visible turn in a second agent run. Preserve the first
+                    // run's committed prefix instead of replacing it with the
+                    // continuation-only range; otherwise the next prompt
+                    // freezes the turn, clears its in-memory blocks, and can
+                    // only reload the continuation suffix (which has no user
+                    // turn start), making the transcript appear to vanish.
+                    *r = Some(match *r {
+                        Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
+                        None => (byte_start, byte_end),
+                    });
                 }
                 return;
             }
