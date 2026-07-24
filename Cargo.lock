@@ -1489,7 +1489,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lofi-code",
  "lofi-core",
+ "lofi-types",
  "lofi-ui",
  "tokio",
  "tracing",
