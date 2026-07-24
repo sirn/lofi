@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 globset = { workspace = true }
 nix = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

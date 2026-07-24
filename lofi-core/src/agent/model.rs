@@ -41,7 +41,13 @@ pub async fn build_agent(
     config_path: Option<&std::path::Path>,
     model: Option<&str>,
     root: &std::path::Path,
-) -> Result<(Agent, Model, ThinkingLevel, lofi_types::Config, ModelRegistry)> {
+) -> Result<(
+    Agent,
+    Model,
+    ThinkingLevel,
+    lofi_types::Config,
+    ModelRegistry,
+)> {
     let config_path = match config_path {
         Some(p) => p.to_path_buf(),
         None => crate::config_loader::user_config_path()?,
@@ -62,10 +68,7 @@ pub async fn build_agent(
     // base system prompt after the agent is built. The `/model` switch
     // reuses the existing agent's prompt, so the folded prompt is inherited
     // without re-reading the files on every switch.
-    let agent = agent.with_system_prompt(assemble_system_prompt(
-        config_path.parent(),
-        root,
-    ));
+    let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
     // Set the skills directory (`<config_dir>/skills`) so the agent can
     // discover and read skill files via `lofi.skills()` / `lofi.skill(name)`.
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
@@ -351,10 +354,11 @@ pub fn select_model(
         .providers()
         .get(&provider_name)
         .ok_or_else(|| Error::Config(format!("unknown provider: {provider_name}")))?;
-    let mc = pcfg
-        .models
-        .get(&model_id)
-        .ok_or_else(|| Error::Config(format!("no model `{model_id}` for provider `{provider_name}`")))?;
+    let mc = pcfg.models.get(&model_id).ok_or_else(|| {
+        Error::Config(format!(
+            "no model `{model_id}` for provider `{provider_name}`"
+        ))
+    })?;
     let level = resolve_thinking_level(explicit_level, mc, pcfg, config.agent.thinking_level)?;
     Ok((model, level))
 }
@@ -456,7 +460,10 @@ mod tests {
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         let repo_pos = prompt.find("repo-level").unwrap();
         let sub_pos = prompt.find("sub-level").unwrap();
-        assert!(repo_pos < sub_pos, "outermost (repo) must precede innermost (sub)");
+        assert!(
+            repo_pos < sub_pos,
+            "outermost (repo) must precede innermost (sub)"
+        );
     }
 
     #[test]

@@ -94,7 +94,10 @@ impl App {
             compact_count(self.ctx_limit),
             cached_suffix.unwrap_or_default()
         ));
-        Line::from(vec![Span::styled(segments.join(sep), Style::new().fg(t.muted))])
+        Line::from(vec![Span::styled(
+            segments.join(sep),
+            Style::new().fg(t.muted),
+        )])
     }
 
     /// Queue badge for the mode line: shows a preview of the first queued

@@ -3,7 +3,9 @@
 //! capped directory walks for `grep`/`find`.
 
 #[allow(clippy::wildcard_imports)]
-use super::*;/// Create a fresh per-session tmp directory under the system temp dir.
+use super::*;
+
+/// Create a fresh per-session tmp directory under the system temp dir.
 /// Called when no explicit tmp dir is provided.
 pub(super) fn default_tmp_dir() -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,8 +18,6 @@ pub(super) fn default_tmp_dir() -> PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
-
-
 
 /// Resolve `p` against `root`, rejecting escapes.
 ///
@@ -185,6 +185,7 @@ pub(super) fn reject_symlink_leaf(root: &Path, p: &str, label: &str) -> Result<(
 /// file can't block in a later read. Returns `true` when truncated.
 pub(super) fn walk_files_capped(
     dir: &Path,
+    allowed_root: &Path,
     out: &mut Vec<PathBuf>,
     visited: &mut usize,
     max_visited: usize,
@@ -192,6 +193,30 @@ pub(super) fn walk_files_capped(
     if !dir.is_dir() {
         return Ok(false);
     }
+    let canonical_root = allowed_root.canonicalize()?;
+    walk_files_capped_inner(
+        dir,
+        &canonical_root,
+        out,
+        visited,
+        max_visited,
+        &mut Vec::new(),
+    )
+}
+
+fn walk_files_capped_inner(
+    dir: &Path,
+    canonical_root: &Path,
+    out: &mut Vec<PathBuf>,
+    visited: &mut usize,
+    max_visited: usize,
+    ancestors: &mut Vec<PathBuf>,
+) -> Result<bool> {
+    let canonical_dir = dir.canonicalize()?;
+    if !canonical_dir.starts_with(canonical_root) || ancestors.contains(&canonical_dir) {
+        return Ok(false);
+    }
+    ancestors.push(canonical_dir);
     for entry in std::fs::read_dir(dir)? {
         if *visited >= max_visited {
             return Ok(true);
@@ -205,13 +230,27 @@ pub(super) fn walk_files_capped(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            if walk_files_capped(&entry.path(), out, visited, max_visited)? {
+            if walk_files_capped_inner(
+                &entry.path(),
+                canonical_root,
+                out,
+                visited,
+                max_visited,
+                ancestors,
+            )? {
+                ancestors.pop();
                 return Ok(true);
             }
         } else if ft.is_file() {
-            out.push(entry.path());
+            let Ok(canonical_file) = entry.path().canonicalize() else {
+                continue;
+            };
+            if canonical_file.starts_with(canonical_root) {
+                out.push(entry.path());
+            }
         }
     }
+    ancestors.pop();
     Ok(false)
 }
 
@@ -239,28 +278,78 @@ pub(super) fn find_walk(
     if !dir.is_dir() {
         return Ok(WalkLimit::Complete);
     }
+    let canonical_root = root.canonicalize()?;
+    find_walk_inner(
+        dir,
+        root,
+        &canonical_root,
+        matcher,
+        hits,
+        max_hits,
+        visited,
+        max_visited,
+        &mut Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_walk_inner(
+    dir: &Path,
+    root: &Path,
+    canonical_root: &Path,
+    matcher: &globset::GlobMatcher,
+    hits: &mut Vec<String>,
+    max_hits: usize,
+    visited: &mut usize,
+    max_visited: usize,
+    ancestors: &mut Vec<PathBuf>,
+) -> Result<WalkLimit> {
+    let canonical_dir = dir.canonicalize()?;
+    if !canonical_dir.starts_with(canonical_root) || ancestors.contains(&canonical_dir) {
+        return Ok(WalkLimit::Complete);
+    }
+    ancestors.push(canonical_dir);
     for entry in std::fs::read_dir(dir)? {
         if hits.len() >= max_hits {
+            ancestors.pop();
             return Ok(WalkLimit::TooManyHits);
         }
         if *visited >= max_visited {
+            ancestors.pop();
             return Ok(WalkLimit::TooManyVisited);
         }
         *visited += 1;
         let entry = entry?;
-        // Follow symlinks via std::fs::metadata (DirEntry::metadata does
-        // not follow symlinks on Unix). Broken symlinks are skipped.
         let ft = match std::fs::metadata(entry.path()) {
             Ok(m) => m.file_type(),
             Err(_) => continue,
         };
         let path = entry.path();
         if ft.is_dir() {
-            match find_walk(&path, root, matcher, hits, max_hits, visited, max_visited)? {
+            match find_walk_inner(
+                &path,
+                root,
+                canonical_root,
+                matcher,
+                hits,
+                max_hits,
+                visited,
+                max_visited,
+                ancestors,
+            )? {
                 WalkLimit::Complete => {}
-                other => return Ok(other),
+                other => {
+                    ancestors.pop();
+                    return Ok(other);
+                }
             }
         } else if ft.is_file() {
+            let Ok(canonical_file) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_file.starts_with(canonical_root) {
+                continue;
+            }
             if let Ok(rel) = path.strip_prefix(root) {
                 let rel = rel.to_string_lossy().into_owned();
                 if matcher.is_match(&rel) {
@@ -269,6 +358,7 @@ pub(super) fn find_walk(
             }
         }
     }
+    ancestors.pop();
     Ok(WalkLimit::Complete)
 }
 

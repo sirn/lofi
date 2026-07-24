@@ -1696,6 +1696,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             summary: "summary".into(),
             first_kept_entry_id: String::new(),
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 3,
             kept: 1,
         },
@@ -2589,6 +2590,7 @@ fn messages_from_events_prepends_compaction_summary() {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: String::new(), // patched after append
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 1,
             kept: 2,
         },
@@ -2619,6 +2621,29 @@ fn messages_from_events_prepends_compaction_summary() {
     assert_eq!(user_text(&msgs[1]), "kept-prompt");
     assert_eq!(msgs[2].role, Role::Assistant);
     assert_eq!(msgs[3].role, Role::Assistant);
+}
+
+#[test]
+fn messages_from_events_compact_all_does_not_restore_old_messages() {
+    let events = sev_chain([
+        msg(user("old prompt")),
+        msg(assistant("old reply")),
+        SessionEventKind::Compaction {
+            summary: "SUMMARY".to_string(),
+            first_kept_entry_id: String::new(),
+            summarized_range: ["e0".to_string(), "e1".to_string()],
+            checkpointed_tail: false,
+            summarized: 2,
+            kept: 0,
+        },
+        msg(assistant("continued")),
+    ]);
+
+    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(user_text(&msgs[0]), "SUMMARY");
+    assert_eq!(msgs[1].role, Role::Assistant);
+    assert_eq!(user_text(&msgs[1]), "continued");
 }
 
 #[test]
@@ -2686,6 +2711,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: "e1".to_string(),
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 1,
             kept: 4,
         },

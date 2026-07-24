@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use lofi_code::{compile_ts, exec, AgentFn, AgentRequest, BashEnv, ExecCtx, ExecOptions, ToolEvent};
+use lofi_code::{
+    compile_ts, exec, AgentFn, AgentRequest, BashEnv, ExecCtx, ExecOptions, ToolEvent,
+};
 use serde_json::{json, Value};
 
 /// Build an `ExecCtx` rooted at `root` with no named strings and a stub
@@ -26,10 +28,12 @@ fn ctx(root: &Path) -> ExecCtx {
         strings: HashMap::new(),
         agent: None,
         on_tool_event: None,
-            recall: None,
-            result: None,
+        recall: None,
+        result: None,
         bash_env: BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm: None,
         auto_mode: None,
         skills_dir: None,
@@ -160,10 +164,12 @@ async fn strings_exposed_as_lofi_strings() {
         strings,
         agent: None,
         on_tool_event: None,
-            recall: None,
-            result: None,
+        recall: None,
+        result: None,
         bash_env: BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm: None,
         auto_mode: None,
         skills_dir: None,
@@ -203,16 +209,21 @@ async fn exec_bash_read_pages_bash_log() {
     let path = out
         .split("Full output: ")
         .nth(1)
-        .and_then(|s| s.split(". Use lofi.read").next().map(|s| s.trim().to_string()))
+        .and_then(|s| {
+            s.split(". Use lofi.read")
+                .next()
+                .map(|s| s.trim().to_string())
+        })
         .expect("notice should contain an absolute path");
-    let src2 = format!(
-        "const r = await lofi.read({path:?}, {{ offset: 1, limit: 3 }}); return r;"
-    );
+    let src2 = format!("const r = await lofi.read({path:?}, {{ offset: 1, limit: 3 }}); return r;");
     let res2 = exec(&src2, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let s2: &str = res2.value["content"].as_str().unwrap();
-    assert!(s2.contains("output line number 1"), "first page should start at line 1: path={path:?} s2={s2}");
+    assert!(
+        s2.contains("output line number 1"),
+        "first page should start at line 1: path={path:?} s2={s2}"
+    );
 }
 
 #[tokio::test]
@@ -236,9 +247,8 @@ async fn agent_call_emits_tool_events() {
         Arc::new(move |ev: ToolEvent| events.lock().unwrap().push(ev))
             as Arc<dyn Fn(ToolEvent) + Send + Sync>
     };
-    let agent: AgentFn = Arc::new(|_req: AgentRequest| {
-        Box::pin(async { Ok("subagent reply".to_string()) })
-    });
+    let agent: AgentFn =
+        Arc::new(|_req: AgentRequest| Box::pin(async { Ok("subagent reply".to_string()) }));
     let cx = ExecCtx {
         root: dir.path().to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-test"),
@@ -248,7 +258,9 @@ async fn agent_call_emits_tool_events() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm: None,
         auto_mode: None,
         skills_dir: None,
@@ -258,7 +270,8 @@ async fn agent_call_emits_tool_events() {
     assert_eq!(res.value.as_str().unwrap(), "subagent reply");
     let evs = events.lock().unwrap();
     let has = |name: &str| {
-        evs.iter().any(|e| matches!(e, ToolEvent::Start { name: n, .. } if n == name))
+        evs.iter()
+            .any(|e| matches!(e, ToolEvent::Start { name: n, .. } if n == name))
             && evs.iter().any(|e| matches!(e, ToolEvent::End { .. }))
     };
     assert!(has("agent"), "missing agent tool events: {evs:?}");
@@ -283,7 +296,9 @@ async fn write_and_edit_emit_written_content_as_result() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm: None,
         auto_mode: None,
         skills_dir: None,
@@ -298,13 +313,23 @@ async fn write_and_edit_emit_written_content_as_result() {
     let ends: Vec<&String> = evs
         .iter()
         .filter_map(|e| match e {
-            ToolEvent::End { result, is_error: false, .. } => Some(result),
+            ToolEvent::End {
+                result,
+                is_error: false,
+                ..
+            } => Some(result),
             _ => None,
         })
         .collect();
     assert_eq!(ends.len(), 2, "expected two successful tool ends: {evs:?}");
-    assert!(ends.iter().any(|r| r.contains("written line one")), "write content missing: {ends:?}");
-    assert!(ends.iter().any(|r| r.contains("edited line one")), "edit content missing: {ends:?}");
+    assert!(
+        ends.iter().any(|r| r.contains("written line one")),
+        "write content missing: {ends:?}"
+    );
+    assert!(
+        ends.iter().any(|r| r.contains("edited line one")),
+        "edit content missing: {ends:?}"
+    );
 }
 
 #[tokio::test]

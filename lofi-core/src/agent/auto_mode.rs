@@ -44,25 +44,19 @@ pub fn build_auto_mode(
     }
 
     let qualified = format!("{}/{}", auto_cfg.provider, auto_cfg.model);
-    let model = registry
-        .resolve(&qualified)
-        .cloned()
-        .ok_or_else(|| {
-            Error::Config(format!(
-                "auto-mode model \"{qualified}\" not found in registry"
-            ))
-        })?;
+    let model = registry.resolve(&qualified).cloned().ok_or_else(|| {
+        Error::Config(format!(
+            "auto-mode model \"{qualified}\" not found in registry"
+        ))
+    })?;
 
     // Verify the model's provider has credentials.
-    let provider_cfg = config
-        .providers
-        .get(&auto_cfg.provider)
-        .ok_or_else(|| {
-            Error::Config(format!(
-                "auto-mode provider \"{}\" not found in config",
-                auto_cfg.provider
-            ))
-        })?;
+    let provider_cfg = config.providers.get(&auto_cfg.provider).ok_or_else(|| {
+        Error::Config(format!(
+            "auto-mode provider \"{}\" not found in config",
+            auto_cfg.provider
+        ))
+    })?;
 
     let is_available = provider_cfg.no_auth
         || provider_cfg
@@ -100,9 +94,8 @@ pub fn build_auto_mode(
                 .ok()
                 .and_then(std::result::Result::ok)
                 .flatten()
-        }) as std::pin::Pin<
-            Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>,
-        >
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
     });
 
     Ok(Some(auto_mode_fn))

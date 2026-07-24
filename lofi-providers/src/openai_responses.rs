@@ -23,16 +23,16 @@ use lofi_error::{Error, Result};
 /// POSTs to `model.base_url` verbatim; see
 /// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
 /// resolution contract.
-pub struct OpenAiResponsesProvider {
+pub(crate) struct OpenAiResponsesProvider {
     /// Provider host root, used as the fallback when a model does not carry
     /// its own `base_url`.
-    pub base_url: String,
+    pub(crate) base_url: String,
     /// Resolved bearer token.
-    pub api_key: String,
+    pub(crate) api_key: String,
     /// Extra resolved headers from config.
-    pub headers: HashMap<String, String>,
+    pub(crate) headers: HashMap<String, String>,
     /// Shared HTTP client.
-    pub client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 #[async_trait]
@@ -53,7 +53,7 @@ impl super::Provider for OpenAiResponsesProvider {
             ),
             &self.headers,
         );
-        let resp = req.send().await.map_err(Error::Http)?;
+        let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
         let resp = super::ensure_ok(resp).await?;
         Ok(map_sse_response(resp, OpenAiResponsesMapper::default()))
     }

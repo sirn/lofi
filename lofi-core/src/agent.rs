@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use futures::future::LocalBoxFuture;
 use futures::StreamExt;
 use lofi_types::{
-    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, StreamingEvent,
-    ThinkingLevel, Usage,
+    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, StreamingEvent, ThinkingLevel,
+    Usage,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -36,15 +36,15 @@ use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
-use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_code::policy::ResolvedPolicy;
-use tokio::sync::oneshot;
+use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
-use std::sync::atomic::{AtomicU64, Ordering};
-use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;
 use lofi_providers::ir::codec::assemble_message;
 use lofi_providers::{open, Provider};
+use lofi_types::BashConfig;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::oneshot;
 
 /// A confirmation request from the shell policy, sent to the UI.
 #[derive(Debug)]
@@ -69,10 +69,12 @@ mod model;
 mod tests;
 
 pub use event::AgentEvent;
-pub use exec::{exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input};
-pub use model::{build_agent, rebuild_agent, select_model};
 pub(crate) use exec::{cap_exec_result, cap_tool_result, extract_code_prefix};
+pub use exec::{
+    exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
+};
 pub(crate) use model::initial_history;
+pub use model::{build_agent, rebuild_agent, select_model};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 
@@ -480,7 +482,6 @@ impl Agent {
     pub fn max_output_tokens(&self) -> Option<u64> {
         self.max_output_tokens
     }
-
 }
 
 /// [`Agent`] is a [`RoundTrip`]: one `run_once` per call, used by subagents.

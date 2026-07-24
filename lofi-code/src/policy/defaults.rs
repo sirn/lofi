@@ -4,9 +4,7 @@
 //! configs, and redirect/heredoc policies. Custom rules from the config
 //! are merged on top.
 
-use lofi_types::{
-    CommandEntry, MatchMode, ShellPolicyMode, WrapperKind, WrapperRuleConfig,
-};
+use lofi_types::{CommandEntry, MatchMode, ShellPolicyMode, WrapperKind, WrapperRuleConfig};
 
 use super::engine::ResolvedPolicy;
 use super::extract::build_wrapper_map;
@@ -14,24 +12,78 @@ use super::extract::build_wrapper_map;
 /// Standard wrapper rules shared by all modes.
 fn standard_wrappers() -> Vec<WrapperRuleConfig> {
     vec![
-        WrapperRuleConfig { name: "bash".into(), kind: WrapperKind::ShellC },
-        WrapperRuleConfig { name: "sh".into(), kind: WrapperKind::ShellC },
-        WrapperRuleConfig { name: "zsh".into(), kind: WrapperKind::ShellC },
-        WrapperRuleConfig { name: "dash".into(), kind: WrapperKind::ShellC },
-        WrapperRuleConfig { name: "ksh".into(), kind: WrapperKind::ShellC },
-        WrapperRuleConfig { name: "sudo".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "doas".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "time".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "nohup".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "nice".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "chroot".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "timeout".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "setsid".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "command".into(), kind: WrapperKind::UtilityOperand },
-        WrapperRuleConfig { name: "env".into(), kind: WrapperKind::Env },
-        WrapperRuleConfig { name: "xargs".into(), kind: WrapperKind::Xargs },
-        WrapperRuleConfig { name: "docker".into(), kind: WrapperKind::DockerRun },
-        WrapperRuleConfig { name: "podman".into(), kind: WrapperKind::DockerRun },
+        WrapperRuleConfig {
+            name: "bash".into(),
+            kind: WrapperKind::ShellC,
+        },
+        WrapperRuleConfig {
+            name: "sh".into(),
+            kind: WrapperKind::ShellC,
+        },
+        WrapperRuleConfig {
+            name: "zsh".into(),
+            kind: WrapperKind::ShellC,
+        },
+        WrapperRuleConfig {
+            name: "dash".into(),
+            kind: WrapperKind::ShellC,
+        },
+        WrapperRuleConfig {
+            name: "ksh".into(),
+            kind: WrapperKind::ShellC,
+        },
+        WrapperRuleConfig {
+            name: "sudo".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "doas".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "time".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "nohup".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "nice".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "chroot".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "timeout".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "setsid".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "command".into(),
+            kind: WrapperKind::UtilityOperand,
+        },
+        WrapperRuleConfig {
+            name: "env".into(),
+            kind: WrapperKind::Env,
+        },
+        WrapperRuleConfig {
+            name: "xargs".into(),
+            kind: WrapperKind::Xargs,
+        },
+        WrapperRuleConfig {
+            name: "docker".into(),
+            kind: WrapperKind::DockerRun,
+        },
+        WrapperRuleConfig {
+            name: "podman".into(),
+            kind: WrapperKind::DockerRun,
+        },
     ]
 }
 
@@ -183,7 +235,10 @@ fn workspace_write_allow() -> Vec<CommandEntry> {
 }
 
 fn entry(match_str: &str, mode: MatchMode) -> CommandEntry {
-    CommandEntry { match_str: match_str.into(), mode }
+    CommandEntry {
+        match_str: match_str.into(),
+        mode,
+    }
 }
 
 /// Resolve a `ShellPolicyConfig` into a `ResolvedPolicy` by merging the
@@ -195,7 +250,10 @@ pub fn resolve(config: &lofi_types::ShellPolicyConfig) -> ResolvedPolicy {
             let mut d = universal_deny();
             // Also deny write commands in read-only mode
             d.extend(workspace_write_allow().into_iter().filter(|e| {
-                !matches!(e.match_str.as_str(), "cd" | "sleep" | "true" | "false" | "test" | "[")
+                !matches!(
+                    e.match_str.as_str(),
+                    "cd" | "sleep" | "true" | "false" | "test" | "["
+                )
             }));
             d
         }),

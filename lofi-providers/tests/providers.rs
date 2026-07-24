@@ -9,14 +9,12 @@
 
 #![allow(clippy::unwrap_used)]
 
-
-
 use futures::StreamExt;
 use lofi_providers::ir::assemble_message;
 use lofi_providers::open;
 use lofi_types::{
-    Api, ContentBlock, Message, Model, PricingFieldMappings,
-    PricingConvention, ProviderConfig, Role, StreamingEvent, Usage,
+    Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, ProviderConfig,
+    Role, StreamingEvent, Usage,
 };
 
 /// A minimal user message used to satisfy the provider's `messages` argument;
@@ -118,7 +116,11 @@ async fn openai_chat_completions_maps_canned_stream() {
     )
     .unwrap();
     let stream = provider
-        .stream(&model_for(Api::OpenAiCompletions, &server.url()), &[user_msg()], &[])
+        .stream(
+            &model_for(Api::OpenAiCompletions, &server.url()),
+            &[user_msg()],
+            &[],
+        )
         .await
         .unwrap();
     let events = collect(stream).await;
@@ -171,7 +173,11 @@ async fn openai_responses_maps_canned_stream() {
     )
     .unwrap();
     let stream = provider
-        .stream(&model_for(Api::OpenAiResponses, &server.url()), &[user_msg()], &[])
+        .stream(
+            &model_for(Api::OpenAiResponses, &server.url()),
+            &[user_msg()],
+            &[],
+        )
         .await
         .unwrap();
     let events = collect(stream).await;
@@ -236,7 +242,11 @@ async fn anthropic_messages_maps_canned_stream() {
     )
     .unwrap();
     let stream = provider
-        .stream(&model_for(Api::AnthropicMessages, &server.url()), &[user_msg()], &[])
+        .stream(
+            &model_for(Api::AnthropicMessages, &server.url()),
+            &[user_msg()],
+            &[],
+        )
         .await
         .unwrap();
     let events = collect(stream).await;
@@ -282,5 +292,3 @@ async fn anthropic_messages_maps_canned_stream() {
         }
     );
 }
-
-
