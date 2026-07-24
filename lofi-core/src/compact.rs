@@ -185,7 +185,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
             .map(|lm| (lm.event_id.clone(), lm.message.clone()))
             .collect();
         let edited = crate::context_edit::edit_tail(&pairs, &opts.edit);
-        for (lm, msg) in live.iter_mut().zip(edited.into_iter()) {
+        for (lm, msg) in live.iter_mut().zip(edited) {
             lm.message = msg;
         }
     }

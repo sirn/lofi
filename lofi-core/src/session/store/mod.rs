@@ -538,9 +538,8 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
         if l.is_empty() {
             continue;
         }
-        let ev = match parse_event(l) {
-            Ok(ev) => ev,
-            Err(_) => continue,
+        let Ok(ev) = parse_event(l) else {
+            continue;
         };
         if matches!(ev.kind, SessionEventKind::Message(_)) {
             count += 1;

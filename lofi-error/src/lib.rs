@@ -1,9 +1,9 @@
 //! Error type for `lofi-core`.
 //!
 //! A single enum covers all fallible surfaces in the crate. Provider/tool/state
-//! failures carry a free-form message; the I/O, HTTP, and config-decode failures
-//! use `#[from]` for ergonomic `?` propagation. A boxed `dyn Error` fallback
-//! keeps room for one-off causes without bloating the enum.
+//! failures carry a free-form message; I/O failures use `#[from]` for ergonomic
+//! `?` propagation. Transport-specific crates map their concrete errors into
+//! the HTTP message variant, keeping this foundational crate transport-agnostic.
 
 use thiserror::Error;
 
@@ -14,9 +14,10 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// An HTTP transport failure.
+    /// An HTTP transport failure. Kept as a message so this shared error crate
+    /// does not impose a concrete HTTP client on every downstream crate.
     #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     /// A config load, parse, or value-resolution failure. Carries a
     /// human-readable message rather than a typed cause so the same variant
@@ -52,10 +53,6 @@ pub enum Error {
     /// public `Agent::run` boundary.
     #[error("cancelled: consumer closed")]
     Cancelled,
-
-    /// A fallback for errors that don't merit their own variant.
-    #[error(transparent)]
-    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Convenience `Result` alias used throughout the crate.

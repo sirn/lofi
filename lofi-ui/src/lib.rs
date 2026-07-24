@@ -14,6 +14,9 @@ use lofi_error::{Error, Result};
 use lofi_types::ThinkingLevel;
 
 pub mod tui;
+mod cli;
+
+pub use cli::run_cli;
 
 /// Options for the interactive TUI session.
 ///
@@ -90,10 +93,8 @@ impl InteractiveOptions {
 /// Options for the non-interactive `--print` path.
 ///
 /// `config_path` defaults to the user config file
-/// ([`lofi_core::config_loader::user_config_path`]) when `None`. `provider`
-/// and `model` mirror the `--provider` / `--model` flags; `api_key` is the
-/// literal `--api-key` override applied to the selected provider after config
-/// load.
+/// ([`lofi_core::config_loader::user_config_path`]) when `None`; `model`
+/// mirrors the `--model` flag.
 #[derive(Debug, Clone)]
 pub struct PrintOptions {
     /// The user prompt to send.
