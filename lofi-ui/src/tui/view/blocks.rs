@@ -945,12 +945,12 @@ impl Component for Thinking<'_> {
         let t = cx.theme;
         let body = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
         let content_w = cx.width.saturating_sub(2);
-        let text = self.block.text.trim();
+        let text = trim_reasoning_summary(&self.block.text);
         let working = self.block.elapsed.is_none() && cx.active_turn;
         if text.is_empty() && !working {
             return Vec::new();
         }
-        let mut out = render_markdown_body(text, t, cx.width, content_w, body, |_| {
+        let mut out = render_markdown_body(&text, t, cx.width, content_w, body, |_| {
             vec![Span::raw("  ")]
         });
         if working {
@@ -981,6 +981,28 @@ impl Component for Thinking<'_> {
         }
         out
     }
+}
+
+/// Remove standalone empty reasoning-summary parts from display. `OpenAI` uses
+/// `<!-- -->` as a placeholder, sometimes after a bold status header. Keep
+/// literal comments that are part of otherwise non-empty summary content.
+fn trim_reasoning_summary(text: &str) -> String {
+    text.split("\n\n")
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let header_end = part.strip_prefix("**").and_then(|after_open| {
+                after_open
+                    .find("**")
+                    .and_then(|close| (close > 0).then_some(close + 4))
+            });
+            let body = header_end.map_or(part, |header_end| &part[header_end..]);
+            (body.trim() != "<!-- -->").then_some(part)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ── Exec tree ────────────────────────────────────────────────────────────
@@ -1718,3 +1740,22 @@ impl Component for CompactionLine {
 // keep the import here so the component module can surface it if needed.
 #[allow(unused_imports)]
 use active_indicator as _;
+
+#[cfg(test)]
+mod tests {
+    use super::trim_reasoning_summary;
+
+    #[test]
+    fn reasoning_summary_trims_empty_placeholder_parts() {
+        let text = "**Checking**\n<!-- -->\n\nActual <!-- --> content.\n\n**Done**\nResult";
+        assert_eq!(
+            trim_reasoning_summary(text),
+            "Actual <!-- --> content.\n\n**Done**\nResult"
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_trims_plain_empty_placeholder() {
+        assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
+    }
+}
