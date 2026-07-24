@@ -4,9 +4,9 @@
 //! functions; `tool_result` translates a tool `Result` into a
 //! `rquickjs::Result<JsonV>` so tool errors surface as thrown JS `Error`s.
 
+use super::convert::js_to_json;
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use super::convert::js_to_json;
 
 /// Bind the builtin file/shell tool methods onto `lofi`.
 pub(super) fn bind_tools<'js>(
@@ -421,10 +421,7 @@ fn bind_skills_tools<'js>(
 /// These are pure computation on compile-time-embedded data (no I/O), but
 /// use `Async` closures to go through the same promise/`IntoJs` path as all
 /// other tool bindings.
-fn bind_docs_tools<'js>(
-    ctx: &Ctx<'js>,
-    lofi: &Object<'js>,
-) -> rquickjs::Result<()> {
+fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<()> {
     lofi.set(
         "docs",
         Function::new(
@@ -434,9 +431,7 @@ fn bind_docs_tools<'js>(
                     Some(n) => crate::docs::docs_entry(n),
                     None => crate::docs::docs_index(),
                 };
-                async move {
-                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
-                }
+                async move { Ok::<JsonV, rquickjs::Error>(JsonV(val)) }
             }),
         )?,
     )?;
@@ -447,9 +442,7 @@ fn bind_docs_tools<'js>(
             ctx.clone(),
             Async(move |query: String| {
                 let val = crate::docs::docs_search(&query);
-                async move {
-                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
-                }
+                async move { Ok::<JsonV, rquickjs::Error>(JsonV(val)) }
             }),
         )?,
     )?;
@@ -482,14 +475,15 @@ fn bind_recall_tool<'js>(
     let Some(recall) = recall else {
         lofi.set(
             "recall",
-            Function::new(ctx.clone(), Async(move |_: Opt<Value>| {
-                async move {
+            Function::new(
+                ctx.clone(),
+                Async(move |_: Opt<Value>| async move {
                     Ok::<JsonV, rquickjs::Error>(JsonV(json!({
                         "text": "recall unavailable: no session file for this session.",
                         "status": "unavailable",
                     })))
-                }
-            }))?,
+                }),
+            )?,
         )?;
         return Ok(());
     };
@@ -517,13 +511,25 @@ fn bind_recall_tool<'js>(
 /// Parse `lofi.recall`'s argument object into a `RecallRequest`.
 fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequest {
     use lofi_types::recall::{CompactionTarget, RecallRequest, RecallScope};
-    let Some(obj) = json.as_object() else { return RecallRequest::default(); };
-    let query = obj.get("query").and_then(serde_json::Value::as_str).map(std::string::ToString::to_string);
-    let page = obj.get("page").and_then(serde_json::Value::as_u64).map_or(1, |n| n.max(1) as usize);
+    let Some(obj) = json.as_object() else {
+        return RecallRequest::default();
+    };
+    let query = obj
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .map(std::string::ToString::to_string);
+    let page = obj
+        .get("page")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(1, |n| n.max(1) as usize);
     let expand: Vec<usize> = obj
         .get("expand")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as usize))
+                .collect()
+        })
         .unwrap_or_default();
     let scope = match obj.get("scope").and_then(serde_json::Value::as_str) {
         Some("all") => RecallScope::All,
@@ -538,7 +544,12 @@ fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequ
         }
         _ => RecallScope::Lineage,
     };
-    RecallRequest { query, scope, page, expand }
+    RecallRequest {
+        query,
+        scope,
+        page,
+        expand,
+    }
 }
 
 /// Bind `lofi.result(eventId) -> string` — recover the original, pre-elision
@@ -553,13 +564,14 @@ fn bind_result_tool<'js>(
     let Some(result) = result else {
         lofi.set(
             "result",
-            Function::new(ctx.clone(), Async(move |_: String| {
-                async move {
+            Function::new(
+                ctx.clone(),
+                Async(move |_: String| async move {
                     Ok::<JsonV, rquickjs::Error>(JsonV(json!(
                         "result unavailable: no session file for this session."
                     )))
-                }
-            }))?,
+                }),
+            )?,
         )?;
         return Ok(());
     };

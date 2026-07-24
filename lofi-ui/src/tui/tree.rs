@@ -64,13 +64,32 @@ pub(super) fn build_tree_entries(
             .unwrap_or_default(),
         Some(_) => Vec::new(),
     };
-    let active_set: std::collections::HashSet<usize> =
-        active_path.iter().copied().collect();
+    let active_set: std::collections::HashSet<usize> = active_path.iter().copied().collect();
+    // Context-edited kept-tail copies are durable model checkpoints, not
+    // additional branch nodes. Hide the copy span immediately preceding each
+    // checkpoint marker while retaining the marker itself.
+    let mut hidden_checkpoint: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (marker_pos, &idx) in active_path.iter().enumerate() {
+        if indices[idx].kind != store::IndexKind::Compaction {
+            continue;
+        }
+        let (_, _, checkpointed, first_kept) = load_compaction_details(path, indices[idx].offset);
+        if !checkpointed || first_kept.is_empty() {
+            continue;
+        }
+        if let Some(start_pos) = active_path[..marker_pos]
+            .iter()
+            .position(|&i| indices[i].id == first_kept)
+        {
+            hidden_checkpoint.extend(active_path[start_pos..marker_pos].iter().copied());
+        }
+    }
 
-    // Trunk = active path filtered to displayable nodes.
+    // Trunk = active path filtered to displayable, non-checkpoint-copy nodes.
     let trunk: Vec<usize> = active_path
         .iter()
         .copied()
+        .filter(|i| !hidden_checkpoint.contains(i))
         .filter(|&i| is_tree_node(indices[i].kind))
         .collect();
 
@@ -195,12 +214,7 @@ pub(super) fn active_path_from_index(
 /// roots are siblings of each other — not flattened into one list. Only
 /// actual sub-branches (divergences within a chain) create further
 /// indentation.
-fn render_branch_subtree(
-    ctx: &TreeCtx,
-    roots: &[usize],
-    prefix: &str,
-    out: &mut Vec<TreeEntry>,
-) {
+fn render_branch_subtree(ctx: &TreeCtx, roots: &[usize], prefix: &str, out: &mut Vec<TreeEntry>) {
     let indices = ctx.indices;
     let children_by_parent = ctx.children_by_parent;
     let n = roots.len();
@@ -220,7 +234,10 @@ fn render_branch_subtree(
                 let cis_last = cpos == cn - 1;
                 format!("{child_indent}{}", if cis_last { "└─ " } else { "├─ " })
             };
-            let sub_indent = format!("{child_indent}{}", if cpos == cn - 1 { "   " } else { "│  " });
+            let sub_indent = format!(
+                "{child_indent}{}",
+                if cpos == cn - 1 { "   " } else { "│  " }
+            );
             push_tree_entry(ctx, idx, &cprefix, false, out);
             let mut sub_branches: Vec<usize> = Vec::new();
             if indices[idx].kind == store::IndexKind::UserPrompt {
@@ -236,8 +253,7 @@ fn render_branch_subtree(
                 .flatten()
                 .copied()
                 .filter(|&i| {
-                    indices[i].kind == store::IndexKind::UserPrompt
-                        && !chain_set.contains(&i)
+                    indices[i].kind == store::IndexKind::UserPrompt && !chain_set.contains(&i)
                 })
                 .collect();
             sub_branches.extend(user_children);
@@ -344,11 +360,7 @@ fn push_tree_entry(
             } else {
                 format!("tool: {marker}{name}: {}", one_line(&content))
             };
-            (
-                label,
-                String::new(),
-                ix.id.clone(),
-            )
+            (label, String::new(), ix.id.clone())
         }
         store::IndexKind::TurnEnd => {
             let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.path);
@@ -374,18 +386,27 @@ fn push_tree_entry(
             )
         }
         store::IndexKind::Compaction => {
-            let (summarized, kept) = load_compaction_counts(ctx.path, ix.offset);
+            let (summarized, kept, checkpointed, first_kept) =
+                load_compaction_details(ctx.path, ix.offset);
+            let branch_point = if checkpointed && !first_kept.is_empty() {
+                // The direct parent is the final checkpoint copy; branch from
+                // the first copy's parent, the true pre-compaction leaf.
+                ctx.by_id
+                    .get(first_kept.as_str())
+                    .and_then(|&i| ctx.indices[i].parent_id.clone())
+                    .unwrap_or_default()
+            } else {
+                ix.parent_id.clone().unwrap_or_default()
+            };
             (
                 format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}"),
                 String::new(),
-                // Roll back to the compaction's parent — the pre-compaction
-                // leaf — so the active path excludes the compaction and the
-                // full un-folded history is restored. Selecting this node is
-                // "revert to before the compact".
-                ix.parent_id.clone().unwrap_or_default(),
+                branch_point,
             )
         }
-        store::IndexKind::AssistantMessage | store::IndexKind::NativeTool | store::IndexKind::Other => return,
+        store::IndexKind::AssistantMessage
+        | store::IndexKind::NativeTool
+        | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {
         prefix: prefix.to_string(),
@@ -449,7 +470,9 @@ pub(super) fn load_assistant_preview(
         if !visited.insert(cur) {
             break;
         }
-        let Some(&pidx) = by_id.get(parent_id) else { break };
+        let Some(&pidx) = by_id.get(parent_id) else {
+            break;
+        };
         let pentry = &indices[pidx];
         if pentry.kind == store::IndexKind::UserPrompt {
             break;
@@ -501,9 +524,11 @@ pub(super) fn load_tool_result(
         return (String::new(), String::new(), String::new(), false);
     };
     let Some(block) = m.blocks.iter().find_map(|b| match b {
-        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-            Some((tool_use_id.clone(), content.clone(), *is_error))
-        }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Some((tool_use_id.clone(), content.clone(), *is_error)),
         _ => None,
     }) else {
         return (String::new(), String::new(), String::new(), false);
@@ -518,11 +543,11 @@ pub(super) fn load_tool_result(
         .and_then(|pidx| {
             let pentry = &indices[pidx];
             let pev = store::load_event_at(path, pentry.offset).ok()?;
-            let SessionEventKind::Message(pm) = pev.kind else { return None };
+            let SessionEventKind::Message(pm) = pev.kind else {
+                return None;
+            };
             pm.blocks.iter().find_map(|b| match b {
-                ContentBlock::ToolUse { id, name, .. } if id == &tool_use_id => {
-                    Some(name.clone())
-                }
+                ContentBlock::ToolUse { id, name, .. } if id == &tool_use_id => Some(name.clone()),
                 _ => None,
             })
         })
@@ -533,16 +558,16 @@ pub(super) fn load_tool_result(
 /// Load an assistant-message event and extract its first text block.
 pub(super) fn load_assistant_text(path: &Path, offset: u64) -> Option<String> {
     let ev = store::load_event_at(path, offset).ok()?;
-    let SessionEventKind::Message(m) = ev.kind else { return None };
+    let SessionEventKind::Message(m) = ev.kind else {
+        return None;
+    };
     if m.role != Role::Assistant {
         return None;
     }
-    m.blocks
-        .iter()
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.clone()),
-            _ => None,
-        })
+    m.blocks.iter().find_map(|b| match b {
+        ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
+    })
 }
 
 /// Load a `turn_failed` event and extract its error message.
@@ -557,16 +582,22 @@ pub(super) fn load_failed_error(path: &Path, offset: u64) -> String {
     }
 }
 
-/// Load a `compaction` event and extract its `summarized`/`kept` counts
-/// for the `/tree` node label.
-pub(super) fn load_compaction_counts(path: &Path, offset: u64) -> (usize, usize) {
+/// Load the compaction metadata needed for its tree node and rollback.
+fn load_compaction_details(path: &Path, offset: u64) -> (usize, usize, bool, String) {
     let Ok(ev) = store::load_event_at(path, offset) else {
-        return (0, 0);
+        return (0, 0, false, String::new());
     };
-    if let SessionEventKind::Compaction { summarized, kept, .. } = ev.kind {
-        (summarized, kept)
+    if let SessionEventKind::Compaction {
+        summarized,
+        kept,
+        checkpointed_tail,
+        first_kept_entry_id,
+        ..
+    } = ev.kind
+    {
+        (summarized, kept, checkpointed_tail, first_kept_entry_id)
     } else {
-        (0, 0)
+        (0, 0, false, String::new())
     }
 }
 

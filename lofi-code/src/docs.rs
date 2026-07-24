@@ -251,7 +251,10 @@ mod tests {
         let res = docs_search("truncated filtering");
         let results = res["results"].as_array().unwrap();
         assert!(!results.is_empty());
-        let names: Vec<&str> = results.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = results
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"Truncated results and filtering"));
     }
 

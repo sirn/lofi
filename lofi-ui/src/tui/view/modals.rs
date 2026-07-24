@@ -19,7 +19,12 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|e| {
             let id = e.id();
-            let header = format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model.label());
+            let header = format!(
+                "{}  ({} msgs, {})",
+                id,
+                e.message_count,
+                e.meta.model.label()
+            );
             let preview = if e.last_message.is_empty() {
                 String::new()
             } else {
@@ -56,11 +61,18 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let h = u16::try_from(total.min(8) * 2 + 2)
         .unwrap_or(14)
         .min(area.height);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-        .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -87,7 +99,15 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(
+            f,
+            track,
+            state.offset(),
+            inner.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 
@@ -96,7 +116,9 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
 /// `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc` dismisses.
 pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
-    let Some(sc) = &app.slash_complete else { return; };
+    let Some(sc) = &app.slash_complete else {
+        return;
+    };
     let t = app.theme;
     let n_max = sc.candidates.len().min(8);
     // Width: longest "cmd  desc" plus borders, capped to the screen.
@@ -177,7 +199,15 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(
+            f,
+            track,
+            state.offset(),
+            inner.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 
@@ -212,7 +242,12 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // whitespace and styles) so the row count for the scrollbar and the
     // rendered output agree exactly.
     let max_w = area.width.saturating_sub(2) as usize;
-    let line_w = |l: &Line| l.spans.iter().map(|s| prim::width(s.content.as_ref())).sum::<usize>();
+    let line_w = |l: &Line| {
+        l.spans
+            .iter()
+            .map(|s| prim::width(s.content.as_ref()))
+            .sum::<usize>()
+    };
     let max_body = info.lines.iter().map(line_w).max().unwrap_or(0);
     let inner_w = max_body.min(max_w).max(prim::width(&title));
     let max_body_h = (area.height as usize).saturating_sub(3);
@@ -234,16 +269,20 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let scroll = info.scroll;
 
-    let w = u16::try_from(inner_w + 2)
-        .unwrap_or(40)
-        .min(area.width);
+    let w = u16::try_from(inner_w + 2).unwrap_or(40).min(area.width);
 
-    let vert =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-            .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -267,8 +306,7 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     };
     f.render_widget(block, popup);
 
-    let body = Paragraph::new(wrapped)
-        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
+    let body = Paragraph::new(wrapped).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
     f.render_widget(body, body_rect);
 
     let key_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
@@ -305,7 +343,9 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
 /// `Esc`/`q` cancels.
 pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
-    let Some(picker) = &app.model_picker else { return; };
+    let Some(picker) = &app.model_picker else {
+        return;
+    };
     let t = app.theme;
     let total = picker.choices.len();
     let title = " Switch model  ↑/↓ j/k enter esc ";
@@ -335,11 +375,18 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
         .min(area.width);
     let rows = total.min(20);
     let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-        .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -367,7 +414,11 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
             let is_active = format!("{}/{}", c.provider, c.id) == active;
             ListItem::new(Span::styled(
                 row_for(c),
-                if is_active { active_style } else { inactive_style },
+                if is_active {
+                    active_style
+                } else {
+                    inactive_style
+                },
             ))
         })
         .collect();
@@ -379,7 +430,15 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(
+            f,
+            track,
+            state.offset(),
+            inner.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 
@@ -388,7 +447,9 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
 /// highlighted; `↑/↓` or `j`/`k` move, `Enter` switches, `Esc`/`q` cancels.
 pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
-    let Some(picker) = &app.thinking_picker else { return; };
+    let Some(picker) = &app.thinking_picker else {
+        return;
+    };
     let t = app.theme;
     let total = picker.levels.len();
     let title = " Thinking level  ↑/↓ j/k enter esc ";
@@ -404,11 +465,18 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
         .min(area.width);
     let rows = total.min(20);
     let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-        .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -436,7 +504,11 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
             let is_active = *l == app.thinking;
             ListItem::new(Span::styled(
                 row_for(l),
-                if is_active { active_style } else { inactive_style },
+                if is_active {
+                    active_style
+                } else {
+                    inactive_style
+                },
             ))
         })
         .collect();
@@ -448,13 +520,23 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(
+            f,
+            track,
+            state.offset(),
+            inner.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
-    let Some(picker) = &app.tree_picker else { return; };
+    let Some(picker) = &app.tree_picker else {
+        return;
+    };
     let t = app.theme;
     let total = picker.entries.len();
     let title = " Roll back to a turn  ↑/↓ j/k enter esc ";
@@ -469,11 +551,18 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         .min(area.width);
     let rows = total.min(20);
     let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-        .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -526,7 +615,15 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
+        prim::render_scrollbar(
+            f,
+            track,
+            state.offset(),
+            inner.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 /// Shell-policy confirmation modal: a small centered popup showing the
@@ -558,12 +655,18 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
         .min(max_w);
     let w = u16::try_from(inner_w + 4).unwrap_or(50).min(area.width);
     let h = u16::try_from(body_h + 4).unwrap_or(7).min(area.height);
-    let vert =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
-            .split(area);
-    let horiz =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
-            .split(vert[1]);
+    let vert = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let horiz = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .split(vert[1]);
     let popup = horiz[1];
     f.render_widget(Clear, popup);
     let block = WidgetBlock::bordered()
@@ -586,8 +689,5 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" deny", Style::new().fg(t.muted)),
     ]);
     let hint_y = inner.bottom().saturating_sub(1);
-    f.render_widget(
-        Paragraph::new(hint),
-        Rect { y: hint_y, ..inner },
-    );
+    f.render_widget(Paragraph::new(hint), Rect { y: hint_y, ..inner });
 }

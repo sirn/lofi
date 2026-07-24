@@ -6,7 +6,8 @@
 //! sandbox-error sentinel instead of exhausting memory.
 
 #[allow(clippy::wildcard_imports)]
-use super::*;/// Convert a guest value to JSON, surfacing depth/node overflow as the
+use super::*;
+/// Convert a guest value to JSON, surfacing depth/node overflow as the
 /// sandbox-error sentinel so the caller raises [`Error::Sandbox`].
 pub(super) fn js_to_json(v: &Value<'_>) -> Json {
     let mut nodes = 0usize;

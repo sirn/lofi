@@ -15,14 +15,24 @@ impl Agent {
     /// execution failures that cannot be surfaced as a `ToolResult`.
     pub async fn run(&self, user_prompt: String, tx: Sender<AgentEvent>) -> Result<()> {
         let mut messages = initial_history(&self.system_prompt, &user_prompt);
-        if !emit(Some(&tx), AgentEvent::TurnStart { prompt: user_prompt.clone() }).await {
+        if !emit(
+            Some(&tx),
+            AgentEvent::TurnStart {
+                prompt: user_prompt.clone(),
+            },
+        )
+        .await
+        {
             return Ok(());
         }
         loop {
             if tx.is_closed() {
                 return Ok(());
             }
-            let finished = match self.run_once_inner(&mut messages, Some(&tx), None, None, None, None).await {
+            let finished = match self
+                .run_once_inner(&mut messages, Some(&tx), None, None, None, None)
+                .await
+            {
                 Ok(f) => f,
                 // A gone receiver is a graceful cancellation, not a provider
                 // error: stop the run cleanly instead of surfacing it.
@@ -82,9 +92,7 @@ impl Agent {
             } else {
                 messages.push(Message {
                     role: Role::User,
-                    blocks: vec![ContentBlock::Text {
-                        text: user_prompt,
-                    }],
+                    blocks: vec![ContentBlock::Text { text: user_prompt }],
                 });
             }
             // Previously a `checkpoint = messages.len()` was captured here so a
@@ -93,7 +101,14 @@ impl Agent {
             // as branches (see `TurnOutcome`), so the caller's history is left in
             // place for the recorder to write — the active-path walk on resume
             // handles excluding the failed content from the agent's context.
-            if !emit(Some(&tx), AgentEvent::TurnStart { prompt: prompt_for_event }).await {
+            if !emit(
+                Some(&tx),
+                AgentEvent::TurnStart {
+                    prompt: prompt_for_event,
+                },
+            )
+            .await
+            {
                 return Ok(());
             }
         }
@@ -141,7 +156,14 @@ impl Agent {
                 break;
             }
             match self
-                .run_once_inner(&mut *messages, Some(&tx), Some(&mut stats), recall.clone(), result.clone(), cancel.as_ref())
+                .run_once_inner(
+                    &mut *messages,
+                    Some(&tx),
+                    Some(&mut stats),
+                    recall.clone(),
+                    result.clone(),
+                    cancel.as_ref(),
+                )
                 .await
             {
                 Ok(true) => {
@@ -178,8 +200,8 @@ impl Agent {
                         // pressure. Without this, a session with 990k cached
                         // tokens and 5k non-cached would never trip the hard
                         // cap until the API rejects the request.
-                        let prompt_tokens = stats.usage.input_tokens
-                            + stats.usage.cache_read_tokens;
+                        let prompt_tokens =
+                            stats.usage.input_tokens + stats.usage.cache_read_tokens;
                         if prompt_tokens > threshold {
                             context_pressure = true;
                             break;
@@ -212,16 +234,13 @@ impl Agent {
                     // backoff: the failed
                     // assistant message is dropped and the round is restarted
                     // so the provider produces a fresh response.
-                    if retry.can_retry(retry_attempt)
-                        && crate::retry::is_retryable_error(&e)
-                    {
+                    if retry.can_retry(retry_attempt) && crate::retry::is_retryable_error(&e) {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
                         // Drop the partial assistant message the failed round
                         // appended (if any) so the retried round starts from a
                         // clean conversation tail.
-                        if messages.last().is_some_and(|m| m.role == Role::Assistant)
-                        {
+                        if messages.last().is_some_and(|m| m.role == Role::Assistant) {
                             messages.pop();
                         }
                         let _ = tx
@@ -283,30 +302,33 @@ impl Agent {
         if let Some(outcome) = &outcome {
             if !tx.is_closed() {
                 let _ = match outcome {
-                    TurnOutcome::Finished => tx
-                        .send(AgentEvent::TurnEnd {
+                    TurnOutcome::Finished => {
+                        tx.send(AgentEvent::TurnEnd {
                             model: self.run_model(),
                             elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
                         })
-                        .await,
-                    TurnOutcome::Failed(error) => tx
-                        .send(AgentEvent::TurnFailed {
+                        .await
+                    }
+                    TurnOutcome::Failed(error) => {
+                        tx.send(AgentEvent::TurnFailed {
                             model: self.run_model(),
                             elapsed_ms,
                             error: error.clone(),
                             cost: stats.cost,
                             usage: stats.usage,
                         })
-                        .await,
-                    TurnOutcome::ContextPressure => tx
-                        .send(AgentEvent::ContextPressure {
+                        .await
+                    }
+                    TurnOutcome::ContextPressure => {
+                        tx.send(AgentEvent::ContextPressure {
                             elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
                         })
-                        .await,
+                        .await
+                    }
                     TurnOutcome::Cancelled => Ok(()),
                 };
             }
@@ -333,7 +355,10 @@ impl Agent {
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
                     let _ = tx
-                        .send(AgentEvent::TurnCommitted { byte_start, byte_end })
+                        .send(AgentEvent::TurnCommitted {
+                            byte_start,
+                            byte_end,
+                        })
                         .await;
                 }
                 _ => {}
@@ -368,7 +393,8 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, commit, true, cancel, preempt).await
+        self.run_continuation(messages, String::new(), tx, commit, true, cancel, preempt)
+            .await
     }
 
     /// A single provider round-trip: stream one assistant turn, append it to
@@ -383,7 +409,8 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None, None, None, None).await
+        self.run_once_inner(messages, None, None, None, None, None)
+            .await
     }
 
     /// Shared core of [`run_once`] with an optional event sender.
@@ -434,103 +461,26 @@ impl Agent {
             // can be persisted as a `ThinkingTiming` event.
             let mut thinking_open: Option<Instant> = None;
             loop {
-                match tokio::time::timeout(
-                    DEFAULT_STREAM_IDLE_TIMEOUT,
-                    stream.next(),
-                )
-                .await
-                {
+                match tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await {
                     Err(_) => return Err(Error::Provider("stream idle timeout".into())),
                     Ok(None) => break,
                     Ok(Some(ev)) => match ev {
-                    Ok(e) => {
-                        let is_thinking_ev = matches!(
-                            e,
-                            StreamingEvent::ThinkingDelta(_) | StreamingEvent::ThinkingSignature(_)
-                        );
-                        if !is_thinking_ev {
-                            if let (Some(start), Some(s)) =
-                                (thinking_open.take(), stats.as_deref_mut())
-                            {
-                                let elapsed = start.elapsed();
-                                s.thinking_elapsed.push(elapsed);
-                                if !emit(
-                                    tx,
-                                    AgentEvent::ThinkingEnd {
-                                        elapsed_ms: elapsed.as_millis() as u64,
-                                    },
-                                )
-                                .await
+                        Ok(e) => {
+                            let is_thinking_ev = matches!(
+                                e,
+                                StreamingEvent::ThinkingDelta(_)
+                                    | StreamingEvent::ThinkingSignature(_)
+                            );
+                            if !is_thinking_ev {
+                                if let (Some(start), Some(s)) =
+                                    (thinking_open.take(), stats.as_deref_mut())
                                 {
-                                    return Err(Error::Cancelled);
-                                }
-                            }
-                        }
-                        match &e {
-                            StreamingEvent::TextDelta(d) => {
-                                if !emit(tx, AgentEvent::Text(d.clone())).await {
-                                    return Err(Error::Cancelled);
-                                }
-                            }
-                            StreamingEvent::ThinkingDelta(d) => {
-                                if thinking_open.is_none() {
-                                    thinking_open = Some(Instant::now());
-                                }
-                                if !emit(tx, AgentEvent::Thinking(d.clone())).await {
-                                    return Err(Error::Cancelled);
-                                }
-                            }
-                            StreamingEvent::ToolUseStart { id, name } => {
-                                if let Some(s) = stats.as_deref_mut() {
-                                    s.tool_start(id);
-                                }
-                                if !emit(
-                                    tx,
-                                    AgentEvent::ToolStart {
-                                        id: id.clone(),
-                                        name: name.clone(),
-                                    },
-                                )
-                                .await
-                                {
-                                    return Err(Error::Cancelled);
-                                }
-                            }
-                            StreamingEvent::ToolUseInputDelta { id, delta } => {
-                                let raw = tool_raw.entry(id.clone()).or_default();
-                                raw.push_str(delta);
-                                let decoded = extract_code_prefix(raw);
-                                let prev = tool_emitted.get(id).copied().unwrap_or(0);
-                                if let Some(chunk) = decoded.get(prev..) {
-                                    if !chunk.is_empty() {
-                                        if !emit(
-                                            tx,
-                                            AgentEvent::ToolInputDelta {
-                                                id: id.clone(),
-                                                delta: chunk.to_string(),
-                                            },
-                                        )
-                                        .await
-                                        {
-                                            return Err(Error::Cancelled);
-                                        }
-                                        tool_emitted.insert(id.clone(), decoded.len());
-                                    }
-                                }
-                            }
-                            StreamingEvent::Done(usage) => {
-                                round_usage = Some(*usage);
-                                if let Some(s) = stats.as_deref_mut() {
-                                    s.add_usage(*usage, &self.model);
-                                    // Emit the turn's cumulative cost and
-                                    // this round's usage immediately so the
-                                    // UI's context gauge and cost counter
-                                    // refresh per round, not just at turn end.
+                                    let elapsed = start.elapsed();
+                                    s.thinking_elapsed.push(elapsed);
                                     if !emit(
                                         tx,
-                                        AgentEvent::RoundUsage {
-                                            cost: s.cost,
-                                            usage: s.usage,
+                                        AgentEvent::ThinkingEnd {
+                                            elapsed_ms: elapsed.as_millis() as u64,
                                         },
                                     )
                                     .await
@@ -539,42 +489,115 @@ impl Agent {
                                     }
                                 }
                             }
-                            StreamingEvent::Error(msg) => {
-                                if !emit(tx, AgentEvent::Error(msg.clone())).await {
-                                    return Err(Error::Cancelled);
+                            match &e {
+                                StreamingEvent::TextDelta(d) => {
+                                    if !emit(tx, AgentEvent::Text(d.clone())).await {
+                                        return Err(Error::Cancelled);
+                                    }
                                 }
-                                return Err(Error::Provider(msg.clone()));
+                                StreamingEvent::ThinkingDelta(d) => {
+                                    if thinking_open.is_none() {
+                                        thinking_open = Some(Instant::now());
+                                    }
+                                    if !emit(tx, AgentEvent::Thinking(d.clone())).await {
+                                        return Err(Error::Cancelled);
+                                    }
+                                }
+                                StreamingEvent::ToolUseStart { id, name } => {
+                                    if let Some(s) = stats.as_deref_mut() {
+                                        s.tool_start(id);
+                                    }
+                                    if !emit(
+                                        tx,
+                                        AgentEvent::ToolStart {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        return Err(Error::Cancelled);
+                                    }
+                                }
+                                StreamingEvent::ToolUseInputDelta { id, delta } => {
+                                    let raw = tool_raw.entry(id.clone()).or_default();
+                                    raw.push_str(delta);
+                                    let decoded = extract_code_prefix(raw);
+                                    let prev = tool_emitted.get(id).copied().unwrap_or(0);
+                                    if let Some(chunk) = decoded.get(prev..) {
+                                        if !chunk.is_empty() {
+                                            if !emit(
+                                                tx,
+                                                AgentEvent::ToolInputDelta {
+                                                    id: id.clone(),
+                                                    delta: chunk.to_string(),
+                                                },
+                                            )
+                                            .await
+                                            {
+                                                return Err(Error::Cancelled);
+                                            }
+                                            tool_emitted.insert(id.clone(), decoded.len());
+                                        }
+                                    }
+                                }
+                                StreamingEvent::Done(usage) => {
+                                    round_usage = Some(*usage);
+                                    if let Some(s) = stats.as_deref_mut() {
+                                        s.add_usage(*usage, &self.model);
+                                        // Emit the turn's cumulative cost and
+                                        // this round's usage immediately so the
+                                        // UI's context gauge and cost counter
+                                        // refresh per round, not just at turn end.
+                                        if !emit(
+                                            tx,
+                                            AgentEvent::RoundUsage {
+                                                cost: s.cost,
+                                                usage: s.usage,
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            return Err(Error::Cancelled);
+                                        }
+                                    }
+                                }
+                                StreamingEvent::Error(msg) => {
+                                    if !emit(tx, AgentEvent::Error(msg.clone())).await {
+                                        return Err(Error::Cancelled);
+                                    }
+                                    return Err(Error::Provider(msg.clone()));
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                        // Bound retained round bytes so a stream of many
-                        // small valid events cannot exhaust memory.
-                        // Charge every owned string plus a fixed per-event
-                        // allowance for Vec/enum/dispatch overhead, so large
-                        // IDs/signatures or many zero-text events are caught.
-                        round_bytes = round_bytes.saturating_add(PER_EVENT_OVERHEAD);
-                        round_bytes = round_bytes.saturating_add(match &e {
-                            StreamingEvent::TextDelta(s)
-                            | StreamingEvent::ThinkingDelta(s)
-                            | StreamingEvent::ThinkingSignature(s)
-                            | StreamingEvent::Error(s) => s.len(),
-                            StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
-                            StreamingEvent::ToolUseInputDelta { id, delta } => {
-                                id.len() + delta.len()
+                            // Bound retained round bytes so a stream of many
+                            // small valid events cannot exhaust memory.
+                            // Charge every owned string plus a fixed per-event
+                            // allowance for Vec/enum/dispatch overhead, so large
+                            // IDs/signatures or many zero-text events are caught.
+                            round_bytes = round_bytes.saturating_add(PER_EVENT_OVERHEAD);
+                            round_bytes = round_bytes.saturating_add(match &e {
+                                StreamingEvent::TextDelta(s)
+                                | StreamingEvent::ThinkingDelta(s)
+                                | StreamingEvent::ThinkingSignature(s)
+                                | StreamingEvent::Error(s) => s.len(),
+                                StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
+                                StreamingEvent::ToolUseInputDelta { id, delta } => {
+                                    id.len() + delta.len()
+                                }
+                                StreamingEvent::ToolUseEnd { id } => id.len(),
+                                StreamingEvent::Done(_) => 0,
+                            });
+                            if round_bytes > MAX_ROUND_BYTES {
+                                return Err(Error::Provider(format!(
+                                    "round exceeded {MAX_ROUND_BYTES} byte budget"
+                                )));
                             }
-                            StreamingEvent::ToolUseEnd { id } => id.len(),
-                            StreamingEvent::Done(_) => 0,
-                        });
-                        if round_bytes > MAX_ROUND_BYTES {
-                            return Err(Error::Provider(format!(
-                                "round exceeded {MAX_ROUND_BYTES} byte budget"
-                            )));
+                            events.push(e);
                         }
-                        events.push(e);
-                    }
-                    Err(err) => {
-                        return Err(err);
-                    }
+                        Err(err) => {
+                            return Err(err);
+                        }
                     },
                 }
             }
@@ -619,7 +642,16 @@ impl Agent {
             return Ok(true);
         }
 
-        let results = self.execute_tools(&tool_uses, tx, stats, recall.clone(), result.clone(), cancel).await?;
+        let results = self
+            .execute_tools(
+                &tool_uses,
+                tx,
+                stats,
+                recall.clone(),
+                result.clone(),
+                cancel,
+            )
+            .await?;
 
         // Tool results travel under the dedicated Tool role: each provider
         // converter emits them from its Role::Tool arm (Chat Completions
@@ -656,8 +688,7 @@ impl Agent {
         // tiles stuck "running" even after the exec succeeds. Relay them
         // through an unbounded channel whose forwarder drains onto the
         // bounded channel with `send().await` — lossless and order-preserving.
-        let (relay_tx, mut relay_rx) =
-            tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let relay_dst = tx.cloned();
         let _forwarder = tokio::spawn(async move {
             while let Some(ev) = relay_rx.recv().await {
@@ -806,7 +837,11 @@ impl Agent {
                     Box::pin(async move {
                         let id = counter.fetch_add(1, Ordering::SeqCst);
                         let (resp_tx, resp_rx) = oneshot::channel();
-                        let req = ConfirmRequest { id, command, respond: resp_tx };
+                        let req = ConfirmRequest {
+                            id,
+                            command,
+                            respond: resp_tx,
+                        };
                         if tx.send(req).is_err() {
                             return false;
                         }

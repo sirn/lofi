@@ -221,11 +221,14 @@ pub fn exec_result_display(result: &str, is_error: bool) -> String {
     serde_json::from_str::<serde_json::Value>(result)
         .ok()
         .and_then(|v| v.get("value").cloned())
-        .map_or_else(|| result.to_string(), |v| {
-            if let Some(s) = v.as_str() {
-                s.to_string()
-            } else {
-                serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-            }
-        })
+        .map_or_else(
+            || result.to_string(),
+            |v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+                }
+            },
+        )
 }
