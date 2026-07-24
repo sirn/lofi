@@ -52,7 +52,7 @@ pub(super) fn handle_event(
             app.pin_to_latest();
             return;
         }
-        handle_ctrl_c(app, current_run);
+        handle_ctrl_c(app, agent, current_run);
         return;
     }
 
@@ -349,7 +349,11 @@ pub(super) fn spawn_continue(
     app.pinned = true;
 }
 
-pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
+pub(super) fn handle_ctrl_c(
+    app: &mut App,
+    agent: Option<&lofi_core::Agent>,
+    current_run: &mut Option<RunHandle>,
+) {
     if let Some(r) = current_run.take() {
         // Signal the QuickJS interrupt handler to break any synchronous
         // guest loop *before* aborting the task — `handle.abort()` alone
@@ -361,6 +365,17 @@ pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) 
         }
         app.run_finished();
         app.ctrl_c_at = None;
+        // Pop the next queued prompt (FIFO) so a queued message is sent
+        // at the earliest opportunity after an abort.
+        if app.run.is_none() {
+            if let Some(prompt) = app.prompt_queue.first().cloned() {
+                app.prompt_queue.remove(0);
+                // Pre-compact before starting the queued run, same as
+                // the Enter and queue-pop paths.
+                app.maybe_auto_compact();
+                spawn_prompt(app, agent, current_run, prompt);
+            }
+        }
         return;
     }
     if app.input.is_empty() {
@@ -565,3 +580,5 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     });
     (line_idx, col)
 }
+
+
