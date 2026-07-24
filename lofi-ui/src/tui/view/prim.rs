@@ -240,6 +240,42 @@ pub fn rtile(
     rl
 }
 
+/// Styled wrapped tile: word-wraps a line of pre-styled spans (preserving
+/// each span's color/modifier across wraps) to fit within `width` minus the
+/// decoration width, emitting one `RenderLine` per wrapped row. The first
+/// row carries `deco`; continuation rows carry `cont_deco` (typically an
+/// indented variant). Each row is padded to `width` with `bg`.
+///
+/// This is the wrapped counterpart to [`rtile`]: use it whenever the content
+/// might exceed the available width (tool headers, result bodies, etc.).
+/// Use [`rtile`] only when the content is guaranteed to fit (short labels,
+/// padding rows, icons).
+pub fn rtile_wrapped(
+    deco: Vec<Span<'static>>,
+    cont_deco: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    bg: Color,
+    width: usize,
+) -> Vec<RenderLine> {
+    let deco_w = span_width(&deco);
+    let avail = width.saturating_sub(deco_w);
+    let line = Line::from(content);
+    let wrapped = wrap_line_styled(&line, avail);
+    let mut out = Vec::new();
+    for (i, wl) in wrapped.into_iter().enumerate() {
+        let d = if i == 0 { deco.clone() } else { cont_deco.clone() };
+        out.push(rtile(d, wl.spans, bg, width));
+    }
+    if out.is_empty() {
+        out.push(rtile(deco, vec![], bg, width));
+    }
+    out
+}
+
+/// Display width of a sequence of spans (sum of each span's content width).
+fn span_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| width(&s.content)).sum()
+}
 /// Truncate `s` to at most `max_w` display cells, never splitting a wide
 /// character: if the next char would overflow, it is dropped entirely.
 /// Callers add `… (N hidden)` themselves when capping a list.
