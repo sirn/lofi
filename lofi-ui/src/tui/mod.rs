@@ -838,6 +838,11 @@ struct RunHandle {
     handle: JoinHandle<()>,
     rx: Receiver<AgentEvent>,
     cancel: Arc<AtomicBool>,
+    /// When set, the agent exits its round loop gracefully after the current
+    /// round finishes (tool results in hand) so the TUI can pop the next
+    /// queued prompt at the earliest opportunity — between rounds, not after
+    /// the entire multi-round turn.
+    preempt: Arc<AtomicBool>,
 }
 
 struct TerminalGuard {
@@ -1017,7 +1022,20 @@ async fn run_loop(
                 }
             } => {
                 match ev {
-                    Some(e) => app.apply_event(e),
+                    Some(e) => {
+                        app.apply_event(e);
+                        // If there's a queued prompt, signal the agent to
+                        // exit its round loop after the current round so the
+                        // queued prompt is sent at the earliest opportunity.
+                        // The flag is only checked between rounds (after tool
+                        // results are in hand), so setting it during streaming
+                        // or tool execution is safe.
+                        if !app.prompt_queue.is_empty() {
+                            if let Some(r) = &current_run {
+                                r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
                     None => {
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
@@ -1155,3 +1173,4 @@ async fn run_loop(
 // A single large key dispatcher; splitting per-key handlers would fragment
 // the picker/submit/run-creation flow and hurt readability more than the line
 // count helps.
+
