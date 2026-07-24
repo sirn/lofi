@@ -55,7 +55,7 @@ impl Agent {
     /// execution.
     // The continuation loop threads mutable round state (usage, byte budget,
     // event log) through one async dispatch; helpers would fan it out.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
         messages: &mut Vec<Message>,
@@ -64,6 +64,7 @@ impl Agent {
         commit: Option<&SessionCommit>,
         continuation: bool,
         cancel: Option<Arc<AtomicBool>>,
+        preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
         let prev_len = messages.len();
         if continuation {
@@ -172,8 +173,27 @@ impl Agent {
                     // the next round would overflow the window and let the UI
                     // force-compact + continue.
                     if let Some(threshold) = self.hard_compact_threshold() {
-                        if stats.usage.input_tokens > threshold {
+                        // Use the full prompt size (non-cached + cached) so
+                        // heavy prompt caching doesn't mask the real context
+                        // pressure. Without this, a session with 990k cached
+                        // tokens and 5k non-cached would never trip the hard
+                        // cap until the API rejects the request.
+                        let prompt_tokens = stats.usage.input_tokens
+                            + stats.usage.cache_read_tokens;
+                        if prompt_tokens > threshold {
                             context_pressure = true;
+                            break;
+                        }
+                    }
+                    // Preempt: the UI has a queued prompt and wants the
+                    // current turn to end gracefully after this round so
+                    // the queued prompt can be sent at the earliest
+                    // opportunity. The round just completed (tool results
+                    // are in hand), so the conversation is in a clean
+                    // state for the next prompt to continue from.
+                    if let Some(flag) = &preempt {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            finished_normally = true;
                             break;
                         }
                     }
@@ -346,8 +366,9 @@ impl Agent {
         tx: Sender<AgentEvent>,
         commit: Option<&SessionCommit>,
         cancel: Option<Arc<AtomicBool>>,
+        preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, commit, true, cancel).await
+        self.run_continuation(messages, String::new(), tx, commit, true, cancel, preempt).await
     }
 
     /// A single provider round-trip: stream one assistant turn, append it to

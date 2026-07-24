@@ -286,7 +286,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
-    agent.run_continuation(&mut messages, String::new(), tx, None, false, None).await.unwrap();
+    agent.run_continuation(&mut messages, String::new(), tx, None, false, None, None).await.unwrap();
 
     let mut saw_pressure = false;
     let mut saw_turn_end = false;
@@ -352,7 +352,7 @@ async fn run_retries_transient_provider_errors() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None)
+        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
         .await;
     assert!(result.is_ok(), "should recover: {result:?}");
     // Drain events and confirm a RetryStart then RetryEnd(success) fired.
@@ -404,7 +404,7 @@ async fn run_does_not_retry_non_transient_errors() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None)
+        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
         .await;
     assert!(result.is_err(), "non-retryable errors should propagate");
 }

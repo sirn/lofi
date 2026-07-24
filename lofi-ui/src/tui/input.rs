@@ -52,7 +52,7 @@ pub(super) fn handle_event(
             app.pin_to_latest();
             return;
         }
-        handle_ctrl_c(app, current_run);
+        handle_ctrl_c(app, agent, current_run);
         return;
     }
 
@@ -138,6 +138,8 @@ pub(super) fn handle_event(
             {
                 app.turns[prev - 1].blocks.clear();
             }
+            // Pre-compact if the context is already above the soft threshold.
+            app.maybe_auto_compact();
             let Some(agent) = agent else {
                 // No model configured: there is no agent to emit `TurnStart`,
                 // so push the turn manually and surface the hint on it.
@@ -166,12 +168,14 @@ pub(super) fn handle_event(
             let err_tx = tx.clone();
             let cancel = Arc::new(AtomicBool::new(false));
             let cancel_clone = cancel.clone();
+            let preempt = Arc::new(AtomicBool::new(false));
+            let preempt_clone = preempt.clone();
             let handle = tokio::task::spawn_local(async move {
                 let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
                 // The engine owns the timers and cost, and writes the turn's
                 // events (messages + timings + turn-end) to the transcript.
                 let result = agent_clone
-                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone))
+                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone), Some(preempt_clone))
                     .await;
                 if let Ok(mut g) = history.lock() {
                     *g = messages;
@@ -180,7 +184,7 @@ pub(super) fn handle_event(
                     let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
                 }
             });
-            *current_run = Some(RunHandle { handle, rx, cancel });
+            *current_run = Some(RunHandle { handle, rx, cancel, preempt });
             app.run = Some(0);
             app.run_start = Some(Instant::now());
             app.pinned = true;
@@ -296,10 +300,12 @@ pub(super) fn spawn_prompt(
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
+    let preempt = Arc::new(AtomicBool::new(false));
+    let preempt_clone = preempt.clone();
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
         let result = agent_clone
-            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone))
+            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone), Some(preempt_clone))
             .await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
@@ -308,7 +314,7 @@ pub(super) fn spawn_prompt(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx, cancel });
+    *current_run = Some(RunHandle { handle, rx, cancel, preempt });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
@@ -333,9 +339,11 @@ pub(super) fn spawn_continue(
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
+    let preempt = Arc::new(AtomicBool::new(false));
+    let preempt_clone = preempt.clone();
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref(), Some(cancel_clone)).await;
+        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref(), Some(cancel_clone), Some(preempt_clone)).await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
         }
@@ -343,13 +351,17 @@ pub(super) fn spawn_continue(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx, cancel });
+    *current_run = Some(RunHandle { handle, rx, cancel, preempt });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
 }
 
-pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
+pub(super) fn handle_ctrl_c(
+    app: &mut App,
+    agent: Option<&lofi_core::Agent>,
+    current_run: &mut Option<RunHandle>,
+) {
     if let Some(r) = current_run.take() {
         // Signal the QuickJS interrupt handler to break any synchronous
         // guest loop *before* aborting the task — `handle.abort()` alone
@@ -361,6 +373,17 @@ pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) 
         }
         app.run_finished();
         app.ctrl_c_at = None;
+        // Pop the next queued prompt (FIFO) so a queued message is sent
+        // at the earliest opportunity after an abort.
+        if app.run.is_none() {
+            if let Some(prompt) = app.prompt_queue.first().cloned() {
+                app.prompt_queue.remove(0);
+                // Pre-compact before starting the queued run, same as
+                // the Enter and queue-pop paths.
+                app.maybe_auto_compact();
+                spawn_prompt(app, agent, current_run, prompt);
+            }
+        }
         return;
     }
     if app.input.is_empty() {
@@ -565,3 +588,5 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     });
     (line_idx, col)
 }
+
+
