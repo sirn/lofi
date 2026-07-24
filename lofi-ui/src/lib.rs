@@ -13,7 +13,10 @@ use lofi_core::{build_agent, AgentEvent};
 use lofi_error::{Error, Result};
 use lofi_types::ThinkingLevel;
 
+mod cli;
 pub mod tui;
+
+pub use cli::run_cli;
 
 /// Options for the interactive TUI session.
 ///
@@ -84,16 +87,13 @@ impl InteractiveOptions {
         self.no_session = true;
         self
     }
-
-    }
+}
 
 /// Options for the non-interactive `--print` path.
 ///
 /// `config_path` defaults to the user config file
-/// ([`lofi_core::config_loader::user_config_path`]) when `None`. `provider`
-/// and `model` mirror the `--provider` / `--model` flags; `api_key` is the
-/// literal `--api-key` override applied to the selected provider after config
-/// load.
+/// ([`lofi_core::config_loader::user_config_path`]) when `None`; `model`
+/// mirrors the `--model` flag.
 #[derive(Debug, Clone)]
 pub struct PrintOptions {
     /// The user prompt to send.
@@ -197,7 +197,10 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                 None,
             ),
         };
-    tui::run(agent, label, thinking, session, hint, ctx_limit, compaction, switcher).await
+    tui::run(
+        agent, label, thinking, session, hint, ctx_limit, compaction, switcher,
+    )
+    .await
 }
 
 /// Startup agent resolution: a built agent, or the model-less launch path.
@@ -206,13 +209,15 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
 /// registry (a KB+ together), and the variant is built once and unpacked
 /// immediately, so a single allocation keeps the enum off the stack.
 enum StartupAgent {
-    Ready(Box<(
-        lofi_core::Agent,
-        lofi_types::Model,
-        ThinkingLevel,
-        lofi_types::Config,
-        lofi_core::ModelRegistry,
-    )>),
+    Ready(
+        Box<(
+            lofi_core::Agent,
+            lofi_types::Model,
+            ThinkingLevel,
+            lofi_types::Config,
+            lofi_core::ModelRegistry,
+        )>,
+    ),
     /// No provider has credentials — launch the TUI model-less with `hint`.
     NoModel(String),
 }
@@ -235,17 +240,13 @@ async fn resolve_startup_agent(
         // The restored model is gone from the registry (config changed since
         // the session ran, or its provider lost its API key): fall back to
         // the default so the transcript is still readable instead of aborting.
-        Err(_) if restored.is_some() => match build_agent(
-            opts.config_path.as_deref(),
-            None,
-            opts.root.as_path(),
-        )
-        .await
-        {
-            Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
-            Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
-            Err(e) => Err(e),
-        },
+        Err(_) if restored.is_some() => {
+            match build_agent(opts.config_path.as_deref(), None, opts.root.as_path()).await {
+                Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
+                Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
+                Err(e) => Err(e),
+            }
+        }
         Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
         Err(e) => Err(e),
     }
@@ -265,9 +266,9 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
     }
     let store = lofi_core::session::store::SessionStore::open()?;
     if let Some(id) = &opts.resume {
-        let entry = store
-            .find(&opts.root, id)?
-            .ok_or_else(|| Error::State(format!("no session matching id '{id}' for this workspace")))?;
+        let entry = store.find(&opts.root, id)?.ok_or_else(|| {
+            Error::State(format!("no session matching id '{id}' for this workspace"))
+        })?;
         let (_meta, events, offsets, file_size) = lofi_core::session::store::load(&entry.path)?;
         return Ok(tui::SessionConfig::resumed(
             store,

@@ -21,6 +21,30 @@ pub(super) fn tool_mut<'a>(blocks: &'a mut [Block], id: &str) -> Option<&'a mut 
     })
 }
 
+/// Active-path event indices used for visible transcript replay. Context-edited
+/// kept-tail copies are model-history checkpoints, not additional UI turns.
+fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
+    use std::collections::HashSet;
+    let path = store::active_path_from_leaf(events);
+    let mut hidden: HashSet<usize> = HashSet::new();
+    for (marker_pos, &event_idx) in path.iter().enumerate() {
+        if let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            checkpointed_tail: true,
+            ..
+        } = &events[event_idx].kind
+        {
+            if let Some(start_pos) = path[..marker_pos]
+                .iter()
+                .position(|&i| events[i].id == *first_kept_entry_id)
+            {
+                hidden.extend(path[start_pos..marker_pos].iter().copied());
+            }
+        }
+    }
+    path.into_iter().filter(|i| !hidden.contains(i)).collect()
+}
+
 /// Build per-turn byte ranges from a transcript event log and the byte
 /// offset of each event's line. A turn starts at a `User` message that isn't
 /// a tool-result (mirroring [`turns_from_events`]); its byte range runs from
@@ -33,7 +57,8 @@ pub(super) fn turn_byte_ranges_from_events(
 ) -> Vec<Option<(u64, u64)>> {
     let mut ranges: Vec<Option<(u64, u64)>> = Vec::new();
     let mut cur_start: Option<u64> = None;
-    for (i, ev) in events.iter().enumerate() {
+    for i in visible_event_indices(events) {
+        let ev = &events[i];
         let is_turn_start = matches!(
             &ev.kind,
             SessionEventKind::Message(m)
@@ -248,14 +273,22 @@ pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
 #[allow(clippy::too_many_lines)]
 pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
     use std::collections::HashMap as Map;
+    let visible: Vec<&SessionEvent> = visible_event_indices(events)
+        .into_iter()
+        .map(|i| &events[i])
+        .collect();
+
     let mut tool_elapsed: Map<String, u64> = Map::new();
     let mut native_by_parent: Map<String, Vec<NativeToolRecord>> = Map::new();
     // Thinking-block durations in emission order, matched positionally to
     // assistant `Thinking` blocks as they are replayed.
     let mut thinking_timing: Vec<u64> = Vec::new();
-    for ev in events {
+    for ev in &visible {
         match &ev.kind {
-            SessionEventKind::ToolTiming { tool_call_id, elapsed_ms } => {
+            SessionEventKind::ToolTiming {
+                tool_call_id,
+                elapsed_ms,
+            } => {
                 tool_elapsed.insert(tool_call_id.clone(), *elapsed_ms);
             }
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
@@ -272,15 +305,24 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
     }
     let mut out: Vec<AgentEvent> = Vec::new();
     let mut thinking_idx = 0usize;
-    for ev in events {
+    for ev in &visible {
         match &ev.kind {
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
                     // ToolResult blocks attach to the current turn's pending
                     // tool calls as deferred `ToolEnd` events.
-                    if msg.blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })) {
+                    if msg
+                        .blocks
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    {
                         for b in &msg.blocks {
-                            if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } = b
+                            {
                                 out.push(AgentEvent::ToolEnd {
                                     id: tool_use_id.clone(),
                                     result: if *is_error {
@@ -314,12 +356,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                             }
                             ContentBlock::Thinking { text, .. } => {
                                 out.push(AgentEvent::Thinking(text.clone()));
-                                let elapsed = thinking_timing
-                                    .get(thinking_idx)
-                                    .copied()
-                                    .unwrap_or(0);
+                                let elapsed =
+                                    thinking_timing.get(thinking_idx).copied().unwrap_or(0);
                                 thinking_idx += 1;
-                                out.push(AgentEvent::ThinkingEnd { elapsed_ms: elapsed });
+                                out.push(AgentEvent::ThinkingEnd {
+                                    elapsed_ms: elapsed,
+                                });
                             }
                             ContentBlock::ToolUse { id, name, input } => {
                                 out.push(AgentEvent::ToolStart {
@@ -369,7 +411,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 // stream's inline-result semantics.
                 Role::Tool => {
                     for b in &msg.blocks {
-                        if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = b
+                        {
                             out.push(AgentEvent::ToolEnd {
                                 id: tool_use_id.clone(),
                                 result: if *is_error {
@@ -385,8 +432,15 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 }
                 Role::System => {}
             },
-            SessionEventKind::NativeTool(_) | SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {}
-            SessionEventKind::Compaction { summarized, kept, summary, .. } => {
+            SessionEventKind::NativeTool(_)
+            | SessionEventKind::ToolTiming { .. }
+            | SessionEventKind::ThinkingTiming { .. } => {}
+            SessionEventKind::Compaction {
+                summarized,
+                kept,
+                summary,
+                ..
+            } => {
                 // The summary is injected into the agent history by
                 // `messages_from_events`; carry it on the marker block too
                 // so `/verbose` can expand it inline.
@@ -396,7 +450,13 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                     summary: summary.clone(),
                 });
             }
-            SessionEventKind::TurnEnd { model, elapsed_ms, cost, usage, .. } => {
+            SessionEventKind::TurnEnd {
+                model,
+                elapsed_ms,
+                cost,
+                usage,
+                ..
+            } => {
                 out.push(AgentEvent::TurnEnd {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -404,7 +464,14 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                     usage: *usage,
                 });
             }
-            SessionEventKind::TurnFailed { model, elapsed_ms, error, cost, usage, .. } => {
+            SessionEventKind::TurnFailed {
+                model,
+                elapsed_ms,
+                error,
+                cost,
+                usage,
+                ..
+            } => {
                 out.push(AgentEvent::TurnFailed {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -442,12 +509,24 @@ pub(super) fn messages_from_events(
     // ancestors; `path` is root-first, so reverse.
     for &i in path.iter().rev() {
         match &events[i].kind {
-            SessionEventKind::Compaction { summary, first_kept_entry_id, .. } => {
+            SessionEventKind::Compaction {
+                summary,
+                first_kept_entry_id,
+                ..
+            } => {
                 if !summary.is_empty() {
                     summary_msg = Some(Message {
                         role: Role::User,
-                        blocks: vec![ContentBlock::Text { text: summary.clone() }],
+                        blocks: vec![ContentBlock::Text {
+                            text: summary.clone(),
+                        }],
                     });
+                }
+                if first_kept_entry_id.is_empty() {
+                    // Compact-all has no kept-tail boundary. Everything older
+                    // than this marker is represented by the summary; retain
+                    // only messages already collected after the marker.
+                    break;
                 }
                 boundary = Some(first_kept_entry_id.clone());
             }

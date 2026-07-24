@@ -118,9 +118,7 @@ pub(super) fn handle_event(
             // Lazily create the transcript file on the first persisted prompt.
             if app.session.path.is_none() {
                 if let Some(store) = &app.session.store {
-                    if let Ok(p) =
-                        store.create(&app.session.cwd, &app.run_model())
-                    {
+                    if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
                         app.session.path = Some(p);
                     }
                 }
@@ -173,7 +171,15 @@ pub(super) fn handle_event(
                 // The engine owns the timers and cost, and writes the turn's
                 // events (messages + timings + turn-end) to the transcript.
                 let result = agent_clone
-                    .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone), Some(preempt_clone))
+                    .run_continuation(
+                        &mut messages,
+                        prompt,
+                        tx,
+                        commit.as_ref(),
+                        false,
+                        Some(cancel_clone),
+                        Some(preempt_clone),
+                    )
                     .await;
                 if let Ok(mut g) = history.lock() {
                     *g = messages;
@@ -182,7 +188,12 @@ pub(super) fn handle_event(
                     let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
                 }
             });
-            *current_run = Some(RunHandle { handle, rx, cancel, preempt });
+            *current_run = Some(RunHandle {
+                handle,
+                rx,
+                cancel,
+                preempt,
+            });
             app.run = Some(0);
             app.run_start = Some(Instant::now());
             app.pinned = true;
@@ -217,7 +228,9 @@ pub(super) fn handle_event(
         KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => app.cursor_down(),
         KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => app.cursor_up(),
         KeyCode::Char('h') if k.modifiers.contains(KeyModifiers::CONTROL) => app.backspace(),
-        KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => app.kill_line_end(append_kill),
+        KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.kill_line_end(append_kill)
+        }
         KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => app.kill_line_start(),
         KeyCode::Char('w') if k.modifiers.contains(KeyModifiers::CONTROL) => app.kill_word_back(),
         KeyCode::Char('y') if k.modifiers.contains(KeyModifiers::CONTROL) => app.yank(),
@@ -225,7 +238,9 @@ pub(super) fn handle_event(
         KeyCode::Char('f') if k.modifiers.contains(KeyModifiers::ALT) => app.move_word_fwd(),
         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::ALT) => app.kill_word_fwd(),
         KeyCode::Char('<') if k.modifiers.contains(KeyModifiers::ALT) => app.input_cursor = 0,
-        KeyCode::Char('>') if k.modifiers.contains(KeyModifiers::ALT) => app.input_cursor = app.input.len(),
+        KeyCode::Char('>') if k.modifiers.contains(KeyModifiers::ALT) => {
+            app.input_cursor = app.input.len()
+        }
         // Readline `C-d`: delete the char under the cursor, or send EOF (quit)
         // when the input is empty.
         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -235,10 +250,14 @@ pub(super) fn handle_event(
                 app.delete_forward_char();
             }
         }
-        
+
         // Insert printable chars unless a control/alt combo is claimed by an
         // arm above; Shift is already folded into `c` so it must be allowed.
-        KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+        KeyCode::Char(c)
+            if !k
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
             app.insert_char(c);
         }
         _ => {}
@@ -303,7 +322,15 @@ pub(super) fn spawn_prompt(
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
         let result = agent_clone
-            .run_continuation(&mut messages, prompt, tx, commit.as_ref(), false, Some(cancel_clone), Some(preempt_clone))
+            .run_continuation(
+                &mut messages,
+                prompt,
+                tx,
+                commit.as_ref(),
+                false,
+                Some(cancel_clone),
+                Some(preempt_clone),
+            )
             .await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
@@ -312,7 +339,12 @@ pub(super) fn spawn_prompt(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx, cancel, preempt });
+    *current_run = Some(RunHandle {
+        handle,
+        rx,
+        cancel,
+        preempt,
+    });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
@@ -341,7 +373,15 @@ pub(super) fn spawn_continue(
     let preempt_clone = preempt.clone();
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        let result = agent_clone.run_continue(&mut messages, tx, commit.as_ref(), Some(cancel_clone), Some(preempt_clone)).await;
+        let result = agent_clone
+            .run_continue(
+                &mut messages,
+                tx,
+                commit.as_ref(),
+                Some(cancel_clone),
+                Some(preempt_clone),
+            )
+            .await;
         if let Ok(mut g) = history.lock() {
             *g = messages;
         }
@@ -349,7 +389,12 @@ pub(super) fn spawn_continue(
             let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
         }
     });
-    *current_run = Some(RunHandle { handle, rx, cancel, preempt });
+    *current_run = Some(RunHandle {
+        handle,
+        rx,
+        cancel,
+        preempt,
+    });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.pinned = true;
@@ -383,7 +428,10 @@ pub(super) fn handle_ctrl_c(
     }
     if app.input.is_empty() {
         let now = Instant::now();
-        if app.ctrl_c_at.is_some_and(|t| now.duration_since(t) < QUIT_DOUBLE_PRESS) {
+        if app
+            .ctrl_c_at
+            .is_some_and(|t| now.duration_since(t) < QUIT_DOUBLE_PRESS)
+        {
             app.should_quit = true;
         } else {
             app.ctrl_c_at = Some(now);
@@ -546,7 +594,10 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.sel = None;
             if in_log {
                 let cell = log_cell(app, m.row, m.column);
-                app.sel = Some(Selection { start: cell, end: cell });
+                app.sel = Some(Selection {
+                    start: cell,
+                    end: cell,
+                });
             }
         }
         MouseEventKind::Drag(MouseButton::Left) if in_log && can_select => {
@@ -583,5 +634,3 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     });
     (line_idx, col)
 }
-
-

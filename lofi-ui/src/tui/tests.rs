@@ -1696,6 +1696,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             summary: "summary".into(),
             first_kept_entry_id: String::new(),
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 3,
             kept: 1,
         },
@@ -1744,6 +1745,58 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
     assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
     assert_eq!(a.turns.len(), 1);
+}
+
+#[test]
+fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
+    use lofi_core::session::store::{self, SessionStore};
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = SessionStore::new(dir.path().join("s"));
+    let path = session_store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let mut original: Vec<SessionEvent> = [
+        msg(user("first")),
+        msg(assistant("hello")),
+        SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ]
+    .into_iter()
+    .map(|kind| SessionEvent { id: String::new(), parent_id: None, kind })
+    .collect();
+    store::append_events(&path, &mut original, None).unwrap();
+    let pre_compaction_leaf = original[2].id.clone();
+    store::append_compaction(
+        &path,
+        &[user("first"), assistant("hello")],
+        None,
+        "summary".into(),
+        [original[0].id.clone(), original[1].id.clone()],
+        2,
+        2,
+    )
+    .unwrap();
+
+    let mut a = app();
+    a.session.path = Some(path);
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().unwrap();
+    assert_eq!(
+        picker.entries.iter().filter(|e| e.label.starts_with("user: first")).count(),
+        1,
+        "checkpoint copy must not appear as another tree turn"
+    );
+    let compact = picker
+        .entries
+        .iter()
+        .find(|e| e.label.starts_with("compact:"))
+        .unwrap();
+    assert_eq!(compact.branch_point, pre_compaction_leaf);
 }
 
 #[test]
@@ -2400,6 +2453,46 @@ fn turns_from_events_round_trip() {
 }
 
 #[test]
+fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
+    let events = sev_chain([
+        msg(user("old prompt")),
+        msg(assistant("old reply")),
+        msg(user("kept prompt")),
+        msg(assistant("kept reply")),
+        // Durable, context-edited copies written by append_compaction.
+        msg(user("kept prompt")),
+        msg(assistant("kept reply")),
+        SessionEventKind::Compaction {
+            summary: "SUMMARY".to_string(),
+            first_kept_entry_id: "e4".to_string(),
+            summarized_range: ["e0".to_string(), "e1".to_string()],
+            checkpointed_tail: true,
+            summarized: 2,
+            kept: 2,
+        },
+        msg(assistant("continued")),
+    ]);
+
+    let turns = turns_from_session_events(&events);
+    assert_eq!(turns.len(), 2, "checkpoint copies must not duplicate UI turns");
+    assert_eq!(turns[0].prompt, "old prompt");
+    assert_eq!(turns[1].prompt, "kept prompt");
+
+    let offsets: Vec<u64> = (0..events.len()).map(|i| i as u64 * 10).collect();
+    assert_eq!(
+        turn_byte_ranges_from_events(&events, &offsets, 80),
+        vec![Some((0, 20)), Some((20, 80))]
+    );
+
+    let messages = messages_from_events(&events, &lofi_types::EditConfig::default());
+    assert_eq!(messages.len(), 4);
+    assert_eq!(user_text(&messages[0]), "SUMMARY");
+    assert_eq!(user_text(&messages[1]), "kept prompt");
+    assert_eq!(user_text(&messages[2]), "kept reply");
+    assert_eq!(user_text(&messages[3]), "continued");
+}
+
+#[test]
 fn turns_from_events_links_tool_results() {
     let messages = vec![
         user("run it"),
@@ -2589,6 +2682,7 @@ fn messages_from_events_prepends_compaction_summary() {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: String::new(), // patched after append
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 1,
             kept: 2,
         },
@@ -2619,6 +2713,29 @@ fn messages_from_events_prepends_compaction_summary() {
     assert_eq!(user_text(&msgs[1]), "kept-prompt");
     assert_eq!(msgs[2].role, Role::Assistant);
     assert_eq!(msgs[3].role, Role::Assistant);
+}
+
+#[test]
+fn messages_from_events_compact_all_does_not_restore_old_messages() {
+    let events = sev_chain([
+        msg(user("old prompt")),
+        msg(assistant("old reply")),
+        SessionEventKind::Compaction {
+            summary: "SUMMARY".to_string(),
+            first_kept_entry_id: String::new(),
+            summarized_range: ["e0".to_string(), "e1".to_string()],
+            checkpointed_tail: false,
+            summarized: 2,
+            kept: 0,
+        },
+        msg(assistant("continued")),
+    ]);
+
+    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(user_text(&msgs[0]), "SUMMARY");
+    assert_eq!(msgs[1].role, Role::Assistant);
+    assert_eq!(user_text(&msgs[1]), "continued");
 }
 
 #[test]
@@ -2686,6 +2803,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             summary: "SUMMARY".to_string(),
             first_kept_entry_id: "e1".to_string(),
             summarized_range: [String::new(), String::new()],
+            checkpointed_tail: false,
             summarized: 1,
             kept: 4,
         },

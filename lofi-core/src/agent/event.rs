@@ -193,10 +193,7 @@ pub enum AgentEvent {
     /// now-frozen turn file-backed (drop its in-memory blocks and re-materialize
     /// from this range on demand). Emitted only for persisted sessions, after
     /// the file is flushed.
-    TurnCommitted {
-        byte_start: u64,
-        byte_end: u64,
-    },
+    TurnCommitted { byte_start: u64, byte_end: u64 },
     /// An offline compaction ran: `summarized` live messages were folded into
     /// a structured summary and `kept` remain in the tail. Never produced by
     /// the agent loop — synthesized by the replay path from a

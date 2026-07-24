@@ -26,16 +26,16 @@ use lofi_error::{Error, Result};
 /// (e.g. `https://api.openai.com/v1/chat/completions`) is resolved at config
 /// load time from the provider's `base_url` joined with the api-type mapping's
 /// `path`. No path suffix is appended here.
-pub struct OpenAiCompletionsProvider {
+pub(crate) struct OpenAiCompletionsProvider {
     /// Provider host root, used as the fallback when a model does not carry
     /// its own `base_url`.
-    pub base_url: String,
+    pub(crate) base_url: String,
     /// Resolved bearer token.
-    pub api_key: String,
+    pub(crate) api_key: String,
     /// Extra resolved headers from config.
-    pub headers: HashMap<String, String>,
+    pub(crate) headers: HashMap<String, String>,
     /// Shared HTTP client.
-    pub client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 #[async_trait]
@@ -56,7 +56,7 @@ impl super::Provider for OpenAiCompletionsProvider {
             ),
             &self.headers,
         );
-        let resp = req.send().await.map_err(Error::Http)?;
+        let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
         let resp = super::ensure_ok(resp).await?;
         Ok(map_sse_response(resp, OpenAiChatMapper::default()))
     }
@@ -89,5 +89,3 @@ impl SseMapper for OpenAiChatMapper {
         ))
     }
 }
-
-

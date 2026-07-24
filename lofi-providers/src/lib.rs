@@ -7,10 +7,10 @@
 //! The transport is a thin layer: request bodies come from [`crate::ir`], and
 //! SSE byte streams are decoded by [`sse`].
 
-pub mod anthropic_messages;
+mod anthropic_messages;
 pub mod ir;
-pub mod openai_completions;
-pub mod openai_responses;
+mod openai_completions;
+mod openai_responses;
 pub(crate) mod sse;
 
 use serde_json::Value;
@@ -24,9 +24,10 @@ use lofi_types::{Api, Message, Model, ProviderConfig, StreamingEvent};
 use crate::ir::chat::ToolSchema;
 use lofi_error::{Error, Result};
 
-pub use anthropic_messages::AnthropicMessagesProvider;
-pub use openai_completions::OpenAiCompletionsProvider;
-pub use openai_responses::OpenAiResponsesProvider;
+use anthropic_messages::AnthropicMessagesProvider;
+pub use anthropic_messages::ANTHROPIC_VERSION;
+use openai_completions::OpenAiCompletionsProvider;
+use openai_responses::OpenAiResponsesProvider;
 
 /// A streaming chat-completion transport.
 ///
@@ -133,7 +134,7 @@ fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(Error::Http)
+        .map_err(|e| Error::Http(e.to_string()))
 }
 
 /// Apply a provider's extra headers to a request builder.
@@ -258,7 +259,7 @@ pub async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Val
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
-        if buf.len() + chunk.len() > max {
+        if chunk.len() > max.saturating_sub(buf.len()) {
             return Err(Error::Provider(format!(
                 "response body exceeded {max} bytes"
             )));
@@ -282,7 +283,7 @@ mod tests {
 
     use super::*;
     use lofi_types::{
-        Api, ApiTypeMapping, PricingFieldMappings, PricingConvention, ProviderConfig,
+        Api, ApiTypeMapping, PricingConvention, PricingFieldMappings, ProviderConfig,
     };
 
     fn cfg() -> ProviderConfig {
@@ -311,6 +312,24 @@ mod tests {
             thinking_level: None,
             thinking_levels: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn read_json_capped_handles_size_overflow_without_panicking() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/large")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let response = reqwest::get(format!("{}/large", server.url()))
+            .await
+            .unwrap();
+
+        let err = read_json_capped(response, 0).await.unwrap_err();
+        assert!(matches!(err, Error::Provider(_)));
+        mock.assert_async().await;
     }
 
     #[test]

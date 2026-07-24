@@ -63,7 +63,9 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         max_output_tokens: None,
         reserved_context_tokens: 0,
         bash_env: lofi_code::BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm_tx: None,
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
@@ -263,15 +265,32 @@ async fn run_continuation_force_stops_at_hard_cap() {
     let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
     let tool_round = |input_tokens| {
         vec![
-            StreamingEvent::ToolUseStart { id: "t1".to_string(), name: "exec".to_string() },
-            StreamingEvent::ToolUseInputDelta { id: "t1".to_string(), delta: tool_input.clone() },
-            StreamingEvent::ToolUseEnd { id: "t1".to_string() },
-            StreamingEvent::Done(Usage { input_tokens, ..Usage::default() }),
+            StreamingEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "exec".to_string(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: "t1".to_string(),
+                delta: tool_input.clone(),
+            },
+            StreamingEvent::ToolUseEnd {
+                id: "t1".to_string(),
+            },
+            StreamingEvent::Done(Usage {
+                input_tokens,
+                ..Usage::default()
+            }),
         ]
     };
     let agent = Agent {
-        provider: Arc::new(MockProvider { rounds: std::sync::Mutex::new(vec![tool_round(10), tool_round(500)]) }),
-        model: { let mut m = model(); m.context_window = Some(100); m },
+        provider: Arc::new(MockProvider {
+            rounds: std::sync::Mutex::new(vec![tool_round(10), tool_round(500)]),
+        }),
+        model: {
+            let mut m = model();
+            m.context_window = Some(100);
+            m
+        },
         root: dir.path().to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
         retry: crate::retry::RetryPolicy::default(),
@@ -279,7 +298,9 @@ async fn run_continuation_force_stops_at_hard_cap() {
         max_output_tokens: None,
         reserved_context_tokens: 20, // hard cap = 100 - 20 = 80
         bash_env: lofi_code::BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
         confirm_tx: None,
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
@@ -288,7 +309,10 @@ async fn run_continuation_force_stops_at_hard_cap() {
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
-    agent.run_continuation(&mut messages, String::new(), tx, None, false, None, None).await.unwrap();
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .await
+        .unwrap();
 
     let mut saw_pressure = false;
     let mut saw_turn_end = false;
@@ -345,8 +369,8 @@ async fn run_retries_transient_provider_errors() {
         StreamingEvent::TextDelta("recovered".into()),
         StreamingEvent::Done(Usage::default()),
     ];
-    let agent = agent_with(vec![round1, round2], dir.path())
-        .with_retry(crate::retry::RetryPolicy {
+    let agent =
+        agent_with(vec![round1, round2], dir.path()).with_retry(crate::retry::RetryPolicy {
             max_retries: 3,
             base_delay: Duration::from_millis(1),
             ..Default::default()
@@ -360,18 +384,15 @@ async fn run_retries_transient_provider_errors() {
     // Drain events and confirm a RetryStart then RetryEnd(success) fired.
     let mut got_start = false;
     let mut got_end_success = false;
-    while let Ok(Some(ev)) = tokio::time::timeout(
-        Duration::from_millis(100),
-        rx.recv(),
-    )
-    .await
-    {
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
         match ev {
             AgentEvent::RetryStart { attempt, .. } => {
                 assert_eq!(attempt, 1);
                 got_start = true;
             }
-            AgentEvent::RetryEnd { success, attempt, .. } => {
+            AgentEvent::RetryEnd {
+                success, attempt, ..
+            } => {
                 assert_eq!(attempt, 1);
                 if success {
                     got_end_success = true;
@@ -381,10 +402,7 @@ async fn run_retries_transient_provider_errors() {
         }
     }
     assert!(got_start, "expected a RetryStart event");
-    assert!(
-        got_end_success,
-        "expected a RetryEnd(success) event"
-    );
+    assert!(got_end_success, "expected a RetryEnd(success) event");
 }
 
 #[tokio::test]
@@ -397,8 +415,8 @@ async fn run_does_not_retry_non_transient_errors() {
         StreamingEvent::TextDelta("should-not-happen".into()),
         StreamingEvent::Done(Usage::default()),
     ];
-    let agent = agent_with(vec![round1, round2], dir.path())
-        .with_retry(crate::retry::RetryPolicy {
+    let agent =
+        agent_with(vec![round1, round2], dir.path()).with_retry(crate::retry::RetryPolicy {
             max_retries: 3,
             base_delay: Duration::from_millis(1),
             ..Default::default()
@@ -604,7 +622,10 @@ fn select_model_rejects_level_not_declared() {
     let (cfg, reg) = build(one_provider(provider(
         Api::OpenAiCompletions,
         Some("sk-test"),
-        models(&[("gpt-4o", mc_levels(&[ThinkingLevel::Low, ThinkingLevel::Medium]))]),
+        models(&[(
+            "gpt-4o",
+            mc_levels(&[ThinkingLevel::Low, ThinkingLevel::Medium]),
+        )]),
         None,
     )));
     let err = select_model(&reg, &cfg, Some("openai/gpt-4o:high")).unwrap_err();
@@ -616,11 +637,21 @@ fn select_model_first_available_when_no_query() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "anthropic".to_string(),
-        provider(Api::AnthropicMessages, Some("sk"), models(&[("claude", mc())]), None),
+        provider(
+            Api::AnthropicMessages,
+            Some("sk"),
+            models(&[("claude", mc())]),
+            None,
+        ),
     );
     let (cfg, reg) = build(providers);
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -633,11 +664,21 @@ fn select_model_uses_default_model_when_no_query() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "anthropic".to_string(),
-        provider(Api::AnthropicMessages, Some("sk"), models(&[("claude", mc())]), None),
+        provider(
+            Api::AnthropicMessages,
+            Some("sk"),
+            models(&[("claude", mc())]),
+            None,
+        ),
     );
     let cfg = Config {
         agent: AgentConfig::default(),
@@ -661,11 +702,21 @@ fn select_model_uses_default_provider_when_no_query() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "anthropic".to_string(),
-        provider(Api::AnthropicMessages, Some("sk"), models(&[("claude", mc())]), None),
+        provider(
+            Api::AnthropicMessages,
+            Some("sk"),
+            models(&[("claude", mc())]),
+            None,
+        ),
     );
     let cfg = Config {
         agent: AgentConfig::default(),
@@ -689,11 +740,21 @@ fn select_model_default_model_overrides_default_provider() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "anthropic".to_string(),
-        provider(Api::AnthropicMessages, Some("sk"), models(&[("claude", mc())]), None),
+        provider(
+            Api::AnthropicMessages,
+            Some("sk"),
+            models(&[("claude", mc())]),
+            None,
+        ),
     );
     let cfg = Config {
         agent: AgentConfig::default(),
@@ -717,11 +778,21 @@ fn select_model_explicit_query_overrides_defaults() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "anthropic".to_string(),
-        provider(Api::AnthropicMessages, Some("sk"), models(&[("claude", mc())]), None),
+        provider(
+            Api::AnthropicMessages,
+            Some("sk"),
+            models(&[("claude", mc())]),
+            None,
+        ),
     );
     let cfg = Config {
         agent: AgentConfig::default(),
@@ -757,11 +828,21 @@ fn select_model_rejects_keyless_provider_model() {
     let mut providers = IndexMap::new();
     providers.insert(
         "openai".to_string(),
-        provider(Api::OpenAiCompletions, Some("sk"), models(&[("gpt-4o", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            Some("sk"),
+            models(&[("gpt-4o", mc())]),
+            None,
+        ),
     );
     providers.insert(
         "local".to_string(),
-        provider(Api::OpenAiCompletions, None, models(&[("local-model", mc())]), None),
+        provider(
+            Api::OpenAiCompletions,
+            None,
+            models(&[("local-model", mc())]),
+            None,
+        ),
     );
     let (cfg, reg) = build(providers);
     let err = select_model(&reg, &cfg, Some("local/local-model")).unwrap_err();
