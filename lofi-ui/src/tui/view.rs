@@ -546,6 +546,24 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let w = area.width as usize;
     let content_w = w;
+
+    // Shell-policy confirmation prompt.
+    if app.mode == Mode::Confirm {
+        if let Some(req) = &app.pending_confirm {
+            let cmd = req.command.chars().take(w.saturating_sub(20)).collect::<String>();
+            let line = Line::from(vec![
+                Span::styled(" Confirm: ", Style::new().fg(t.warn).bold()),
+                Span::styled(cmd, Style::new().fg(t.fg)),
+                Span::styled(" [y/n]", Style::new().fg(t.muted)),
+            ]);
+            f.render_widget(
+                Paragraph::new(line).style(Style::new().bg(t.panel_bg)),
+                area,
+            );
+            return;
+        }
+    }
+
     // In Navigate/Select the prompt is inert: dim it and hide the cursor so
     // the transcript cursor is the focus. A centered modal (info, /resume,
     // /tree) likewise hides the cursor — it owns input while open.

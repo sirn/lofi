@@ -433,7 +433,7 @@ impl App {
         }
         let step: i32 = h.try_into().unwrap_or(i32::MAX);
         match self.mode {
-            Mode::Input => {
+            Mode::Input | Mode::Confirm => {
                 self.top_line = self.top_line.saturating_sub(h);
                 self.pinned = false;
             }
@@ -448,7 +448,7 @@ impl App {
         }
         let step: i32 = h.try_into().unwrap_or(i32::MAX);
         match self.mode {
-            Mode::Input => {
+            Mode::Input | Mode::Confirm => {
                 let base = self.last_base;
                 let new = self.top_line.saturating_add(h);
                 if new >= base {

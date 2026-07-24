@@ -214,7 +214,8 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnStart { .. }
         // Live-only signals handled by `App::apply_event`; no block here.
         | AgentEvent::TurnContinue
-        | AgentEvent::ContextPressure { .. } => {}
+        | AgentEvent::ContextPressure { .. }
+        | AgentEvent::ConfirmationRequest { .. } => {}
     }
 }
 
