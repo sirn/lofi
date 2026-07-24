@@ -604,6 +604,7 @@ fn extract_path(name: &str, args_json: &str) -> Option<String> {
 
 /// Search the rendered entries. A query with regex metacharacters is treated
 /// as one pattern; otherwise it's tokenized into terms and ranked by BM25.
+#[allow(clippy::too_many_lines)]
 fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) -> Vec<SearchHit> {
     debug_assert_eq!(entries.len(), messages.len());
     let raw_query = query.trim();

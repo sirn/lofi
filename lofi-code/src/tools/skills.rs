@@ -33,6 +33,9 @@ const MAX_WALK_DEPTH: usize = 8;
 const MAX_WALK_VISITED: usize = 10_000;
 /// The marker file name identifying a skill directory.
 const SKILL_FILE: &str = "SKILL.md";
+/// Maximum size of a skill file; reads are bounded so a large or linked
+/// `SKILL.md` cannot exhaust host memory outside `QuickJS`'s limit.
+const MAX_SKILL_FILE_BYTES: usize = 1024 * 1024;
 
 impl BuiltinTools {
     /// List available skills from the global and per-workspace directories.
@@ -145,8 +148,15 @@ impl BuiltinTools {
         depth: usize,
         visited: &mut usize,
     ) -> Result<()> {
-        if depth > MAX_WALK_DEPTH || *visited > MAX_WALK_VISITED {
-            return Ok(());
+        if depth > MAX_WALK_DEPTH {
+            return Err(Error::Tool(format!(
+                "skills: exceeded {MAX_WALK_DEPTH}-depth limit"
+            )));
+        }
+        if *visited > MAX_WALK_VISITED {
+            return Err(Error::Tool(format!(
+                "skills: exceeded {MAX_WALK_VISITED}-entry walk limit"
+            )));
         }
         if !dir.is_dir() {
             return Ok(());
@@ -157,7 +167,9 @@ impl BuiltinTools {
         for entry in read_dir {
             *visited += 1;
             if *visited > MAX_WALK_VISITED {
-                return Ok(());
+                return Err(Error::Tool(format!(
+                    "skills: exceeded {MAX_WALK_VISITED}-entry walk limit"
+                )));
             }
             let path = match entry {
                 Ok(e) => e.path(),
@@ -190,7 +202,7 @@ impl BuiltinTools {
 
     /// Read a file within a skill directory and return the structured result.
     fn read_skill_file(path: &Path, name: &str, file: &str, source: &str) -> Result<Value> {
-        let content = std::fs::read_to_string(path)
+        let content = read_bounded(path, MAX_SKILL_FILE_BYTES)
             .map_err(|e| Error::Tool(format!("skill `{name}`: {e}")))?;
         let skill_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         Ok(json!({
@@ -226,7 +238,7 @@ fn validate_skill_name(name: &str) -> Result<()> {
 /// the skill description. Falls back to the parent directory name when the
 /// file is empty or all headings.
 fn read_description(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = read_bounded(path, MAX_SKILL_FILE_BYTES).ok()?;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -243,6 +255,24 @@ fn read_description(path: &Path) -> Option<String> {
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
         .map(std::string::ToString::to_string)
+}
+
+/// Read a file up to `max` bytes as a UTF-8 string, returning an error when
+/// the file exceeds the cap or cannot be read.
+fn read_bounded(path: &Path, max: usize) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    // Cap the read at max+1 so we can detect files that exceed the limit
+    // even when the reported metadata size is zero or stale.
+    let mut reader = std::io::Read::take(&mut file, (max as u64) + 1);
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut buf)?;
+    if buf.len() > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file exceeds {max}-byte limit"),
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]

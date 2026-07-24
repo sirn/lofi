@@ -16,11 +16,32 @@ use lofi_types::{
 };
 use serde_json::Value;
 
+use futures::StreamExt;
 use lofi_error::{Error, Result};
 use lofi_providers::apply_headers;
 use lofi_providers::ANTHROPIC_VERSION;
 
 use super::resolve_model_base_url;
+
+/// Maximum bytes accepted for a discovery (model-list) response body.
+pub(super) const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read a JSON response body through a capped byte stream so a configurable
+/// discovery endpoint cannot force unbounded allocation before parsing.
+pub(super) async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> {
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
+        if chunk.len() > max.saturating_sub(buf.len()) {
+            return Err(Error::Provider(format!(
+                "response body exceeded {max} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
+}
 /// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
@@ -135,14 +156,20 @@ pub(super) async fn fetch_auto_models(
     let req = if am.auth {
         authed_get(&client, pcfg.default_api(), key_arg, &url)
     } else {
+        // When auth is disabled, omit provider headers entirely so no
+        // configured credential headers (Authorization, x-api-key, …)
+        // leak to a public or alternate models_url.
         client.get(&url)
     };
-    let req = apply_headers(req, &headers);
+    let req = if am.auth {
+        apply_headers(req, &headers)
+    } else {
+        req
+    };
 
     let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
     let resp = lofi_providers::ensure_ok(resp).await?;
-    let body: Value =
-        lofi_providers::read_json_capped(resp, lofi_providers::MAX_DISCOVERY_BODY_BYTES).await?;
+    let body: Value = read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await?;
 
     Ok(parse_auto_models(pcfg, am, &body))
 }
@@ -364,5 +391,30 @@ pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, Vec<(String
             .map_err(|e| Error::State(format!("auto-models cache decode error: {e}")))?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(Error::Io(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn read_json_capped_handles_size_overflow_without_panicking() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/large")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let response = reqwest::get(format!("{}/large", server.url()))
+            .await
+            .unwrap();
+
+        let err = read_json_capped(response, 0).await.unwrap_err();
+        assert!(matches!(err, Error::Provider(_)));
+        mock.assert_async().await;
     }
 }
