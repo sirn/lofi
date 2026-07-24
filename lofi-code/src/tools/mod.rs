@@ -77,6 +77,8 @@ pub struct BuiltinTools {
     tool_counter: Arc<AtomicU64>,
     /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
+    /// Resolved shell policy for `lofi.bash` command evaluation.
+    shell_policy: crate::policy::ResolvedPolicy,
     /// Optional skills directory (`<config_dir>/skills`). When set,
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
@@ -96,7 +98,8 @@ impl BuiltinTools {
     /// fresh directory under the system temp dir.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self::with_tool_cb(root, None, default_tmp_dir(), BashEnv::default())
+        Self::with_tool_cb(root, None, default_tmp_dir(), BashEnv::default(),
+            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()))
     }
 
     /// Like [`new`](Self::new) but also forwards native tool-call events to
@@ -107,8 +110,9 @@ impl BuiltinTools {
         tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
         tmp_dir: PathBuf,
         bash_env: BashEnv,
+        shell_policy: crate::policy::ResolvedPolicy,
     ) -> Self {
-        Self::with_skills_dir(root, tool_cb, tmp_dir, bash_env, None)
+        Self::with_skills_dir(root, tool_cb, tmp_dir, bash_env, shell_policy, None)
     }
 
     /// Like [`with_tool_cb`](Self::with_tool_cb) but also sets the skills
@@ -119,6 +123,7 @@ impl BuiltinTools {
         tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
         tmp_dir: PathBuf,
         bash_env: BashEnv,
+        shell_policy: crate::policy::ResolvedPolicy,
         skills_dir: Option<PathBuf>,
     ) -> Self {
         let root = root.canonicalize().unwrap_or(root);
@@ -138,6 +143,7 @@ impl BuiltinTools {
             tool_cb,
             tool_counter: Arc::new(AtomicU64::new(0)),
             bash_env,
+            shell_policy,
             skills_dir,
             read_roots,
         }
@@ -159,6 +165,12 @@ impl BuiltinTools {
     #[must_use]
     pub fn bash_env(&self) -> &BashEnv {
         &self.bash_env
+    }
+
+    /// The resolved shell policy for command evaluation.
+    #[must_use]
+    pub fn shell_policy(&self) -> &crate::policy::ResolvedPolicy {
+        &self.shell_policy
     }
 
     /// The skills directory, if configured.
@@ -211,7 +223,25 @@ mod tests {
 
     fn tools() -> (tempfile::TempDir, BuiltinTools) {
         let dir = tempdir().unwrap();
-        let tools = BuiltinTools::new(dir.path().to_path_buf());
+        // Test tools use a fully permissive policy (no deny rules) so that
+        // bash mechanics tests (kill, signal, timeout) aren't blocked.
+        let policy = crate::policy::ResolvedPolicy {
+            allow: Vec::new(),
+            ask: Vec::new(),
+            deny: Vec::new(),
+            wrappers: std::collections::HashMap::new(),
+            redirects: lofi_types::RedirectPolicy::default(),
+            heredocs: lofi_types::HeredocPolicy::default(),
+            yolo: true,
+            allow_by_default: true,
+        };
+        let tools = BuiltinTools::with_tool_cb(
+            dir.path().to_path_buf(),
+            None,
+            default_tmp_dir(),
+            BashEnv::default(),
+            policy,
+        );
         (dir, tools)
     }
 

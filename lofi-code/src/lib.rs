@@ -47,6 +47,7 @@ use swc_ecma_visit::VisitMutWith;
 use lofi_error::{Error, Result};
 
 pub mod docs;
+pub mod policy;
 mod convert;
 use convert::{js_to_json, json_to_js};
 
@@ -162,6 +163,8 @@ pub struct ExecCtx {
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     /// Resolved `bash` child-env policy + output-redaction set.
     pub bash_env: BashEnv,
+    /// Resolved shell policy for `lofi.bash` command evaluation.
+    pub shell_policy: crate::policy::ResolvedPolicy,
     /// Optional skills directory (`<config_dir>/skills`). When set,
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
@@ -179,6 +182,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("result", &self.result.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
             .field("bash_env", &self.bash_env)
+            .field("shell_policy", &"<resolved>")
             .field("skills_dir", &self.skills_dir)
             .finish()
     }
@@ -390,6 +394,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         ctx.on_tool_event.clone(),
         ctx.tmp_dir.clone(),
         ctx.bash_env.clone(),
+        ctx.shell_policy.clone(),
     ));
     let strings = ctx.strings.clone();
     let agent = ctx.agent.clone();
@@ -595,6 +600,7 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
             skills_dir: None,
         }
     }
@@ -760,6 +766,7 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
             skills_dir: None,
         };
         let res = exec(
