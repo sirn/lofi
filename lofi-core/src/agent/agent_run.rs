@@ -780,6 +780,7 @@ impl Agent {
                 result: result.clone(),
                 on_tool_event: Some(on_tool_event),
                 bash_env: self.bash_env.clone(),
+                shell_policy: self.shell_policy.clone(),
                 skills_dir: self.skills_dir.clone(),
             };
             let outcome = exec(
