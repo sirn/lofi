@@ -783,6 +783,10 @@ pub(crate) struct App {
     sel: Option<Selection>,
     /// Current modal focus.
     mode: Mode,
+    /// Queue of pending shell-policy confirmation requests.
+    /// The first item is shown as a centered modal; when the user
+    /// responds, it is popped and the next one (if any) appears.
+    pending_confirms: Vec<lofi_core::ConfirmRequest>,
     /// When the yank-to-clipboard badge was last triggered; shown on the
     /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
@@ -983,6 +987,15 @@ async fn run_loop(
         );
     }
 
+    // Create the confirmation channel for shell-policy `ask` decisions.
+    // The agent sends ConfirmRequests; the TUI shows a yes/no prompt and
+    // responds through the embedded oneshot.
+    let (confirm_tx, mut confirm_rx) =
+        tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
+    if let Some(a) = agent.take() {
+        agent = Some(a.with_confirm_tx(confirm_tx));
+    }
+
     let mut current_run: Option<RunHandle> = None;
     let mut events = EventStream::new();
     let mut last_err: Option<String> = None;
@@ -1113,6 +1126,13 @@ async fn run_loop(
                     if n.at.elapsed() >= NOTIFY_TTL {
                         app.notify = None;
                     }
+                    dirty = true;
+                }
+            }
+            // Shell-policy confirmation request from the agent.
+            req = confirm_rx.recv() => {
+                if let Some(req) = req {
+                    app.pending_confirms.push(req);
                     dirty = true;
                 }
             }

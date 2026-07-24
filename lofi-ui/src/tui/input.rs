@@ -37,6 +37,11 @@ pub(super) fn handle_event(
         return;
     }
 
+    // Shell-policy confirmation modal: y = allow, anything else = deny.
+    if app.handle_confirm_key(k) {
+        return;
+    }
+
     // Ctrl+C cancels a run, clears the draft, or quits on double-press in
     // Input. In Navigate/Select it returns to Input and snaps the viewport
     // to the latest transcript line (a run, if active, keeps running — press

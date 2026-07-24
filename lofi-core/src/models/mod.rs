@@ -455,6 +455,7 @@ mod tests {
             agent: lofi_types::AgentConfig::default(),
             compaction: lofi_types::CompactionConfig::default(),
             bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
             retry: lofi_types::RetryConfig::default(),
             default_provider: None,
             default_model: None,
