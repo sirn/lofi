@@ -4,12 +4,84 @@
 use super::*;
 use async_trait::async_trait;
 use futures::stream;
-use lofi_types::{Api, Usage};
+use lofi_types::{Api, SessionEventKind, Usage};
 use tempfile::tempdir;
 
 /// A canned provider that pops one `Vec<StreamingEvent>` per call.
 struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamingEvent>>>,
+}
+
+struct PendingAfterRoundProvider {
+    first: std::sync::Mutex<Option<Vec<StreamingEvent>>>,
+}
+
+#[async_trait]
+impl Provider for PendingAfterRoundProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        let first = self.first.lock().unwrap().take();
+        match first {
+            Some(events) => Ok(Box::pin(stream::iter(events.into_iter().map(Ok)))),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Provider for the concurrent-native-tool failure regression. The parent
+/// gets one exec call and then a final response; its nested `lofi.agent`
+/// request remains pending until the sibling `lofi.read` failure rejects
+/// `Promise.all` and drops it.
+struct ConcurrentFailureProvider;
+
+#[async_trait]
+impl Provider for ConcurrentFailureProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        if messages.last().is_some_and(|m| {
+            m.role == Role::User
+                && m.blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text == "hang"))
+        }) {
+            return std::future::pending().await;
+        }
+        if messages.last().is_some_and(|m| m.role == Role::Tool) {
+            return Ok(Box::pin(stream::iter([
+                Ok(StreamingEvent::TextDelta("done".to_string())),
+                Ok(StreamingEvent::Done(Usage::default())),
+            ])));
+        }
+        let input = serde_json::json!({
+            "code": r#"await Promise.all([
+                lofi.agent("hang"),
+                lofi.read("../escape")
+            ])"#
+        })
+        .to_string();
+        Ok(Box::pin(stream::iter([
+            Ok(StreamingEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "exec".to_string(),
+            }),
+            Ok(StreamingEvent::ToolUseInputDelta {
+                id: "t1".to_string(),
+                delta: input,
+            }),
+            Ok(StreamingEvent::ToolUseEnd {
+                id: "t1".to_string(),
+            }),
+            Ok(StreamingEvent::Done(Usage::default())),
+        ])))
+    }
 }
 
 #[async_trait]
@@ -255,6 +327,65 @@ async fn run_once_tool_call_executes_and_appends_result() {
 }
 
 #[tokio::test]
+async fn run_continuation_persists_completed_round_before_next_round_settles() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let first_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: tool_input,
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let agent = Agent {
+        provider: Arc::new(PendingAfterRoundProvider {
+            first: std::sync::Mutex::new(Some(first_round)),
+        }),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let commit = SessionCommit {
+        path: path.clone(),
+        parent_hint: None,
+    };
+    let run = agent.run_continuation(
+        &mut messages,
+        "go".into(),
+        tx,
+        Some(&commit),
+        false,
+        None,
+        None,
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), run)
+            .await
+            .is_err(),
+        "second provider round should still be pending"
+    );
+
+    let (_, events, _, _) = crate::session::store::load(&path).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::Message(message) if message.role == Role::Tool
+    )));
+}
+
+#[tokio::test]
 async fn run_continuation_force_stops_at_hard_cap() {
     // A tool-use loop whose second round crosses the hard context cap must
     // force-stop with `ContextPressure` (no `TurnEnd`) and leave the partial
@@ -325,6 +456,52 @@ async fn run_continuation_force_stops_at_hard_cap() {
     assert!(!saw_turn_end, "hard-cap stop must not emit TurnEnd");
     // The partial turn ends in a tool result (matched cycle), kept verbatim.
     assert_eq!(messages.last().unwrap().role, Role::Tool);
+}
+
+#[tokio::test]
+async fn failed_exec_closes_concurrent_pending_native_tools() {
+    let dir = tempdir().unwrap();
+    let agent = Agent {
+        provider: Arc::new(ConcurrentFailureProvider),
+        model: model(),
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
+        retry: crate::retry::RetryPolicy::default(),
+        system_prompt: "sys".to_string(),
+        max_output_tokens: None,
+        reserved_context_tokens: 0,
+        bash_env: lofi_code::BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
+        confirm_tx: None,
+        confirm_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        auto_mode: None,
+        skills_dir: None,
+        subagent_semaphore: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .await
+        .unwrap();
+
+    let mut starts = 0;
+    let mut cancelled_agent = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::NativeToolStart { .. } => starts += 1,
+            AgentEvent::NativeToolEnd {
+                result, is_error, ..
+            } if is_error && result == "cancelled because parent exec failed" => {
+                cancelled_agent = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(starts, 2);
+    assert!(cancelled_agent);
 }
 
 #[tokio::test]

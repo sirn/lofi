@@ -113,6 +113,15 @@ impl Agent {
             }
         }
         let mut stats = TurnStats::new();
+        // Keep one recorder alive across the whole multi-round turn. Each
+        // completed round checkpoints its new messages/timings immediately;
+        // final flush only appends the remaining suffix and terminal marker.
+        let mut recorder = commit.map(|commit| match commit.parent_hint.as_deref() {
+            Some(id) => {
+                SessionRecorder::with_parent(commit.path.clone(), self.run_model(), id.to_string())
+            }
+            None => SessionRecorder::new(commit.path.clone(), self.run_model()),
+        });
         // `lofi.recall` reads the full on-disk transcript (including
         // compacted-away messages) fresh on each call, so the native tool
         // sees the same history `/recall` does. Built once from the commit
@@ -189,6 +198,13 @@ impl Agent {
                     break;
                 }
                 Ok(false) => {
+                    // The assistant tool call and its results form a complete,
+                    // provider-valid round. Persist that suffix now instead of
+                    // retaining the entire long turn only in memory.
+                    if let Some(recorder) = recorder.as_mut() {
+                        let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+                        recorder.checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?;
+                    }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
                     // tool cycle that compaction keeps verbatim). Stop before
@@ -333,24 +349,11 @@ impl Agent {
                 };
             }
         }
-        // The durable translation lives in `SessionRecorder`: hand it the
-        // finalized message slice + a snapshot of the engine's accumulators
-        // and it shapes/writes the `SessionEvent`s. The agent loop stays free
-        // of on-disk-format concerns.
-        if let Some(commit) = commit {
+        // Append anything not yet checkpointed plus the terminal marker. The
+        // recorder returns the full byte span across all round checkpoints so
+        // the UI can safely file-back the completed turn.
+        if let Some(recorder) = recorder.as_mut() {
             let summary = stats.summary(elapsed_ms);
-            // Branch off an explicit parent when the caller picked one (e.g.
-            // resuming from a non-leaf entry in the tree picker); otherwise
-            // append to the file's active leaf.
-            let mut recorder = match commit.parent_hint.as_deref() {
-                Some(id) => SessionRecorder::with_parent(
-                    commit.path.clone(),
-                    self.run_model(),
-                    id.to_string(),
-                ),
-                None => SessionRecorder::new(commit.path.clone(), self.run_model()),
-            };
-            // A turn with no terminal outcome and no content writes nothing.
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
@@ -783,11 +786,12 @@ impl Agent {
             let on_tool_event: Arc<dyn Fn(ToolEvent) + Send + Sync> = {
                 let native_pending = native_pending.clone();
                 let native_completed = native_completed.clone();
+                let event_parent = parent.clone();
                 Arc::new(move |ev: ToolEvent| match ev {
                     ToolEvent::Start { id, name, args } => {
                         lock(&native_pending).insert(id, (name.clone(), args.clone()));
                         let _ = native_tx.send(AgentEvent::NativeToolStart {
-                            parent: parent.clone(),
+                            parent: event_parent.clone(),
                             id,
                             name,
                             args,
@@ -806,7 +810,7 @@ impl Agent {
                         let result = cap_tool_result(&result);
                         if let Some((name, args)) = lock(&native_pending).remove(&id) {
                             lock(&native_completed).push(NativeToolRecord {
-                                parent: parent.clone(),
+                                parent: event_parent.clone(),
                                 call_id: id,
                                 name,
                                 args,
@@ -815,7 +819,7 @@ impl Agent {
                             });
                         }
                         let _ = native_tx.send(AgentEvent::NativeToolEnd {
-                            parent: parent.clone(),
+                            parent: event_parent.clone(),
                             id,
                             result,
                             is_error,
@@ -888,6 +892,37 @@ impl Agent {
                 }
                 Err(e) => (cap_exec_result(&e.to_string()), true),
             };
+            if is_error {
+                // A rejected guest promise can short-circuit concurrent native
+                // calls before their futures emit `ToolEvent::End`. Close every
+                // still-pending row explicitly so the live UI cannot leave a
+                // spinner behind after the parent exec has already failed.
+                // These synthetic cancellations are also persisted, making
+                // resume reproduce the settled state.
+                let pending = {
+                    let mut pending = lock(&native_pending);
+                    pending.drain().collect::<Vec<_>>()
+                };
+                for (call_id, (name, args)) in pending {
+                    let result = "cancelled because parent exec failed".to_string();
+                    if let Some(s) = stats.as_deref_mut() {
+                        s.native_tools.push(NativeToolRecord {
+                            parent: parent.clone(),
+                            call_id,
+                            name,
+                            args,
+                            result: result.clone(),
+                            is_error: true,
+                        });
+                    }
+                    let _ = relay_tx.send(AgentEvent::NativeToolEnd {
+                        parent: parent.clone(),
+                        id: call_id,
+                        result,
+                        is_error: true,
+                    });
+                }
+            }
             let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
             if !emit(
                 tx,
