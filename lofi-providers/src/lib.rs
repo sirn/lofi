@@ -187,7 +187,7 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
         return Ok(resp);
     }
     let status = resp.status();
-    let url = resp.url().to_string();
+    let url = redact_url(resp.url());
     // Read the error body through a capped stream so a huge or hostile
     // error response cannot exhaust memory before its (truncated) detail
     // is surfaced.
@@ -248,26 +248,22 @@ fn extract_error_detail(text: &str) -> Option<String> {
 /// response.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Maximum bytes accepted for a discovery (model-list) response body.
-pub const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
-
-/// Read a JSON response body through a capped byte stream so a configurable
-/// discovery endpoint cannot force unbounded allocation before parsing.
-#[allow(clippy::missing_errors_doc)]
-pub async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> {
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
-        if chunk.len() > max.saturating_sub(buf.len()) {
-            return Err(Error::Provider(format!(
-                "response body exceeded {max} bytes"
-            )));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
+/// Render a URL with credentials and query stripped, for use in error
+/// messages. A provider `base_url` or proxy may carry an API key in userinfo
+/// or a query parameter; surfacing the raw URL would leak it into the
+/// transcript. Keeps scheme, host, port, and path so the endpoint is still
+/// identifiable.
+fn redact_url(url: &reqwest::Url) -> String {
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    format!(
+        "{}://{}{}{}",
+        url.scheme(),
+        url.host_str().unwrap_or(""),
+        port,
+        url.path()
+    )
 }
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -314,22 +310,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn read_json_capped_handles_size_overflow_without_panicking() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/large")
-            .with_status(200)
-            .with_body("{}")
-            .create_async()
-            .await;
-        let response = reqwest::get(format!("{}/large", server.url()))
-            .await
-            .unwrap();
-
-        let err = read_json_capped(response, 0).await.unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
-        mock.assert_async().await;
+    #[test]
+    fn redact_url_strips_credentials_and_query() {
+        let url = reqwest::Url::parse(
+            "https://user:pass@host.example:8443/v1/models?secret=abc",
+        )
+        .unwrap();
+        assert_eq!(redact_url(&url), "https://host.example:8443/v1/models");
     }
 
     #[test]
