@@ -29,6 +29,7 @@ fn ctx(root: &Path) -> ExecCtx {
             recall: None,
             result: None,
         bash_env: BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
         skills_dir: None,
     }
 }
@@ -160,6 +161,7 @@ async fn strings_exposed_as_lofi_strings() {
             recall: None,
             result: None,
         bash_env: BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
         skills_dir: None,
     };
     let res = exec(
@@ -242,6 +244,7 @@ async fn agent_call_emits_tool_events() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
         skills_dir: None,
     };
     let src = "const r = await lofi.agent('do stuff'); return r;";
@@ -274,6 +277,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         recall: None,
         result: None,
         bash_env: BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
         skills_dir: None,
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
