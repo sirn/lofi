@@ -295,6 +295,50 @@ env_file = "~/.config/lofi/secrets.env"  # optional; KEY=VALUE file loaded into
                                #   lofi.read/edit/write cannot reach it. Values
                                #   are redacted from output. None by default.
 
+### Shell policy (`policy.toml`)
+
+Shell policy is configured in a separate `policy.toml` file (alongside
+`config.toml`; overridable via `$LOFI_POLICY`). Every `lofi.bash` command
+is parsed structurally (not string-matched) and evaluated against an
+allow / ask / deny policy table. Commands that don't match any rule fail
+closed to `ask` (require confirmation).
+
+Three built-in modes are available:
+
+- `read_only` — only read-only commands (ls, cat, grep, git status, …).
+- `workspace_write` (default) — read-only plus workspace mutations (cargo,
+  make, mkdir, …); destructive ops (rm, git push, …) require confirmation.
+- `unrestricted` — everything allowed unless explicitly denied.
+
+```toml
+mode = "workspace_write"       # read_only | workspace_write | unrestricted
+yolo = false                   # allow-unless-deny: skip confirmation for ask/unmatched
+
+# Custom rules merged on top of the mode's defaults.
+[[allow]]
+match = "my-tool"
+mode = "prefix"               # exact | prefix | substring | args
+
+[[deny]]
+match = "curl"
+mode = "prefix"
+
+[[ask]]
+match = "git commit"
+mode = "prefix"
+
+# Auto-mode: LLM-based pre-approval of ask commands.
+# When enabled, commands that would normally require confirmation are first
+# evaluated by a small LLM. If the model returns "allow", the command runs
+# silently. Otherwise the normal confirmation flow applies.
+[auto_mode]
+enable = true
+provider = "openai"           # provider key from config.toml
+model = "gpt-4o-mini"         # model id within that provider
+timeout_ms = 30000            # optional; default 30s
+# max_tokens = 1024           # optional; defaults to the model's max_tokens
+```
+
 [retry]                         # optional; transient-error retries
 max_retries = 10                # default. Max retry attempts after the initial
                                 #   try, for transient provider/transport

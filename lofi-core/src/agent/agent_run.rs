@@ -771,6 +771,29 @@ impl Agent {
                     }
                 }) as Arc<dyn Fn(ToolEvent) + Send + Sync>
             };
+            // Build the confirmation callback for shell-policy `ask`
+            // decisions. When a confirm channel is available (interactive
+            // mode), the callback sends a ConfirmRequest and awaits the
+            // user's response. In headless mode it is `None` and `ask`
+            // blocks the command.
+            let confirm: Option<lofi_code::ConfirmFn> = self.confirm_tx.as_ref().map(|tx| {
+                let tx = tx.clone();
+                let counter = self.confirm_counter.clone();
+                Arc::new(move |command: String| {
+                    let tx = tx.clone();
+                    let counter = counter.clone();
+                    Box::pin(async move {
+                        let id = counter.fetch_add(1, Ordering::SeqCst);
+                        let (resp_tx, resp_rx) = oneshot::channel();
+                        let req = ConfirmRequest { id, command, respond: resp_tx };
+                        if tx.send(req).is_err() {
+                            return false;
+                        }
+                        resp_rx.await.unwrap_or(false)
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
+                }) as lofi_code::ConfirmFn
+            });
             let exec_ctx = ExecCtx {
                 root: self.root.clone(),
                 tmp_dir: self.tmp_dir.clone(),
@@ -780,6 +803,9 @@ impl Agent {
                 result: result.clone(),
                 on_tool_event: Some(on_tool_event),
                 bash_env: self.bash_env.clone(),
+                shell_policy: self.shell_policy.clone(),
+                confirm,
+                auto_mode: self.auto_mode.clone(),
                 skills_dir: self.skills_dir.clone(),
             };
             let outcome = exec(

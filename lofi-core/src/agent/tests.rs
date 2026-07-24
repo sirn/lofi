@@ -63,6 +63,10 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         max_output_tokens: None,
         reserved_context_tokens: 0,
         bash_env: lofi_code::BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        confirm_tx: None,
+        confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        auto_mode: None,
         skills_dir: None,
     }
 }
@@ -274,6 +278,10 @@ async fn run_continuation_force_stops_at_hard_cap() {
         max_output_tokens: None,
         reserved_context_tokens: 20, // hard cap = 100 - 20 = 80
         bash_env: lofi_code::BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+        confirm_tx: None,
+        confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        auto_mode: None,
         skills_dir: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
@@ -509,6 +517,7 @@ fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry)
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: None,
         default_model: None,
@@ -632,6 +641,7 @@ fn select_model_uses_default_model_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
@@ -659,6 +669,7 @@ fn select_model_uses_default_provider_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: None,
@@ -686,6 +697,7 @@ fn select_model_default_model_overrides_default_provider() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
@@ -713,6 +725,7 @@ fn select_model_explicit_query_overrides_defaults() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),

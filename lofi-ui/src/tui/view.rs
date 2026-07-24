@@ -30,7 +30,7 @@ pub(crate) mod blocks;
 pub(crate) mod component;
 mod prim;
 mod modals;
-use modals::{render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
+use modals::{render_confirm_modal, render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
 
 pub(crate) use prim::RenderLine;
 #[allow(unused_imports)]
@@ -155,6 +155,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.info.is_some() {
         render_info_modal(f, area, app);
+    }
+    if !app.pending_confirms.is_empty() {
+        render_confirm_modal(f, area, app);
     }
     if app.slash_complete.is_some() {
         render_slash_complete(f, area, app);

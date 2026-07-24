@@ -512,3 +512,65 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         prim::render_scrollbar(f, track, state.offset(), inner.height as usize, total, t.subtle, t.muted);
     }
 }
+/// Shell-policy confirmation modal: a small centered popup showing the
+/// command text and a `y/n` prompt. `y` allows, any other key denies.
+/// If multiple requests are queued, a counter is shown.
+pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{Block as WidgetBlock, BorderType};
+    let t = app.theme;
+    let Some(req) = app.pending_confirms.first() else {
+        return;
+    };
+    let max_w = area.width.saturating_sub(4) as usize;
+    let cmd_lines = prim::wrap(&req.command, max_w.min(80));
+    let body_h = cmd_lines.len();
+    let queue_count = app.pending_confirms.len();
+    let counter = if queue_count > 1 {
+        format!(" ({}/{})", 1, queue_count)
+    } else {
+        String::new()
+    };
+    let title = format!(" Confirm{counter} ");
+    let title_w = prim::width(&title);
+    let inner_w = cmd_lines
+        .iter()
+        .map(|l| prim::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(title_w)
+        .min(max_w);
+    let w = u16::try_from(inner_w + 4).unwrap_or(50).min(area.width);
+    let h = u16::try_from(body_h + 4).unwrap_or(7).min(area.height);
+    let vert =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
+            .split(area);
+    let horiz =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(w), Constraint::Min(0)])
+            .split(vert[1]);
+    let popup = horiz[1];
+    f.render_widget(Clear, popup);
+    let block = WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            title,
+            Style::new().fg(t.warn).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let body_lines: Vec<Line> = cmd_lines
+        .iter()
+        .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
+        .collect();
+    f.render_widget(Paragraph::new(body_lines), inner);
+    let hint = Line::from(vec![
+        Span::styled("y", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
+        Span::styled(" allow · ", Style::new().fg(t.muted)),
+        Span::styled("n", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
+        Span::styled(" deny", Style::new().fg(t.muted)),
+    ]);
+    let hint_y = inner.bottom().saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint),
+        Rect { y: hint_y, ..inner },
+    );
+}

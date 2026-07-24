@@ -28,6 +28,64 @@ impl BuiltinTools {
     /// the session tmp dir and its absolute path is included in the notice
     /// so the model can `lofi.read` it in pages (the tmp dir is a read root).
     ///
+    /// Evaluate `cmd` against the shell policy. Returns `Some(json)` if the
+    /// command is denied or needs confirmation, `None` if allowed.
+    ///
+    /// Decision flow for `Ask`:
+    /// 1. If auto-mode is enabled, ask the LLM first. If it says allow,
+    ///    proceed (`None`).
+    /// 2. If a confirmation callback is available, ask the user. If they
+    ///    approve, proceed (`None`).
+    /// 3. Otherwise, return `needs_confirmation`.
+    async fn check_policy(&self, cmd: &str) -> Option<Value> {
+        let decision = self.shell_policy.evaluate(cmd);
+        let suffix = decision
+            .matched_command
+            .as_deref()
+            .map(|c| format!(" (command: {c})"))
+            .unwrap_or_default();
+        match decision.action {
+            lofi_types::PolicyAction::Deny => Some(json!({
+                "ok": false,
+                "output": format!("blocked by shell policy: {}{}", decision.reason, suffix),
+                "code": Value::Null,
+                "command": cmd,
+                "directory": self.root.display().to_string(),
+                "signal": Value::Null,
+                "duration_ms": 0,
+                "status": "denied",
+            })),
+            lofi_types::PolicyAction::Ask => {
+                // Step 1: auto-mode LLM pre-approval.
+                if let Some(auto_mode) = &self.auto_mode {
+                    if let Some(true) = auto_mode(cmd.to_string()).await {
+                        return None;
+                    }
+                    // Some(false) or None: fall through to confirm.
+                }
+                // Step 2: user confirmation.
+                if let Some(confirm) = &self.confirm {
+                    let approved = confirm(cmd.to_string()).await;
+                    if approved {
+                        return None;
+                    }
+                }
+                // Step 3: blocked (no UI or user denied).
+                Some(json!({
+                    "ok": false,
+                    "output": format!("requires confirmation: {}{}", decision.reason, suffix),
+                    "code": Value::Null,
+                    "command": cmd,
+                    "directory": self.root.display().to_string(),
+                    "signal": Value::Null,
+                    "duration_ms": 0,
+                    "status": "needs_confirmation",
+                }))
+            }
+            lofi_types::PolicyAction::Allow => None,
+        }
+    }
+
     /// # Errors
     /// Returns [`Error::Io`] only if the process cannot be spawned.
     pub async fn bash(&self, args: Value) -> Result<Value> {
@@ -41,6 +99,11 @@ impl BuiltinTools {
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
         let dur = Duration::from_millis(timeout_ms);
+
+        // Evaluate the command against the shell policy before spawning.
+        if let Some(blocked) = self.check_policy(&cmd).await {
+            return Ok(blocked);
+        }
 
         // `bash` is intentionally host-level: it runs the user's project
         // commands and is *not* a security sandbox. The child env is resolved
