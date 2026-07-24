@@ -137,12 +137,9 @@ pub fn map_anthropic_event(
         }
         "content_block_stop" => {
             if let Some(idx) = data.get("index").and_then(Value::as_u64) {
-                let id = state
-                    .index_to_id
-                    .get(&idx)
-                    .cloned()
-                    .or_else(|| Some(idx.to_string()));
-                if let Some(id) = id {
+                // Only tool-use blocks have a tracked id; text and thinking
+                // blocks must not synthesize a phantom ToolUseEnd.
+                if let Some(id) = state.index_to_id.remove(&idx) {
                     out.push(StreamingEvent::ToolUseEnd { id });
                 }
             }
@@ -353,6 +350,18 @@ mod tests {
             vec![StreamingEvent::ToolUseEnd {
                 id: "tu_0".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn text_block_stop_emits_no_tool_use_end() {
+        // A `content_block_stop` for a non-tool block has no tracked id and
+        // must not synthesize a phantom `ToolUseEnd`.
+        let mut state = AnthropicMapperState::default();
+        let stop = json!({"index": 0});
+        assert_eq!(
+            map_anthropic_event(Some("content_block_stop"), &stop, &mut state).unwrap(),
+            vec![]
         );
     }
 

@@ -207,7 +207,7 @@ pub(super) fn handle_event(
             // Alt+Up: restore the last queued prompt (LIFO) into the input.
             if let Some(prompt) = app.prompt_queue.pop() {
                 app.input = prompt;
-                app.input_cursor = app.input.chars().count();
+                app.input_cursor = app.input.len();
                 app.history_idx = None;
                 app.refresh_slash_complete();
             }
@@ -229,7 +229,7 @@ pub(super) fn handle_event(
         KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => app.cursor_up(),
         KeyCode::Char('h') if k.modifiers.contains(KeyModifiers::CONTROL) => app.backspace(),
         KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.kill_line_end(append_kill)
+            app.kill_line_end(append_kill);
         }
         KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => app.kill_line_start(),
         KeyCode::Char('w') if k.modifiers.contains(KeyModifiers::CONTROL) => app.kill_word_back(),
@@ -239,7 +239,7 @@ pub(super) fn handle_event(
         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::ALT) => app.kill_word_fwd(),
         KeyCode::Char('<') if k.modifiers.contains(KeyModifiers::ALT) => app.input_cursor = 0,
         KeyCode::Char('>') if k.modifiers.contains(KeyModifiers::ALT) => {
-            app.input_cursor = app.input.len()
+            app.input_cursor = app.input.len();
         }
         // Readline `C-d`: delete the char under the cursor, or send EOF (quit)
         // when the input is empty.

@@ -187,7 +187,7 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
         return Ok(resp);
     }
     let status = resp.status();
-    let url = resp.url().to_string();
+    let url = redact_url(resp.url());
     // Read the error body through a capped stream so a huge or hostile
     // error response cannot exhaust memory before its (truncated) detail
     // is surfaced.
@@ -220,6 +220,85 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
     Err(Error::Provider(msg))
 }
 
+/// Maximum bytes accepted for a discovery (model-list) response body.
+const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read a JSON response body through a capped byte stream so a configurable
+/// discovery endpoint cannot force unbounded allocation before parsing.
+async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> {
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
+        if chunk.len() > max.saturating_sub(buf.len()) {
+            return Err(Error::Provider(format!(
+                "response body exceeded {max} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
+}
+
+/// Build an authenticated GET request for `url` using the per-`Api` auth
+/// scheme. Mirrors the concrete transports' header wiring.
+fn authed_get(
+    client: &reqwest::Client,
+    api: Api,
+    api_key: Option<&str>,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    let req = client.get(url);
+    let key = api_key.filter(|k| !k.is_empty());
+    match api {
+        Api::OpenAiCompletions | Api::OpenAiResponses => match key {
+            Some(k) => req.bearer_auth(k),
+            None => req,
+        },
+        Api::AnthropicMessages => match key {
+            Some(k) => req
+                .header("x-api-key", k)
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            None => req.header("anthropic-version", ANTHROPIC_VERSION),
+        },
+    }
+}
+
+/// Fetch a provider's model-discovery endpoint (`/models`) and return the
+/// raw JSON body. When `auth` is false the request is sent without
+/// credentials or provider headers so no configured credential headers leak
+/// to a public or alternate `models_url`.
+///
+/// # Errors
+/// Returns [`Error::Http`] on transport failure, [`Error::Provider`] on a
+/// non-2xx response or body that exceeds the size cap, or a decode error.
+#[allow(clippy::missing_errors_doc, clippy::implicit_hasher)]
+pub async fn fetch_models(
+    url: &str,
+    api: Api,
+    api_key: Option<&str>,
+    headers: &HashMap<String, String>,
+    auth: bool,
+) -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let req = if auth {
+        authed_get(&client, api, api_key, url)
+    } else {
+        client.get(url)
+    };
+    let req = if auth {
+        apply_headers(req, headers)
+    } else {
+        req
+    };
+    let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
+    let resp = ensure_ok(resp).await?;
+    read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await
+}
+
 /// Pull a human-readable message out of a provider error body.
 ///
 /// Handles the common `{ "error": { "message": "..." } }` shape used by
@@ -248,26 +327,22 @@ fn extract_error_detail(text: &str) -> Option<String> {
 /// response.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Maximum bytes accepted for a discovery (model-list) response body.
-pub const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
-
-/// Read a JSON response body through a capped byte stream so a configurable
-/// discovery endpoint cannot force unbounded allocation before parsing.
-#[allow(clippy::missing_errors_doc)]
-pub async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> {
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
-        if chunk.len() > max.saturating_sub(buf.len()) {
-            return Err(Error::Provider(format!(
-                "response body exceeded {max} bytes"
-            )));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
+/// Render a URL with credentials and query stripped, for use in error
+/// messages. A provider `base_url` or proxy may carry an API key in userinfo
+/// or a query parameter; surfacing the raw URL would leak it into the
+/// transcript. Keeps scheme, host, port, and path so the endpoint is still
+/// identifiable.
+fn redact_url(url: &reqwest::Url) -> String {
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    format!(
+        "{}://{}{}{}",
+        url.scheme(),
+        url.host_str().unwrap_or(""),
+        port,
+        url.path()
+    )
 }
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -285,6 +360,29 @@ mod tests {
     use lofi_types::{
         Api, ApiTypeMapping, PricingConvention, PricingFieldMappings, ProviderConfig,
     };
+
+    #[tokio::test]
+    async fn fetch_models_rejects_oversized_body() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/large")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let headers = HashMap::new();
+        let err = fetch_models(
+            &format!("{}/large", server.url()),
+            Api::OpenAiResponses,
+            None,
+            &headers,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Provider(_)));
+        mock.assert_async().await;
+    }
 
     fn cfg() -> ProviderConfig {
         ProviderConfig {
@@ -314,22 +412,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn read_json_capped_handles_size_overflow_without_panicking() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/large")
-            .with_status(200)
-            .with_body("{}")
-            .create_async()
-            .await;
-        let response = reqwest::get(format!("{}/large", server.url()))
-            .await
+    #[test]
+    fn redact_url_strips_credentials_and_query() {
+        let url = reqwest::Url::parse("https://user:pass@host.example:8443/v1/models?secret=abc")
             .unwrap();
-
-        let err = read_json_capped(response, 0).await.unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
-        mock.assert_async().await;
+        assert_eq!(redact_url(&url), "https://host.example:8443/v1/models");
     }
 
     #[test]

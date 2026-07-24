@@ -133,9 +133,15 @@ impl<'a> Parser<'a> {
                 _ if self.try_redirect() => {}
                 _ => {
                     let word = self.read_word()?;
-                    if !word.is_empty() {
-                        self.tokens.push(Token::Word(word));
+                    if word.is_empty() {
+                        // No progress — the character is unparseable.
+                        // Fail closed rather than spin forever.
+                        return Err(format!(
+                            "unexpected character: {:?}",
+                            self.input[self.pos] as char
+                        ));
                     }
+                    self.tokens.push(Token::Word(word));
                 }
             }
         }
@@ -205,6 +211,16 @@ impl<'a> Parser<'a> {
                 }
                 if depth != 0 {
                     return Err("Unmatched $( inside double quote".into());
+                }
+                // Tokenize the inner command so the policy engine
+                // evaluates it — the raw text is also kept in the word
+                // for matching, but without this the substitution hides
+                // inside a quoted word and bypasses policy.
+                if let Ok(inner_tokens) = tokenize(&inner) {
+                    self.tokens.push(Token::Group {
+                        tokens: inner_tokens,
+                        kind: GroupKind::Substitution,
+                    });
                 }
                 val.push_str(&inner);
                 continue;
@@ -344,6 +360,7 @@ impl<'a> Parser<'a> {
         Ok(val)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn try_redirect(&mut self) -> bool {
         let len = self.input.len();
         let ch = self.input[self.pos];
@@ -363,6 +380,30 @@ impl<'a> Parser<'a> {
         };
         if rch != b'<' && rch != b'>' {
             return false;
+        }
+        // Process substitution: <(cmd) or >(cmd). Tokenize the inner
+        // command as a substitution group so the policy engine evaluates
+        // it. Without this, <( hangs the tokenizer (the redirect guard
+        // returns false, read_word breaks on '<' without advancing, and
+        // the main loop spins forever).
+        if self.peek_from(ri, 1) == b'(' {
+            let saved = self.pos;
+            self.pos = ri + 2;
+            let (inner, ok) = self.read_balanced(b')');
+            if !ok {
+                self.pos = saved;
+                return false;
+            }
+            match tokenize(&inner) {
+                Ok(tokens) => {
+                    self.tokens.push(Token::Group {
+                        tokens,
+                        kind: GroupKind::Substitution,
+                    });
+                }
+                Err(_) => return false,
+            }
+            return true;
         }
         // Here-string: <<<
         if rch == b'<' && self.peek_from(ri, 1) == b'<' && self.peek_from(ri, 2) == b'<' {
@@ -665,5 +706,47 @@ mod tests {
     fn complex_pipeline() {
         let t = tokenize("cat file | grep foo | sort | uniq -c").unwrap();
         assert_eq!(ops(&t), vec!["|", "|", "|"]);
+    }
+
+    #[test]
+    fn process_substitution_input() {
+        let t = tokenize("diff <(ls a) <(ls b)").unwrap();
+        let groups: Vec<_> = t
+            .iter()
+            .filter_map(|tk| match tk {
+                Token::Group { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, vec![GroupKind::Substitution, GroupKind::Substitution]);
+    }
+
+    #[test]
+    fn process_substitution_output() {
+        let t = tokenize("tee >(gzip > out.gz)").unwrap();
+        assert!(t.iter().any(|tk| matches!(
+            tk,
+            Token::Group { kind: GroupKind::Substitution, .. }
+        )));
+    }
+
+    #[test]
+    fn quoted_cmd_substitution_produces_group() {
+        // "$(sudo rm -rf /)" inside double quotes must emit a Group
+        // token so the policy engine can analyze the inner command.
+        let t = tokenize("echo \"$(sudo rm -rf /)\"").unwrap();
+        assert!(t.iter().any(|tk| matches!(
+            tk,
+            Token::Group { kind: GroupKind::Substitution, .. }
+        )));
+    }
+
+    #[test]
+    fn unparseable_char_does_not_hang() {
+        // A bare '&' at end of input with no following word is not a
+        // valid redirect or word; the safety net must reject it.
+        // (Most stray chars like '<' are valid redirects with empty
+        // targets, so we test a truly unparseable construct.)
+        assert!(tokenize("<(").is_err());
     }
 }
