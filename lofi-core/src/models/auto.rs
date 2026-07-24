@@ -8,19 +8,52 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 use lofi_types::{
     Api, AutoModelsConfig, ModelConfig, PricingConvention, ProviderConfig, ThinkingLevel,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use futures::StreamExt;
 use lofi_error::{Error, Result};
 use lofi_providers::apply_headers;
 use lofi_providers::ANTHROPIC_VERSION;
 
 use super::resolve_model_base_url;
+
+/// Maximum bytes accepted for a discovery (model-list) response body.
+pub(super) const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// One provider's cached auto-discovery result with the wall-clock timestamp
+/// it was fetched at, so freshness is evaluated per-provider rather than by
+/// a single shared file mtime (which would let a long-TTL provider mask a
+/// short-TTL provider's stale data).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CachedDiscovery {
+    /// Epoch milliseconds when the entries were fetched.
+    pub fetched_at: u64,
+    /// `(id, ModelConfig)` pairs discovered for this provider.
+    pub entries: Vec<(String, ModelConfig)>,
+}
+
+/// Read a JSON response body through a capped byte stream so a configurable
+/// discovery endpoint cannot force unbounded allocation before parsing.
+pub(super) async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> {
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
+        if chunk.len() > max.saturating_sub(buf.len()) {
+            return Err(Error::Provider(format!(
+                "response body exceeded {max} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
+}
 /// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
@@ -135,14 +168,20 @@ pub(super) async fn fetch_auto_models(
     let req = if am.auth {
         authed_get(&client, pcfg.default_api(), key_arg, &url)
     } else {
+        // When auth is disabled, omit provider headers entirely so no
+        // configured credential headers (Authorization, x-api-key, …)
+        // leak to a public or alternate models_url.
         client.get(&url)
     };
-    let req = apply_headers(req, &headers);
+    let req = if am.auth {
+        apply_headers(req, &headers)
+    } else {
+        req
+    };
 
     let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
     let resp = lofi_providers::ensure_ok(resp).await?;
-    let body: Value =
-        lofi_providers::read_json_capped(resp, lofi_providers::MAX_DISCOVERY_BODY_BYTES).await?;
+    let body: Value = read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await?;
 
     Ok(parse_auto_models(pcfg, am, &body))
 }
@@ -324,27 +363,19 @@ fn navigate<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-/// Age of the cache file, or `None` if it does not exist. Used to decide
-/// whether the cached auto-models list is fresh enough to skip a network fetch.
-pub(super) fn cache_age(path: &Path) -> Result<Option<Duration>> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::Io(e)),
-    };
-    let mtime = meta.modified()?;
-    let elapsed = SystemTime::now()
-        .duration_since(mtime)
-        .unwrap_or(Duration::ZERO);
-    Ok(Some(elapsed))
+/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
 /// Write the per-provider auto-discovered model lists to `path` as pretty
-/// JSON. Each entry is an `[id, ModelConfig]` tuple so the id (which is the
-/// map key in the provider's `models` table) round-trips with its config.
+/// JSON. Each entry carries its fetch timestamp so freshness is checked
+/// per-provider rather than by a single shared file mtime.
 pub(super) fn write_auto_cache(
     path: &Path,
-    cache: &HashMap<String, Vec<(String, ModelConfig)>>,
+    cache: &HashMap<String, CachedDiscovery>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -357,12 +388,37 @@ pub(super) fn write_auto_cache(
 
 /// Read the cached auto-models map from `path`. A missing file yields an
 /// empty map (cache miss, not an error); parse failures propagate.
-pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, Vec<(String, ModelConfig)>>> {
+pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, CachedDiscovery>> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(HashMap::new()),
         Ok(s) => Ok(serde_json::from_str(&s)
             .map_err(|e| Error::State(format!("auto-models cache decode error: {e}")))?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(Error::Io(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn read_json_capped_handles_size_overflow_without_panicking() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/large")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let response = reqwest::get(format!("{}/large", server.url()))
+            .await
+            .unwrap();
+
+        let err = read_json_capped(response, 0).await.unwrap_err();
+        assert!(matches!(err, Error::Provider(_)));
+        mock.assert_async().await;
     }
 }

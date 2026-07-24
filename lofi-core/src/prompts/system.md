@@ -19,7 +19,7 @@ All paths resolve against the workspace root; paths escaping it are rejected. Us
 - `lofi.ls(dir?)` — list directory entries.
 - `lofi.agent(prompt, opts?)` — run a nested agent, return its final text.
 
-Full docs for every API (including `bash_read`, `recall`, `result`, `skills`, `tmp_dir`, and more) are available at runtime:
+Full docs for every API (including `recall`, `result`, `skills`, `tmp_dir`, and more) are available at runtime:
 
 - `lofi.docs()` — list all entries.
 - `lofi.docs("lofi.bash")` — full docs for one API.
@@ -27,7 +27,7 @@ Full docs for every API (including `bash_read`, `recall`, `result`, `skills`, `t
 
 ## Truncated results
 
-- **`read` / `bash_read` page.** They return `{ content, truncated, total_lines, start_line }`. If `truncated` is true, more lines remain — page with a higher `offset` before processing `content`.
+- **`read` pages.** It returns `{ content, truncated, total_lines, start_line }`. If `truncated` is true, more lines remain — page with a higher `offset` before processing `content`.
 - **`ls` / `find` / `grep` throw.** They never return partial results. A throw means "narrow the query" — do not catch and filter.
 
 ## Working habits

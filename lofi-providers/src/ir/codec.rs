@@ -35,37 +35,44 @@ pub fn parse_sse(body: &str) -> Vec<SseEvent> {
 }
 
 /// Parse an SSE stream from a line iterator. See [`parse_sse`].
+///
+/// A block with no `data:` line is skipped: the mappers decode the `data:`
+/// payload as JSON, so an event-only block (e.g. a keep-alive) would otherwise
+/// abort the stream with a parse error.
 #[must_use]
 pub fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent> {
     let mut out = Vec::new();
     let mut event: Option<String> = None;
     let mut data_lines: Vec<String> = Vec::new();
-    let mut have_any = false;
+    let mut have_data = false;
     for line in lines {
         if line.is_empty() {
-            if have_any {
+            if have_data {
                 out.push(SseEvent {
                     event: event.take(),
                     data: data_lines.join("\n"),
                 });
                 data_lines.clear();
-                have_any = false;
+                have_data = false;
+            } else {
+                // Clear a stale event name from an event-only block so it
+                // does not attach to the next data-bearing block.
+                event = None;
             }
             continue;
         }
         if let Some(rest) = line.strip_prefix("event:") {
             event = Some(rest.trim().to_string());
-            have_any = true;
         } else if let Some(rest) = line.strip_prefix("data:") {
             // A single optional leading space after the colon is part of the
             // delimiter, not the payload.
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             data_lines.push(rest.to_string());
-            have_any = true;
+            have_data = true;
         }
         // `id:`, `retry:`, and `:` comment lines are intentionally ignored.
     }
-    if have_any {
+    if have_data {
         out.push(SseEvent {
             event: event.take(),
             data: data_lines.join("\n"),
@@ -227,6 +234,17 @@ mod tests {
         let ev = parse_sse(body);
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].data, "keep");
+    }
+
+    #[test]
+    fn event_only_block_does_not_leak_event_name() {
+        // An event-only block (e.g. a keep-alive) must not attach its event
+        // name to the next data-bearing block.
+        let body = "event: ping\n\ndata: {\"a\":1}\n\n";
+        let ev = parse_sse(body);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event, None);
+        assert_eq!(ev[0].data, "{\"a\":1}");
     }
 
     #[test]

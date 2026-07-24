@@ -596,6 +596,7 @@ impl App {
     /// line) or at the boundary to a decoration-only line. Decoration-only
     /// lines (tool glyphs, borders) fall back to their rendered content slice.
     #[allow(clippy::needless_range_loop)]
+    #[allow(clippy::too_many_lines)]
     pub(super) fn selection_text(&self) -> Option<String> {
         let sel = self.sel.as_ref()?;
         let (sl, sc) = sel.start;

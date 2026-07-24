@@ -52,7 +52,7 @@ use crate::state;
 
 mod auto;
 use auto::{
-    cache_age, fetch_auto_models, inject_discovered, read_auto_cache, write_auto_cache,
+    inject_discovered, read_auto_cache, write_auto_cache, CachedDiscovery,
     DEFAULT_AUTO_TTL_SECS,
 };
 
@@ -106,10 +106,10 @@ impl ModelRegistry {
         // static entries. Static models always win on id collision.
         let mut augmented = config.clone();
         let cache_path = state::discovery_cache_path()?;
-        let cache_fresh = cache_age(&cache_path).ok().flatten();
 
-        let mut cached: HashMap<String, Vec<(String, ModelConfig)>> =
+        let mut cached: HashMap<String, CachedDiscovery> =
             read_auto_cache(&cache_path).unwrap_or_default();
+        let now = auto::now_ms();
         let mut any_refreshed = false;
 
         for (name, pcfg) in &mut augmented.providers {
@@ -125,24 +125,31 @@ impl ModelRegistry {
             let ttl = Duration::from_secs(am.ttl_seconds.unwrap_or(DEFAULT_AUTO_TTL_SECS));
 
             // Serve from cache when fresh enough, avoiding a network round
-            // trip on every startup within the TTL window.
-            if cache_fresh.is_some_and(|age| age < ttl) {
-                if let Some(entries) = cached.get(name) {
-                    inject_discovered(&mut pcfg.models, entries);
+            // trip on every startup within the per-provider TTL window.
+            if let Some(cd) = cached.get(name) {
+                let age = Duration::from_millis(now.saturating_sub(cd.fetched_at));
+                if age < ttl {
+                    inject_discovered(&mut pcfg.models, &cd.entries);
                     continue;
                 }
             }
 
-            match fetch_auto_models(pcfg, &am).await {
+            match auto::fetch_auto_models(pcfg, &am).await {
                 Ok(entries) => {
                     any_refreshed = true;
-                    cached.insert(name.clone(), entries.clone());
+                    cached.insert(
+                        name.clone(),
+                        CachedDiscovery {
+                            fetched_at: now,
+                            entries: entries.clone(),
+                        },
+                    );
                     inject_discovered(&mut pcfg.models, &entries);
                 }
                 Err(remote_err) => {
                     // Fall back to whatever the cache holds for this provider.
-                    if let Some(entries) = cached.get(name) {
-                        inject_discovered(&mut pcfg.models, entries);
+                    if let Some(cd) = cached.get(name) {
+                        inject_discovered(&mut pcfg.models, &cd.entries);
                     } else {
                         tracing::debug!(
                             provider = %name,

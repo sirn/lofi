@@ -562,4 +562,19 @@ mod tests {
             StreamingEvent::TextDelta("x".to_string())
         );
     }
+
+    #[tokio::test]
+    async fn event_only_block_is_skipped_not_errored() {
+        // A block carrying only an `event:` line (no `data:`) must be skipped
+        // rather than dispatched with empty data, which would make the mapper
+        // fail JSON decoding and abort the stream.
+        let body = b"event: ping\n\ndata: {\"text\":\"ok\"}\n\n";
+        let out = run_decoder(vec![body.as_slice()]).await;
+        assert!(out.iter().all(Result::is_ok));
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            *out[0].as_ref().unwrap(),
+            StreamingEvent::TextDelta("ok".to_string())
+        );
+    }
 }
