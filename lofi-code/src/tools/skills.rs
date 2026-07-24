@@ -272,6 +272,9 @@ mod tests {
             None,
             tmp_dir,
             BashEnv::default(),
+            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            None,
+            None,
             skills_dir,
         )
     }

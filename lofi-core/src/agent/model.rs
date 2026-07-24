@@ -70,6 +70,20 @@ pub async fn build_agent(
     // discover and read skill files via `lofi.skills()` / `lofi.skill(name)`.
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
     let agent = agent.with_skills_dir(skills_dir);
+    // Wire auto-mode (LLM-based pre-approval of `ask` commands) when enabled
+    // in the shell policy config.
+    let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
+        match super::auto_mode::build_auto_mode(&config, &registry, auto_cfg, root) {
+            Ok(Some(fn_)) => agent.with_auto_mode(fn_),
+            Ok(None) => agent,
+            Err(e) => {
+                tracing::warn!(error = %e, "auto-mode: disabled due to configuration error");
+                agent
+            }
+        }
+    } else {
+        agent
+    };
     Ok((agent, model_obj, level, config, registry))
 }
 
@@ -203,6 +217,7 @@ pub fn rebuild_agent(
             None,
             config.compaction.reserved_context_tokens,
             &config.bash,
+            &config.shell_policy,
         )
         .with_retry(crate::retry::RetryPolicy::from(config.retry))
     };

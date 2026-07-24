@@ -547,6 +547,21 @@ impl App {
             || self.tree_picker.is_some()
             || self.model_picker.is_some()
             || self.thinking_picker.is_some()
+            || !self.pending_confirms.is_empty()
+    }
+
+    /// Handle a key while a shell-policy confirmation modal is open.
+    /// `y`/`Y` allows the command; any other key denies it. The response
+    /// is sent and the request is popped; if more are queued, the next
+    /// one appears on the next render.
+    pub(super) fn handle_confirm_key(&mut self, k: &KeyEvent) -> bool {
+        if self.pending_confirms.is_empty() {
+            return false;
+        }
+        let approved = matches!(k.code, KeyCode::Char('y' | 'Y'));
+        let req = self.pending_confirms.remove(0);
+        let _ = req.respond.send(approved);
+        true
     }
 
     /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are

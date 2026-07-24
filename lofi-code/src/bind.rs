@@ -347,6 +347,9 @@ fn bind_skills_tools<'js>(
         None,
         tools.tmp_dir().to_path_buf(),
         tools.bash_env().clone(),
+        tools.shell_policy().clone(),
+        tools.confirm().cloned(),
+        tools.auto_mode().cloned(),
         skills_dir,
     ));
 

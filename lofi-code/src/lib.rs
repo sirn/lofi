@@ -47,6 +47,7 @@ use swc_ecma_visit::VisitMutWith;
 use lofi_error::{Error, Result};
 
 pub mod docs;
+pub mod policy;
 mod convert;
 use convert::{js_to_json, json_to_js};
 
@@ -134,6 +135,34 @@ pub struct AgentRequest {
 }
 
 /// A native tool call observed inside the sandbox, forwarded to the UI so
+/// Async confirmation callback used by the shell policy.
+///
+/// When `lofi.bash` hits an `ask` decision, the runtime calls this with
+/// the command text and awaits the boolean response (`true` = allow,
+/// `false` = deny). When `None` (headless mode), `ask` blocks the command.
+pub type ConfirmFn = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
+        + Send
+        + Sync,
+>;
+
+/// Async auto-mode callback used by the shell policy.
+///
+/// When `lofi.bash` hits an `ask` decision and auto-mode is enabled, the
+/// runtime calls this with the command text and awaits the result:
+/// - `Some(true)` — the LLM approved the command; run it without prompting.
+/// - `Some(false)` — the LLM said ask; fall through to the confirmation flow.
+/// - `None` — auto-mode failed or timed out; fall through to the confirmation
+///   flow.
+///
+/// When `None` (auto-mode disabled or not configured), `ask` goes directly
+/// to the confirmation flow.
+pub type AutoModeFn = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
+        + Send
+        + Sync,
+>;
+
 /// each `lofi.bash` / `lofi.read` / ... can be rendered as its own line
 /// under the parent `exec` block. `id` is a per-exec counter.
 #[derive(Debug, Clone)]
@@ -162,6 +191,14 @@ pub struct ExecCtx {
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     /// Resolved `bash` child-env policy + output-redaction set.
     pub bash_env: BashEnv,
+    /// Resolved shell policy for `lofi.bash` command evaluation.
+    pub shell_policy: crate::policy::ResolvedPolicy,
+    /// Async confirmation callback for shell-policy `ask` decisions.
+    /// When `None` (headless), `ask` blocks the command.
+    pub confirm: Option<ConfirmFn>,
+    /// Async auto-mode callback for shell-policy `ask` decisions.
+    /// When `None` (auto-mode disabled), `ask` goes directly to `confirm`.
+    pub auto_mode: Option<AutoModeFn>,
     /// Optional skills directory (`<config_dir>/skills`). When set,
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
@@ -179,6 +216,9 @@ impl std::fmt::Debug for ExecCtx {
             .field("result", &self.result.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
             .field("bash_env", &self.bash_env)
+            .field("shell_policy", &"<resolved>")
+            .field("confirm", &self.confirm.is_some())
+            .field("auto_mode", &self.auto_mode.is_some())
             .field("skills_dir", &self.skills_dir)
             .finish()
     }
@@ -385,11 +425,15 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         .await;
     }
 
-    let tools = Arc::new(BuiltinTools::with_tool_cb(
+    let tools = Arc::new(BuiltinTools::with_skills_dir(
         ctx.root.clone(),
         ctx.on_tool_event.clone(),
         ctx.tmp_dir.clone(),
         ctx.bash_env.clone(),
+        ctx.shell_policy.clone(),
+        ctx.confirm.clone(),
+        ctx.auto_mode.clone(),
+        ctx.skills_dir.clone(),
     ));
     let strings = ctx.strings.clone();
     let agent = ctx.agent.clone();
@@ -568,10 +612,20 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
 /// The renderer interprets the result per tool — this never extracts fields.
 fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
     match res {
-        Ok(v) => match v {
-            Json::String(s) => (s.clone(), false),
-            other => (other.to_string(), false),
-        },
+        Ok(v) => {
+            // Tools like `bash` return `Ok(json!({"ok": false, ...}))` for
+            // policy denials, non-zero exits, and timeouts — these are
+            // errors from the UI's perspective even though the JSON is
+            // successfully delivered to the model.
+            let is_error = v
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .is_some_and(|ok| !ok);
+            match v {
+                Json::String(s) => (s.clone(), is_error),
+                other => (other.to_string(), is_error),
+            }
+        }
         Err(e) => (e.to_string(), true),
     }
 }
@@ -595,6 +649,9 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            confirm: None,
+            auto_mode: None,
             skills_dir: None,
         }
     }
@@ -760,6 +817,9 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
+            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            confirm: None,
+            auto_mode: None,
             skills_dir: None,
         };
         let res = exec(
