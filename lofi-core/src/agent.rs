@@ -37,6 +37,7 @@ use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
 use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
+use lofi_code::policy::ResolvedPolicy;
 use lofi_error::{Error, Result};
 use lofi_types::BashConfig;
 use lofi_providers::ir::chat::ToolSchema;
@@ -238,6 +239,8 @@ pub struct Agent {
     reserved_context_tokens: u64,
     /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
+    /// Resolved shell policy for `lofi.bash`.
+    shell_policy: ResolvedPolicy,
     /// Optional skills directory (`<config_dir>/skills`). When set,
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
@@ -257,8 +260,10 @@ impl Agent {
         max_output_tokens: Option<u64>,
         reserved_context_tokens: u64,
         bash: &BashConfig,
+        shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
         let bash_env = BashEnv::from_config(bash);
+        let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
         Self {
             provider: Arc::from(provider),
             model,
@@ -269,6 +274,7 @@ impl Agent {
             max_output_tokens,
             reserved_context_tokens,
             bash_env,
+            shell_policy,
             skills_dir: None,
         }
     }
@@ -291,6 +297,7 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
             skills_dir: self.skills_dir.clone(),
         }
     }
@@ -312,6 +319,7 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
             skills_dir: self.skills_dir.clone(),
         }
     }
@@ -330,6 +338,7 @@ impl Agent {
             max_output_tokens: self.max_output_tokens,
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
             skills_dir,
         }
     }
