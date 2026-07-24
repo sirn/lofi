@@ -106,7 +106,7 @@ impl Component for UserMessage<'_> {
         let w = cx.width;
         let content_w = w.saturating_sub(2);
         let mark = Style::new().fg(user_indicator(t));
-        render_markdown_body(self.prompt.trim(), t, w, content_w, move |i| {
+        render_markdown_body(self.prompt.trim(), t, w, content_w, Style::new().fg(t.fg), move |i| {
             if i == 0 {
                 vec![Span::styled("❯ ", mark)]
             } else {
@@ -136,7 +136,7 @@ impl Component for AssistantText<'_> {
         if text.is_empty() {
             return Vec::new();
         }
-        render_markdown_body(text, t, w, content_w, |_| {
+        render_markdown_body(text, t, w, content_w, Style::new().fg(t.fg), |_| {
             vec![Span::raw("  ")]
         })
     }
@@ -153,6 +153,7 @@ fn render_markdown_body(
     t: Theme,
     w: usize,
     content_w: usize,
+    base_style: Style,
     lead_fn: impl Fn(usize) -> Vec<Span<'static>>,
 ) -> Vec<RenderLine> {
     if text.is_empty() {
@@ -265,7 +266,7 @@ fn render_markdown_body(
         if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ')
         {
             let h = &trimmed[hashes + 1..];
-            let head_fg = if hashes <= 2 { t.fg } else { t.muted };
+            let head_fg = if hashes <= 2 { base_style.fg.unwrap_or(t.fg) } else { t.muted };
             let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
             let src: Arc<str> = Arc::from(trimmed);
             let rows = wrap_with_map(h, hashes + 1, trimmed.len(), content_w);
@@ -293,7 +294,7 @@ fn render_markdown_body(
                 row += 1;
             }
         } else {
-            let mapped = inline_spans_mapped(raw, t, Style::new().fg(t.fg));
+            let mapped = inline_spans_mapped(raw, t, base_style);
             let lead_ws = mapped
                 .iter()
                 .flat_map(|m| m.span.content.chars())
@@ -863,7 +864,6 @@ struct Thinking<'a> {
 impl Component for Thinking<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        let lead: Vec<Span<'static>> = vec![Span::raw("  ")];
         let body = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
         let content_w = cx.width.saturating_sub(2);
         let text = self.block.text.trim();
@@ -871,15 +871,14 @@ impl Component for Thinking<'_> {
         if text.is_empty() && !working {
             return Vec::new();
         }
-        let mut out = Vec::new();
-        for seg in prim::wrap(text, content_w) {
-            out.push(prim::rline(lead.clone(), vec![Span::styled(seg, body)]));
-        }
+        let mut out = render_markdown_body(text, t, cx.width, content_w, body, |_| {
+            vec![Span::raw("  ")]
+        });
         if working {
             if !out.is_empty() {
                 out.push(prim::rblank());
             }
-            out.push(prim::rline(lead.clone(), vec![Span::styled("Thinking...", body)]));
+            out.push(prim::rline(vec![Span::raw("  ")], vec![Span::styled("Thinking...", body)]));
         } else if let Some(d) = self.block.elapsed {
             if !d.is_zero() {
                 if !out.is_empty() {
