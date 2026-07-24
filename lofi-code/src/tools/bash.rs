@@ -3,8 +3,8 @@ use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
-use std::fmt::Write as _;
 use serde_json::{json, Value};
+use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -222,42 +222,42 @@ impl BuiltinTools {
     /// a notice pointing at it. `pipe_capped` indicates the pipe-level safety cap
     /// (8 MiB) was hit, in which case the temp file holds only what was captured.
     fn format_bash_output(&self, full: &str, pipe_capped: bool) -> String {
-    let t = truncate_tail(full);
-    if !t.truncated && !pipe_capped {
-        return full.to_string();
-    }
-    let mut out = t.content;
-    let start_line = t.total_lines.saturating_sub(t.output_lines) + 1;
-    let end_line = t.total_lines;
-    // Write the full captured output to the session tmp dir so the model can
-    // page through it with `lofi.read` (the tmp dir is a read root).
-    let path = match self.write_bash_log(full) {
-        Ok(p) => p,
-        Err(_) => "<temp file unavailable>".to_string(),
-    };
-    if t.output_lines == 0 {
-        // Single line exceeded the byte budget.
-        let _ = write!(
+        let t = truncate_tail(full);
+        if !t.truncated && !pipe_capped {
+            return full.to_string();
+        }
+        let mut out = t.content;
+        let start_line = t.total_lines.saturating_sub(t.output_lines) + 1;
+        let end_line = t.total_lines;
+        // Write the full captured output to the session tmp dir so the model can
+        // page through it with `lofi.read` (the tmp dir is a read root).
+        let path = match self.write_bash_log(full) {
+            Ok(p) => p,
+            Err(_) => "<temp file unavailable>".to_string(),
+        };
+        if t.output_lines == 0 {
+            // Single line exceeded the byte budget.
+            let _ = write!(
             out,
             "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             format_size(DEFAULT_MAX_BYTES),
         );
-    } else if pipe_capped && !t.truncated {
-        let _ = write!(
+        } else if pipe_capped && !t.truncated {
+            let _ = write!(
             out,
             "\n\n[Output exceeded {} safety cap; truncated. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             format_size(MAX_BASH_OUTPUT_BYTES)
         );
-    } else {
-        let _ = write!(
+        } else {
+            let _ = write!(
             out,
             "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             t.total_lines,
             format_size(DEFAULT_MAX_BYTES)
         );
+        }
+        out
     }
-    out
-}
 
     /// Write `content` to `lofi-bash-<hex>.log` under the session tmp dir and
     /// return the path.

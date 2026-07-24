@@ -85,9 +85,7 @@ impl BuiltinTools {
             }
         }
 
-        Err(Error::Tool(format!(
-            "skill `{name}` not found"
-        )))
+        Err(Error::Tool(format!("skill `{name}` not found")))
     }
 
     /// Scan both skill directories and collect sorted, de-duplicated entries.
@@ -191,15 +189,9 @@ impl BuiltinTools {
     }
 
     /// Read a file within a skill directory and return the structured result.
-    fn read_skill_file(
-        path: &Path,
-        name: &str,
-        file: &str,
-        source: &str,
-    ) -> Result<Value> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Tool(format!("skill `{name}`: {e}"))
-        })?;
+    fn read_skill_file(path: &Path, name: &str, file: &str, source: &str) -> Result<Value> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| Error::Tool(format!("skill `{name}`: {e}")))?;
         let skill_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         Ok(json!({
             "ok": true,
@@ -219,16 +211,12 @@ fn validate_skill_name(name: &str) -> Result<()> {
         return Err(Error::Tool("skill: name must not be empty".into()));
     }
     if name.starts_with('/') || name.contains('\\') {
-        return Err(Error::Tool(format!(
-            "skill: invalid name `{name}`"
-        )));
+        return Err(Error::Tool(format!("skill: invalid name `{name}`")));
     }
     // Reject any `..` component.
     for component in name.split('/') {
         if component == ".." {
-            return Err(Error::Tool(format!(
-                "skill: invalid name `{name}`"
-            )));
+            return Err(Error::Tool(format!("skill: invalid name `{name}`")));
         }
     }
     Ok(())
@@ -347,7 +335,10 @@ mod tests {
         let skills_arr = v["skills"].as_array().unwrap();
         assert_eq!(skills_arr.len(), 1);
         assert_eq!(skills_arr[0]["source"], json!("workspace"));
-        assert_eq!(skills_arr[0]["description"], json!("Project-specific deploy."));
+        assert_eq!(
+            skills_arr[0]["description"],
+            json!("Project-specific deploy.")
+        );
     }
 
     #[tokio::test]
@@ -459,8 +450,7 @@ mod tests {
         let real = tempdir().unwrap();
         // Create a real skill directory, then symlink it into skills/.
         std::fs::write(real.path().join(SKILL_FILE), "Symlinked skill.\n").unwrap();
-        std::os::unix::fs::symlink(real.path(), skills.path().join("linked"))
-            .unwrap();
+        std::os::unix::fs::symlink(real.path(), skills.path().join("linked")).unwrap();
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
             .skills()
             .await
@@ -478,13 +468,19 @@ mod tests {
         let real_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(&real_file, "Symlinked SKILL.md.\n").unwrap();
         std::fs::create_dir_all(skills.path().join("linked-file")).unwrap();
-        std::os::unix::fs::symlink(real_file.path(), skills.path().join("linked-file").join(SKILL_FILE))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            real_file.path(),
+            skills.path().join("linked-file").join(SKILL_FILE),
+        )
+        .unwrap();
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
             .skill("linked-file")
             .await
             .unwrap();
-        assert!(v["content"].as_str().unwrap().contains("Symlinked SKILL.md"));
+        assert!(v["content"]
+            .as_str()
+            .unwrap()
+            .contains("Symlinked SKILL.md"));
     }
 
     #[tokio::test]
