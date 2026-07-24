@@ -82,6 +82,19 @@ fn extract_name(header: &str) -> String {
     }
 }
 
+/// All parsed entries, each as (canonical name, header line, summary).
+///
+/// Exposed so other modules (e.g. the compaction hook) can use the docs
+/// registry as the single source of truth for tool names and descriptions
+/// instead of maintaining a parallel hard-coded table.
+#[must_use]
+pub fn entries() -> Vec<(String, String, String)> {
+    parse_entries()
+        .into_iter()
+        .map(|e| (e.name, e.header, e.summary))
+        .collect()
+}
+
 /// Compact index of all entries: `[{ name, summary }]`.
 #[must_use]
 pub fn docs_index() -> serde_json::Value {

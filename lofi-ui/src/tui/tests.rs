@@ -2086,14 +2086,14 @@ fn verbose_expands_compaction_summary() {
     // Collapsed: only the one-line marker; the folded text is absent.
     let collapsed = render_turns(&a, 80);
     let collapsed_s = join_rendered(&collapsed);
-    assert!(collapsed_s.contains("compacted 7 msgs"), "collapsed: {collapsed_s}");
+    assert!(collapsed_s.contains("Compacted 7 messages"), "collapsed: {collapsed_s}");
     assert!(!collapsed_s.contains("Build a coding agent"), "collapsed leaked summary: {collapsed_s}");
 
     // Expanded: the marker plus the folded summary text.
     a.toggle_verbose();
     let expanded = render_turns(&a, 80);
     let expanded_s = join_rendered(&expanded);
-    assert!(expanded_s.contains("compacted 7 msgs"));
+    assert!(expanded_s.contains("Compacted 7 messages"));
     assert!(expanded_s.contains("Build a coding agent"), "expanded missing summary: {expanded_s}");
     assert!(expanded_s.contains("Use Rust."), "expanded missing summary: {expanded_s}");
 }

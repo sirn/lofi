@@ -252,6 +252,7 @@ impl App {
         // carry over the previous one's context gauge and accumulated cost.
         self.status_usage = None;
         self.prev_ctx_tokens = None;
+        self.last_compact_msg_count = 0;
         self.cost = 0.0;
         self.turn_cost = 0.0;
         self.turn_has_round_usage = false;
@@ -311,6 +312,7 @@ impl App {
                 self.total_cache_write = 0;
                 self.status_usage = None;
                 self.prev_ctx_tokens = None;
+                self.last_compact_msg_count = 0;
                 for ev in replay_session_events(&events) {
                     self.apply_event(ev);
                 }
@@ -844,6 +846,7 @@ impl App {
         self.total_cache_write = 0;
         self.status_usage = None;
         self.prev_ctx_tokens = None;
+        self.last_compact_msg_count = 0;
         for ev in replay_session_events(&rolled_back) {
             self.apply_event(ev);
         }

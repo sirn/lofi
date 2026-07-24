@@ -376,7 +376,7 @@ fn push_tree_entry(
         store::IndexKind::Compaction => {
             let (summarized, kept) = load_compaction_counts(ctx.path, ix.offset);
             (
-                format!("compact: compacted {summarized} msgs \u{00b7} kept {kept}"),
+                format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}"),
                 String::new(),
                 // Roll back to the compaction's parent — the pre-compaction
                 // leaf — so the active path excludes the compaction and the

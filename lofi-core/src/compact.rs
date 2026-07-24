@@ -23,8 +23,9 @@
 //! NativeToolRecords on the active path rather than from per-tool messages.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind};
+use lofi_types::{CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind};
 
 use crate::session::store;
 
@@ -33,24 +34,6 @@ use crate::session::store;
 /// from the live message list before planning the next cut (its content is
 /// passed as previous_summary and merged into the fresh one).
 pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.";
-
-/// A compressed, normalized view of one conversation message, used as the
-/// intermediate representation for the section extractors and the brief
-/// transcript builder. Thinking blocks are dropped early (they bloat the
-/// summary without carrying durable facts).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum Block {
-    User { text: String },
-    Assistant { text: String },
-    /// An exec tool call. code is the TypeScript source; label is the
-    /// optional display name. The native tool calls that ran inside it are
-    /// attached here so the brief transcript can show the real actions.
-    ToolCall { id: String, code: String, label: Option<String>, native: Vec<NativeToolRecord> },
-    /// The result of an exec call. text is the surfaced value (or the
-    /// error message); is_error marks failures.
-    ToolResult { id: String, text: String, is_error: bool },
-}
 
 /// A live message on the active path with the event id of the
 /// SessionEventKind::Message it came from. The event id is needed to
@@ -99,7 +82,7 @@ pub struct Compaction {
 }
 
 /// Options for compact.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CompactOptions {
     /// Soft token budget (chars/4) for the kept tail. When the most recent
     /// turn alone exceeds it, the cut is pushed back to a completed
@@ -110,6 +93,10 @@ pub struct CompactOptions {
     /// [`crate::context_edit`]). When `enabled` is false the tail is carried
     /// verbatim.
     pub edit: lofi_types::EditConfig,
+    /// Compaction hooks (e.g. lofi-code's tool-API section). Each hook
+    /// receives the normalized transcript blocks and returns additional
+    /// summary sections.
+    pub hooks: Vec<Arc<dyn CompactionHook>>,
 }
 
 /// Minimum number of live messages the summarized prefix must contain for a
@@ -199,7 +186,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
 
     let prefix_messages: Vec<&Message> = live[..plan.summarized].iter().map(|lm| &lm.message).collect();
     let blocks = normalize(&prefix_messages, &native_by_parent);
-    let fresh = build_summary(&blocks);
+    let fresh = build_summary(&blocks, &opts.hooks);
     let summary = match &previous_summary {
         Some(prev) => merge_previous(prev, &fresh),
         None => fresh,
@@ -411,18 +398,18 @@ fn find_suffix_split(live: &[LiveMessage], cut: usize, budget_tokens: usize) -> 
 
 /// Flatten a slice of messages (the summarized prefix) into Blocks,
 /// attaching the native tool calls that ran inside each exec.
-fn normalize(messages: &[&Message], native_by_parent: &HashMap<String, Vec<NativeToolRecord>>) -> Vec<Block> {
+fn normalize(messages: &[&Message], native_by_parent: &HashMap<String, Vec<NativeToolRecord>>) -> Vec<CompactBlock> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
             Role::User => {
                 let text = user_text(m);
                 if !text.trim().is_empty() {
-                    out.push(Block::User { text });
+                    out.push(CompactBlock::User { text });
                 }
                 for b in &m.blocks {
                     if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
-                        out.push(Block::ToolResult {
+                        out.push(CompactBlock::ToolResult {
                             id: tool_use_id.clone(),
                             text: exec_result_display(content, *is_error),
                             is_error: *is_error,
@@ -441,17 +428,17 @@ fn normalize(messages: &[&Message], native_by_parent: &HashMap<String, Vec<Nativ
                         }
                         ContentBlock::ToolUse { id, name, input } if name == "exec" => {
                             if !text_buf.is_empty() {
-                                out.push(Block::Assistant { text: std::mem::take(&mut text_buf) });
+                                out.push(CompactBlock::Assistant { text: std::mem::take(&mut text_buf) });
                             }
                             let (code, label) = crate::agent::exec_input_code_and_label(input);
                             let native = native_by_parent.get(id).cloned().unwrap_or_default();
-                            out.push(Block::ToolCall { id: id.clone(), code, label, native });
+                            out.push(CompactBlock::ToolCall { id: id.clone(), code, label, native });
                         }
                         ContentBlock::ToolUse { id, name, .. } => {
                             if !text_buf.is_empty() {
-                                out.push(Block::Assistant { text: std::mem::take(&mut text_buf) });
+                                out.push(CompactBlock::Assistant { text: std::mem::take(&mut text_buf) });
                             }
-                            out.push(Block::ToolCall {
+                            out.push(CompactBlock::ToolCall {
                                 id: id.clone(),
                                 code: String::new(),
                                 label: Some(name.clone()),
@@ -462,13 +449,13 @@ fn normalize(messages: &[&Message], native_by_parent: &HashMap<String, Vec<Nativ
                     }
                 }
                 if !text_buf.is_empty() {
-                    out.push(Block::Assistant { text: text_buf });
+                    out.push(CompactBlock::Assistant { text: text_buf });
                 }
             }
             Role::Tool => {
                 for b in &m.blocks {
                     if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
-                        out.push(Block::ToolResult {
+                        out.push(CompactBlock::ToolResult {
                             id: tool_use_id.clone(),
                             text: exec_result_display(content, *is_error),
                             is_error: *is_error,
@@ -507,15 +494,32 @@ const SEPARATOR: &str = "\n\n---\n\n";
 
 /// Build the full fresh summary (no merging): preamble + ordered sections +
 /// brief transcript.
-fn build_summary(blocks: &[Block]) -> String {
+fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
     let goal = extract_session_goal(blocks);
     let prefs = extract_preferences(blocks);
-    let files = extract_files(blocks);
-    let commits = extract_commits(blocks);
-    let outstanding = extract_outstanding(blocks);
-    let brief = build_brief(blocks);
+    let outstanding = extract_outstanding(blocks, hooks);
 
-    let stable: Vec<String> = [
+    // Files and Commits are provided by hooks (they know the tool
+    // vocabulary). Fall back to built-in extractors when no hook is
+    // registered, so tests without hooks still work.
+    let files: Vec<String> = hooks
+        .iter()
+        .find_map(|h| {
+            let items = h.file_changes(blocks);
+            (!items.is_empty()).then_some(items)
+        })
+        .unwrap_or_else(|| extract_files(blocks));
+    let commits: Vec<String> = hooks
+        .iter()
+        .find_map(|h| {
+            let items = h.commits(blocks);
+            (!items.is_empty()).then_some(items)
+        })
+        .unwrap_or_else(|| extract_commits(blocks));
+
+    let brief = build_brief(blocks, hooks);
+
+    let mut stable: Vec<String> = [
         section("Session Goal", &goal),
         section("User Preferences", &prefs),
         section("Files And Changes", &files),
@@ -524,6 +528,18 @@ fn build_summary(blocks: &[Block]) -> String {
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
+
+    // Hook sections (e.g. APIs Used from lofi-code) go after the stable
+    // built-in sections, before the volatile Outstanding Context.
+    for hook in hooks {
+        for sec in hook.sections(blocks) {
+            let s = section(&sec.title, &sec.items);
+            if !s.is_empty() {
+                stable.push(s);
+            }
+        }
+    }
+
     let volatile: Vec<String> = [section("Outstanding Context", &outstanding)]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -554,10 +570,10 @@ fn section(title: &str, items: &[String]) -> String {
 }
 
 /// Session Goal: the first few substantive user prompts, clipped.
-fn extract_session_goal(blocks: &[Block]) -> Vec<String> {
+fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out = Vec::new();
     for b in blocks {
-        if let Block::User { text } = b {
+        if let CompactBlock::User { text } = b {
             let t = text.trim();
             if t.is_empty() || out.len() >= 8 {
                 continue;
@@ -569,7 +585,7 @@ fn extract_session_goal(blocks: &[Block]) -> Vec<String> {
 }
 
 /// User Preferences: user lines that read as a directive.
-fn extract_preferences(blocks: &[Block]) -> Vec<String> {
+fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
     const SIGNALS: &[&str] = &[
         "prefer", "use ", "don't", "do not", "always", "never", "please",
         "make sure", "avoid", "keep ", "no need", "no longer",
@@ -578,7 +594,7 @@ fn extract_preferences(blocks: &[Block]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for b in blocks {
-        let Block::User { text } = b else { continue };
+        let CompactBlock::User { text } = b else { continue };
         let lower = text.to_lowercase();
         if !SIGNALS.iter().any(|s| lower.contains(s)) {
             continue;
@@ -601,12 +617,12 @@ fn extract_preferences(blocks: &[Block]) -> Vec<String> {
 /// Files And Changes from native tool calls: read/bash_read -> Read,
 /// edit -> Modified, write -> Created. Dedup; Created drops files already
 /// in Modified.
-fn extract_files(blocks: &[Block]) -> Vec<String> {
+fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
     let mut modified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut read: std::collections::HashSet<String> = std::collections::HashSet::new();
     for b in blocks {
-        let Block::ToolCall { native, .. } = b else { continue };
+        let CompactBlock::ToolCall { native, .. } = b else { continue };
         for rec in native {
             if rec.is_error {
                 continue;
@@ -646,11 +662,11 @@ fn extract_files(blocks: &[Block]) -> Vec<String> {
 }
 
 /// Commits from bash native calls whose command runs git commit.
-fn extract_commits(blocks: &[Block]) -> Vec<String> {
+fn extract_commits(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for b in blocks {
-        let Block::ToolCall { native, .. } = b else { continue };
+        let CompactBlock::ToolCall { native, .. } = b else { continue };
         for rec in native {
             if rec.name != "bash" || !rec.args.contains("git commit") {
                 continue;
@@ -703,25 +719,33 @@ fn blocker_regex() -> regex::Regex {
 
 /// Outstanding Context: errors and blockers from the recent tail (last ~25
 /// blocks). Tagged by severity.
-fn extract_outstanding(blocks: &[Block]) -> Vec<String> {
+fn extract_outstanding(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> Vec<String> {
     let blocker = blocker_regex();
     let tail = if blocks.len() > 25 { &blocks[blocks.len() - 25..] } else { blocks };
+    let compress = |text: &str, max: usize| -> String {
+        for hook in hooks {
+            if let Some(s) = hook.compress_tool_result(text, max) {
+                return s;
+            }
+        }
+        compress_tool_result(text, max)
+    };
     let mut items: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for b in tail {
         match b {
-            Block::ToolResult { text, is_error: true, .. } => {
-                let s = format!("[ERROR] {}", first_line(text, 150));
+            CompactBlock::ToolResult { text, is_error: true, .. } => {
+                let s = format!("[ERROR] {}", compress(text, 150));
                 if seen.insert(s.clone()) { items.push(s); }
             }
-            Block::ToolCall { native, .. } => {
+            CompactBlock::ToolCall { native, .. } => {
                 for rec in native {
                     if !rec.is_error { continue; }
                     let s = format!("[ERROR] {}: {}", rec.name, first_line(&rec.result, 120));
                     if seen.insert(s.clone()) { items.push(s); }
                 }
             }
-            Block::Assistant { text } | Block::User { text } => {
+            CompactBlock::Assistant { text } | CompactBlock::User { text } => {
                 for line in non_empty_lines(text) {
                     if line.len() < 15 || !blocker.is_match(&line) {
                         continue;
@@ -731,7 +755,7 @@ fn extract_outstanding(blocks: &[Block]) -> Vec<String> {
                     break;
                 }
             }
-            Block::ToolResult { is_error: false, .. } => {}
+            CompactBlock::ToolResult { is_error: false, .. } => {}
         }
         if items.len() >= 8 {
             break;
@@ -748,24 +772,41 @@ const TRUNC_ASSISTANT: usize = 200;
 
 /// Build the compressed per-turn transcript: [user]/[assistant] sections
 /// with clipped text and one-liner tool actions.
-fn build_brief(blocks: &[Block]) -> String {
+fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
+    let compress = |text: &str, max: usize| -> String {
+        for hook in hooks {
+            if let Some(s) = hook.compress_tool_result(text, max) {
+                return s;
+            }
+        }
+        compress_tool_result(text, max)
+    };
+    let full_path = |text: &str| -> Option<String> {
+        for hook in hooks {
+            if let Some(p) = hook.full_output_path(text) {
+                return Some(p);
+            }
+        }
+        extract_full_output_path(text).map(str::to_string)
+    };
+
     let mut lines: Vec<String> = Vec::new();
     let mut last_header = "";
     for b in blocks {
         match b {
-            Block::User { text } => {
+            CompactBlock::User { text } => {
                 let t = clip(text.trim(), TRUNC_USER);
                 if t.is_empty() { continue; }
                 if last_header != "[user]" { lines.push("[user]".to_string()); last_header = "[user]"; }
                 lines.push(t);
             }
-            Block::Assistant { text } => {
+            CompactBlock::Assistant { text } => {
                 let t = clip(text.trim(), TRUNC_ASSISTANT);
                 if t.is_empty() { continue; }
                 if last_header != "[assistant]" { lines.push("[assistant]".to_string()); last_header = "[assistant]"; }
                 lines.push(t);
             }
-            Block::ToolCall { code, label, native, .. } => {
+            CompactBlock::ToolCall { code, label, native, .. } => {
                 if last_header != "[assistant]" { lines.push("[assistant]".to_string()); last_header = "[assistant]"; }
                 if native.is_empty() {
                     let l = label.clone().unwrap_or_else(|| first_line(code, 60));
@@ -778,19 +819,17 @@ fn build_brief(blocks: &[Block]) -> String {
                     }
                 }
             }
-            Block::ToolResult { text, is_error: true, .. } => {
-                let body = first_line(text, 150);
+            CompactBlock::ToolResult { text, is_error: true, .. } => {
+                let body = compress(text, 150);
                 if body.is_empty() { continue; }
                 if last_header != "[tool_error]" { lines.push("[tool_error]".to_string()); last_header = "[tool_error]"; }
                 lines.push(body);
             }
-            Block::ToolResult { text, is_error: false, .. } => {
-                let body = first_line(text, 100);
+            CompactBlock::ToolResult { text, is_error: false, .. } => {
+                let body = compress(text, 120);
                 if body.is_empty() { continue; }
                 if last_header != "[tool_result]" { lines.push("[tool_result]".to_string()); last_header = "[tool_result]"; }
-                // Preserve the full-output path from bash truncation notices so
-                // the agent can still page through after compaction.
-                if let Some(path) = extract_full_output_path(text) {
+                if let Some(path) = full_path(text) {
                     lines.push(format!("{body} ... Full output: {path}"));
                 } else {
                     lines.push(body);
@@ -839,10 +878,28 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     let (fresh_headers, fresh_brief) = split_headers_brief(&fresh);
 
     let mut merged_headers: Vec<String> = Vec::new();
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
     for header in SECTION_HEADERS {
+        handled.insert((*header).to_string());
         let p = section_of(&prev_headers, header);
         let f = section_of(&fresh_headers, header);
         let merged = merge_section(header, &p, &f);
+        if !merged.is_empty() {
+            merged_headers.push(merged);
+        }
+    }
+
+    // Carry forward hook-provided sections (any [Header] not in
+    // SECTION_HEADERS). Fresh sections replace prev ones of the same name;
+    // prev-only sections are kept so hook data is never lost on re-compact.
+    for header in extra_section_names(&prev_headers, &fresh_headers, &handled) {
+        let p = section_of(&prev_headers, &header);
+        let f = section_of(&fresh_headers, &header);
+        let merged = if f.is_empty() {
+            format!("[{header}]\n{p}")
+        } else {
+            merge_section(&header, &p, &f)
+        };
         if !merged.is_empty() {
             merged_headers.push(merged);
         }
@@ -891,6 +948,27 @@ fn section_of(headers: &str, name: &str) -> String {
     let rest = &headers[start..];
     let end = rest.find("\n[").unwrap_or(rest.len());
     rest[..end].trim().to_string()
+}
+
+/// Collect `[Header]` names from both prev and fresh headers that are not in
+/// the built-in `SECTION_HEADERS` set. These are hook-provided sections that
+/// must be carried through merges. Returns names in order of first appearance
+/// (prev then fresh), deduplicated.
+fn extra_section_names(prev: &str, fresh: &str, builtin: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for text in [prev, fresh] {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let name = name.to_string();
+                if !builtin.contains(&name) && seen.insert(name.clone()) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Merge one section. Outstanding Context is volatile (fresh only). Files And
@@ -1003,6 +1081,106 @@ fn clip(text: &str, max: usize) -> String {
 fn first_line(text: &str, max: usize) -> String {
     let line = text.split('\n').next().unwrap_or("").trim();
     clip(line, max)
+}
+
+/// Compress a tool result into a compact, meaningful summary.
+///
+/// Instead of just taking the first line (which may be `{` for JSON output),
+/// this tries to extract the most useful information:
+/// - For JSON objects, it picks out key fields like `output`, `ok`, `code`, etc.
+/// - For multi-line text, it takes the first few non-empty lines.
+/// - Falls back to first_line for single-line results.
+fn compress_tool_result(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Single-line results: just clip.
+    if !trimmed.contains('\n') {
+        return clip(trimmed, max);
+    }
+
+    // Try JSON parsing for structured tool output.
+    if trimmed.starts_with('{') {
+        if let Some(summary) = compress_json_result(trimmed, max) {
+            return summary;
+        }
+    }
+
+    // For multi-line text, take up to 3 non-empty lines and join with " | ".
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let joined = lines.join(" | ");
+    clip(&joined, max)
+}
+
+/// Extract a compact summary from a JSON tool result object.
+/// Picks out the most informative fields and formats them as `key=value` pairs.
+fn compress_json_result(text: &str, max: usize) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = v.as_object()?;
+    // Priority fields that carry the most useful info.
+    let priority = ["output", "error", "stderr", "stdout", "path", "value", "result", "content", "message", "text"];
+    let mut parts: Vec<String> = Vec::new();
+
+    // First, grab priority fields.
+    for key in &priority {
+        if let Some(val) = obj.get(*key) {
+            let s = json_value_brief(val, 60);
+            if !s.is_empty() {
+                parts.push(format!("{key}={s}"));
+            }
+        }
+    }
+
+    // Then grab status-ish fields.
+    for key in &["ok", "code", "status", "signal", "is_error", "duration_ms"] {
+        if let Some(val) = obj.get(*key) {
+            let s = json_value_brief(val, 30);
+            if !s.is_empty() {
+                parts.push(format!("{key}={s}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        // No recognised fields; show first 3 keys.
+        for (k, v) in obj.iter().take(3) {
+            let s = json_value_brief(v, 40);
+            if !s.is_empty() {
+                parts.push(format!("{k}={s}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(clip(&parts.join(" "), max))
+}
+
+/// Render a JSON value as a brief string for inclusion in a compressed summary.
+fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
+    match v {
+        serde_json::Value::String(s) => clip(s.trim(), max),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Array(a) => {
+            if a.is_empty() { "[]".to_string() } else { format!("[{} items]", a.len()) }
+        }
+        serde_json::Value::Object(o) => {
+            if o.is_empty() { "{}".to_string() } else { format!("{{{} fields}}", o.len()) }
+        }
+    }
 }
 
 /// Extract the absolute path from a bash truncation notice like

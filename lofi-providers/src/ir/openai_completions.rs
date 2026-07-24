@@ -56,8 +56,8 @@ pub fn build_openai_chat_request(
     req
 }
 
-/// Map a thinking level to an `OpenAI` `reasoning.effort` / `reasoning_effort`
-/// value. `Off` disables thinking (returns `None` so the field is omitted);
+/// Map a thinking level to an `OpenAI` `reasoning_effort` value. `Off`
+/// disables thinking (returns `None` so the field is omitted);
 /// `XHigh` clamps to `high` since `OpenAI` exposes no higher step.
 fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
@@ -127,10 +127,15 @@ pub fn map_openai_chat_event(
         return Ok(out);
     };
 
-    // OpenAI-compatible reasoning models (DeepSeek, Qwen, etc.) stream the
-    // chain-of-thought as `delta.reasoning_content`, separate from `content`.
-    // Emit it as a thinking delta so it lands in its own thinking block.
-    if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+    // OpenAI-compatible reasoning models stream chain-of-thought under
+    // varying field names: `reasoning_content` (DeepSeek, Qwen),
+    // `thinking` (GLM/Zhipu), or `reasoning` (others).
+    let reasoning = delta
+        .get("reasoning_content")
+        .or_else(|| delta.get("thinking"))
+        .or_else(|| delta.get("reasoning"))
+        .and_then(Value::as_str);
+    if let Some(reasoning) = reasoning {
         if !reasoning.is_empty() {
             out.push(StreamingEvent::ThinkingDelta(reasoning.to_string()));
         }

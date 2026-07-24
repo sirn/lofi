@@ -230,7 +230,7 @@ enum Block {
     /// cancelled. The turn's partial messages precede it; the marker is the
     /// leaf of the failed branch.
     TurnFailed { label: String, elapsed: Duration, error: String },
-    /// An offline compaction marker: `◇ compacted N msgs · kept M` in the
+    /// An offline compaction marker: `◇ Compacted N messages · kept M` in the
     /// muted tint, appended to the current turn when `/compact` (or the
     /// auto-trigger) folds the older history into a summary. The summary
     /// text is carried along so `/verbose` can expand it inline; the default
@@ -710,6 +710,11 @@ pub(crate) struct App {
     /// first round reports usage, and reset to `None` after a compaction
     /// or a session rollback so the baseline re-evaluates cleanly.
     prev_ctx_tokens: Option<u64>,
+    /// Message count at the time of the last compaction, used as a soft
+    /// cooldown for auto-compaction so a tail too large to compact further
+    /// is not re-compacted every turn (which would waste tokens for no
+    /// benefit). Reset on rollback/resume.
+    last_compact_msg_count: usize,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
     /// hard context cap. The run loop reads (and clears) it on channel close
     /// to drive the force-compact + silent continue, instead of the soft
@@ -838,6 +843,11 @@ struct RunHandle {
     handle: JoinHandle<()>,
     rx: Receiver<AgentEvent>,
     cancel: Arc<AtomicBool>,
+    /// When set, the agent exits its round loop gracefully after the current
+    /// round finishes (tool results in hand) so the TUI can pop the next
+    /// queued prompt at the earliest opportunity — between rounds, not after
+    /// the entire multi-round turn.
+    preempt: Arc<AtomicBool>,
 }
 
 struct TerminalGuard {
@@ -1017,7 +1027,20 @@ async fn run_loop(
                 }
             } => {
                 match ev {
-                    Some(e) => app.apply_event(e),
+                    Some(e) => {
+                        app.apply_event(e);
+                        // If there's a queued prompt, signal the agent to
+                        // exit its round loop after the current round so the
+                        // queued prompt is sent at the earliest opportunity.
+                        // The flag is only checked between rounds (after tool
+                        // results are in hand), so setting it during streaming
+                        // or tool execution is safe.
+                        if !app.prompt_queue.is_empty() {
+                            if let Some(r) = &current_run {
+                                r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
                     None => {
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
@@ -1155,3 +1178,4 @@ async fn run_loop(
 // A single large key dispatcher; splitting per-key handlers would fragment
 // the picker/submit/run-creation flow and hurt readability more than the line
 // count helps.
+

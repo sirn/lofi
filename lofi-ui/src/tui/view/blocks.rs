@@ -1494,7 +1494,7 @@ impl Component for TurnFailed {
     }
 }
 
-/// Compaction marker: `◇ compacted N msgs · kept M` in the muted tint,
+/// Compaction marker: `◇ Compacted N messages · kept M` in the muted tint,
 /// appended to a turn when `/compact` (or the auto-trigger) folds the
 /// older history into a summary. Under `/verbose` the folded summary text
 /// is expanded below the marker (soft-wrapped, muted) so the fold can be
@@ -1509,7 +1509,7 @@ impl Component for CompactionLine {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let body = format!(
-            "compacted {} msgs · kept {}",
+            "Compacted {} messages · kept {}",
             self.summarized, self.kept
         );
         let marker = prim::render(
