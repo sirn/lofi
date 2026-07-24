@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 lofi-core = { workspace = true }
 lofi-ui = { workspace = true }
+lofi-code = { workspace = true }
+lofi-types = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

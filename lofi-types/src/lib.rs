@@ -1044,6 +1044,161 @@ impl Default for BashConfig {
     }
 }
 
+/// Shell policy enforcement mode.
+///
+/// - `ReadOnly` — only read-only commands (ls, cat, grep, git status, …).
+/// - `WorkspaceWrite` — read-only plus workspace mutations (cargo, make,
+///   mkdir, …); destructive ops denied or asked.
+/// - `Unrestricted` — everything allowed unless explicitly denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellPolicyMode {
+    ReadOnly,
+    #[default]
+    WorkspaceWrite,
+    Unrestricted,
+}
+
+/// How a [`CommandEntry`] matches against a parsed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// Entire trimmed command string matches (case-insensitive).
+    Exact,
+    /// Command starts with `match` followed by a word boundary.
+    Prefix,
+    /// The exact contiguous token sequence exists anywhere in the command.
+    Substring,
+    /// `programPrefix:arg1 arg2…` — prefix matches the command start, and
+    /// all listed args appear as tokens after the prefix.
+    Args,
+}
+
+/// One rule in an allow/ask/deny list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandEntry {
+    /// The pattern to match. Meaning depends on [`MatchMode`].
+    #[serde(rename = "match")]
+    pub match_str: String,
+    /// How to interpret `match`.
+    pub mode: MatchMode,
+}
+
+/// Wrapper kind for recursive command unwrapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapperKind {
+    /// `bash -c 'cmd'` — next operand after `-c` is the command string.
+    ShellC,
+    /// `sudo cmd`, `time cmd`, `nohup cmd` — first non-option operand.
+    UtilityOperand,
+    /// `env VAR=1 cmd` — skip env assignments, first remaining operand.
+    Env,
+    /// `xargs cmd` — same as utility-operand.
+    Xargs,
+    /// `docker run … image cmd` — skip flags + image name.
+    DockerRun,
+}
+
+/// A wrapper rule mapping a command name to its unwrapping strategy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrapperRuleConfig {
+    pub name: String,
+    pub kind: WrapperKind,
+}
+
+/// Policy for output redirects (`>`, `>>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedirectPolicy {
+    /// Action for non-safe redirect targets.
+    #[serde(default = "default_redirect_action")]
+    pub action: PolicyAction,
+    /// Targets that are always allowed (e.g. `/dev/null`).
+    #[serde(default)]
+    pub safe_targets: Vec<String>,
+    /// Allow `>&N` file-descriptor duplication.
+    #[serde(default)]
+    pub allow_fd_dup: bool,
+}
+
+fn default_redirect_action() -> PolicyAction {
+    PolicyAction::Allow
+}
+
+impl Default for RedirectPolicy {
+    fn default() -> Self {
+        Self {
+            action: default_redirect_action(),
+            safe_targets: Vec::new(),
+            allow_fd_dup: false,
+        }
+    }
+}
+
+/// Policy for heredocs (`<<`, `<<-`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeredocPolicy {
+    #[serde(default = "default_heredoc_action")]
+    pub action: PolicyAction,
+}
+
+fn default_heredoc_action() -> PolicyAction {
+    PolicyAction::Ask
+}
+
+impl Default for HeredocPolicy {
+    fn default() -> Self {
+        Self {
+            action: default_heredoc_action(),
+        }
+    }
+}
+
+/// Action returned by the policy engine.
+///
+/// Serialized as a string for config files (`"allow"`, `"ask"`, `"deny"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    Allow,
+    Ask,
+    Deny,
+}
+
+/// Shell policy configuration, parsed from the `[shell_policy]` table.
+///
+/// The `mode` selects a built-in default policy; custom `allow`/`ask`/`deny`
+/// rules are merged on top. When `yolo` is true, `ask` and unmatched
+/// (`default`) commands are treated as `allow` — only explicit `deny`
+/// blocks execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShellPolicyConfig {
+    /// Built-in policy preset. Defaults to `workspace_write`.
+    #[serde(default)]
+    pub mode: ShellPolicyMode,
+    /// Allow-unless-deny: skip confirmation for `ask`/`default` commands.
+    #[serde(default)]
+    pub yolo: bool,
+    /// Custom allow rules merged on top of the mode's defaults.
+    #[serde(default)]
+    pub allow: Vec<CommandEntry>,
+    /// Custom ask rules merged on top of the mode's defaults.
+    #[serde(default)]
+    pub ask: Vec<CommandEntry>,
+    /// Custom deny rules merged on top of the mode's defaults.
+    #[serde(default)]
+    pub deny: Vec<CommandEntry>,
+    /// Custom wrapper rules merged on top of the mode's defaults.
+    #[serde(default)]
+    pub wrappers: Vec<WrapperRuleConfig>,
+    /// Redirect policy. Defaults to allow.
+    #[serde(default)]
+    pub redirects: RedirectPolicy,
+    /// Heredoc policy. Defaults to ask.
+    #[serde(default)]
+    pub heredocs: HeredocPolicy,
+}
+
 /// Transient-error retry settings for provider/transport failures.
 ///
 /// A failed round whose error matches a transient pattern (overloaded, rate
@@ -1236,6 +1391,11 @@ pub struct Config {
     /// `bash` native-tool environment settings.
     #[serde(default)]
     pub bash: BashConfig,
+    /// Shell policy enforcement for `lofi.bash`.
+    ///
+    /// Loaded from `policy.toml`, not from `config.toml`.
+    #[serde(skip)]
+    pub shell_policy: ShellPolicyConfig,
     /// Transient-error retry budget and backoff schedule.
     #[serde(default)]
     pub retry: RetryConfig,
@@ -1431,6 +1591,7 @@ mod tests {
             agent: AgentConfig::default(),
             compaction: CompactionConfig::default(),
             bash: BashConfig::default(),
+            shell_policy: ShellPolicyConfig::default(),
             retry: RetryConfig::default(),
             default_provider: None,
             default_model: None,
