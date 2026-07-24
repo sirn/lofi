@@ -33,7 +33,7 @@ pub(crate) struct Theme {
     pub inline_bg: Color,
     /// Filled background of the footer panel (prompt + stats).
     pub panel_bg: Color,
-    
+
     /// Mouse-selection highlight background in the log.
     pub selection: Color,
     /// Background of the Navigate cursor line in the log.
@@ -60,28 +60,26 @@ impl Theme {
     pub(crate) fn dark() -> Self {
         Self {
             primary: Color::Indexed(44),   // teal (modus-vivendi accent)
-            secondary: Color::Indexed(44),  // teal — user indicator
-            success: Color::Indexed(77),    // green
-            warn: Color::Indexed(178),      // amber
-            error: Color::Indexed(203),     // red
-            info: Color::Indexed(75),       // blue
-            fg: Color::Indexed(255),        // white
-            muted: Color::Indexed(244),     // mid gray
-            subtle: Color::Indexed(241),    // outline gray
-            surface: Color::Indexed(235),   // user-message / input bg
+            secondary: Color::Indexed(44), // teal — user indicator
+            success: Color::Indexed(77),   // green
+            warn: Color::Indexed(178),     // amber
+            error: Color::Indexed(203),    // red
+            info: Color::Indexed(75),      // blue
+            fg: Color::Indexed(255),       // white
+            muted: Color::Indexed(244),    // mid gray
+            subtle: Color::Indexed(241),   // outline gray
+            surface: Color::Indexed(235),  // user-message / input bg
             inline_bg: Color::Indexed(236),
-            panel_bg: Color::Indexed(232),     // near-black footer panel
-            
-            
-            selection: Color::Indexed(238),        // one step above surface
-            cursor_line: Color::Indexed(234),      // faint bar under the nav cursor
-            select_cursor: Color::Indexed(60),     // slate marker on the select cursor
-            exec_running_bg: Color::Indexed(236),  // gray tile
-            exec_success_bg: Color::Indexed(22),   // dark green tile
-            exec_error_bg: Color::Indexed(52),     // dark red tile
+            panel_bg: Color::Indexed(232), // near-black footer panel
+
+            selection: Color::Indexed(238),   // one step above surface
+            cursor_line: Color::Indexed(234), // faint bar under the nav cursor
+            select_cursor: Color::Indexed(60), // slate marker on the select cursor
+            exec_running_bg: Color::Indexed(236), // gray tile
+            exec_success_bg: Color::Indexed(22), // dark green tile
+            exec_error_bg: Color::Indexed(52), // dark red tile
         }
     }
-
 }
 
 impl Default for Theme {

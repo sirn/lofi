@@ -23,18 +23,21 @@ use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::theme::active_indicator;
-use crate::tui::{App, Mode, NotifyKind, SPINNER};
 use crate::tui::SLASH_COMMANDS;
+use crate::tui::{App, Mode, NotifyKind, SPINNER};
 
 pub(crate) mod blocks;
 pub(crate) mod component;
-mod prim;
 mod modals;
-use modals::{render_confirm_modal, render_info_modal, render_model_picker, render_picker, render_slash_complete, render_thinking_picker, render_tree_picker};
+mod prim;
+use modals::{
+    render_confirm_modal, render_info_modal, render_model_picker, render_picker,
+    render_slash_complete, render_thinking_picker, render_tree_picker,
+};
 
-pub(crate) use prim::RenderLine;
 #[allow(unused_imports)]
 pub(crate) use prim::RawLine;
+pub(crate) use prim::RenderLine;
 pub(crate) use prim::VisLine;
 
 pub(crate) use prim::HStack;
@@ -80,9 +83,7 @@ impl VStack {
             .regions
             .iter()
             .enumerate()
-            .filter(|(_, r)| {
-                matches!(r, VRegion::Fill) || matches!(r, VRegion::Fixed(h) if *h > 0)
-            })
+            .filter(|(_, r)| matches!(r, VRegion::Fill) || matches!(r, VRegion::Fixed(h) if *h > 0))
             .map(|(i, _)| i)
             .collect();
         let mut constraints: Vec<Constraint> = Vec::new();
@@ -123,10 +124,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     // row above the mode line.
     let footer_h = input_h.saturating_add(4);
     let mut vs = VStack::new(1);
-    vs.fixed(1);                               // header
-    vs.fill();                                 // log viewport
-    vs.fixed(u16::from(app.run_active()));     // working indicator (absent when idle)
-    vs.fixed(footer_h);                        // mode line + panel
+    vs.fixed(1); // header
+    vs.fill(); // log viewport
+    vs.fixed(u16::from(app.run_active())); // working indicator (absent when idle)
+    vs.fixed(footer_h); // mode line + panel
     let rects = vs.split(f, area);
 
     if let Some(r) = rects[0] {
@@ -197,12 +198,7 @@ fn feed_segment(
         }
         vis.push(rl.line.clone());
         visv.push(VisLine {
-            rendered: rl
-                .line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect(),
+            rendered: rl.line.spans.iter().map(|s| s.content.as_ref()).collect(),
             content: rl.content,
             raw: rl.raw.clone(),
         });
@@ -311,7 +307,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         app.top_line = app.nav_cursor.saturating_sub(row).min(base);
     }
     app.last_base = base;
-    let mut off = if app.pinned { base } else { app.top_line.min(base) };
+    let mut off = if app.pinned {
+        base
+    } else {
+        app.top_line.min(base)
+    };
     app.pinned = off >= base;
     app.log_off = off;
     // Stash the total / viewport height so the Navigate cursor can be clamped
@@ -323,7 +323,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // nearest edge, keeping it on its content line.
     if view_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
         app.nav_show_cursor();
-        off = if app.pinned { base } else { app.top_line.min(base) };
+        off = if app.pinned {
+            base
+        } else {
+            app.top_line.min(base)
+        };
         app.log_off = off;
     }
     if app.nav_cursor >= total {
@@ -379,14 +383,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     }
                 }
             } else {
-                feed_segment(
-                    &last_lines,
-                    &mut pos,
-                    off,
-                    &mut want,
-                    &mut vis,
-                    &mut visv,
-                );
+                feed_segment(&last_lines, &mut pos, off, &mut want, &mut vis, &mut visv);
             }
             if want == 0 {
                 break;
@@ -499,9 +496,23 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 /// Thin right-edge scrollbar for a chrome viewport: delegates to the
 /// shared [`prim::render_scrollbar`] on the rightmost column of `area`,
 /// using the theme's thumb/track tones. Only drawn when content overflows.
-fn draw_scrollbar(f: &mut Frame, area: Rect, off: usize, total: usize, t: crate::tui::theme::Theme) {
+fn draw_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    off: usize,
+    total: usize,
+    t: crate::tui::theme::Theme,
+) {
     let track = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-    prim::render_scrollbar(f, track, off, area.height as usize, total, t.subtle, t.muted);
+    prim::render_scrollbar(
+        f,
+        track,
+        off,
+        area.height as usize,
+        total,
+        t.subtle,
+        t.muted,
+    );
 }
 
 /// One-line working indicator above the prompt, shown only while a run is
@@ -532,7 +543,10 @@ fn render_working(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("  "),
             Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
             Span::styled(
-                format!("Working for {} with ", prim::fmt_duration(app.run_elapsed())),
+                format!(
+                    "Working for {} with ",
+                    prim::fmt_duration(app.run_elapsed())
+                ),
                 Style::new().fg(t.subtle),
             ),
             Span::styled(app.run_label(), Style::new().fg(t.muted)),
@@ -567,12 +581,17 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     for seg in &rows[start..end] {
         lines.push(Line::from(vec![Span::styled(seg.clone(), text_style)]));
     }
-    f.render_widget(Paragraph::new(lines).style(Style::new().bg(t.panel_bg)), area);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::new().bg(t.panel_bg)),
+        area,
+    );
 
     if active {
         let (vrow, x_in) = app.input_cursor_pos(content_w);
         if vrow >= start && vrow < end {
-            let x = area.x.saturating_add(u16::try_from(x_in).unwrap_or(u16::MAX));
+            let x = area
+                .x
+                .saturating_add(u16::try_from(x_in).unwrap_or(u16::MAX));
             let y = area
                 .y
                 .saturating_add(u16::try_from(vrow - start).unwrap_or(u16::MAX));
@@ -593,7 +612,12 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
 
     // The panel below: a leading blank, the prompt, a blank, and the stats,
     // all on panel_bg. A single `❯` marks the prompt row (no spanning rail).
-    let panel = Rect::new(area.x, area.y.saturating_add(1), w, area.height.saturating_sub(1));
+    let panel = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        w,
+        area.height.saturating_sub(1),
+    );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
     let bar = if active { t.primary } else { t.subtle };
@@ -675,7 +699,10 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         };
         // Reserve room for the 2-cell left padding, the right side, and the
         // badge's wrapping spaces.
-        let avail = w.saturating_sub(2).saturating_sub(right_w).saturating_sub(2);
+        let avail = w
+            .saturating_sub(2)
+            .saturating_sub(right_w)
+            .saturating_sub(2);
         if avail >= 1 {
             let body = if prim::width(msg) > avail {
                 let mut s = prim::truncate(msg, avail.saturating_sub(1));
@@ -697,10 +724,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     // the rule shows through the gaps between them.
     let rule: String = std::iter::repeat_n('▁', w).collect();
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            rule,
-            Style::new().fg(color),
-        ))),
+        Paragraph::new(Line::from(Span::styled(rule, Style::new().fg(color)))),
         area,
     );
     // Left badges sit at the 2-cell inset; only as wide as their content so
@@ -718,7 +742,8 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     // Right chip flush to the right edge.
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
     let rrect = Rect::new(
-        area.x.saturating_add(u16::try_from(w.saturating_sub(right_w)).unwrap_or(0)),
+        area.x
+            .saturating_add(u16::try_from(w.saturating_sub(right_w)).unwrap_or(0)),
         area.y,
         u16::try_from(right_w).unwrap_or(0),
         1,
@@ -733,5 +758,8 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let left = app.render_footer_left(w).spans;
     let right = app.render_footer_cost().spans;
     let line = HStack::new(w).left(left).right(right).build();
-    f.render_widget(Paragraph::new(line).style(Style::new().bg(app.theme.panel_bg)), area);
+    f.render_widget(
+        Paragraph::new(line).style(Style::new().bg(app.theme.panel_bg)),
+        area,
+    );
 }

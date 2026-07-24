@@ -282,15 +282,28 @@ pub struct NativeToolRecord {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum CompactBlock {
-    User { text: String },
-    Assistant { text: String },
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
     /// An exec tool call. `code` is the TypeScript source; `label` is the
     /// optional display name. The native tool calls that ran inside it are
     /// attached here so the brief transcript can show the real actions.
-    ToolCall { id: String, code: String, label: Option<String>, native: Vec<NativeToolRecord> },
+    ToolCall {
+        id: String,
+        code: String,
+        label: Option<String>,
+        native: Vec<NativeToolRecord>,
+    },
     /// The result of an exec call. `text` is the surfaced value (or the
     /// error message); `is_error` marks failures.
-    ToolResult { id: String, text: String, is_error: bool },
+    ToolResult {
+        id: String,
+        text: String,
+        is_error: bool,
+    },
 }
 
 /// A named section produced by a compaction hook.
@@ -373,9 +386,7 @@ pub enum SessionEventKind {
     /// Wall-clock duration of a completed thinking block within a turn, so the
     /// "Thought for Ns" marker survives freeze/resume. Emitted in order, one
     /// per assistant thinking block.
-    ThinkingTiming {
-        elapsed_ms: u64,
-    },
+    ThinkingTiming { elapsed_ms: u64 },
     /// A completed turn: the raw model identity that ran it, wall-clock
     /// duration, accumulated USD cost, and the final round's token usage.
     /// Rendered as the `◇ Done in Ns with <model>` block and folded into the
@@ -588,13 +599,23 @@ impl RunModel {
         };
         // ` · level` (agent) and `:level` (app) both appeared in the wild.
         let (id, thinking) = if let Some((i, lvl)) = rest.split_once(" · ") {
-            (i.to_string(), ThinkingLevel::parse(lvl.trim()).unwrap_or_default())
+            (
+                i.to_string(),
+                ThinkingLevel::parse(lvl.trim()).unwrap_or_default(),
+            )
         } else if let Some((i, lvl)) = rest.split_once(':') {
-            (i.to_string(), ThinkingLevel::parse(lvl.trim()).unwrap_or_default())
+            (
+                i.to_string(),
+                ThinkingLevel::parse(lvl.trim()).unwrap_or_default(),
+            )
         } else {
             (rest.to_string(), ThinkingLevel::Off)
         };
-        Self { provider, id, thinking }
+        Self {
+            provider,
+            id,
+            thinking,
+        }
     }
 }
 
@@ -628,7 +649,15 @@ impl<'de> serde::Deserialize<'de> for RunModel {
             Str(String),
         }
         Ok(match Repr::deserialize(deserializer)? {
-            Repr::Obj { provider, id, thinking } => Self { provider, id, thinking },
+            Repr::Obj {
+                provider,
+                id,
+                thinking,
+            } => Self {
+                provider,
+                id,
+                thinking,
+            },
             Repr::Str(s) => Self::parse(&s),
         })
     }
@@ -1257,7 +1286,6 @@ pub enum PolicyAction {
     Deny,
 }
 
-
 /// Auto-mode configuration for shell policy.
 ///
 /// When enabled, commands that would normally require user confirmation
@@ -1404,6 +1432,9 @@ impl CompactionConfig {
     /// case there is no speculative compaction, only the hard cap.
     #[must_use]
     pub fn soft_threshold(&self, context_window: u64) -> Option<u64> {
+        if !self.auto.enable {
+            return None;
+        }
         let mut threshold = None::<u64>;
         if let Some(cap) = self.auto.max_context_tokens {
             threshold = Some(threshold.map_or(cap, |t| t.min(cap)));
@@ -1739,8 +1770,7 @@ mod tests {
             serde_json::to_string(&ThinkingLevel::Off).unwrap(),
             concat!('"', "off", '"')
         );
-        let l: ThinkingLevel =
-            serde_json::from_str(concat!('"', "medium", '"')).unwrap();
+        let l: ThinkingLevel = serde_json::from_str(concat!('"', "medium", '"')).unwrap();
         assert_eq!(l, ThinkingLevel::Medium);
     }
 
@@ -1769,7 +1799,10 @@ mod tests {
     #[test]
     fn api_type_accepts_kebab_case() {
         assert_eq!(Api::parse("openai-responses"), Some(Api::OpenAiResponses));
-        assert_eq!(Api::parse("anthropic-messages"), Some(Api::AnthropicMessages));
+        assert_eq!(
+            Api::parse("anthropic-messages"),
+            Some(Api::AnthropicMessages)
+        );
         // snake_case still works.
         assert_eq!(Api::parse("openai_responses"), Some(Api::OpenAiResponses));
     }
@@ -1792,6 +1825,19 @@ mod tests {
         // saturating sub when reserved >= window -> no positive threshold.
         assert_eq!(cfg.hard_threshold(10_000), None);
         assert_eq!(cfg.hard_threshold(0), None);
+    }
+
+    #[test]
+    fn disabled_auto_compaction_has_no_soft_threshold() {
+        let cfg = CompactionConfig {
+            auto: AutoCompactConfig {
+                enable: false,
+                max_context_tokens: Some(10_000),
+                context_ratio: Some(0.5),
+            },
+            ..CompactionConfig::default()
+        };
+        assert_eq!(cfg.soft_threshold(100_000), None);
     }
 
     #[test]
@@ -1863,7 +1909,10 @@ mod tests {
         let cfg: BashConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.strip_env);
         assert_eq!(cfg.pass_env, ["GITHUB_TOKEN", "NPM_TOKEN"]);
-        assert_eq!(cfg.env_file.as_deref(), Some(std::path::Path::new("~/.config/lofi/secrets.env")));
+        assert_eq!(
+            cfg.env_file.as_deref(),
+            Some(std::path::Path::new("~/.config/lofi/secrets.env"))
+        );
     }
 
     #[test]
