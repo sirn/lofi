@@ -8,9 +8,7 @@ impl App {
     /// terminal width; 2 cells are reserved for the `❯ `/`  ` prefix.
     pub(super) fn input_lines(&self, width: usize) -> usize {
         let content_w = width.saturating_sub(2);
-        self.input_select_rows(content_w)
-            .len()
-            .min(MAX_INPUT_LINES)
+        self.input_select_rows(content_w).len().min(MAX_INPUT_LINES)
     }
 
     /// Keep [`input_scroll`] within bounds and clamp it so the cursor's
@@ -172,7 +170,11 @@ impl App {
     /// Remove `input[start..end]` into the kill ring. When `append` is true the
     /// removed text is appended (consecutive `C-k`); otherwise it replaces.
     pub(super) fn kill_range(&mut self, start: usize, end: usize, append: bool) {
-        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         if start >= end {
             return;
         }

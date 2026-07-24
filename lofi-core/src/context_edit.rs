@@ -50,9 +50,7 @@ fn category(b: &ContentBlock) -> Cat {
 /// original content from the transcript.
 fn result_stub(event_id: &str, is_error: bool) -> String {
     let kind = if is_error { "error result" } else { "result" };
-    format!(
-        "[exec {kind} cleared — re-expand with lofi.result(\"{event_id}\")]"
-    )
+    format!("[exec {kind} cleared — re-expand with lofi.result(\"{event_id}\")]")
 }
 
 /// Rebuild a tool-call (`ToolUse`) input so the `display` label survives but
@@ -91,8 +89,10 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
     // First pass (reverse): mark the protected recent window per category.
     // `kept_flag[mi][bi]` is true when the block is within the last
     // `keep_*` of its category and so survives verbatim.
-    let mut kept_flag: Vec<Vec<bool>> =
-        kept.iter().map(|(_, m)| vec![true; m.blocks.len()]).collect();
+    let mut kept_flag: Vec<Vec<bool>> = kept
+        .iter()
+        .map(|(_, m)| vec![true; m.blocks.len()])
+        .collect();
     let mut cnt_r = 0usize;
     let mut cnt_t = 0usize;
     let mut cnt_u = 0usize;
@@ -131,7 +131,11 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
                     continue;
                 }
                 match b {
-                    ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        ..
+                    } => {
                         blocks.push(ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
                             content: result_stub(eid, *is_error),
@@ -149,7 +153,10 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
                     text @ ContentBlock::Text { .. } => blocks.push(text.clone()),
                 }
             }
-            Message { role: msg.role, blocks }
+            Message {
+                role: msg.role,
+                blocks,
+            }
         })
         .collect()
 }
@@ -201,13 +208,26 @@ mod tests {
     // kept as a test fixture
     #[allow(dead_code)]
     fn user(t: &str) -> Message {
-        Message { role: Role::User, blocks: vec![ContentBlock::Text { text: t.to_string() }] }
+        Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: t.to_string(),
+            }],
+        }
     }
     fn assistant(t: &str) -> Message {
-        Message { role: Role::Assistant, blocks: vec![ContentBlock::Text { text: t.to_string() }] }
+        Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: t.to_string(),
+            }],
+        }
     }
     fn think(t: &str) -> ContentBlock {
-        ContentBlock::Thinking { text: t.to_string(), signature: None }
+        ContentBlock::Thinking {
+            text: t.to_string(),
+            signature: None,
+        }
     }
     fn exec_call(id: &str, code: &str) -> ContentBlock {
         ContentBlock::ToolUse {
@@ -217,11 +237,20 @@ mod tests {
         }
     }
     fn exec_result(id: &str, content: &str) -> ContentBlock {
-        ContentBlock::ToolResult { tool_use_id: id.to_string(), content: content.to_string(), is_error: false }
+        ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: content.to_string(),
+            is_error: false,
+        }
     }
 
- fn opts(keep_results: usize, keep_thinking: usize, keep_calls: usize) -> EditConfig {
-        EditConfig { enabled: true, keep_results, keep_thinking, keep_calls }
+    fn opts(keep_results: usize, keep_thinking: usize, keep_calls: usize) -> EditConfig {
+        EditConfig {
+            enabled: true,
+            keep_results,
+            keep_thinking,
+            keep_calls,
+        }
     }
 
     fn tail(kept: &[(String, Message)]) -> Vec<Message> {
@@ -231,7 +260,12 @@ mod tests {
     #[test]
     fn disabled_returns_verbatim() {
         let kept = vec![("e1".to_string(), assistant("hi"))];
-        let o = EditConfig { enabled: false, keep_results: 1, keep_thinking: 1, keep_calls: 1 };
+        let o = EditConfig {
+            enabled: false,
+            keep_results: 1,
+            keep_thinking: 1,
+            keep_calls: 1,
+        };
         let out = edit_tail(&kept, &o);
         assert_eq!(out, vec![assistant("hi")]);
     }
@@ -243,52 +277,123 @@ mod tests {
             ("e2".to_string(), assistant("recent decision")),
         ];
         let out = tail(&kept);
-        assert_eq!(out[0].blocks[0], ContentBlock::Text { text: "old decision".to_string() });
-        assert_eq!(out[1].blocks[0], ContentBlock::Text { text: "recent decision".to_string() });
+        assert_eq!(
+            out[0].blocks[0],
+            ContentBlock::Text {
+                text: "old decision".to_string()
+            }
+        );
+        assert_eq!(
+            out[1].blocks[0],
+            ContentBlock::Text {
+                text: "recent decision".to_string()
+            }
+        );
     }
 
     #[test]
     fn elides_old_tool_results_keeps_recent() {
         // Three tool results; keep_results=1 -> only the last is verbatim.
         let kept = vec![
-            ("e1".to_string(), Message { role: Role::Tool, blocks: vec![exec_result("a", "out-1")] }),
-            ("e2".to_string(), Message { role: Role::Tool, blocks: vec![exec_result("b", "out-2")] }),
-            ("e3".to_string(), Message { role: Role::Tool, blocks: vec![exec_result("c", "out-3")] }),
+            (
+                "e1".to_string(),
+                Message {
+                    role: Role::Tool,
+                    blocks: vec![exec_result("a", "out-1")],
+                },
+            ),
+            (
+                "e2".to_string(),
+                Message {
+                    role: Role::Tool,
+                    blocks: vec![exec_result("b", "out-2")],
+                },
+            ),
+            (
+                "e3".to_string(),
+                Message {
+                    role: Role::Tool,
+                    blocks: vec![exec_result("c", "out-3")],
+                },
+            ),
         ];
         let out = tail(&kept);
         assert_eq!(out[2].blocks[0], exec_result("c", "out-3"));
-        let ContentBlock::ToolResult { content, .. } = &out[0].blocks[0] else { panic!() };
+        let ContentBlock::ToolResult { content, .. } = &out[0].blocks[0] else {
+            panic!()
+        };
         assert!(content.contains("lofi.result(\"e1\")"));
-        let ContentBlock::ToolResult { content, .. } = &out[1].blocks[0] else { panic!() };
+        let ContentBlock::ToolResult { content, .. } = &out[1].blocks[0] else {
+            panic!()
+        };
         assert!(content.contains("lofi.result(\"e2\")"));
     }
 
     #[test]
     fn drops_old_thinking_keeps_recent() {
         let kept = vec![
-            ("e1".to_string(), Message { role: Role::Assistant, blocks: vec![think("old reasoning"), exec_call("a", "code-1")] }),
-            ("e2".to_string(), Message { role: Role::Assistant, blocks: vec![think("recent reasoning"), exec_call("b", "code-2")] }),
+            (
+                "e1".to_string(),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![think("old reasoning"), exec_call("a", "code-1")],
+                },
+            ),
+            (
+                "e2".to_string(),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![think("recent reasoning"), exec_call("b", "code-2")],
+                },
+            ),
         ];
         let out = tail(&kept);
         // Old thinking dropped; its tool call stays (keep_calls=1 keeps the
         // last call only, so a's code is stubbed but the block remains).
-        assert!(out[0].blocks.iter().all(|b| !matches!(b, ContentBlock::Thinking { .. })));
+        assert!(out[0]
+            .blocks
+            .iter()
+            .all(|b| !matches!(b, ContentBlock::Thinking { .. })));
         assert!(matches!(out[1].blocks[0], ContentBlock::Thinking { .. }));
     }
 
     #[test]
     fn trims_old_tool_call_code_keeps_display() {
         let kept = vec![
-            ("e1".to_string(), Message { role: Role::Assistant, blocks: vec![exec_call("a", "old-secret-code")] }),
-            ("e2".to_string(), Message { role: Role::Assistant, blocks: vec![exec_call("b", "recent-code")] }),
+            (
+                "e1".to_string(),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![exec_call("a", "old-secret-code")],
+                },
+            ),
+            (
+                "e2".to_string(),
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![exec_call("b", "recent-code")],
+                },
+            ),
         ];
         let out = tail(&kept);
         // Recent call keeps full code.
-        let ContentBlock::ToolUse { input: recent, .. } = &out[1].blocks[0] else { panic!() };
-        assert_eq!(recent.get("code").and_then(|v| v.as_str()), Some("recent-code"));
+        let ContentBlock::ToolUse { input: recent, .. } = &out[1].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(
+            recent.get("code").and_then(|v| v.as_str()),
+            Some("recent-code")
+        );
         // Old call: code stubbed, display kept.
-        let ContentBlock::ToolUse { input: old, .. } = &out[0].blocks[0] else { panic!() };
-        assert_eq!(old.get("display").and_then(|v| v.get("name")).and_then(|v| v.as_str()), Some("do thing"));
+        let ContentBlock::ToolUse { input: old, .. } = &out[0].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(
+            old.get("display")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("do thing")
+        );
         let code = old.get("code").and_then(|v| v.as_str()).unwrap();
         assert!(code.contains("lofi.result(\"e1\")"));
     }

@@ -81,14 +81,26 @@ pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConf
             toml::from_str(&content)
                 .map_err(|e| Error::Config(format!("parse error in {}: {e}", path.display())))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(
-            lofi_types::ShellPolicyConfig::default(),
-        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(lofi_types::ShellPolicyConfig::default())
+        }
         Err(e) => Err(Error::Config(format!(
             "policy path {}: {e}",
             path.display()
         ))),
     }
+}
+
+/// Load the configured shell policy and evaluate `command` without executing it.
+///
+/// # Errors
+/// Returns configuration errors when the config or policy path cannot be
+/// resolved, read, or parsed.
+pub fn evaluate_shell_policy(command: &str) -> Result<lofi_code::policy::Decision> {
+    let config_path = user_config_path()?;
+    let policy_path = policy_config_path(&config_path)?;
+    let config = load_policy_or_default(&policy_path)?;
+    Ok(lofi_code::policy::defaults::resolve(&config).evaluate(command))
 }
 
 /// Resolve a single config value (see module docs for the syntax).
@@ -283,8 +295,6 @@ pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
     Ok(())
 }
 
-
-
 /// The built-in default configuration, shipped as TOML so the default
 /// provider/model set is expressed in the same format the user edits.
 ///
@@ -342,8 +352,6 @@ pub fn default_config() -> Config {
         panic!("built-in default config must parse: {e}");
     })
 }
-
-
 
 /// Load the user config from `path`, or fall back to [`default_config`] when
 /// the file does not exist.

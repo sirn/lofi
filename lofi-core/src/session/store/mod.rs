@@ -37,7 +37,7 @@ pub struct SessionMeta {
     /// `provider/id:level` only at display; deserializes from a legacy
     /// `provider/id[:level]` string too).
     pub model: RunModel,
-    }
+}
 
 /// The first-line wrapper. `type: "meta"` distinguishes it from message lines
 /// if a future format ever interleaves other entry kinds.
@@ -91,13 +91,9 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// A short, low-entropy disambiguator derived from nanosecond jitter. This is
-/// not a security id — it only needs to keep same-millisecond file names apart.
+/// Generate an opaque event/session identifier.
 fn short_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    format!("{nanos:06x}")
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// Owns the sessions root directory and scopes all per-cwd listings/creates
@@ -142,56 +138,56 @@ impl SessionStore {
     pub fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
         let dir = self.dir_for_cwd(cwd);
         std::fs::create_dir_all(&dir)?;
-    let file_name = format!("{}_{}.jsonl", now_ms(), short_id());
-    let path = dir.join(file_name);
-    let header = Header {
-        kind: "meta".to_string(),
-        meta: SessionMeta {
-            version: SESSION_VERSION,
-            created: now_ms(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            model: model.clone(),
-        },
-    };
-    let line = serde_json::to_string(&header)
-        .map_err(|e| Error::State(format!("json: {e}")))?;
-    write_atomic(&path, &format!("{line}\n"))?;
-    Ok(path)
-}
+        let file_name = format!("{}_{}.jsonl", now_ms(), short_id());
+        let path = dir.join(file_name);
+        let header = Header {
+            kind: "meta".to_string(),
+            meta: SessionMeta {
+                version: SESSION_VERSION,
+                created: now_ms(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                model: model.clone(),
+            },
+        };
+        let line =
+            serde_json::to_string(&header).map_err(|e| Error::State(format!("json: {e}")))?;
+        write_atomic(&path, &format!("{line}\n"))?;
+        Ok(path)
+    }
 
-/// List sessions for `cwd`, newest-first (by file stem's leading timestamp).
-///
-/// # Errors
-/// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
-/// other than not existing.
-pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
+    /// List sessions for `cwd`, newest-first (by file stem's leading timestamp).
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
+    /// other than not existing.
+    pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
         let dir = self.dir_for_cwd(cwd);
         let mut entries = Vec::new();
         let read = match std::fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::Io(e)),
-    };
-    for ent in read {
-        let ent = ent?;
-        let path = ent.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        for ent in read {
+            let ent = ent?;
+            let path = ent.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(entry) = parse_entry(&path) {
+                entries.push(entry);
+            }
         }
-        if let Some(entry) = parse_entry(&path) {
-            entries.push(entry);
-        }
+        // Newest activity first: descending by file mtime (last write).
+        entries.sort_by_key(|e| std::cmp::Reverse(e.last_active));
+        Ok(entries)
     }
-    // Newest activity first: descending by file mtime (last write).
-    entries.sort_by_key(|e| std::cmp::Reverse(e.last_active));
-    Ok(entries)
-}
 
-/// The most recent session for `cwd`, or `None` if none exist.
-///
-/// # Errors
-/// Propagates [`list_for_cwd`](Self::list_for_cwd).
-pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
+    /// The most recent session for `cwd`, or `None` if none exist.
+    ///
+    /// # Errors
+    /// Propagates [`list_for_cwd`](Self::list_for_cwd).
+    pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
         Ok(self.list_for_cwd(cwd)?.into_iter().next())
     }
 
@@ -205,11 +201,11 @@ pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
             .into_iter()
             .filter(|e| e.id().starts_with(prefix))
             .collect();
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.into_iter().next()),
-        _ => Err(Error::State(format!("ambiguous session id '{prefix}'"))),
-    }
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.into_iter().next()),
+            _ => Err(Error::State(format!("ambiguous session id '{prefix}'"))),
+        }
     }
 }
 
@@ -241,8 +237,8 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
             break line.to_string();
         }
     };
-    let header: Header = serde_json::from_str(&header_line)
-        .map_err(|e| Error::State(format!("json: {e}")))?;
+    let header: Header =
+        serde_json::from_str(&header_line).map_err(|e| Error::State(format!("json: {e}")))?;
     if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return Err(Error::State(format!(
             "unsupported session version {} in {}",
@@ -330,18 +326,78 @@ pub fn append_events(
         }
         parent = Some(ev.id.clone());
     }
+    append_prepared_events(path, events)
+}
+
+/// Append a compaction checkpoint as one batch: edited kept-tail messages
+/// followed by the marker. A failed write is rolled back to the original file
+/// length so the transcript cannot expose a partial checkpoint as its leaf.
+///
+/// # Errors
+/// Propagates transcript read, serialization, and write failures.
+pub fn append_compaction(
+    path: &Path,
+    kept_messages: &[Message],
+    summary: String,
+    summarized_range: [String; 2],
+    summarized: usize,
+    kept: usize,
+) -> Result<(u64, u64)> {
+    let parent = last_event_id(path)?;
+    let ids: Vec<String> = (0..=kept_messages.len()).map(|_| short_id()).collect();
+    let mut events: Vec<SessionEvent> = kept_messages
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, message)| SessionEvent {
+            id: ids[index].clone(),
+            parent_id: if index == 0 {
+                parent.clone()
+            } else {
+                Some(ids[index - 1].clone())
+            },
+            kind: SessionEventKind::Message(message),
+        })
+        .collect();
+    let marker_index = kept_messages.len();
+    events.push(SessionEvent {
+        id: ids[marker_index].clone(),
+        parent_id: if marker_index == 0 {
+            parent
+        } else {
+            Some(ids[marker_index - 1].clone())
+        },
+        kind: SessionEventKind::Compaction {
+            summary,
+            first_kept_entry_id: if marker_index == 0 {
+                String::new()
+            } else {
+                ids[0].clone()
+            },
+            summarized_range,
+            summarized,
+            kept,
+        },
+    });
+    append_prepared_events(path, &events)
+}
+
+fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
     let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
+    let mut payload = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut payload, event)
+            .map_err(|e| Error::State(format!("json: {e}")))?;
+        payload.push(b'\n');
+    }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    for ev in events {
-        let line = serde_json::to_string(ev)
-            .map_err(|e| Error::State(format!("json: {e}")))?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
+    if let Err(error) = file.write_all(&payload).and_then(|()| file.flush()) {
+        let _ = file.set_len(byte_start);
+        return Err(Error::Io(error));
     }
-    file.flush()?;
     let byte_end = file.metadata()?.len();
     Ok((byte_start, byte_end))
 }
@@ -502,7 +558,9 @@ fn entry_preview(kind: &SessionEventKind) -> String {
         SessionEventKind::TurnFailed { error, .. } => {
             format!("agent: {} (failed)", one_line(error))
         }
-        SessionEventKind::Compaction { summarized, kept, .. } => {
+        SessionEventKind::Compaction {
+            summarized, kept, ..
+        } => {
             format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}")
         }
         SessionEventKind::NativeTool(rec) => {
@@ -538,9 +596,8 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
         if l.is_empty() {
             continue;
         }
-        let ev = match parse_event(l) {
-            Ok(ev) => ev,
-            Err(_) => continue,
+        let Ok(ev) = parse_event(l) else {
+            continue;
         };
         if matches!(ev.kind, SessionEventKind::Message(_)) {
             count += 1;
@@ -572,7 +629,9 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         .ok_or_else(|| Error::State("session path has no parent".into()))?;
     let tmp = dir.join(format!(
         ".{}.tmp",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("session")
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session")
     ));
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -647,13 +706,18 @@ mod tests {
         // a later display-format change must not strand stale text in old files.
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/raw");
-        let path = store.create(cwd, &"openai/gpt-5.6-sol:medium".into()).unwrap();
+        let path = store
+            .create(cwd, &"openai/gpt-5.6-sol:medium".into())
+            .unwrap();
         let header = std::fs::read_to_string(&path).unwrap();
         assert!(
             header.contains("\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\"}"),
             "header model must be a raw object: {header}"
         );
-        assert!(!header.contains("\"model\":\""), "header must not store a rendered model string: {header}");
+        assert!(
+            !header.contains("\"model\":\""),
+            "header must not store a rendered model string: {header}"
+        );
 
         let mut batch = [SessionEvent {
             id: String::new(),
@@ -669,11 +733,57 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let turn_end_line = body.lines().last().unwrap();
         assert!(
-            turn_end_line.contains("\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"),
+            turn_end_line.contains(
+                "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"
+            ),
             "turn-end model must be a raw object: {turn_end_line}"
         );
-        assert!(!turn_end_line.contains("\"label\""), "turn-end must not carry a rendered label field: {turn_end_line}");
-        assert!(!turn_end_line.contains("\"model\":\""), "turn-end must not store a rendered model string: {turn_end_line}");
+        assert!(
+            !turn_end_line.contains("\"label\""),
+            "turn-end must not carry a rendered label field: {turn_end_line}"
+        );
+        assert!(
+            !turn_end_line.contains("\"model\":\""),
+            "turn-end must not store a rendered model string: {turn_end_line}"
+        );
+    }
+
+    #[test]
+    fn compaction_checkpoint_round_trips_as_one_chain() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/compact-checkpoint"), &"p/m".into())
+            .unwrap();
+        let mut original = [ev(user("old"))];
+        append_events(&path, &mut original, None).unwrap();
+
+        let kept = [assistant("kept")];
+        append_compaction(
+            &path,
+            &kept,
+            "summary".into(),
+            ["first".into(), "last".into()],
+            5,
+            1,
+        )
+        .unwrap();
+
+        let (_meta, events, _, _) = load(&path).unwrap();
+        assert_eq!(events.len(), 3);
+        let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            summary,
+            ..
+        } = &events[2].kind
+        else {
+            panic!("expected compaction marker");
+        };
+        assert_eq!(summary, "summary");
+        assert_eq!(first_kept_entry_id, &events[1].id);
+        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
+        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
+        assert_ne!(events[0].id, events[1].id);
+        assert_ne!(events[1].id, events[2].id);
     }
 
     #[test]
@@ -686,7 +796,9 @@ mod tests {
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant));
+        assert!(
+            matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
+        );
         // Linear chain: first event is root, second chains to first.
         assert!(events[0].parent_id.is_none());
         assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
@@ -702,7 +814,10 @@ mod tests {
             SessionEvent {
                 id: String::new(),
                 parent_id: None,
-                kind: SessionEventKind::ToolTiming { tool_call_id: "t1".into(), elapsed_ms: 5 },
+                kind: SessionEventKind::ToolTiming {
+                    tool_call_id: "t1".into(),
+                    elapsed_ms: 5,
+                },
             },
             SessionEvent {
                 id: String::new(),
@@ -711,7 +826,11 @@ mod tests {
                     model: "p/m:medium".into(),
                     elapsed_ms: 1234,
                     cost: 0.01,
-                    usage: Usage { input_tokens: 10, output_tokens: 20, ..Usage::default() },
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                        ..Usage::default()
+                    },
                 },
             },
         ];
@@ -719,9 +838,13 @@ mod tests {
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 3);
         assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1"));
-        assert!(matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
-            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10));
+        assert!(
+            matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1")
+        );
+        assert!(
+            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
+            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10)
+        );
     }
 
     #[test]
@@ -749,8 +872,12 @@ mod tests {
         // is a sibling and excluded.
         let path_idx = active_path(&events, &branch_ev.id);
         assert_eq!(path_idx.len(), 2);
-        assert!(matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User));
+        assert!(
+            matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User)
+        );
+        assert!(
+            matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User)
+        );
     }
 
     #[test]

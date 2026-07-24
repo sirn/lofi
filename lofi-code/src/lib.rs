@@ -47,9 +47,9 @@ use swc_ecma_visit::VisitMutWith;
 use lofi_error::{Error, Result};
 
 pub mod compact_hook;
+mod convert;
 pub mod docs;
 pub mod policy;
-mod convert;
 use convert::{js_to_json, json_to_js};
 
 mod bind;
@@ -57,8 +57,8 @@ use bind::bind_tools;
 
 pub mod tools;
 
-pub use tools::BashEnv;
 use crate::tools::BuiltinTools;
+pub use tools::BashEnv;
 
 /// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
@@ -116,8 +116,9 @@ pub type AgentFn =
 /// `lofi.recall` native tool into the engine that owns the session
 /// transcript. The callback reads the session file fresh and runs the
 /// recall engine, so the sandbox never depends on `lofi-core`.
-pub type RecallFn =
-    Arc<dyn Fn(&lofi_types::recall::RecallRequest) -> lofi_types::recall::RecallOutcome + Send + Sync>;
+pub type RecallFn = Arc<
+    dyn Fn(&lofi_types::recall::RecallRequest) -> lofi_types::recall::RecallOutcome + Send + Sync,
+>;
 
 /// Optional `lofi.result` implementation: a sync callback that recovers the
 /// original, pre-elision content of one message event by id. The inverse of
@@ -159,7 +160,10 @@ pub type ConfirmFn = Arc<
 /// When `None` (auto-mode disabled or not configured), `ask` goes directly
 /// to the confirmation flow.
 pub type AutoModeFn = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
+    dyn Fn(
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
         + Send
         + Sync,
 >;
@@ -168,8 +172,16 @@ pub type AutoModeFn = Arc<
 /// under the parent `exec` block. `id` is a per-exec counter.
 #[derive(Debug, Clone)]
 pub enum ToolEvent {
-    Start { id: u64, name: String, args: String },
-    End { id: u64, result: String, is_error: bool },
+    Start {
+        id: u64,
+        name: String,
+        args: String,
+    },
+    End {
+        id: u64,
+        result: String,
+        is_error: bool,
+    },
 }
 
 /// Per-call execution context: workspace root, named strings, and an optional
@@ -498,10 +510,7 @@ fn install_globals(
     // Expose the per-session tmp dir path so the model knows where bash
     // full-output logs live (and can reference them if needed beyond
     // `lofi.bash_read`, which takes a basename relative to this dir).
-    lofi.set(
-        "tmp_dir",
-        tools.tmp_dir().to_string_lossy().to_string(),
-    )?;
+    lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
     ctx.globals().set("lofi", lofi)?;
 
     let print = Function::new(ctx.clone(), {
@@ -563,14 +572,16 @@ fn install_globals(
     Ok(())
 }
 
-
-
 /// Parse the optional `{ offset?, limit? }` argument object for `lofi.read`.
 /// Accepts either an object (`{ offset: 10, limit: 20 }`) or nothing.
 fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
-    let Some(v) = opts.0 else { return (None, None); };
+    let Some(v) = opts.0 else {
+        return (None, None);
+    };
     let json = js_to_json(&v);
-    let Some(obj) = json.as_object() else { return (None, None) };
+    let Some(obj) = json.as_object() else {
+        return (None, None);
+    };
     let offset = obj.get("offset").and_then(serde_json::Value::as_u64);
     let limit = obj.get("limit").and_then(serde_json::Value::as_u64);
     (offset, limit)
@@ -595,7 +606,11 @@ fn cap_first_line(s: &str, cap: usize) -> String {
 
 /// Short label for a native tool's arguments, shown after the tool name.
 fn native_args_label(name: &str, v: &serde_json::Value) -> String {
-    let pick = |key: &str| v.get(key).and_then(serde_json::Value::as_str).map(std::string::ToString::to_string);
+    let pick = |key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(std::string::ToString::to_string)
+    };
     let raw = match name {
         "write" | "edit" => pick("path"),
         "bash" => pick("cmd"),
@@ -650,7 +665,9 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
-            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            shell_policy: crate::policy::defaults::resolve(
+                &lofi_types::ShellPolicyConfig::default(),
+            ),
             confirm: None,
             auto_mode: None,
             skills_dir: None,
@@ -818,7 +835,9 @@ mod tests {
             recall: None,
             result: None,
             bash_env: BashEnv::default(),
-            shell_policy: crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            shell_policy: crate::policy::defaults::resolve(
+                &lofi_types::ShellPolicyConfig::default(),
+            ),
             confirm: None,
             auto_mode: None,
             skills_dir: None,
@@ -853,7 +872,10 @@ mod tests {
             other => panic!("expected Sandbox error, got {other:?}"),
         };
         assert!(msg.starts_with("parse error"), "not a parse error: {msg}");
-        assert!(msg.contains("at 1:"), "missing user-relative location: {msg}");
+        assert!(
+            msg.contains("at 1:"),
+            "missing user-relative location: {msg}"
+        );
     }
 
     #[tokio::test]

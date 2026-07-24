@@ -255,7 +255,10 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
     let mut thinking_timing: Vec<u64> = Vec::new();
     for ev in events {
         match &ev.kind {
-            SessionEventKind::ToolTiming { tool_call_id, elapsed_ms } => {
+            SessionEventKind::ToolTiming {
+                tool_call_id,
+                elapsed_ms,
+            } => {
                 tool_elapsed.insert(tool_call_id.clone(), *elapsed_ms);
             }
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
@@ -278,9 +281,18 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 Role::User => {
                     // ToolResult blocks attach to the current turn's pending
                     // tool calls as deferred `ToolEnd` events.
-                    if msg.blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })) {
+                    if msg
+                        .blocks
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    {
                         for b in &msg.blocks {
-                            if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } = b
+                            {
                                 out.push(AgentEvent::ToolEnd {
                                     id: tool_use_id.clone(),
                                     result: if *is_error {
@@ -314,12 +326,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                             }
                             ContentBlock::Thinking { text, .. } => {
                                 out.push(AgentEvent::Thinking(text.clone()));
-                                let elapsed = thinking_timing
-                                    .get(thinking_idx)
-                                    .copied()
-                                    .unwrap_or(0);
+                                let elapsed =
+                                    thinking_timing.get(thinking_idx).copied().unwrap_or(0);
                                 thinking_idx += 1;
-                                out.push(AgentEvent::ThinkingEnd { elapsed_ms: elapsed });
+                                out.push(AgentEvent::ThinkingEnd {
+                                    elapsed_ms: elapsed,
+                                });
                             }
                             ContentBlock::ToolUse { id, name, input } => {
                                 out.push(AgentEvent::ToolStart {
@@ -369,7 +381,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 // stream's inline-result semantics.
                 Role::Tool => {
                     for b in &msg.blocks {
-                        if let ContentBlock::ToolResult { tool_use_id, content, is_error } = b {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = b
+                        {
                             out.push(AgentEvent::ToolEnd {
                                 id: tool_use_id.clone(),
                                 result: if *is_error {
@@ -385,8 +402,15 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 }
                 Role::System => {}
             },
-            SessionEventKind::NativeTool(_) | SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {}
-            SessionEventKind::Compaction { summarized, kept, summary, .. } => {
+            SessionEventKind::NativeTool(_)
+            | SessionEventKind::ToolTiming { .. }
+            | SessionEventKind::ThinkingTiming { .. } => {}
+            SessionEventKind::Compaction {
+                summarized,
+                kept,
+                summary,
+                ..
+            } => {
                 // The summary is injected into the agent history by
                 // `messages_from_events`; carry it on the marker block too
                 // so `/verbose` can expand it inline.
@@ -396,7 +420,13 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                     summary: summary.clone(),
                 });
             }
-            SessionEventKind::TurnEnd { model, elapsed_ms, cost, usage, .. } => {
+            SessionEventKind::TurnEnd {
+                model,
+                elapsed_ms,
+                cost,
+                usage,
+                ..
+            } => {
                 out.push(AgentEvent::TurnEnd {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -404,7 +434,14 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                     usage: *usage,
                 });
             }
-            SessionEventKind::TurnFailed { model, elapsed_ms, error, cost, usage, .. } => {
+            SessionEventKind::TurnFailed {
+                model,
+                elapsed_ms,
+                error,
+                cost,
+                usage,
+                ..
+            } => {
                 out.push(AgentEvent::TurnFailed {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
@@ -442,12 +479,24 @@ pub(super) fn messages_from_events(
     // ancestors; `path` is root-first, so reverse.
     for &i in path.iter().rev() {
         match &events[i].kind {
-            SessionEventKind::Compaction { summary, first_kept_entry_id, .. } => {
+            SessionEventKind::Compaction {
+                summary,
+                first_kept_entry_id,
+                ..
+            } => {
                 if !summary.is_empty() {
                     summary_msg = Some(Message {
                         role: Role::User,
-                        blocks: vec![ContentBlock::Text { text: summary.clone() }],
+                        blocks: vec![ContentBlock::Text {
+                            text: summary.clone(),
+                        }],
                     });
+                }
+                if first_kept_entry_id.is_empty() {
+                    // Compact-all has no kept-tail boundary. Everything older
+                    // than this marker is represented by the summary; retain
+                    // only messages already collected after the marker.
+                    break;
                 }
                 boundary = Some(first_kept_entry_id.clone());
             }

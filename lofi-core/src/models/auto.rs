@@ -17,10 +17,11 @@ use lofi_types::{
 use serde_json::Value;
 
 use lofi_error::{Error, Result};
-use lofi_providers::anthropic_messages::ANTHROPIC_VERSION;
 use lofi_providers::apply_headers;
+use lofi_providers::ANTHROPIC_VERSION;
 
-use super::resolve_model_base_url;/// Default cache freshness for auto-discovered model lists (5 minutes).
+use super::resolve_model_base_url;
+/// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
 /// Insert auto-discovered `(id, ModelConfig)` entries into a provider's
@@ -114,14 +115,23 @@ pub(super) async fn fetch_auto_models(
             .base_url
             .as_deref()
             .unwrap_or_else(|| pcfg.default_api().default_base_url());
-        format!("{}{}", base.trim_end_matches('/'), default_models_path(pcfg))
+        format!(
+            "{}{}",
+            base.trim_end_matches('/'),
+            default_models_path(pcfg)
+        )
     };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+        .build()
+        .map_err(|e| Error::Http(e.to_string()))?;
     let (api_key, headers) = lofi_providers::effective_credentials(pcfg);
-    let key_arg = if api_key.is_empty() { None } else { Some(&api_key[..]) };
+    let key_arg = if api_key.is_empty() {
+        None
+    } else {
+        Some(&api_key[..])
+    };
     let req = if am.auth {
         authed_get(&client, pcfg.default_api(), key_arg, &url)
     } else {
@@ -129,7 +139,7 @@ pub(super) async fn fetch_auto_models(
     };
     let req = apply_headers(req, &headers);
 
-    let resp = req.send().await?;
+    let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
     let resp = lofi_providers::ensure_ok(resp).await?;
     let body: Value =
         lofi_providers::read_json_capped(resp, lofi_providers::MAX_DISCOVERY_BODY_BYTES).await?;
@@ -227,9 +237,12 @@ pub(super) fn parse_auto_models(
             .as_deref()
             .and_then(|field| entry.get(field))
             .and_then(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .or_else(|| v.as_array().and_then(|a| a.first()).and_then(Value::as_str).map(str::to_string))
+                v.as_str().map(str::to_string).or_else(|| {
+                    v.as_array()
+                        .and_then(|a| a.first())
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
             });
         // Translate the remote vocabulary to an internal api id; an
         // unmapped value falls back to the provider's default.
@@ -242,10 +255,8 @@ pub(super) fn parse_auto_models(
         let display_name = navigate(entry, &am.field_mappings.name)
             .and_then(Value::as_str)
             .map(str::to_string);
-        let context_window = navigate(entry, &am.field_mappings.context_window)
-            .and_then(json_u64);
-        let max_tokens = navigate(entry, &am.field_mappings.max_tokens)
-            .and_then(json_u64);
+        let context_window = navigate(entry, &am.field_mappings.context_window).and_then(json_u64);
+        let max_tokens = navigate(entry, &am.field_mappings.max_tokens).and_then(json_u64);
         let scale = match pcfg.pricing_convention {
             PricingConvention::PerToken => 1_000_000.0,
             PricingConvention::PerMillion => 1.0,
@@ -261,9 +272,7 @@ pub(super) fn parse_auto_models(
         let cache_read_price = price(&fields.cache_read);
         let cache_write_price = price(&fields.cache_write);
         let per_request_price = price(&fields.per_request);
-        let supported_params = entry
-            .get("supported_parameters")
-            .and_then(Value::as_array);
+        let supported_params = entry.get("supported_parameters").and_then(Value::as_array);
         let supports_reasoning =
             supported_params.is_some_and(|a| a.iter().any(|p| p.as_str() == Some("reasoning")));
         let supports_image =
@@ -324,14 +333,19 @@ pub(super) fn cache_age(path: &Path) -> Result<Option<Duration>> {
         Err(e) => return Err(Error::Io(e)),
     };
     let mtime = meta.modified()?;
-    let elapsed = SystemTime::now().duration_since(mtime).unwrap_or(Duration::ZERO);
+    let elapsed = SystemTime::now()
+        .duration_since(mtime)
+        .unwrap_or(Duration::ZERO);
     Ok(Some(elapsed))
 }
 
 /// Write the per-provider auto-discovered model lists to `path` as pretty
 /// JSON. Each entry is an `[id, ModelConfig]` tuple so the id (which is the
 /// map key in the provider's `models` table) round-trips with its config.
-pub(super) fn write_auto_cache(path: &Path, cache: &HashMap<String, Vec<(String, ModelConfig)>>) -> Result<()> {
+pub(super) fn write_auto_cache(
+    path: &Path,
+    cache: &HashMap<String, Vec<(String, ModelConfig)>>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

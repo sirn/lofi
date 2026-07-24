@@ -162,7 +162,7 @@ async fn step<M: SseMapper>(
         }
         match state.bytes.next().await {
             Some(Ok(chunk)) => feed_chunk(&mut state, &chunk),
-            Some(Err(e)) => return Some((Err(Error::Http(e)), state)),
+            Some(Err(e)) => return Some((Err(Error::Http(e.to_string())), state)),
             None => {
                 state.exhausted = true;
                 flush_tail(&mut state);
@@ -528,7 +528,11 @@ mod tests {
             b"data: {\"choices\":[],\"cost\":\"0\"}\n\n",
         ];
         let out = run_decoder(chunks).await;
-        assert_eq!(out.len(), 1, "trailing chunk must not produce events: {out:?}");
+        assert_eq!(
+            out.len(),
+            1,
+            "trailing chunk must not produce events: {out:?}"
+        );
         assert!(out[0].is_ok(), "drain must not surface a transport error");
         assert_eq!(
             *out[0].as_ref().unwrap(),

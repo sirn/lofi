@@ -185,8 +185,10 @@ mod tests {
     fn parse_env_file_skips_comments_and_quotes() {
         let text = "# comment\nFOO=bar\n\nEMPTY=\nQUOTED=\"a b\"\nNOSIGN\nKEY='v'\n";
         let pairs = parse_env_file(text);
-        let map: std::collections::HashMap<&str, &str> =
-            pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let map: std::collections::HashMap<&str, &str> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         assert_eq!(map.get("FOO"), Some(&"bar"));
         assert_eq!(map.get("EMPTY"), Some(&""));
         assert_eq!(map.get("QUOTED"), Some(&"a b"));
@@ -216,7 +218,10 @@ mod tests {
         let secret = "shh-topsecret-value";
         let env = BashEnv {
             strip_env: true,
-            baseline: vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())],
+            baseline: vec![(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )],
             extras: vec![("LOFI_TEST_SECRET".to_string(), secret.to_string())],
             redact: vec![secret.to_string()],
         };
@@ -241,7 +246,10 @@ mod tests {
         std::env::set_var("LOFI_TEST_API_KEY", "leak-if-inherited");
         let env = BashEnv {
             strip_env: true,
-            baseline: vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())],
+            baseline: vec![(
+                "PATH".to_string(),
+                std::env::var("PATH").unwrap_or_default(),
+            )],
             extras: Vec::new(),
             redact: Vec::new(),
         };

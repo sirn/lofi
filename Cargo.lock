@@ -1488,10 +1488,6 @@ name = "lofi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
- "lofi-code",
- "lofi-core",
- "lofi-types",
  "lofi-ui",
  "tokio",
  "tracing",
@@ -1502,7 +1498,6 @@ dependencies = [
 name = "lofi-code"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures",
  "globset",
  "lofi-error",
@@ -1510,7 +1505,6 @@ dependencies = [
  "nix",
  "regex",
  "rquickjs",
- "serde",
  "serde_json",
  "swc_common",
  "swc_ecma_ast",
@@ -1547,13 +1541,13 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "lofi-error"
 version = "0.1.0"
 dependencies = [
- "reqwest",
  "thiserror 2.0.18",
 ]
 
@@ -1583,14 +1577,15 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
 name = "lofi-ui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
+ "clap",
  "crossterm",
  "dirs",
  "futures",
@@ -1602,6 +1597,7 @@ dependencies = [
  "similar",
  "tempfile",
  "tokio",
+ "tracing",
  "unicode-width 0.2.2",
 ]
 
