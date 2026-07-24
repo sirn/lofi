@@ -17,7 +17,7 @@ use lofi_types::{
 use serde_json::Value;
 
 use lofi_error::{Error, Result};
-use lofi_providers::anthropic_messages::ANTHROPIC_VERSION;
+use lofi_providers::ANTHROPIC_VERSION;
 use lofi_providers::apply_headers;
 
 use super::resolve_model_base_url;/// Default cache freshness for auto-discovered model lists (5 minutes).
@@ -119,7 +119,8 @@ pub(super) async fn fetch_auto_models(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+        .build()
+        .map_err(|e| Error::Http(e.to_string()))?;
     let (api_key, headers) = lofi_providers::effective_credentials(pcfg);
     let key_arg = if api_key.is_empty() { None } else { Some(&api_key[..]) };
     let req = if am.auth {
@@ -129,7 +130,7 @@ pub(super) async fn fetch_auto_models(
     };
     let req = apply_headers(req, &headers);
 
-    let resp = req.send().await?;
+    let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
     let resp = lofi_providers::ensure_ok(resp).await?;
     let body: Value =
         lofi_providers::read_json_capped(resp, lofi_providers::MAX_DISCOVERY_BODY_BYTES).await?;
