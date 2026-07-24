@@ -26,6 +26,7 @@ impl App {
             ctx_limit: if ctx_limit > 0 { ctx_limit } else { DEFAULT_CTX_LIMIT },
             compaction,
             prev_ctx_tokens: None,
+            last_compact_msg_count: 0,
             context_pressure: false,
             cost: 0.0,
             turn_cost: 0.0,
@@ -448,9 +449,23 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
+        // Derive a kept-tail token budget from the compaction thresholds so
+        // the oversized-turn guard in plan_cut fires: if the last turn alone
+        // exceeds the budget, it is split at a tool-cycle boundary so part of
+        // it is summarized too. Without this (max_kept_tokens=0) a single
+        // turn with many large tool results is kept verbatim and the
+        // compaction barely shrinks the context.
+        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
+        let budget = self
+            .compaction
+            .soft_threshold(limit)
+            .or_else(|| self.compaction.hard_threshold(limit))
+            .map(|t| (t / 2) as usize) // keep tail under ~50% of the threshold
+            .unwrap_or(0);
         let opts = CompactOptions {
-            max_kept_tokens: 0,
+            max_kept_tokens: budget,
             edit: self.compaction.edit.clone(),
+            hooks: vec![std::sync::Arc::new(lofi_core::CodeCompactionHook)],
         };
         let Some(c) = compact(&events, &opts) else {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
@@ -493,6 +508,7 @@ impl App {
         // and the gauge waits for the next round's real (smaller) usage.
         self.status_usage = None;
         self.prev_ctx_tokens = None;
+        self.last_compact_msg_count = self.messages_since_last_compact();
         self.bump_render_epoch();
         true
     }
@@ -559,7 +575,11 @@ impl App {
         let Some(usage) = self.status_usage else { return };
         let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
         let Some(threshold) = self.compaction.soft_threshold(limit) else { return };
-        let current = usage.input_tokens;
+        // Use the full prompt size (non-cached + cached) so heavy prompt
+        // caching doesn't mask the real context size. Without this, a session
+        // with 150k cached tokens and 9k non-cached would read as 9k — well
+        // below the threshold — and never auto-compact.
+        let current = usage.input_tokens + usage.cache_read_tokens;
         // `was_below` is true when the prior round was at or below the
         // threshold (or there was no prior reading). Only an upward
         // crossing — prev at/below, current above — triggers a compaction,
@@ -571,6 +591,16 @@ impl App {
         };
         self.prev_ctx_tokens = Some(current);
         if !was_below || current <= threshold {
+            return;
+        }
+        // Soft cooldown: if the last compaction was too few messages ago,
+        // the kept tail is likely still too large for another compaction to
+        // help. Skip rather than wasting a compact that barely shrinks the
+        // context (and then immediately re-triggers).
+        let msgs_since = self.messages_since_last_compact();
+        if self.last_compact_msg_count > 0
+            && msgs_since < self.compaction.min_messages_between_hard_compacts
+        {
             return;
         }
         if self.compact_now() {
@@ -673,3 +703,4 @@ fn parse_recall_page(rest: &str) -> usize {
         .unwrap_or(1)
         .max(1)
 }
+

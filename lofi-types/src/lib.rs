@@ -276,6 +276,84 @@ pub struct NativeToolRecord {
     pub is_error: bool,
 }
 
+/// A compressed, normalized view of one conversation message, used as the
+/// intermediate representation for the compaction section extractors and the
+/// brief transcript builder.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum CompactBlock {
+    User { text: String },
+    Assistant { text: String },
+    /// An exec tool call. `code` is the TypeScript source; `label` is the
+    /// optional display name. The native tool calls that ran inside it are
+    /// attached here so the brief transcript can show the real actions.
+    ToolCall { id: String, code: String, label: Option<String>, native: Vec<NativeToolRecord> },
+    /// The result of an exec call. `text` is the surfaced value (or the
+    /// error message); `is_error` marks failures.
+    ToolResult { id: String, text: String, is_error: bool },
+}
+
+/// A named section produced by a compaction hook.
+///
+/// Each hook returns zero or more sections; each section is a title and a
+/// list of bullet items (`- item` lines). Sections are inserted into the
+/// summary between the stable built-in sections (Goal, Preferences, Files,
+/// Commits) and the volatile section (Outstanding Context).
+#[derive(Debug, Clone)]
+pub struct SummarySection {
+    /// The section title, shown as `[Title]` in the summary.
+    pub title: String,
+    /// Bullet items, each shown as `- item`.
+    pub items: Vec<String>,
+}
+
+/// Hook trait allowing external crates (lofi-code) to inject custom summary
+/// sections into the compaction output. The hook receives the normalized
+/// transcript blocks and returns additional sections.
+///
+/// This avoids hardcoding tool-specific knowledge (like API descriptions)
+/// in lofi-core; instead lofi-code registers a hook that knows its own tools.
+pub trait CompactionHook: Send + Sync {
+    /// Return additional summary sections for this compaction.
+    /// `blocks` is the normalized transcript of the summarized prefix.
+    fn sections(&self, blocks: &[CompactBlock]) -> Vec<SummarySection>;
+
+    /// Return bullet items for the [Files And Changes] section.
+    ///
+    /// Inspects native tool calls to determine which files were modified,
+    /// created, or read. Default returns empty (no file tracking).
+    fn file_changes(&self, _blocks: &[CompactBlock]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Return bullet items for the [Commits] section.
+    ///
+    /// Inspects native tool calls for git commit commands. Default returns
+    /// empty (no commit tracking).
+    fn commits(&self, _blocks: &[CompactBlock]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Compress a tool result string for the brief transcript.
+    ///
+    /// Hooks that know the structure of their tool results (e.g. JSON
+    /// format) can extract meaningful fields instead of just taking the
+    /// first line. Default returns `None` (caller falls back to its own
+    /// generic compression).
+    fn compress_tool_result(&self, _text: &str, _max: usize) -> Option<String> {
+        None
+    }
+
+    /// Extract a "full output" path from a tool result that was truncated.
+    ///
+    /// Hooks that produce truncation notices (e.g. bash output redirected to
+    /// a temp file) can return the path so the brief transcript can reference
+    /// it. Default returns None.
+    fn full_output_path(&self, _text: &str) -> Option<String> {
+        None
+    }
+}
+
 /// The payload of a [`SessionEvent`], exclusive of tree linkage. See
 /// [`SessionEvent`] for the on-disk shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]

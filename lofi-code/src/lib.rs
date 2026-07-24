@@ -46,6 +46,7 @@ use swc_ecma_visit::VisitMutWith;
 
 use lofi_error::{Error, Result};
 
+pub mod compact_hook;
 pub mod docs;
 pub mod policy;
 mod convert;
