@@ -7,7 +7,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
 use serde_json::{json, Value};
@@ -47,8 +47,10 @@ pub fn build_openai_responses_request(
         req["tools"] = json!(tools_arr);
     }
     if let Some(effort) = openai_effort(model.thinking) {
-        // The Responses API nests effort under `reasoning`.
-        req["reasoning"] = json!({ "effort": effort });
+        // Request a displayable reasoning summary whenever thinking is on.
+        // OpenAI does not expose raw chain-of-thought; `summary: auto`
+        // enables the summary delta events handled by the stream mapper.
+        req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
     }
     req
 }
@@ -74,6 +76,7 @@ fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
 #[derive(Default, Debug, Clone)]
 pub struct ResponsesMapperState {
     item_to_call: HashMap<String, String>,
+    reasoning_items_with_deltas: HashSet<String>,
     pub(crate) saw_completed: bool,
 }
 
@@ -111,8 +114,22 @@ pub fn map_openai_responses_event(
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             if let Some(delta) = v.get("delta").and_then(Value::as_str) {
                 if !delta.is_empty() {
+                    if let Some(item_id) = v.get("item_id").and_then(Value::as_str) {
+                        state
+                            .reasoning_items_with_deltas
+                            .insert(item_id.to_string());
+                    }
                     out.push(StreamingEvent::ThinkingDelta(delta.to_string()));
                 }
+            }
+        }
+        "response.reasoning_summary_part.done" => {
+            // Preserve summary-part boundaries. Besides rendering paragraphs
+            // correctly, this lets the UI discard standalone empty placeholder
+            // parts without hiding literal comments embedded in real content.
+            let item_id = v.get("item_id").and_then(Value::as_str).unwrap_or("");
+            if state.reasoning_items_with_deltas.contains(item_id) {
+                out.push(StreamingEvent::ThinkingDelta("\n\n".to_string()));
             }
         }
         "response.output_item.added" => {
@@ -161,17 +178,11 @@ pub fn map_openai_responses_event(
             }
         }
         "response.output_item.done" => {
-            if let Some(item) = v.get("item") {
-                if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    let id = item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !id.is_empty() {
-                        out.push(StreamingEvent::ToolUseEnd { id });
-                    }
-                }
+            if let Some(event) = v
+                .get("item")
+                .and_then(|item| map_completed_output_item(item, state))
+            {
+                out.push(event);
             }
         }
         "response.completed" => {
@@ -190,6 +201,45 @@ pub fn map_openai_responses_event(
         _ => {}
     }
     Ok(out)
+}
+
+/// Map the event produced when an output item completes.
+fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Option<StreamingEvent> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("function_call") => item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| StreamingEvent::ToolUseEnd { id: id.to_string() }),
+        Some("reasoning") => {
+            // Some Responses-compatible providers omit summary deltas but
+            // include the completed item. Avoid duplicating streamed text.
+            let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
+            (!state.reasoning_items_with_deltas.contains(item_id))
+                .then(|| reasoning_item_text(item))
+                .flatten()
+                .map(StreamingEvent::ThinkingDelta)
+        }
+        _ => None,
+    }
+}
+
+/// Extract raw text from a completed Responses reasoning item.
+/// Prefer the requested summary, falling back to exposed reasoning content
+/// for compatible providers that return that shape instead. Display cleanup
+/// belongs to the UI; placeholders and whitespace are retained here so the
+/// transcript preserves the provider's data.
+fn reasoning_item_text(item: &Value) -> Option<String> {
+    ["summary", "content"].into_iter().find_map(|field| {
+        let text = item
+            .get(field)?
+            .as_array()?
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!text.is_empty()).then_some(text)
+    })
 }
 
 /// Extract [`Usage`] from a Responses `usage` object.
@@ -249,6 +299,18 @@ mod tests {
         assert_eq!(req["stream"], true);
         assert!(req.get("input").is_some());
         assert!(req.get("tools").is_none());
+        assert!(req.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn request_enables_reasoning_summary_when_thinking_is_on() {
+        let mut model = model();
+        model.thinking = ThinkingLevel::Medium;
+        let req = build_openai_responses_request(&model, &[], &[]);
+        assert_eq!(
+            req["reasoning"],
+            json!({"effort": "medium", "summary": "auto"})
+        );
     }
 
     #[test]
@@ -298,6 +360,100 @@ mod tests {
                 id: "call_1".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn maps_completed_reasoning_item_when_deltas_are_absent() {
+        let ev = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"reasoning",
+                "id":"rs_1",
+                "summary":[
+                    {"type":"summary_text","text":"Checked the inputs."},
+                    {"type":"summary_text","text":"Selected the result."}
+                ]
+            }
+        });
+        assert_eq!(
+            map_openai_responses_event(&ev, &mut ResponsesMapperState::default()).unwrap(),
+            vec![StreamingEvent::ThinkingDelta(
+                "Checked the inputs.\n\nSelected the result.".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn completed_reasoning_item_preserves_raw_placeholder_parts() {
+        let ev = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"reasoning",
+                "id":"rs_1",
+                "summary":[
+                    {"type":"summary_text","text":" **Checking**\n<!-- --> "},
+                    {"type":"summary_text","text":"Kept <!-- --> literally."},
+                    {"type":"summary_text","text":" **Done**\nResult "}
+                ]
+            }
+        });
+        assert_eq!(
+            map_openai_responses_event(&ev, &mut ResponsesMapperState::default()).unwrap(),
+            vec![StreamingEvent::ThinkingDelta(
+                " **Checking**\n<!-- --> \n\nKept <!-- --> literally.\n\n **Done**\nResult "
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn summary_part_done_separates_streamed_parts() {
+        let mut state = ResponsesMapperState::default();
+        let first = json!({
+            "type":"response.reasoning_summary_text.delta",
+            "item_id":"rs_1",
+            "delta":"First"
+        });
+        let part_done = json!({
+            "type":"response.reasoning_summary_part.done",
+            "item_id":"rs_1"
+        });
+        let second = json!({
+            "type":"response.reasoning_summary_text.delta",
+            "item_id":"rs_1",
+            "delta":"Second"
+        });
+        map_openai_responses_event(&first, &mut state).unwrap();
+        assert_eq!(
+            map_openai_responses_event(&part_done, &mut state).unwrap(),
+            vec![StreamingEvent::ThinkingDelta("\n\n".to_string())]
+        );
+        assert_eq!(
+            map_openai_responses_event(&second, &mut state).unwrap(),
+            vec![StreamingEvent::ThinkingDelta("Second".to_string())]
+        );
+    }
+
+    #[test]
+    fn completed_reasoning_item_does_not_duplicate_streamed_summary() {
+        let mut state = ResponsesMapperState::default();
+        let delta = json!({
+            "type":"response.reasoning_summary_text.delta",
+            "item_id":"rs_1",
+            "delta":"Checked the inputs."
+        });
+        map_openai_responses_event(&delta, &mut state).unwrap();
+        let done = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"reasoning",
+                "id":"rs_1",
+                "summary":[{"type":"summary_text","text":"Checked the inputs."}]
+            }
+        });
+        assert!(map_openai_responses_event(&done, &mut state)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
