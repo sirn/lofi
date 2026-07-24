@@ -30,30 +30,13 @@ pub(crate) fn cap_exec_result(content: &str) -> String {
     cap_tool_result_to(content, MAX_EXEC_RESULT_BYTES)
 }
 
-/// The single LLM-facing tool schema: `exec`.
+/// Adapt the code sandbox's tool contract to the provider IR.
 #[must_use]
 pub fn exec_tool_schema() -> ToolSchema {
     ToolSchema {
-        name: "exec".to_string(),
-        description: "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash) and a `lofi.agent(prompt, opts?)` subagent helper. Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "TypeScript source. Top-level await/return supported."
-                },
-                "strings": {
-                    "type": "object",
-                    "description": "Named string constants exposed as the global `lofi_strings` object."
-                },
-                "display": {
-                    "type": "object",
-                    "description": "Optional display metadata; ignored by the runtime."
-                }
-            },
-            "required": ["code"]
-        }),
+        name: lofi_code::EXEC_TOOL_NAME.to_string(),
+        description: lofi_code::EXEC_TOOL_DESCRIPTION.to_string(),
+        input_schema: lofi_code::exec_tool_input_schema(),
     }
 }
 

@@ -1490,7 +1490,6 @@ dependencies = [
  "anyhow",
  "lofi-ui",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -1521,7 +1520,6 @@ name = "lofi-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytes",
  "dirs",
  "futures",
  "globset",
@@ -1530,10 +1528,8 @@ dependencies = [
  "lofi-error",
  "lofi-providers",
  "lofi-types",
- "mockito",
  "nix",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -8,19 +8,28 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
-use lofi_types::{
-    Api, AutoModelsConfig, ModelConfig, PricingConvention, ProviderConfig, ThinkingLevel,
-};
+use lofi_types::{AutoModelsConfig, ModelConfig, PricingConvention, ProviderConfig, ThinkingLevel};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use lofi_error::{Error, Result};
-use lofi_providers::apply_headers;
-use lofi_providers::ANTHROPIC_VERSION;
 
 use super::resolve_model_base_url;
+
+/// One provider's cached auto-discovery result with the wall-clock timestamp
+/// it was fetched at, so freshness is evaluated per-provider rather than by
+/// a single shared file mtime (which would let a long-TTL provider mask a
+/// short-TTL provider's stale data).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CachedDiscovery {
+    /// Epoch milliseconds when the entries were fetched.
+    pub fetched_at: u64,
+    /// `(id, ModelConfig)` pairs discovered for this provider.
+    pub entries: Vec<(String, ModelConfig)>,
+}
+
 /// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
@@ -122,27 +131,14 @@ pub(super) async fn fetch_auto_models(
         )
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Http(e.to_string()))?;
     let (api_key, headers) = lofi_providers::effective_credentials(pcfg);
     let key_arg = if api_key.is_empty() {
         None
     } else {
         Some(&api_key[..])
     };
-    let req = if am.auth {
-        authed_get(&client, pcfg.default_api(), key_arg, &url)
-    } else {
-        client.get(&url)
-    };
-    let req = apply_headers(req, &headers);
-
-    let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
-    let resp = lofi_providers::ensure_ok(resp).await?;
     let body: Value =
-        lofi_providers::read_json_capped(resp, lofi_providers::MAX_DISCOVERY_BODY_BYTES).await?;
+        lofi_providers::fetch_models(&url, pcfg.default_api(), key_arg, &headers, am.auth).await?;
 
     Ok(parse_auto_models(pcfg, am, &body))
 }
@@ -157,30 +153,6 @@ fn default_models_path(pcfg: &ProviderConfig) -> String {
         "/models".to_string()
     } else {
         format!("/{first}/models")
-    }
-}
-
-/// Build an authenticated GET request for `url` using the per-`Api` auth
-/// scheme. Mirrors the concrete transports' header wiring.
-fn authed_get(
-    client: &reqwest::Client,
-    api: Api,
-    api_key: Option<&str>,
-    url: &str,
-) -> reqwest::RequestBuilder {
-    let req = client.get(url);
-    let key = api_key.filter(|k| !k.is_empty());
-    match api {
-        Api::OpenAiCompletions | Api::OpenAiResponses => match key {
-            Some(k) => req.bearer_auth(k),
-            None => req,
-        },
-        Api::AnthropicMessages => match key {
-            Some(k) => req
-                .header("x-api-key", k)
-                .header("anthropic-version", ANTHROPIC_VERSION),
-            None => req.header("anthropic-version", ANTHROPIC_VERSION),
-        },
     }
 }
 
@@ -202,7 +174,7 @@ fn json_u64(v: &Value) -> Option<u64> {
 /// Navigate `body` to the array at `am.path` and map each entry to an
 /// `(id, ModelConfig)` pair. The per-model `api_type` is read from the
 /// field named by `am.api_type_field` (e.g. `preferred_api`), translated
-/// through `am.api_type_mappings` (remote vocabulary → internal [`Api`] id),
+/// through `am.api_type_mappings` (remote vocabulary → internal [`lofi_types::Api`] id),
 /// and stored as the model's `api_type` key so it resolves through the
 /// provider's `api_types` table exactly like a static model's override.
 /// When `api_type_field` is unset or the remote value has no mapping, the
@@ -324,27 +296,19 @@ fn navigate<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-/// Age of the cache file, or `None` if it does not exist. Used to decide
-/// whether the cached auto-models list is fresh enough to skip a network fetch.
-pub(super) fn cache_age(path: &Path) -> Result<Option<Duration>> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::Io(e)),
-    };
-    let mtime = meta.modified()?;
-    let elapsed = SystemTime::now()
-        .duration_since(mtime)
-        .unwrap_or(Duration::ZERO);
-    Ok(Some(elapsed))
+/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
 /// Write the per-provider auto-discovered model lists to `path` as pretty
-/// JSON. Each entry is an `[id, ModelConfig]` tuple so the id (which is the
-/// map key in the provider's `models` table) round-trips with its config.
+/// JSON. Each entry carries its fetch timestamp so freshness is checked
+/// per-provider rather than by a single shared file mtime.
 pub(super) fn write_auto_cache(
     path: &Path,
-    cache: &HashMap<String, Vec<(String, ModelConfig)>>,
+    cache: &HashMap<String, CachedDiscovery>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -357,7 +321,7 @@ pub(super) fn write_auto_cache(
 
 /// Read the cached auto-models map from `path`. A missing file yields an
 /// empty map (cache miss, not an error); parse failures propagate.
-pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, Vec<(String, ModelConfig)>>> {
+pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, CachedDiscovery>> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(HashMap::new()),
         Ok(s) => Ok(serde_json::from_str(&s)

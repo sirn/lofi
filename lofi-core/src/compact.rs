@@ -121,6 +121,7 @@ const MIN_SUMMARIZED: usize = 5;
 /// Returns None when there is nothing worth compacting (no live messages,
 /// or too few to fold).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compaction> {
     let path = store::active_path_from_leaf(events);
     if path.is_empty() {
@@ -1646,10 +1647,14 @@ mod tests {
             },
         });
         let new_messages = [
-            user("new one"), assistant("reply one"),
-            user("new two"), assistant("reply two"),
-            user("new three"), assistant("reply three"),
-            user("new four"), assistant("reply four"),
+            user("new one"),
+            assistant("reply one"),
+            user("new two"),
+            assistant("reply two"),
+            user("new three"),
+            assistant("reply three"),
+            user("new four"),
+            assistant("reply four"),
         ];
         let mut parent = "c1".to_string();
         for (i, message) in new_messages.into_iter().enumerate() {

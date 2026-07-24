@@ -129,13 +129,11 @@ fn cap_exec_result_uses_larger_outer_limit() {
 }
 
 #[test]
-fn exec_schema_shape() {
-    let s = exec_tool_schema();
-    assert_eq!(s.name, "exec");
-    assert_eq!(s.input_schema["properties"]["code"]["type"], "string");
-    assert_eq!(s.input_schema["required"][0], "code");
-    assert!(s.input_schema["properties"].get("strings").is_some());
-    assert!(s.input_schema["properties"].get("display").is_some());
+fn exec_schema_uses_code_contract() {
+    let schema = exec_tool_schema();
+    assert_eq!(schema.name, lofi_code::EXEC_TOOL_NAME);
+    assert_eq!(schema.description, lofi_code::EXEC_TOOL_DESCRIPTION);
+    assert_eq!(schema.input_schema, lofi_code::exec_tool_input_schema());
 }
 
 #[test]

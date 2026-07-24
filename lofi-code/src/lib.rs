@@ -60,6 +60,35 @@ pub mod tools;
 use crate::tools::BuiltinTools;
 pub use tools::BashEnv;
 
+/// Name of the code sandbox's LLM-facing tool.
+pub const EXEC_TOOL_NAME: &str = "exec";
+
+/// Description advertised for the code sandbox's LLM-facing tool.
+pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash) and a `lofi.agent(prompt, opts?)` subagent helper. Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
+
+/// JSON Schema for the code sandbox's tool input.
+#[must_use]
+pub fn exec_tool_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "TypeScript source. Top-level await/return supported."
+            },
+            "strings": {
+                "type": "object",
+                "description": "Named string constants exposed as the global `lofi_strings` object."
+            },
+            "display": {
+                "type": "object",
+                "description": "Optional display metadata; ignored by the runtime."
+            }
+        },
+        "required": ["code"]
+    })
+}
+
 /// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
@@ -651,6 +680,18 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn exec_tool_contract_shape() {
+        assert_eq!(EXEC_TOOL_NAME, "exec");
+        assert!(EXEC_TOOL_DESCRIPTION.contains("sandboxed QuickJS runtime"));
+        let schema = exec_tool_input_schema();
+        assert_eq!(schema["properties"]["code"]["type"], "string");
+        assert_eq!(schema["required"], serde_json::json!(["code"]));
+        assert!(schema["properties"].get("strings").is_some());
+        assert!(schema["properties"].get("display").is_some());
+    }
+
     use tempfile::tempdir;
 
     fn ctx(root: &std::path::Path) -> ExecCtx {
