@@ -945,12 +945,12 @@ impl Component for Thinking<'_> {
         let t = cx.theme;
         let body = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
         let content_w = cx.width.saturating_sub(2);
-        let text = self.block.text.trim();
+        let text = trim_reasoning_summary(&self.block.text);
         let working = self.block.elapsed.is_none() && cx.active_turn;
         if text.is_empty() && !working {
             return Vec::new();
         }
-        let mut out = render_markdown_body(text, t, cx.width, content_w, body, |_| {
+        let mut out = render_markdown_body(&text, t, cx.width, content_w, body, |_| {
             vec![Span::raw("  ")]
         });
         if working {
@@ -981,6 +981,28 @@ impl Component for Thinking<'_> {
         }
         out
     }
+}
+
+/// Remove standalone empty reasoning-summary parts from display. OpenAI uses
+/// `<!-- -->` as a placeholder, sometimes after a bold status header. Keep
+/// literal comments that are part of otherwise non-empty summary content.
+fn trim_reasoning_summary(text: &str) -> String {
+    text.split("\n\n")
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let header_end = part.strip_prefix("**").and_then(|after_open| {
+                after_open
+                    .find("**")
+                    .and_then(|close| (close > 0).then_some(close + 4))
+            });
+            let body = header_end.map_or(part, |header_end| &part[header_end..]);
+            (body.trim() != "<!-- -->").then_some(part)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ── Exec tree ────────────────────────────────────────────────────────────
@@ -1340,381 +1362,22 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
             if start == 0 {
                 return None;
             }
-            let content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
-            let count = content.split('\n').count();
-            if count == 0 {
-                return None;
-            }
-            let end = start + count as u64 - 1;
-            if end <= start {
-                return None;
-            }
-            Some(format!("(lines {start}-{end})"))
-        }
-        "bash" => {
-            let ms = v.get("duration_ms").and_then(serde_json::Value::as_u64)?;
-            if ms == 0 {
-                return None;
-            }
-            let dur = std::time::Duration::from_millis(ms);
-            Some(format!("(took {})", prim::fmt_duration(dur)))
-        }
-        _ => None,
-    }
-}
 
-/// A line diff of `old` vs `new` (what `edit` replaced), as `-`/`+`/` `
-/// prefixed lines. The renderer colors these by prefix.
-fn edit_diff(old: &str, new: &str) -> Vec<String> {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut out = Vec::new();
-    for change in diff.iter_all_changes() {
-        let prefix = match change.tag() {
-            ChangeTag::Delete => '-',
-            ChangeTag::Insert => '+',
-            ChangeTag::Equal => ' ',
-        };
-        let val = change.value();
-        let line = val.strip_suffix('\n').unwrap_or(val);
-        out.push(format!("{prefix}{line}"));
-    }
-    out
-}
+#[cfg(test)]
+mod tests {
+    use super::trim_reasoning_summary;
 
-impl Component for ExecBlockBranch<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let w = cx.width;
-        let bg = self.bg;
-        let working = !self.nt.done && cx.active_turn;
-        let mut out = Vec::new();
-        let exec_cont = if self.is_last { "  " } else { "│ " };
-
-        // Header: "Tool <name> <args> <suffix>" wrapped to fit, preserving
-        // per-part colors (muted label, info name, subtle args/suffix).
-        let mut content = vec![
-            prim::muted("Tool ".to_string(), t, bg),
-            Span::styled(self.nt.name.clone(), Style::new().fg(t.info).bg(bg)),
-        ];
-        if !self.nt.args.is_empty() {
-            content.push(prim::subtle(format!(" {}", self.nt.args), t, bg));
-        }
-        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
-            content.push(prim::subtle(format!(" {note}"), t, bg));
-        }
-        let header_deco = vec![
-            prim::gutter(bg),
-            prim::branch(t, bg, self.is_last),
-            prim::status_icon(t, bg, working, self.nt.is_error, cx.spinner()),
-        ];
-        let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
-        let cont_deco = vec![
-            prim::gutter(bg),
-            Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-            Span::styled(" ".repeat(name_w), Style::new().bg(bg)),
-        ];
-        out.extend(prim::rtile_wrapped(header_deco, &cont_deco, content, bg, w));
-
-        let Some(result) = &self.nt.result else {
-            return out;
-        };
-        if result.is_empty() {
-            return out;
-        }
-        // In non-verbose mode, hide read-only results for a cleaner
-        // transcript — file reads/greps/finds/ls clutter the view. Mutating
-        // tools (bash, write, edit) keep their result so the user sees the
-        // outcome of an action; errors stay visible regardless so a failure
-        // is never silently swallowed.
-        if !cx.app.verbose
-            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit")
-            && !self.nt.is_error
-        {
-            return out;
-        }
-
-        let indent = 2 + 2 + 2; // gutter + exec-rail col + own rail
-                                // Each native tool returns structured output; interpret it per tool to
-                                // derive the body lines (and how to label / color them).
-        let body = native_body(self.nt);
-        let all: Vec<&str> = body.lines.iter().map(String::as_str).collect();
-        let numbered = body.numbered;
-        let start = body.start_line;
-        let total = all.len();
-        let lw = total.to_string().len().max(3);
-        let avail = w
-            .saturating_sub(indent)
-            .saturating_sub(if numbered { lw + 1 } else { 0 });
-        let limit = if cx.app.verbose { total } else { PREVIEW_LINES };
-        let hidden = total.saturating_sub(limit);
-        let body_fg = if self.nt.is_error { t.error } else { t.muted };
-        let blank_n = " ".repeat(lw + 1);
-        let num_style = Style::new().fg(t.subtle).bg(bg);
-        let numbered_style = Style::new().fg(t.fg).bg(bg);
-        let plain_style = Style::new().fg(body_fg).bg(bg);
-        let diff_del = Style::new().fg(t.error).bg(bg);
-        let diff_add = Style::new().fg(t.success).bg(bg);
-        let diff_ctx = Style::new().fg(t.muted).bg(bg);
-        let base_deco = vec![
-            prim::gutter(bg),
-            Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-            prim::rail(t, bg),
-        ];
-        // Wrap each result line preserving its formatting. Numbered tools
-        // (read/view/bash_read) label from `start_line`; an edit diff colors
-        // each line by its `-`/`+`/` ` prefix; `hidden` counts logical lines
-        // so the preview cap stays accurate.
-        for (i, line) in all.iter().take(limit).enumerate() {
-            let n = format!("{:>lw$} ", start + i, lw = lw);
-            let content_style = if body.is_diff {
-                match line.chars().next() {
-                    Some('-') => diff_del,
-                    Some('+') => diff_add,
-                    _ => diff_ctx,
-                }
-            } else if numbered {
-                numbered_style
-            } else {
-                plain_style
-            };
-            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
-                let mut deco = base_deco.clone();
-                let content = if numbered {
-                    deco.push(if j == 0 {
-                        Span::styled(n.clone(), num_style)
-                    } else {
-                        Span::styled(blank_n.clone(), num_style)
-                    });
-                    vec![Span::styled(seg, content_style)]
-                } else {
-                    vec![Span::styled(seg, content_style)]
-                };
-                out.push(prim::rtile(deco, content, bg, w));
-            }
-        }
-        if hidden > 0 {
-            let cap = format!("({hidden} lines hidden)");
-            out.push(prim::rtile(
-                vec![
-                    prim::gutter(bg),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-                    Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
-                ],
-                vec![Span::styled(cap, Style::new().fg(t.subtle).bg(bg))],
-                bg,
-                w,
-            ));
-        }
-        if let Some(notice) = body.notice {
-            out.push(prim::rtile(
-                vec![
-                    prim::gutter(bg),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-                    Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
-                ],
-                vec![Span::styled(notice, Style::new().fg(t.subtle).bg(bg))],
-                bg,
-                w,
-            ));
-        }
-        out
-    }
-}
-
-// ── Non-exec tool ────────────────────────────────────────────────────────
-
-/// A non-`exec` tool — e.g. a hallucinated name the model emitted despite
-/// only `exec` being advertised — rendered as a single status line without
-/// the tree. Not reached in normal operation; kept as a defensive fallback.
-struct ToolLine<'a> {
-    tool: &'a ToolCall,
-}
-
-impl Component for ToolLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let working = !self.tool.done && cx.active_turn;
-        let icon = prim::status_icon(t, Color::Reset, working, self.tool.is_error, cx.spinner());
-        let mut content = vec![Span::styled(
-            self.tool.name.clone(),
-            Style::new().fg(t.info),
-        )];
-        if let Some(first) = self.tool.input.split('\n').next() {
-            if !first.is_empty() {
-                content.push(prim::subtle(format!(" {first}"), t, Color::Reset));
-            }
-        }
-        vec![prim::rline(vec![Span::raw("  "), icon], content)]
-    }
-}
-
-// ── Fatal error ─────────────────────────────────────────────────────────
-
-/// A fatal error line: `✗ <message>`.
-struct ErrorLine<'a> {
-    msg: &'a str,
-}
-
-impl Component for ErrorLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let err = Style::new().fg(t.error);
-        // `✗ ` lead on the first line, a 2-space indent on continuations so
-        // wrapped rows align under the message. Long messages used to be
-        // clipped at the terminal edge on a single line.
-        let content_w = cx.width.saturating_sub(4); // "  " + "✗ "
-        let mut out = Vec::new();
-        for (i, seg) in prim::wrap(self.msg, content_w).iter().enumerate() {
-            let deco = if i == 0 {
-                vec![Span::raw("  "), Span::styled("✗ ", err)]
-            } else {
-                vec![Span::raw("  "), Span::raw("  ")]
-            };
-            out.push(prim::rline(deco, vec![Span::styled(seg.clone(), err)]));
-        }
-        out
-    }
-}
-
-// ── Turn-end rule ─────────────────────────────────────────────────────────
-
-/// Turn-end separator: `Done in Ns with <label>`. Appended to a turn when
-/// its run finishes. Carries only model, level, and duration so the line
-/// never overflows; nothing is wrapped below it.
-struct TurnEnd {
-    label: String,
-    elapsed: Duration,
-}
-
-impl Component for TurnEnd {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(self.elapsed);
-        vec![prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![
-                Span::styled(format!("Done in {dur} with "), Style::new().fg(t.subtle)),
-                Span::styled(self.label.clone(), Style::new().fg(t.muted)),
-            ],
-            vec![],
-        )]
-    }
-}
-
-/// Turn-failed separator. Line 1 carries model, level, and duration only
-/// (`◇ Failed in Ns with <label>`) so the status never overflows; the provider
-/// error is wrapped below it, indented and word-broken with a wide-char
-/// fallback. Mirrors [`TurnEnd`] but signals the turn did not complete;
-/// the turn's partial content precedes it on the same branch.
-///
-/// When the error is empty the failure was already surfaced as a fatal `✗`
-/// line (see [`ErrorLine`]) earlier in the turn, so nothing is repeated
-/// below the header. The builder drops the text in that case rather than
-/// rendering a redundant copy.
-struct TurnFailed {
-    label: String,
-    elapsed: Duration,
-    error: String,
-}
-
-impl Component for TurnFailed {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(self.elapsed);
-        let mut out = vec![prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.error)),
-            ],
-            vec![
-                Span::styled(format!("Failed in {dur} with "), Style::new().fg(t.error)),
-                Span::styled(self.label.clone(), Style::new().fg(t.error)),
-            ],
-            vec![],
-        )];
-        let err = self.error.trim();
-        if !err.is_empty() {
-            // Wrap below the header so a long provider error isn't clipped
-            // at the terminal edge. Indented to align under the label;
-            // blank source lines are preserved as blank wrapped lines.
-            let indent = "    ";
-            let content_w = cx.width.saturating_sub(indent.len());
-            for raw in err.split('\n') {
-                let line = raw.trim_end();
-                if line.is_empty() {
-                    out.push(prim::rblank());
-                } else {
-                    for seg in prim::wrap(line, content_w) {
-                        out.push(prim::render(
-                            vec![Span::raw(indent)],
-                            vec![Span::styled(seg, Style::new().fg(t.error))],
-                            vec![],
-                        ));
-                    }
-                }
-            }
-        }
-        out
-    }
-}
-
-/// Compaction marker: `◇ Compacted N messages · kept M` in the muted tint,
-/// appended to a turn when `/compact` (or the auto-trigger) folds the
-/// older history into a summary. Under `/verbose` the folded summary text
-/// is expanded below the marker (soft-wrapped, muted) so the fold can be
-/// inspected without leaving the transcript.
-struct CompactionLine {
-    summarized: usize,
-    kept: usize,
-    summary: String,
-}
-
-impl Component for CompactionLine {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let body = format!(
-            "Compacted {} messages · kept {}",
-            self.summarized, self.kept
+    #[test]
+    fn reasoning_summary_trims_empty_placeholder_parts() {
+        let text = "**Checking**\n<!-- -->\n\nActual <!-- --> content.\n\n**Done**\nResult";
+        assert_eq!(
+            trim_reasoning_summary(text),
+            "Actual <!-- --> content.\n\n**Done**\nResult"
         );
-        let marker = prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![Span::styled(body, Style::new().fg(t.muted))],
-            vec![],
-        );
-        let mut out = vec![marker];
-        if cx.app.verbose {
-            let text = self.summary.trim();
-            if !text.is_empty() {
-                let indent = "    ";
-                let content_w = cx.width.saturating_sub(indent.len());
-                for raw in text.split('\n') {
-                    let line = raw.trim_end();
-                    if line.is_empty() {
-                        out.push(prim::rblank());
-                    } else {
-                        for seg in prim::wrap(line, content_w) {
-                            out.push(prim::render(
-                                vec![Span::raw(indent)],
-                                vec![Span::styled(seg, Style::new().fg(t.muted))],
-                                vec![],
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        out
+    }
+
+    #[test]
+    fn reasoning_summary_trims_plain_empty_placeholder() {
+        assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
     }
 }
-
-// `active_indicator` is re-exported for the working indicator in the chrome;
-// keep the import here so the component module can surface it if needed.
-#[allow(unused_imports)]
-use active_indicator as _;
