@@ -277,22 +277,65 @@ fn render_markdown_body(
                 );
                 row += 1;
             }
-        } else if let Some(q) = trimmed.strip_prefix("> ") {
-            let src: Arc<str> = Arc::from(trimmed);
-            let rows = wrap_with_map(q, 2, trimmed.len(), content_w);
-            for (i, (seg, map)) in rows.into_iter().enumerate() {
-                out.push(
-                    prim::rline(
-                        lead_fn(row),
-                        vec![Span::styled(
-                            seg,
-                            Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
-                        )],
-                    )
-                    .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                );
-                row += 1;
+        } else if trimmed == ">" || trimmed.starts_with("> ") {
+            // Group consecutive blockquote lines.
+            let start = idx;
+            while idx < lines.len()
+                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
+            {
+                idx += 1;
             }
+            let q_lines = &lines[start..idx];
+            let quote_style = Style::new().fg(t.muted);
+            let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
+            for qraw in q_lines.iter() {
+                let qtrimmed = qraw.trim_end();
+                // Strip "> " or ">" to get the body.
+                let body = if let Some(b) = qtrimmed.strip_prefix("> ") {
+                    b
+                } else {
+                    // Bare ">" — empty body line.
+                    ""
+                };
+                let src: Arc<str> = Arc::from(qtrimmed);
+                if body.is_empty() {
+                    // Empty quote line (bare ">"): just the bar.  Build
+                    // the RenderLine directly so the content span is
+                    // non-empty (a thin space) with a 2-entry map snapping
+                    // to the full ">" source — selection_text yanks the
+                    // raw markdown.
+                    let map = vec![0, src.len()];
+                    let mut lead = lead_fn(row);
+                    lead.push(bar.clone());
+                    let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+                    let content_span = Span::styled("\u{2009}", quote_style); // thin space
+                    let content_len = content_span.content.chars().count();
+                    let mut all = lead.clone();
+                    all.push(content_span);
+                    out.push(RenderLine {
+                        line: Line::from(all),
+                        content: (deco_len, deco_len + content_len),
+                        raw: Some(RawLine::new(src, map, true)),
+                    });
+                    row += 1;
+                    continue;
+                }
+                let prefix_len = qtrimmed.len() - body.len(); // length of "> " or ">"
+                let rows = wrap_with_map(body, prefix_len, qtrimmed.len(), content_w.saturating_sub(2));
+                for (i, (seg, map)) in rows.into_iter().enumerate() {
+                    let mut lead = lead_fn(row);
+                    lead.push(bar.clone());
+                    out.push(
+                        prim::rline(
+                            lead,
+                            vec![Span::styled(seg, quote_style)],
+                        )
+                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
+                    );
+                    row += 1;
+                }
+            }
+            continue;
         } else {
             let mapped = inline_spans_mapped(raw, t, base_style);
             let lead_ws = mapped

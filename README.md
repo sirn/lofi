@@ -213,6 +213,9 @@ default_model = "openai/gpt-4o"  # optional; "provider/id" or bare id
 thinking_level = "medium"        # optional
 thinking_levels = ["low", "medium", "high", "xhigh"]  # optional
 
+[agent.subagents]                # optional
+max_concurrent = 3               # 0 = unlimited (default)
+
 [providers.<name>]
 base_url = "..."                 # host root; optional (defaults per api_type)
 api_type = "openai-completions"  # default protocol (internal api id)

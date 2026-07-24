@@ -68,6 +68,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        subagent_semaphore: None,
     }
 }
 
@@ -283,6 +284,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        subagent_semaphore: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];

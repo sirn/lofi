@@ -268,6 +268,9 @@ pub struct Agent {
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
     skills_dir: Option<PathBuf>,
+    /// Throttle for concurrent subagents: when set, `lofi.agent()` calls
+    /// acquire a permit before running. `None` means no limit.
+    subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Agent {
@@ -302,6 +305,7 @@ impl Agent {
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
             skills_dir: None,
+            subagent_semaphore: None,
         }
     }
 
@@ -328,6 +332,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
+            subagent_semaphore: self.subagent_semaphore.clone(),
         }
     }
 
@@ -353,6 +358,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
+            subagent_semaphore: self.subagent_semaphore.clone(),
         }
     }
 
@@ -375,6 +381,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir,
+            subagent_semaphore: self.subagent_semaphore.clone(),
         }
     }
 
@@ -398,6 +405,16 @@ impl Agent {
     pub fn with_auto_mode(&self, auto_mode: lofi_code::AutoModeFn) -> Self {
         Self {
             auto_mode: Some(auto_mode),
+            ..self.clone()
+        }
+    }
+
+    /// Set the subagent concurrency limit. When non-zero, at most that many
+    /// `lofi.agent()` calls run at once; the rest wait for a permit.
+    #[must_use]
+    pub fn with_subagent_limit(&self, max: usize) -> Self {
+        Self {
+            subagent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(max))),
             ..self.clone()
         }
     }

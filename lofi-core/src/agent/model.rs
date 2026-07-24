@@ -84,6 +84,12 @@ pub async fn build_agent(
     } else {
         agent
     };
+    // Throttle concurrent subagents when configured.
+    let agent = if config.agent.subagents.max_concurrent > 0 {
+        agent.with_subagent_limit(config.agent.subagents.max_concurrent)
+    } else {
+        agent
+    };
     Ok((agent, model_obj, level, config, registry))
 }
 

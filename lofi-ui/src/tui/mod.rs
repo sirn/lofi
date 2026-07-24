@@ -798,6 +798,10 @@ pub(crate) struct App {
     /// When the yank-to-clipboard badge was last triggered; shown on the
     /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
+    /// Cursor position saved at yank time so the next `enter_nav` can jump
+    /// back to it instead of the bottom of the viewport. `None` when the
+    /// cursor was on the last line (follow transcript) or no yank happened.
+    yank_cursor: Option<(usize, usize)>,
     /// Transient status/error notification from a slash command (e.g.
     /// `/session` with no session, `/tree` with no session file, an unknown
     /// command). Surfaced on the rule line's left edge instead of as a chat

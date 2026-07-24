@@ -1029,6 +1029,20 @@ pub struct AgentConfig {
     /// applies).
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
+    /// Subagent concurrency settings (`[agent.subagents]`).
+    #[serde(default)]
+    pub subagents: SubagentConfig,
+}
+
+/// Subagent settings (`[agent.subagents]`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    /// Maximum number of subagents (`lofi.agent()` calls) that may run
+    /// concurrently. When `0` (the default) there is no limit — every
+    /// `lofi.agent()` call proceeds immediately. Set to e.g. `3` to
+    /// throttle: excess calls wait for a slot before starting.
+    #[serde(default)]
+    pub max_concurrent: usize,
 }
 
 /// Compaction settings.

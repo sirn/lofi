@@ -443,6 +443,79 @@ fn yank_code_block_preserves_indent() {
 }
 
 #[test]
+fn selection_blockquote_to_text_preserves_blank() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "> Quote line.\n\nNormal text after.";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    for (i, rl) in rls.iter().enumerate() {
+        let r: String = rl.line.spans.iter().map(|s| s.content.as_ref()).collect();
+        eprintln!("line {}: rendered={:?} content={:?} raw={:?} raw_src={:?} hard_break={:?}", i, r, rl.content, rl.raw.is_some(), rl.raw.as_ref().map(|r| r.source.as_ref()), rl.raw.as_ref().map(|r| r.hard_break));
+    }
+    let n = rls.len();
+    feed_lines(&mut a, &rls);
+    // Select all content lines (skip marker line 0 and gap line 1).
+    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    let text = a.selection_text().expect("selection text");
+    eprintln!("yanked: {:?}", text);
+    assert_eq!(text, "> Quote line.\n\nNormal text after.");
+}
+
+#[test]
+fn blockquote_renders_with_bar_and_empty_lines() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "> Line one\n>\n> Line three";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    // Every quote line should have the bar character.
+    let quote_lines: Vec<String> = rls.iter().skip(2).map(|rl| {
+        rl.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }).collect();
+    assert!(quote_lines.iter().any(|s| s.contains("Line one") && s.contains("▎")),
+        "Line one should have bar: {:?}", quote_lines);
+    // The bare > should produce a line with just the bar (not dropped).
+    assert!(quote_lines.iter().any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
+        "Empty quote line should render bar only: {:?}", quote_lines);
+    assert!(quote_lines.iter().any(|s| s.contains("Line three") && s.contains("▎")),
+        "Line three should have bar: {:?}", quote_lines);
+    // Yanking the full quote should preserve the bare ">" line.
+    let n = rls.len();
+    feed_lines(&mut a, &rls);
+    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    let text = a.selection_text().expect("selection text");
+    assert_eq!(text, "> Line one\n>\n> Line three");
+}
+
+#[test]
+fn selection_blank_line_between_paragraphs_preserved() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let md = "First paragraph.\n\nSecond paragraph.";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let turn = &a.turns[0];
+    let cx = Cx { app: &a, theme: a.theme, width: 120, active_turn: false };
+    let rls = render_turn_lines(&cx, turn);
+    let n = rls.len();
+    feed_lines(&mut a, &rls);
+    // Select all content lines (skip turn marker at line 0 and gap at 1).
+    a.sel = Some(Selection { start: (2, 0), end: (n - 1, a.log_vis[n - 1].rendered.chars().count()) });
+    let text = a.selection_text().expect("selection text");
+    assert_eq!(text, "First paragraph.\n\nSecond paragraph.");
+}
+
+#[test]
 fn selection_nested_list_preserves_indent() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;

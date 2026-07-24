@@ -12,31 +12,48 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let total = picker.entries.len();
     let title = " Resume a session ";
+
+    // Two lines per entry: header line + preview line.
     let items: Vec<ListItem> = picker
         .entries
         .iter()
         .map(|e| {
             let id = e.id();
-            ListItem::new(format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model.label()))
+            let header = format!("{}  ({} msgs, {})", id, e.message_count, e.meta.model.label());
+            let preview = if e.last_message.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", e.last_message)
+            };
+            ListItem::new(vec![
+                Line::from(Span::styled(header, Style::new().fg(t.fg))),
+                Line::from(Span::styled(preview, Style::new().fg(t.muted))),
+            ])
         })
         .collect();
     let content_w = picker
         .entries
         .iter()
         .map(|e| {
-            prim::width(&format!(
+            let header_w = prim::width(&format!(
                 "{}  ({} msgs, {})",
                 e.id(),
                 e.message_count,
                 e.meta.model.label()
-            ))
+            ));
+            let preview_w = if e.last_message.is_empty() {
+                0
+            } else {
+                prim::width(&format!("  {}", e.last_message))
+            };
+            header_w.max(preview_w)
         })
         .max()
         .unwrap_or(0);
     let w = u16::try_from(content_w.max(prim::width(title)) + 2)
         .unwrap_or(40)
         .min(area.width);
-    let h = u16::try_from(total.min(12) + 2)
+    let h = u16::try_from(total.min(8) * 2 + 2)
         .unwrap_or(14)
         .min(area.height);
     let vert = Layout::vertical([Constraint::Min(0), Constraint::Length(h), Constraint::Min(0)])
@@ -53,7 +70,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
-    let need_sb = total > inner.height as usize;
+    let need_sb = total * 2 > inner.height as usize;
     let content = if need_sb {
         Rect {
             width: inner.width.saturating_sub(1),

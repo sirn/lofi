@@ -56,6 +56,11 @@ pub struct SessionEntry {
     pub path: PathBuf,
     /// Number of message lines (excluding the header).
     pub message_count: usize,
+    /// Wall-clock time of the file's last modification (last activity).
+    pub last_active: std::time::SystemTime,
+    /// One-line preview of the last meaningful event (user prompt,
+    /// assistant text, tool result, or compaction marker).
+    pub last_message: String,
 }
 
 impl SessionEntry {
@@ -177,8 +182,8 @@ pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
             entries.push(entry);
         }
     }
-    // Newest first: descending by the id (timestamp-led stem).
-    entries.sort_by_key(|e| std::cmp::Reverse(e.id()));
+    // Newest activity first: descending by file mtime (last write).
+    entries.sort_by_key(|e| std::cmp::Reverse(e.last_active));
     Ok(entries)
 }
 
@@ -472,6 +477,54 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
 /// Parse a session file into a [`SessionEntry`] (metadata + message count),
 /// or `None` if the file is not a valid session. Only `Message` events are
 /// counted, so timing/turn-end lines do not inflate the "msgs" total.
+/// One-line preview of a session event for the `/resume` picker.
+fn entry_preview(kind: &SessionEventKind) -> String {
+    use lofi_types::Role;
+    match kind {
+        SessionEventKind::Message(m) => {
+            let text: String = m
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    lofi_types::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let prefix = match m.role {
+                Role::User => "user: ",
+                Role::Assistant => "agent: ",
+                _ => "",
+            };
+            format!("{prefix}{}", one_line(&text))
+        }
+        SessionEventKind::TurnEnd { .. } => String::new(),
+        SessionEventKind::TurnFailed { error, .. } => {
+            format!("agent: {} (failed)", one_line(error))
+        }
+        SessionEventKind::Compaction { summarized, kept, .. } => {
+            format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}")
+        }
+        SessionEventKind::NativeTool(rec) => {
+            format!("exec: {} {}", rec.name, one_line(&rec.args))
+        }
+        SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {
+            String::new()
+        }
+    }
+}
+
+/// Truncate to a single line and cap its length for a compact preview.
+fn one_line(s: &str) -> String {
+    let line = s.split('\n').next().unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() > 80 {
+        format!("{}\u{2026}", chars[..80].iter().collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
 fn parse_entry(path: &Path) -> Option<SessionEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
@@ -479,16 +532,36 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
     if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return None;
     }
-    let count = lines
-        .filter(|l| !l.is_empty())
-        .filter(|l| {
-            parse_event(l).is_ok_and(|ev| matches!(ev.kind, SessionEventKind::Message(_)))
-        })
-        .count();
+    let mut count = 0usize;
+    let mut last_message = String::new();
+    for l in lines {
+        if l.is_empty() {
+            continue;
+        }
+        let ev = match parse_event(l) {
+            Ok(ev) => ev,
+            Err(_) => continue,
+        };
+        if matches!(ev.kind, SessionEventKind::Message(_)) {
+            count += 1;
+        }
+        // Track the last user/agent message or compaction — not timing/
+        // TurnEnd metadata, which is always the final event and carries
+        // no useful preview text.
+        let preview = entry_preview(&ev.kind);
+        if !preview.is_empty() {
+            last_message = preview;
+        }
+    }
+    let last_active = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     Some(SessionEntry {
         meta: header.meta,
         path: path.to_path_buf(),
         message_count: count,
+        last_active,
+        last_message,
     })
 }
 
@@ -812,12 +885,14 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/listy");
         let p1 = store.create(cwd, &"m".into()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
         let mut batch = [ev(user("a"))];
         append_events(&p1, &mut batch, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let p2 = store.create(cwd, &"m".into()).unwrap();
         let list = store.list_for_cwd(cwd).unwrap();
         assert_eq!(list.len(), 2);
+        // p2 was created after p1 was last written, so p2 is most recently
+        // active and should be listed first.
         assert_eq!(list[0].path, p2);
         assert_eq!(list[1].path, p1);
         assert_eq!(list[1].message_count, 1);

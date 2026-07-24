@@ -884,9 +884,17 @@ impl Agent {
     /// the `lofi.agent()` return value inside the sandbox.
     fn make_agent_fn(&self) -> AgentFn {
         let self_clone = self.clone();
+        let sem = self.subagent_semaphore.clone();
         Arc::new(move |req: lofi_code::AgentRequest| {
             let agent = self_clone.clone();
+            let sem = sem.clone();
             Box::pin(async move {
+                // Acquire a concurrency permit before starting the subagent.
+                // When no semaphore is configured this is a no-op.
+                let _permit = match &sem {
+                    Some(s) => Some(s.acquire().await),
+                    None => None,
+                };
                 // Honor a caller-supplied `timeoutMs` (per round-trip); fall
                 // back to the default. A total deadline of 20× the per-round
                 // timeout bounds runaway loops that complete within each call.

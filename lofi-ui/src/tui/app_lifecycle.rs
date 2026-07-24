@@ -73,6 +73,7 @@ impl App {
             mode: Mode::Input,
             pending_confirms: Vec::new(),
             yank_notify: None,
+            yank_cursor: None,
             notify: None,
             nav_cursor: 0,
             nav_col: 0,

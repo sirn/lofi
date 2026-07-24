@@ -8,15 +8,30 @@ impl App {
     pub(super) fn enter_nav(&mut self) {
         self.mode = Mode::Navigate;
         self.sel = None;
-        self.pinned = false;
-        self.top_line = self.log_off;
-        let last = self
-            .log_off
-            .saturating_add(self.log_view_h)
-            .saturating_sub(1);
-        self.nav_cursor = last.min(self.log_total.saturating_sub(1));
-        // Park the column at the content start; h/l snap it into range.
-        self.nav_col = 0;
+        // If the user yanked from a non-last-line position, jump back to
+        // that line so they can continue reading from where they were.
+        // Clamp to the current transcript bounds in case lines were added.
+        if let Some((cursor, col)) = self.yank_cursor.take() {
+            let total = self.log_total;
+            let last = total.saturating_sub(1);
+            self.nav_cursor = cursor.min(last);
+            self.nav_col = col;
+            // Un-pin so the viewport stays where the cursor is, not the
+            // bottom of the transcript. The render loop will clamp the
+            // viewport to keep the cursor visible.
+            self.pinned = false;
+            self.top_line = self.nav_cursor.saturating_sub(self.log_view_h / 2);
+        } else {
+            self.pinned = false;
+            self.top_line = self.log_off;
+            let last = self
+                .log_off
+                .saturating_add(self.log_view_h)
+                .saturating_sub(1);
+            self.nav_cursor = last.min(self.log_total.saturating_sub(1));
+            // Park the column at the content start; h/l snap it into range.
+            self.nav_col = 0;
+        }
     }
 
     /// Return to Input mode, dropping any selection.
@@ -465,6 +480,7 @@ impl App {
     /// Copy the current selection to the system clipboard via OSC 52.
     pub(super) fn yank_selection(&mut self) {
         if let Some(text) = self.selection_text() {
+            self.save_yank_cursor();
             self.yank_text(&text);
         }
     }
@@ -473,7 +489,20 @@ impl App {
     /// Used by Navigate's `y`.
     pub(super) fn yank_line(&mut self) {
         if let Some(text) = self.current_line_text() {
+            self.save_yank_cursor();
             self.yank_text(&text);
+        }
+    }
+
+    /// Save the current cursor position so the next `enter_nav` can jump
+    /// back to it. Not saved when the cursor is on the last line (the
+    /// transcript-follow case) — in that case `enter_nav` follows as usual.
+    fn save_yank_cursor(&mut self) {
+ let last = self.log_total.saturating_sub(1);
+        if self.nav_cursor < last {
+            self.yank_cursor = Some((self.nav_cursor, self.nav_col));
+        } else {
+            self.yank_cursor = None;
         }
     }
 
@@ -617,7 +646,13 @@ impl App {
                         prev_src = Some(rl.source.clone());
                         continue;
                     }
-                    // Empty contribution — still track the source for contiguity.
+                    // Empty contribution — still track the source for
+                    // contiguity.  A hard-break blank line in the middle
+                    // of a selection must emit a separator so it is not
+                    // silently collapsed into the next line.
+                    if rl.hard_break && !out.is_empty() {
+                        out.push('\n');
+                    }
                     prev_src = if rl.hard_break { None } else { Some(rl.source.clone()) };
                     continue;
                 }
@@ -633,6 +668,14 @@ impl App {
                     out.push_str(&rl.source);
                     prev_src = Some(rl.source.clone());
                 } else {
+                    // Empty source and either no content selected (a
+                    // blank paragraph separator) or decoration-only grid
+                    // chars (a table border).  The former must emit a
+                    // separator so the blank line survives; the latter
+                    // is suppressed.
+                    if cs >= ce && rl.hard_break && !out.is_empty() {
+                        out.push('\n');
+                    }
                     prev_src = None;
                 }
                 continue;
