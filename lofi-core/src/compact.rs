@@ -512,6 +512,7 @@ fn build_summary(blocks: &[Block]) -> String {
     let prefs = extract_preferences(blocks);
     let files = extract_files(blocks);
     let commits = extract_commits(blocks);
+    let apis = extract_apis_used(blocks);
     let outstanding = extract_outstanding(blocks);
     let brief = build_brief(blocks);
 
@@ -520,6 +521,7 @@ fn build_summary(blocks: &[Block]) -> String {
         section("User Preferences", &prefs),
         section("Files And Changes", &files),
         section("Commits", &commits),
+        section("APIs Used", &apis),
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -691,6 +693,52 @@ fn first_hash(text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
+/// APIs Used: enumerate every lofi.* tool actually called in the session
+/// (from NativeToolRecord names) plus the exec tool itself, so the model
+/// retains knowledge of how to call tools after compaction. Each entry is a
+/// single line: `lofi.<name>` with a brief reminder of its purpose.
+fn extract_apis_used(blocks: &[Block]) -> Vec<String> {
+    /// Short descriptions for each known native tool name.
+    const DESCRIPTIONS: &[(&str, &str)] = &[
+        ("read", "lofi.read({path}) — read a file (returns {output})"),
+        ("ls", "lofi.ls({path}) — list directory entries"),
+        ("find", "lofi.find({path, pattern?}) — find files by glob"),
+        ("grep", "lofi.grep({pattern, path?, glob?}) — search file contents (regex)"),
+        ("write", "lofi.write({path, text}) — write a file (creates parents)"),
+        ("edit", "lofi.edit({path, old, new}) — find-and-replace in a file"),
+        ("bash", "lofi.bash({cmd, ...}) — run a shell command (returns {output, ...})"),
+        ("agent", "lofi.agent(prompt, opts?) — spawn a subagent for a subtask"),
+        ("skills", "lofi.skills() — list available skills"),
+        ("skill", "lofi.skill(name) — read a specific skill's instructions"),
+        ("docs", "lofi.docs(name?) — read project documentation"),
+        ("docs_search", "lofi.docs_search(query) — search project docs"),
+        ("recall", "lofi.recall({query?, scope?, ...}) — search session history"),
+        ("result", "lofi.result(value) — set the exec return value"),
+    ];
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    // The exec tool itself is always used (it's the only LLM-facing tool).
+    out.push("exec({code, strings?, display?}) — the TypeScript sandbox tool. Call lofi.* methods inside it.".to_string());
+    seen.insert("exec".to_string());
+
+    for b in blocks {
+        let Block::ToolCall { native, .. } = b else { continue };
+        for rec in native {
+            if seen.insert(rec.name.clone()) {
+                if let Some((_, desc)) = DESCRIPTIONS.iter().find(|(n, _)| *n == rec.name) {
+                    out.push((*desc).to_string());
+                } else {
+                    out.push(format!("lofi.{}({})", rec.name, rec.args));
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// The blocker regex. The pattern is a compile-time constant so this
 /// always succeeds; the fallback is defensive only.
 #[allow(clippy::unwrap_used)]
@@ -824,6 +872,7 @@ const SECTION_HEADERS: &[&str] = &[
     "User Preferences",
     "Files And Changes",
     "Commits",
+    "APIs Used",
     "Outstanding Context",
 ];
 

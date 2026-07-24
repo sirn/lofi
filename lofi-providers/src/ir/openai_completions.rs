@@ -56,8 +56,8 @@ pub fn build_openai_chat_request(
     req
 }
 
-/// Map a thinking level to an `OpenAI` `reasoning.effort` / `reasoning_effort`
-/// value. `Off` disables thinking (returns `None` so the field is omitted);
+/// Map a thinking level to an `OpenAI` `reasoning_effort` value. `Off`
+/// disables thinking (returns `None` so the field is omitted);
 /// `XHigh` clamps to `high` since `OpenAI` exposes no higher step.
 fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {

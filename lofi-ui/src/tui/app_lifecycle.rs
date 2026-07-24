@@ -559,7 +559,11 @@ impl App {
         let Some(usage) = self.status_usage else { return };
         let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
         let Some(threshold) = self.compaction.soft_threshold(limit) else { return };
-        let current = usage.input_tokens;
+        // Use the full prompt size (non-cached + cached) so heavy prompt
+        // caching doesn't mask the real context size. Without this, a session
+        // with 150k cached tokens and 9k non-cached would read as 9k — well
+        // below the threshold — and never auto-compact.
+        let current = usage.input_tokens + usage.cache_read_tokens;
         // `was_below` is true when the prior round was at or below the
         // threshold (or there was no prior reading). Only an upward
         // crossing — prev at/below, current above — triggers a compaction,
@@ -673,3 +677,4 @@ fn parse_recall_page(rest: &str) -> usize {
         .unwrap_or(1)
         .max(1)
 }
+
