@@ -9,10 +9,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::tui::theme::{active_indicator, user_indicator, Theme};
+use crate::tui::theme::{active_indicator, agent_indicator, user_indicator, Theme};
 use crate::tui::{App, Block, NativeTool, ThinkingBlock, ToolCall, Turn};
 
 use super::component::{Component, Cx, Stack};
@@ -115,8 +115,9 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
 
 // ── User message ─────────────────────────────────────────────────────────
 
-/// A user message: the prompt rendered as markdown with a `❯` lead on the
-/// first row and a 2-space margin on continuation rows. No background fill.
+/// A user message marked by a user-colored rail on every visual row.
+/// It has no tile background or internal top/bottom padding; separation from
+/// adjacent response blocks remains the enclosing Stack's responsibility.
 struct UserMessage<'a> {
     prompt: &'a str,
 }
@@ -133,21 +134,16 @@ impl Component for UserMessage<'_> {
             w,
             content_w,
             Style::new().fg(t.fg),
-            move |i| {
-                if i == 0 {
-                    vec![Span::styled("❯ ", mark)]
-                } else {
-                    vec![Span::raw("  ")]
-                }
-            },
+            move |_| vec![Span::styled("▌ ", mark)],
         )
     }
 }
 
 // ── Assistant text ───────────────────────────────────────────────────────
 
-/// Plain assistant text with a 2-space left margin; soft-wrapped lines all
-/// carry the margin. Markdown-lite: headings bold (all six levels),
+/// Assistant response text marked by an agent-colored rail on every visual
+/// row. Thinking and tool-call components deliberately do not use this rail.
+/// Markdown-lite: headings bold (all six levels),
 /// blockquotes dim, inline `code` on a tile, `**bold**`, `*italic*`,
 /// `_underline_`, `~~strike~~`, fenced code as a plain triple-backtick fence
 /// on a full-width surface tile, and `|`-delimited tables as box-drawn grids.
@@ -164,15 +160,16 @@ impl Component for AssistantText<'_> {
         if text.is_empty() {
             return Vec::new();
         }
-        render_markdown_body(text, t, w, content_w, Style::new().fg(t.fg), |_| {
-            vec![Span::raw("  ")]
+        let mark = Style::new().fg(agent_indicator(t));
+        render_markdown_body(text, t, w, content_w, Style::new().fg(t.fg), move |_| {
+            vec![Span::styled("▌ ", mark)]
         })
     }
 }
 
 /// Shared markdown-lite renderer used by both user prompts and assistant
-/// text. `lead_fn(i)` produces the decoration spans for the i-th output row
-/// (row 0 carries the indicator, continuations the margin). Markdown
+/// text. `lead_fn(i)` produces the decoration spans for each output row
+/// (for example, the role-colored message rail). Markdown
 /// parsing: headings, blockquotes, fenced code blocks, `|`-delimited tables,
 /// and inline formatting (`code`, `**bold**`, `*italic*`, `_underline_`,
 /// `~~strike~~`).
@@ -1007,10 +1004,9 @@ fn trim_reasoning_summary(text: &str) -> String {
 
 // ── Exec tree ────────────────────────────────────────────────────────────
 
-/// An `exec` block drawn as a tree on a state-colored tile: gray while
-/// running, green when it succeeded, red when it failed. A blank padding
-/// row above and below (on the tile color) sets the block off from the
-/// surrounding log. Header `Exec <label>`, the code with line numbers behind
+/// An `exec` block drawn as a plain tree without a background tile or
+/// top/bottom padding. A two-cell left gutter aligns it with other transcript
+/// blocks. Header `Exec <label>`, the code with line numbers behind
 /// a `│` rail, then each native tool branched off that rail, and a final
 /// `└ ✓ Succeed`/`└ ✗ Failed` line with a result preview once done.
 struct ExecBlock<'a> {
@@ -1021,41 +1017,31 @@ impl Component for ExecBlock<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let w = cx.width;
-        let bg = if !self.tool.done {
-            t.exec_running_bg
-        } else if self.tool.is_error {
-            t.exec_error_bg
-        } else {
-            t.exec_success_bg
-        };
-
         let mut out = Vec::new();
-        // Top padding: a full-width blank row on the tile color (no spans, so
-        // it copies as an empty line).
-        out.push(prim::rtile(Vec::new(), Vec::new(), bg, w));
 
         let header = match &self.tool.label {
             Some(l) if !l.is_empty() => format!("Exec {l}"),
             _ => "Exec".to_string(),
         };
-        out.push(prim::rtile(
-            vec![prim::gutter(bg)],
-            vec![prim::bold(header, t, bg)],
-            bg,
-            w,
+        out.push(prim::rline(
+            vec![Span::raw("  ")],
+            vec![Span::styled(
+                header,
+                Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
+            )],
         ));
 
         // Trim a trailing newline so a terminated command doesn't render an
         // empty rail line at the bottom of the code body.
         let code: Vec<&str> = self.tool.input.trim_end_matches('\n').split('\n').collect();
         let lw = code.len().to_string().len().max(3);
-        let rail = prim::rail(t, bg);
+        let rail = Span::styled("│ ", Style::new().fg(t.subtle));
         let avail = w.saturating_sub(4).saturating_sub(lw + 1);
         for (i, line) in code.iter().enumerate() {
             let n = format!("{:>lw$} ", i + 1, lw = lw);
             let blank_n = " ".repeat(lw + 1);
-            let body_style = Style::new().fg(t.fg).bg(bg);
-            let num_style = Style::new().fg(t.subtle).bg(bg);
+            let body_style = Style::new().fg(t.fg);
+            let num_style = Style::new().fg(t.subtle);
             // Wrap each command line preserving its indentation; the line
             // number labels the first row and a blank of the same width
             // aligns continuation rows under the body.
@@ -1065,11 +1051,9 @@ impl Component for ExecBlock<'_> {
                 } else {
                     Span::styled(blank_n.clone(), num_style)
                 };
-                out.push(prim::rtile(
-                    vec![prim::gutter(bg), rail.clone(), num_span],
+                out.push(prim::rline(
+                    vec![Span::raw("  "), rail.clone(), num_span],
                     vec![Span::styled(seg, body_style)],
-                    bg,
-                    w,
                 ));
             }
         }
@@ -1080,14 +1064,12 @@ impl Component for ExecBlock<'_> {
             // tail (`└`); once done the final `└` is the exec-result line, so
             // every native tool becomes a `├`.
             let is_last = idx + 1 == n_total && !self.tool.done;
-            out.extend(ExecBlockBranch { nt, bg, is_last }.lines(cx));
+            out.extend(ExecBlockBranch { nt, is_last }.lines(cx));
         }
 
         if self.tool.done {
-            out.extend(exec_result_lines(self.tool, t, bg, w, cx.app.verbose));
+            out.extend(exec_result_lines(self.tool, t, w, cx.app.verbose));
         }
-        // Bottom padding: a full-width blank row on the tile color.
-        out.push(prim::rtile(Vec::new(), Vec::new(), bg, w));
 
         out
     }
@@ -1095,13 +1077,7 @@ impl Component for ExecBlock<'_> {
 
 /// The final `└ ✓ Succeed, took Ns` / `└ ✗ Failed, took Ns` branch with a
 /// preview of the returned value or error.
-fn exec_result_lines(
-    tool: &ToolCall,
-    t: Theme,
-    bg: Color,
-    w: usize,
-    verbose: bool,
-) -> Vec<RenderLine> {
+fn exec_result_lines(tool: &ToolCall, t: Theme, w: usize, verbose: bool) -> Vec<RenderLine> {
     let mut out = Vec::new();
     let (icon, label, fg_color) = if tool.is_error {
         ("✗", "Failed", t.error)
@@ -1114,15 +1090,13 @@ fn exec_result_lines(
         .map(|d| format!(", took {}", prim::fmt_duration(d)))
         .unwrap_or_default();
     let summary = format!("{label}{took}");
-    out.push(prim::rtile(
+    out.push(prim::rline(
         vec![
-            prim::gutter(bg),
-            prim::branch(t, bg, true),
-            Span::styled(format!("{icon} "), Style::new().fg(fg_color).bg(bg)),
+            Span::raw("  "),
+            Span::styled("└ ", Style::new().fg(t.subtle)),
+            Span::styled(format!("{icon} "), Style::new().fg(fg_color)),
         ],
-        vec![prim::fg(summary, t, bg)],
-        bg,
-        w,
+        vec![Span::styled(summary, Style::new().fg(t.fg))],
     ));
     // In non-verbose mode, hide the final result body for a cleaner
     // transcript — the native-tool lines above already showed the work.
@@ -1138,42 +1112,38 @@ fn exec_result_lines(
     if display.is_empty() {
         return out;
     }
-    let indent = 2 + 2 + 2; // gutter + branch col + own rail
+    let indent = 2 + 2 + 2; // left gutter + branch column + own rail
     let all: Vec<&str> = display.trim_end_matches('\n').split('\n').collect();
     let limit = if verbose { all.len() } else { PREVIEW_LINES };
     let hidden = all.len().saturating_sub(limit);
     let avail = w.saturating_sub(indent);
     let body_fg = if tool.is_error { t.error } else { t.muted };
     let rail_deco = vec![
-        prim::gutter(bg),
-        Span::styled("  ", Style::new().bg(bg)),
-        prim::rail(t, bg),
+        Span::raw("  "),
+        Span::raw("  "),
+        Span::styled("│ ", Style::new().fg(t.subtle)),
     ];
-    let body_style = Style::new().fg(body_fg).bg(bg);
+    let body_style = Style::new().fg(body_fg);
     // Wrap each result line preserving its formatting; the rail repeats on
     // every continuation row. `hidden` counts logical lines, not wrapped
     // rows, so the `(N lines hidden)` cap stays accurate.
     for line in all.iter().take(limit) {
         for seg in prim::wrap_pre(line, avail) {
-            out.push(prim::rtile(
+            out.push(prim::rline(
                 rail_deco.clone(),
                 vec![Span::styled(seg, body_style)],
-                bg,
-                w,
             ));
         }
     }
     if hidden > 0 {
         let cap = format!("({hidden} lines hidden)");
-        out.push(prim::rtile(
+        out.push(prim::rline(
             vec![
-                prim::gutter(bg),
-                Span::styled("  ", Style::new().bg(bg)),
-                Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
+                Span::raw("  "),
+                Span::raw("  "),
+                Span::styled("… ", Style::new().fg(t.subtle)),
             ],
-            vec![Span::styled(cap, Style::new().fg(t.subtle).bg(bg))],
-            bg,
-            w,
+            vec![Span::styled(cap, Style::new().fg(t.subtle))],
         ));
     }
     out
@@ -1185,7 +1155,6 @@ fn exec_result_lines(
 /// status icon, then its result preview indented under a second rail.
 struct ExecBlockBranch<'a> {
     nt: &'a NativeTool,
-    bg: Color,
     /// Whether this is the tail of the exec tree (selects `└` and stops the
     /// exec rail from continuing through the result body).
     is_last: bool,
@@ -1408,7 +1377,6 @@ impl Component for ExecBlockBranch<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let w = cx.width;
-        let bg = self.bg;
         let working = !self.nt.done && cx.active_turn;
         let mut out = Vec::new();
         let exec_cont = if self.is_last { "  " } else { "│ " };
@@ -1416,27 +1384,33 @@ impl Component for ExecBlockBranch<'_> {
         // Header: "Tool <name> <args> <suffix>" wrapped to fit, preserving
         // per-part colors (muted label, info name, subtle args/suffix).
         let mut content = vec![
-            prim::muted("Tool ".to_string(), t, bg),
-            Span::styled(self.nt.name.clone(), Style::new().fg(t.info).bg(bg)),
+            Span::styled("Tool ", Style::new().fg(t.muted)),
+            Span::styled(self.nt.name.clone(), Style::new().fg(t.info)),
         ];
         if !self.nt.args.is_empty() {
-            content.push(prim::subtle(format!(" {}", self.nt.args), t, bg));
+            content.push(Span::styled(
+                format!(" {}", self.nt.args),
+                Style::new().fg(t.subtle),
+            ));
         }
         if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
-            content.push(prim::subtle(format!(" {note}"), t, bg));
+            content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
         }
         let header_deco = vec![
-            prim::gutter(bg),
-            prim::branch(t, bg, self.is_last),
-            prim::status_icon(t, bg, working, self.nt.is_error, cx.spinner()),
+            Span::raw("  "),
+            Span::styled(
+                if self.is_last { "└ " } else { "├ " },
+                Style::new().fg(t.subtle),
+            ),
+            prim::status_icon(t, working, self.nt.is_error, cx.spinner()),
         ];
         let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
         let cont_deco = vec![
-            prim::gutter(bg),
-            Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-            Span::styled(" ".repeat(name_w), Style::new().bg(bg)),
+            Span::raw("  "),
+            Span::styled(exec_cont, Style::new().fg(t.subtle)),
+            Span::raw(" ".repeat(name_w)),
         ];
-        out.extend(prim::rtile_wrapped(header_deco, &cont_deco, content, bg, w));
+        out.extend(prim::rline_wrapped(header_deco, &cont_deco, content, w));
 
         let Some(result) = &self.nt.result else {
             return out;
@@ -1456,7 +1430,7 @@ impl Component for ExecBlockBranch<'_> {
             return out;
         }
 
-        let indent = 2 + 2 + 2; // gutter + exec-rail col + own rail
+        let indent = 2 + 2 + 2; // left gutter + exec-rail column + own rail
                                 // Each native tool returns structured output; interpret it per tool to
                                 // derive the body lines (and how to label / color them).
         let body = native_body(self.nt);
@@ -1472,16 +1446,16 @@ impl Component for ExecBlockBranch<'_> {
         let hidden = total.saturating_sub(limit);
         let body_fg = if self.nt.is_error { t.error } else { t.muted };
         let blank_n = " ".repeat(lw + 1);
-        let num_style = Style::new().fg(t.subtle).bg(bg);
-        let numbered_style = Style::new().fg(t.fg).bg(bg);
-        let plain_style = Style::new().fg(body_fg).bg(bg);
-        let diff_del = Style::new().fg(t.error).bg(bg);
-        let diff_add = Style::new().fg(t.success).bg(bg);
-        let diff_ctx = Style::new().fg(t.muted).bg(bg);
+        let num_style = Style::new().fg(t.subtle);
+        let numbered_style = Style::new().fg(t.fg);
+        let plain_style = Style::new().fg(body_fg);
+        let diff_del = Style::new().fg(t.error);
+        let diff_add = Style::new().fg(t.success);
+        let diff_ctx = Style::new().fg(t.muted);
         let base_deco = vec![
-            prim::gutter(bg),
-            Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-            prim::rail(t, bg),
+            Span::raw("  "),
+            Span::styled(exec_cont, Style::new().fg(t.subtle)),
+            Span::styled("│ ", Style::new().fg(t.subtle)),
         ];
         // Wrap each result line preserving its formatting. Numbered tools
         // (read/view/bash_read) label from `start_line`; an edit diff colors
@@ -1512,32 +1486,28 @@ impl Component for ExecBlockBranch<'_> {
                 } else {
                     vec![Span::styled(seg, content_style)]
                 };
-                out.push(prim::rtile(deco, content, bg, w));
+                out.push(prim::rline(deco, content));
             }
         }
         if hidden > 0 {
             let cap = format!("({hidden} lines hidden)");
-            out.push(prim::rtile(
+            out.push(prim::rline(
                 vec![
-                    prim::gutter(bg),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-                    Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
+                    Span::raw("  "),
+                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
+                    Span::styled("… ", Style::new().fg(t.subtle)),
                 ],
-                vec![Span::styled(cap, Style::new().fg(t.subtle).bg(bg))],
-                bg,
-                w,
+                vec![Span::styled(cap, Style::new().fg(t.subtle))],
             ));
         }
         if let Some(notice) = body.notice {
-            out.push(prim::rtile(
+            out.push(prim::rline(
                 vec![
-                    prim::gutter(bg),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle).bg(bg)),
-                    Span::styled("… ", Style::new().fg(t.subtle).bg(bg)),
+                    Span::raw("  "),
+                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
+                    Span::styled("… ", Style::new().fg(t.subtle)),
                 ],
-                vec![Span::styled(notice, Style::new().fg(t.subtle).bg(bg))],
-                bg,
-                w,
+                vec![Span::styled(notice, Style::new().fg(t.subtle))],
             ));
         }
         out
@@ -1557,14 +1527,14 @@ impl Component for ToolLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let working = !self.tool.done && cx.active_turn;
-        let icon = prim::status_icon(t, Color::Reset, working, self.tool.is_error, cx.spinner());
+        let icon = prim::status_icon(t, working, self.tool.is_error, cx.spinner());
         let mut content = vec![Span::styled(
             self.tool.name.clone(),
             Style::new().fg(t.info),
         )];
         if let Some(first) = self.tool.input.split('\n').next() {
             if !first.is_empty() {
-                content.push(prim::subtle(format!(" {first}"), t, Color::Reset));
+                content.push(prim::subtle(format!(" {first}"), t));
             }
         }
         vec![prim::rline(vec![Span::raw("  "), icon], content)]

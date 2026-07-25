@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -226,6 +226,33 @@ pub fn rblank() -> RenderLine {
     }
 }
 
+/// Wrapped plain lines: word-wraps pre-styled spans to fit within `width`
+/// minus the decoration width. The first row uses `deco`; continuations use
+/// `cont_deco`. Unlike [`rtile_wrapped`], this adds no background or trailing
+/// full-width padding.
+pub fn rline_wrapped(
+    deco: Vec<Span<'static>>,
+    cont_deco: &[Span<'static>],
+    content: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<RenderLine> {
+    let avail = width.saturating_sub(span_width(&deco));
+    let wrapped = wrap_line_styled(&Line::from(content), avail);
+    let mut out = Vec::new();
+    for (i, wl) in wrapped.into_iter().enumerate() {
+        let d = if i == 0 {
+            deco.clone()
+        } else {
+            cont_deco.to_owned()
+        };
+        out.push(rline(d, wl.spans));
+    }
+    if out.is_empty() {
+        out.push(rline(deco, vec![]));
+    }
+    out
+}
+
 /// A `bg` tile padded to the full `width`. The padding tail is trailing
 /// decoration — outside the content range — so the background spans
 /// edge-to-edge without ever being selected or copied.
@@ -242,42 +269,6 @@ pub fn rtile(
         Style::new().bg(bg),
     ));
     rl
-}
-
-/// Styled wrapped tile: word-wraps a line of pre-styled spans (preserving
-/// each span's color/modifier across wraps) to fit within `width` minus the
-/// decoration width, emitting one `RenderLine` per wrapped row. The first
-/// row carries `deco`; continuation rows carry `cont_deco` (typically an
-/// indented variant). Each row is padded to `width` with `bg`.
-///
-/// This is the wrapped counterpart to [`rtile`]: use it whenever the content
-/// might exceed the available width (tool headers, result bodies, etc.).
-/// Use [`rtile`] only when the content is guaranteed to fit (short labels,
-/// padding rows, icons).
-pub fn rtile_wrapped(
-    deco: Vec<Span<'static>>,
-    cont_deco: &[Span<'static>],
-    content: Vec<Span<'static>>,
-    bg: Color,
-    width: usize,
-) -> Vec<RenderLine> {
-    let deco_w = span_width(&deco);
-    let avail = width.saturating_sub(deco_w);
-    let line = Line::from(content);
-    let wrapped = wrap_line_styled(&line, avail);
-    let mut out = Vec::new();
-    for (i, wl) in wrapped.into_iter().enumerate() {
-        let d = if i == 0 {
-            deco.clone()
-        } else {
-            cont_deco.to_owned()
-        };
-        out.push(rtile(d, wl.spans, bg, width));
-    }
-    if out.is_empty() {
-        out.push(rtile(deco, vec![], bg, width));
-    }
-    out
 }
 
 /// Display width of a sequence of spans (sum of each span's content width).
@@ -495,62 +486,24 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// A two-cell `bg`-colored gutter, the left margin of exec-tree rows (no
-/// indicator). Pairs with the `used` counts in the exec components, which
-/// assume a 2-cell gutter.
-pub fn gutter(bg: Color) -> Span<'static> {
-    Span::styled("  ", Style::new().bg(bg))
-}
-
-/// A vertical rail `│ ` in the subtle tone.
-pub fn rail(t: Theme, bg: Color) -> Span<'static> {
-    Span::styled("│ ", Style::new().fg(t.subtle).bg(bg))
-}
-
-/// A tree branch connector: `└ ` when `is_last`, else `├ `.
-pub fn branch(t: Theme, bg: Color, is_last: bool) -> Span<'static> {
-    Span::styled(
-        if is_last { "└ " } else { "├ " },
-        Style::new().fg(t.subtle).bg(bg),
-    )
-}
-
 /// A status icon: a spinner frame while `working`, `✗` on error, `✓` on done.
 /// `frame` is the current spinner frame index (from [`Cx::spinner`]).
-pub fn status_icon(t: Theme, bg: Color, working: bool, error: bool, frame: usize) -> Span<'static> {
+pub fn status_icon(t: Theme, working: bool, error: bool, frame: usize) -> Span<'static> {
     if working {
         Span::styled(
             format!("{} ", SPINNER[frame % SPINNER.len()]),
-            Style::new().fg(active_indicator(t)).bg(bg),
+            Style::new().fg(active_indicator(t)),
         )
     } else if error {
-        Span::styled("✗ ", Style::new().fg(t.error).bg(bg))
+        Span::styled("✗ ", Style::new().fg(t.error))
     } else {
-        Span::styled("✓ ", Style::new().fg(t.success).bg(bg))
+        Span::styled("✓ ", Style::new().fg(t.success))
     }
 }
 
-/// Bold foreground span on `bg`.
-pub fn bold(text: String, t: Theme, bg: Color) -> Span<'static> {
-    Span::styled(
-        text,
-        Style::new().fg(t.fg).add_modifier(Modifier::BOLD).bg(bg),
-    )
-}
-
-/// Muted foreground span on `bg`.
-pub fn muted(text: String, t: Theme, bg: Color) -> Span<'static> {
-    Span::styled(text, Style::new().fg(t.muted).bg(bg))
-}
-
-/// Subtle foreground span on `bg`.
-pub fn subtle(text: String, t: Theme, bg: Color) -> Span<'static> {
-    Span::styled(text, Style::new().fg(t.subtle).bg(bg))
-}
-
-/// Plain foreground span on `bg`.
-pub fn fg(text: String, t: Theme, bg: Color) -> Span<'static> {
-    Span::styled(text, Style::new().fg(t.fg).bg(bg))
+/// Subtle foreground span.
+pub fn subtle(text: String, t: Theme) -> Span<'static> {
+    Span::styled(text, Style::new().fg(t.subtle))
 }
 
 /// Total display width of a slice of spans.
@@ -661,6 +614,7 @@ pub fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     fn spans_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()

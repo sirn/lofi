@@ -13,15 +13,19 @@ use ratatui::style::Color;
 /// truecolor.
 ///
 /// Token roles (kept deliberately small and generic):
-/// - `primary` / `secondary` — brand accents (wordmark, user indicator).
+/// - `primary` — brand/accent color.
+/// - `user` / `agent` — conversation-role colors.
 /// - `success` / `warn` / `error` / `info` — status semantics.
 /// - `fg` / `muted` / `subtle` — base, dimmed, and faint text.
-/// - `surface` — filled background for user messages and code tiles.
+/// - `surface` — filled background for fenced code tiles.
 /// - `inline_bg` — background for inline code spans.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Theme {
     pub primary: Color,
-    pub secondary: Color,
+    /// User-role labels and indicators. Deliberately matches `primary`.
+    pub user: Color,
+    /// Agent-role labels. Kept separate from generic informational blue.
+    pub agent: Color,
     pub success: Color,
     pub warn: Color,
     pub error: Color,
@@ -40,15 +44,15 @@ pub(crate) struct Theme {
     pub cursor_line: Color,
     /// Single-cell cursor marker in Select mode (distinct from `selection`).
     pub select_cursor: Color,
-    /// Exec-block tile backgrounds, one per terminal state.
-    pub exec_running_bg: Color,
-    pub exec_success_bg: Color,
-    pub exec_error_bg: Color,
 }
 
 /// User-message left indicator (distinct from the assistant tone).
 pub(crate) fn user_indicator(t: Theme) -> Color {
-    t.secondary
+    t.user
+}
+/// Agent-response left indicator.
+pub(crate) fn agent_indicator(t: Theme) -> Color {
+    t.agent
 }
 /// Active (streaming / running) left indicator.
 pub(crate) fn active_indicator(t: Theme) -> Color {
@@ -59,25 +63,23 @@ impl Theme {
     /// Dark background, xterm 256-color palette.
     pub(crate) fn dark() -> Self {
         Self {
-            primary: Color::Indexed(44),   // teal (modus-vivendi accent)
-            secondary: Color::Indexed(44), // teal — user indicator
-            success: Color::Indexed(77),   // green
-            warn: Color::Indexed(178),     // amber
-            error: Color::Indexed(203),    // red
-            info: Color::Indexed(75),      // blue
-            fg: Color::Indexed(255),       // white
-            muted: Color::Indexed(244),    // mid gray
-            subtle: Color::Indexed(241),   // outline gray
-            surface: Color::Indexed(235),  // user-message / input bg
+            primary: Color::Indexed(44),  // teal (modus-vivendi accent)
+            user: Color::Indexed(44),     // teal — same as primary
+            agent: Color::Indexed(129),   // rich purple — bold contrast with teal and white
+            success: Color::Indexed(77),  // green
+            warn: Color::Indexed(178),    // amber
+            error: Color::Indexed(203),   // red
+            info: Color::Indexed(75),     // blue
+            fg: Color::Indexed(255),      // white
+            muted: Color::Indexed(244),   // mid gray
+            subtle: Color::Indexed(241),  // outline gray
+            surface: Color::Indexed(235), // fenced-code background
             inline_bg: Color::Indexed(236),
             panel_bg: Color::Indexed(232), // near-black footer panel
 
             selection: Color::Indexed(238),   // one step above surface
             cursor_line: Color::Indexed(234), // faint bar under the nav cursor
             select_cursor: Color::Indexed(60), // slate marker on the select cursor
-            exec_running_bg: Color::Indexed(236), // gray tile
-            exec_success_bg: Color::Indexed(22), // dark green tile
-            exec_error_bg: Color::Indexed(52), // dark red tile
         }
     }
 }

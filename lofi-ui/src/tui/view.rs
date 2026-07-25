@@ -611,7 +611,8 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_mode_line(f, Rect::new(area.x, area.y, w, 1), app);
 
     // The panel below: a leading blank, the prompt, a blank, and the stats,
-    // all on panel_bg. A single `❯` marks the prompt row (no spanning rail).
+    // all on panel_bg. A continuous user rail spans every panel row, including
+    // those vertical gutters and the usage row.
     let panel = Rect::new(
         area.x,
         area.y.saturating_add(1),
@@ -620,7 +621,12 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
-    let bar = if active { t.primary } else { t.subtle };
+    let bar = if active { t.user } else { t.subtle };
+    for y in panel.y..panel.bottom() {
+        let cell = &mut f.buffer_mut()[(panel.x, y)];
+        cell.set_char('▌');
+        cell.set_fg(bar);
+    }
     let inner = Rect::new(
         area.x.saturating_add(2),
         panel.y,
@@ -635,13 +641,8 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(inner);
-    // chunks[0] is the leading blank (panel_bg already painted).
+    // chunks[0] is the leading blank (panel_bg and rail already painted).
     app.input_rect = chunks[1];
-    if chunks[1].height > 0 {
-        let cell = &mut f.buffer_mut()[(area.x, chunks[1].y)];
-        cell.set_char('❯');
-        cell.set_fg(bar);
-    }
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
 }
@@ -718,13 +719,15 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // A thin rule of `▁` spans the full width in the current mode color,
-    // visually tying the notification line to the mode chip on the right and
-    // the panel below. The chip and badges render on top as narrow widgets so
-    // the rule shows through the gaps between them.
-    let rule: String = std::iter::repeat_n('▁', w).collect();
+    // A diagonal rule spans the prompt/notification bar. It starts in the
+    // prompt panel's tone and is tinted by the active mode so focus changes
+    // remain visible without the old lower-block underline.
+    let rule: String = std::iter::repeat_n('╱', w).collect();
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(rule, Style::new().fg(color)))),
+        Paragraph::new(Line::from(Span::styled(
+            rule,
+            Style::new().fg(color).bg(t.panel_bg),
+        ))),
         area,
     );
     // Left badges sit at the 2-cell inset; only as wide as their content so

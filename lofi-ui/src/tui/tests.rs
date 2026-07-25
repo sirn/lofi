@@ -173,6 +173,155 @@ fn rich_header_suffix_for_read_and_bash() {
 }
 
 #[test]
+fn user_message_uses_full_height_rail_without_tile_or_padding() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: "A long user prompt\nwith another line".to_string(),
+        blocks: Vec::new(),
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 32,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+
+    assert_eq!(lines.len(), 2, "only the two message body rows");
+    for line in &lines {
+        assert_eq!(line.line.spans[0].content, "▌ ");
+        assert_eq!(line.line.spans[0].style.fg, Some(a.theme.user));
+        assert!(
+            line.line.spans.iter().all(|span| span.style.bg.is_none()),
+            "user message has no tile background: {:?}",
+            line.line
+        );
+    }
+    let first: String = lines[0]
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let second: String = lines[1]
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(first.starts_with("▌ A long user prompt"));
+    assert!(second.starts_with("▌ with another line"));
+}
+
+#[test]
+fn agent_response_uses_agent_rail_but_thinking_and_tools_do_not() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Thinking("Private thought".to_string()));
+    a.apply_event(AgentEvent::Text(
+        "Agent response\nwith a second row".to_string(),
+    ));
+    a.apply_event(AgentEvent::ToolStart {
+        id: "t1".to_string(),
+        name: "search".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "t1".to_string(),
+        code: "query".to_string(),
+        label: None,
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 40,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+
+    let response: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line.raw.as_ref().is_some_and(|raw| {
+                raw.source.contains("Agent response") || raw.source.contains("second row")
+            })
+        })
+        .collect();
+    assert_eq!(response.len(), 2);
+    for line in response {
+        assert_eq!(line.line.spans[0].content, "▌ ");
+        assert_eq!(line.line.spans[0].style.fg, Some(a.theme.agent));
+    }
+
+    let rendered = |line: &view::RenderLine| -> String {
+        line.line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let thinking = lines
+        .iter()
+        .find(|line| rendered(line).contains("Private thought"))
+        .expect("thinking row");
+    assert_ne!(thinking.line.spans[0].content, "▌ ");
+    let tool = lines
+        .iter()
+        .find(|line| rendered(line).contains("search"))
+        .expect("tool row");
+    assert_ne!(tool.line.spans[0].content, "▌ ");
+}
+
+#[test]
+fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: Vec::new(),
+    });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".to_string(),
+        code: "lofi.bash({ cmd: 'true' })".to_string(),
+        label: Some("check".to_string()),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".to_string(),
+        result: "{\"value\":null}".to_string(),
+        is_error: false,
+        elapsed_ms: 0,
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+
+    assert_eq!(lines.len(), 3, "header, command, and status only");
+    for line in &lines {
+        assert_eq!(line.line.spans[0].content, "  ", "two-cell left gutter");
+        assert!(
+            line.line.spans.iter().all(|span| span.style.bg.is_none()),
+            "exec has no background tile: {:?}",
+            line.line
+        );
+    }
+}
+
+#[test]
 fn render_tree_smoke() {
     use crate::tui::view::blocks::render_turns;
     let mut a = app();
@@ -691,7 +840,7 @@ fn blockquote_renders_with_bar_and_empty_lines() {
     assert!(
         quote_lines
             .iter()
-            .any(|s| s.trim() == "▎" || s.ends_with("▎ ")),
+            .any(|s| s.trim_start_matches("▌ ").trim() == "▎"),
         "Empty quote line should render bar only: {quote_lines:?}"
     );
     assert!(
@@ -1869,6 +2018,179 @@ fn paste_blocked_while_modal_open() {
     assert_eq!(a.input, "pasted");
 }
 
+fn confirm_request(
+    command: &str,
+) -> (
+    lofi_core::ConfirmRequest,
+    tokio::sync::oneshot::Receiver<bool>,
+) {
+    let (respond, response) = tokio::sync::oneshot::channel();
+    (
+        lofi_core::ConfirmRequest {
+            id: 1,
+            command: command.to_string(),
+            respond,
+        },
+        response,
+    )
+}
+
+#[test]
+fn permission_dialog_requires_an_explicit_choice() {
+    let mut a = app();
+    let (req, mut response) = confirm_request("rm -rf build");
+    a.pending_confirms.push(req);
+
+    // The old behavior denied on any non-y key. Printable noise must now be
+    // swallowed while leaving both the request and response pending.
+    assert!(a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE,)));
+    assert_eq!(a.pending_confirms.len(), 1);
+    assert!(matches!(
+        response.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    // Move to Deny and explicitly confirm it. Cursor aliases work too.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(a.confirm_selected, 1);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert_eq!(a.confirm_selected, 0);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(a.confirm_selected, 1);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(response.try_recv(), Ok(false));
+}
+
+#[test]
+fn permission_dialog_action_keys_resolve_directly() {
+    for (key, expected) in [('a', true), ('y', true), ('d', false), ('n', false)] {
+        let mut a = app();
+        let (req, mut response) = confirm_request("dangerous command");
+        a.pending_confirms.push(req);
+        a.handle_confirm_key(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        assert_eq!(response.try_recv(), Ok(expected), "key {key}");
+    }
+}
+
+#[test]
+fn permission_dialog_renders_command_and_selectable_actions() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let (req, _response) = confirm_request("sudo systemctl restart lofi");
+    a.pending_confirms.push(req);
+    let mut term = Terminal::new(TestBackend::new(90, 28)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let screen = (0..28)
+        .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    assert!(screen.contains("Permission Required"), "{screen}");
+    assert!(screen.contains("sudo systemctl restart lofi"), "{screen}");
+    assert!(
+        screen.contains("Allow") && screen.contains("Deny"),
+        "{screen}"
+    );
+    let command_cell = (0..28)
+        .flat_map(|y| (0..90).map(move |x| (x, y)))
+        .find(|&(x, y)| buf[(x, y)].symbol() == "s" && buf[(x, y)].bg == a.theme.panel_bg)
+        .expect("policy command should use a distinct panel background");
+    assert!(command_cell.0 > 0);
+    let allow = (0..28)
+        .flat_map(|y| (0..90).map(move |x| (x, y)))
+        .find(|&(x, y)| buf[(x, y)].symbol() == "A" && buf[(x, y)].bg == a.theme.primary)
+        .expect("selected Allow button should use primary background");
+    assert!(
+        allow.0 > 45,
+        "actions should sit toward the right: {allow:?}"
+    );
+}
+
+#[test]
+fn prompt_panel_uses_full_height_user_rail() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.input = "hello".to_string();
+    a.input_cursor = a.input.len();
+    let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let rule_y = (0..20)
+        .find(|&y| buf[(0, y)].symbol() == "╱")
+        .expect("prompt rule");
+    for y in rule_y + 1..20 {
+        assert_eq!(buf[(0, y)].symbol(), "▌", "panel row {y}");
+        assert_eq!(buf[(0, y)].fg, a.theme.user, "focused rail row {y}");
+    }
+
+    a.mode = Mode::Navigate;
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    for y in rule_y + 1..20 {
+        assert_eq!(buf[(0, y)].symbol(), "▌", "panel row {y}");
+        assert_eq!(buf[(0, y)].fg, a.theme.subtle, "unfocused rail row {y}");
+    }
+}
+
+#[test]
+fn autocomplete_uses_primary_focus_default_background_and_no_header() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.input = "/".to_string();
+    a.input_cursor = 1;
+    a.refresh_slash_complete();
+    let mut term = Terminal::new(TestBackend::new(90, 28)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+
+    let (item_x, item_y) = (0..28)
+        .flat_map(|y| (0..90).map(move |x| (x, y)))
+        .find(|&(x, y)| buf[(x, y)].symbol() == "/" && buf[(x, y)].bg == a.theme.primary)
+        .expect("selected autocomplete row should use primary background");
+    let border_x = (0..item_x)
+        .rev()
+        .find(|&x| buf[(x, item_y)].symbol() == "│")
+        .expect("autocomplete left border");
+    assert_eq!(
+        item_x - border_x,
+        2,
+        "one padding cell should separate the border and item"
+    );
+    assert_eq!(
+        buf[(border_x + 1, item_y)].bg,
+        ratatui::style::Color::Reset,
+        "popover padding should keep the terminal's default background"
+    );
+    let right_border_x = (item_x + 1..90)
+        .find(|&x| buf[(x, item_y)].symbol() == "│" && buf[(x, item_y)].fg == a.theme.primary)
+        .expect("autocomplete right border");
+    assert!(
+        matches!(buf[(right_border_x - 1, item_y)].symbol(), "┃" | "│"),
+        "scrollbar should share the right padding gutter next to the border"
+    );
+    let screen = (0..28)
+        .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !screen.contains("Commands"),
+        "autocomplete has no header: {screen}"
+    );
+    assert!(
+        screen.contains("navigate") && screen.contains("complete"),
+        "{screen}"
+    );
+}
+
 #[test]
 fn tree_picker_is_centered() {
     use ratatui::backend::TestBackend;
@@ -1897,17 +2219,30 @@ fn tree_picker_is_centered() {
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let buf = term.backend().buffer();
-    // Top border row of the modal carries the 'R' of "Roll back".
-    let top_y = (0..22)
-        .find(|&y| {
-            (0..80)
-                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
-                .collect::<String>()
-                .contains('R')
-        })
-        .expect("tree modal border found");
-    // 2 entries => height 4; bottom-anchored would put the border at y=18,
-    // centered at ~9. Insist on centered.
+    let row = |y: u16| {
+        (0..80)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect::<String>()
+    };
+    let title_y = (0..22)
+        .find(|&y| row(y).contains("Roll back to a turn"))
+        .expect("tree modal title found");
+    let top_y = title_y.saturating_sub(1);
+
+    // The border stays uninterrupted; the title gets its own first interior
+    // row rather than being docked into the top border.
+    assert!(row(top_y).contains('╭') && row(top_y).contains('╮'));
+    assert!(!row(top_y).contains("Roll back"));
+    assert!(row(title_y).contains('│'));
+
+    // The navigation hint is restored to the final interior row, directly
+    // above the bottom border.
+    let help_y = (title_y + 1..22)
+        .find(|&y| row(y).contains("navigate") && row(y).contains("restore"))
+        .expect("tree modal bottom hint found");
+    assert!(row(help_y + 1).contains('╰') && row(help_y + 1).contains('╯'));
+
+    // The picker remains centered rather than bottom-anchored.
     assert!(
         top_y < 15,
         "tree modal should be centered, got top_y={top_y}"
@@ -4986,7 +5321,7 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     // Locate the opening fence, code line, and closing fence.
     let open = lines
         .iter()
-        .find(|l| l.starts_with("  ```rust"))
+        .find(|l| l.starts_with("▌ ```rust"))
         .expect("opening ```rust");
     let code = lines
         .iter()
@@ -4994,7 +5329,7 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
         .expect("code line");
     let close = lines
         .iter()
-        .find(|l| l.trim() == "```")
+        .find(|l| l.trim_start_matches("▌ ").trim() == "```")
         .expect("closing ```");
     // No frame art survives.
     for l in &lines {
@@ -5024,6 +5359,10 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
         .iter()
         .flat_map(|s| s.content.chars())
         .collect();
-    let content: String = chars[open_rl.content.0..open_rl.content.1].to_string();
+    let content: String = chars
+        .chars()
+        .skip(open_rl.content.0)
+        .take(open_rl.content.1 - open_rl.content.0)
+        .collect();
     assert_eq!(content, "```rust");
 }
