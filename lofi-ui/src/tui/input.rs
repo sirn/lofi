@@ -37,7 +37,7 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Shell-policy confirmation modal: y = allow, anything else = deny.
+    // Shell-policy permission dialog: navigate actions, then explicitly confirm.
     if app.handle_confirm_key(k) {
         return;
     }

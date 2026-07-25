@@ -557,17 +557,36 @@ impl App {
             || !self.pending_confirms.is_empty()
     }
 
-    /// Handle a key while a shell-policy confirmation modal is open.
-    /// `y`/`Y` allows the command; any other key denies it. The response
-    /// is sent and the request is popped; if more are queued, the next
-    /// one appears on the next render.
+    /// Handle a key while a shell-policy permission dialog is open.
+    /// The dialog behaves like a two-button chooser: arrows/Tab move focus,
+    /// Enter confirms, and explicit action keys (`a`/`y`, `d`/`n`)
+    /// resolve immediately. Esc is an intentional deny. Every other key is
+    /// swallowed without resolving the request, preventing accidental denial.
     pub(super) fn handle_confirm_key(&mut self, k: &KeyEvent) -> bool {
         if self.pending_confirms.is_empty() {
             return false;
         }
-        let approved = matches!(k.code, KeyCode::Char('y' | 'Y'));
-        let req = self.pending_confirms.remove(0);
-        let _ = req.respond.send(approved);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let response = match k.code {
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.confirm_selected = self.confirm_selected.saturating_sub(1);
+                None
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                self.confirm_selected = (self.confirm_selected + 1).min(1);
+                None
+            }
+            KeyCode::Enter => Some(self.confirm_selected == 0),
+            KeyCode::Char('a' | 'A' | 'y' | 'Y') => Some(true),
+            KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => Some(false),
+            KeyCode::Char('c') if ctrl => Some(false),
+            _ => None,
+        };
+        if let Some(approved) = response {
+            let req = self.pending_confirms.remove(0);
+            let _ = req.respond.send(approved);
+            self.confirm_selected = 0;
+        }
         true
     }
 
