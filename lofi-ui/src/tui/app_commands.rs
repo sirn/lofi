@@ -24,6 +24,11 @@ impl App {
             }
             "/compact" => {
                 self.compact_now();
+                self.debug_sample("compaction", true);
+                true
+            }
+            "/debug" => {
+                self.toggle_debug();
                 true
             }
             "/recall" => {
@@ -186,6 +191,7 @@ impl App {
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
+        lines.push(info_kv(t, "/debug", "toggle resource diagnostics"));
         lines.push(info_kv(
             t,
             "/recall [query]",

@@ -49,6 +49,7 @@ impl App {
             top_line: 0,
             last_base: 0,
             verbose: false,
+            debug: None,
             should_quit: false,
             session: SessionState {
                 store: None,

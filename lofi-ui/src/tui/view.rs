@@ -668,6 +668,12 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
+    if let Some(label) = app.debug_badge() {
+        right.push(Span::styled(
+            format!(" {label} "),
+            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+        ));
+    }
     right.push(Span::styled(
         chip,
         Style::new().fg(t.fg).bg(color).add_modifier(bold),
