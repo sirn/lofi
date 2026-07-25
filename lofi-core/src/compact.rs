@@ -154,24 +154,19 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     // nothing, so only events appended after its marker are live.
     // Native tools on the path are keyed by their parent exec id so the brief
     // transcript can attach them.
-    let live_range: Vec<usize> = match &live_start_id {
-        Some(start) if start.is_empty() => path
-            .iter()
-            .copied()
-            .skip(previous_marker_pos.map_or(path.len(), |pos| pos + 1))
-            .collect(),
+    let live_start = match &live_start_id {
+        Some(start) if start.is_empty() => previous_marker_pos.map_or(path.len(), |pos| pos + 1),
         Some(start) => path
             .iter()
-            .copied()
-            .skip_while(|&i| events[i].id != *start)
-            .collect(),
-        None => path.clone(),
+            .position(|&i| events[i].id == *start)
+            .unwrap_or(path.len()),
+        None => 0,
     };
 
     let mut live: Vec<LiveMessage> = Vec::new();
     let mut native_by_parent: HashMap<String, Vec<NativeToolRecord>> = HashMap::new();
     let mut skipping = false;
-    for &i in &live_range {
+    for &i in &path[live_start..] {
         match &events[i].kind {
             SessionEventKind::TurnFailed { .. } => skipping = true,
             SessionEventKind::TurnEnd { .. } => skipping = false,
@@ -209,11 +204,11 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     // already rebuilds the prefix. The final edit_tail on the kept tail after
     // plan_cut is then idempotent (stubs stay stubs).
     if previous_summary.is_some() && opts.edit.enabled && !live.is_empty() {
-        let pairs: Vec<(String, Message)> = live
+        let pairs: Vec<(&str, &Message)> = live
             .iter()
-            .map(|lm| (lm.event_id.clone(), lm.message.clone()))
+            .map(|message| (message.event_id.as_str(), &message.message))
             .collect();
-        let edited = crate::context_edit::edit_tail(&pairs, &opts.edit);
+        let edited = crate::context_edit::edit_tail_refs(&pairs, &opts.edit);
         for (lm, msg) in live.iter_mut().zip(edited) {
             lm.message = msg;
         }
@@ -253,15 +248,15 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
 
     let kept_count = live.len().saturating_sub(plan.summarized);
     let kept_live = &live[plan.summarized..];
-    let kept_pairs: Vec<(String, Message)> = kept_live
+    let kept_pairs: Vec<(&str, &Message)> = kept_live
         .iter()
-        .map(|lm| (lm.event_id.clone(), lm.message.clone()))
+        .map(|message| (message.event_id.as_str(), &message.message))
         .collect();
     // Apply tiered-retention context editing to the kept tail so the new
     // prefix is much lighter (old tool results/thinking/tool-call code
     // elided, recall-recoverable). Cache-safe: this rides the prefix
     // rebuild compaction already pays.
-    let kept_messages: Vec<Message> = crate::context_edit::edit_tail(&kept_pairs, &opts.edit);
+    let kept_messages: Vec<Message> = crate::context_edit::edit_tail_refs(&kept_pairs, &opts.edit);
 
     // The summarized range is `live[0 .. plan.summarized]`. Recorded as
     // event ids so `/recall scope:compaction:N` can resolve it to global

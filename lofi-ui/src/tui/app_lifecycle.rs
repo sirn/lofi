@@ -78,6 +78,9 @@ impl App {
             mode: Mode::Input,
             pending_confirms: Vec::new(),
             confirm_selected: 0,
+            confirm_scroll: 0,
+            confirm_total: 0,
+            confirm_view_h: 0,
             yank_notify: None,
             yank_cursor: None,
             notify: None,
@@ -574,6 +577,11 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
+        // The full durable log can dominate memory. It is no longer needed
+        // once compact() has produced the summary and edited kept tail; drop
+        // it before constructing/persisting the replacement history so those
+        // representations do not overlap for the rest of this operation.
+        drop(events);
         // Lock before persisting so every failure leaves both sources of truth
         // unchanged: a poisoned history lock cannot strand a checkpoint that
         // the running agent never adopted, and a failed write cannot compact
@@ -835,12 +843,12 @@ impl App {
     /// Returns None when the history is empty.
     fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
         if let Some(path) = &self.session.path {
-            let (_meta, events, _off, _size) = store::load(path).ok()?;
-            if let Some(leaf) = self.branch_hint.as_deref() {
-                let active = store::active_path(&events, leaf);
-                return Some(active.into_iter().map(|i| events[i].clone()).collect());
-            }
-            return Some(events);
+            // The transcript is append-only and can contain large abandoned
+            // branches. Build its tiny tree index first, then deserialize only
+            // the selected lineage instead of loading the entire file and
+            // cloning the branch out of it.
+            let (_meta, index, _size) = store::load_index(path).ok()?;
+            return store::load_compaction_path(path, &index, self.branch_hint.as_deref()).ok();
         }
         let msgs = self.history.lock().ok()?;
         if msgs.is_empty() {

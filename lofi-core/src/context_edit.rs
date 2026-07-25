@@ -82,37 +82,46 @@ fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json:
 /// When `opts.enabled` is false this is a plain clone (the verbatim tail).
 #[must_use]
 pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> {
+    let refs: Vec<(&str, &Message)> = kept
+        .iter()
+        .map(|(id, message)| (id.as_str(), message))
+        .collect();
+    edit_tail_refs(&refs, opts)
+}
+
+/// Borrowing variant used by compaction, where the event log already owns
+/// every message. Only the final edited output is allocated; large tool
+/// results are not cloned into an intermediate `(id, message)` list first.
+#[must_use]
+pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Message> {
     if !opts.enabled || kept.is_empty() {
-        return kept.iter().map(|(_, m)| m.clone()).collect();
+        return kept.iter().map(|(_, message)| (*message).clone()).collect();
     }
 
-    // First pass (reverse): mark the protected recent window per category.
-    // `kept_flag[mi][bi]` is true when the block is within the last
-    // `keep_*` of its category and so survives verbatim.
     let mut kept_flag: Vec<Vec<bool>> = kept
         .iter()
-        .map(|(_, m)| vec![true; m.blocks.len()])
+        .map(|(_, message)| vec![true; message.blocks.len()])
         .collect();
     let mut cnt_r = 0usize;
     let mut cnt_t = 0usize;
     let mut cnt_u = 0usize;
     for (mi, (_, msg)) in kept.iter().enumerate().rev() {
-        for (bi, b) in msg.blocks.iter().enumerate().rev() {
-            let keep = match category(b) {
+        for (bi, block) in msg.blocks.iter().enumerate().rev() {
+            let keep = match category(block) {
                 Cat::ToolResult => {
-                    let k = cnt_r < opts.keep_results;
+                    let keep = cnt_r < opts.keep_results;
                     cnt_r += 1;
-                    k
+                    keep
                 }
                 Cat::Thinking => {
-                    let k = cnt_t < opts.keep_thinking;
+                    let keep = cnt_t < opts.keep_thinking;
                     cnt_t += 1;
-                    k
+                    keep
                 }
                 Cat::ToolUse => {
-                    let k = cnt_u < opts.keep_calls;
+                    let keep = cnt_u < opts.keep_calls;
                     cnt_u += 1;
-                    k
+                    keep
                 }
                 Cat::Other => true,
             };
@@ -120,34 +129,31 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
         }
     }
 
-    // Second pass (forward): rebuild, eliding non-kept blocks.
     kept.iter()
         .enumerate()
-        .map(|(mi, (eid, msg))| {
+        .map(|(mi, (event_id, msg))| {
             let mut blocks = Vec::with_capacity(msg.blocks.len());
-            for (bi, b) in msg.blocks.iter().enumerate() {
+            for (bi, block) in msg.blocks.iter().enumerate() {
                 if kept_flag[mi][bi] {
-                    blocks.push(b.clone());
+                    blocks.push(block.clone());
                     continue;
                 }
-                match b {
+                match block {
                     ContentBlock::ToolResult {
                         tool_use_id,
                         is_error,
                         ..
-                    } => {
-                        blocks.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: result_stub(eid, *is_error),
-                            is_error: *is_error,
-                        });
-                    }
-                    ContentBlock::Thinking { .. } => { /* dropped */ }
+                    } => blocks.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: result_stub(event_id, *is_error),
+                        is_error: *is_error,
+                    }),
+                    ContentBlock::Thinking { .. } => {}
                     ContentBlock::ToolUse { id, name, input } => {
                         blocks.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
-                            input: trim_tool_use_input(input, eid),
+                            input: trim_tool_use_input(input, event_id),
                         });
                     }
                     text @ ContentBlock::Text { .. } => blocks.push(text.clone()),

@@ -826,6 +826,12 @@ pub(crate) struct App {
     /// Navigation changes this; only Enter or an explicit action key resolves
     /// the request, so stray key presses can never reject a command.
     confirm_selected: usize,
+    /// First wrapped command row visible in the permission dialog. Reset for
+    /// each queued request and clamped by the renderer to its viewport.
+    confirm_scroll: usize,
+    /// Wrapped command row count and viewport height from the last render.
+    confirm_total: usize,
+    confirm_view_h: usize,
     /// When the yank-to-clipboard badge was last triggered; shown on the
     /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
@@ -1195,6 +1201,9 @@ async fn run_loop(
                 if let Some(req) = req {
                     if app.pending_confirms.is_empty() {
                         app.confirm_selected = 0;
+                        app.confirm_scroll = 0;
+                        app.confirm_total = 0;
+                        app.confirm_view_h = 0;
                     }
                     app.pending_confirms.push(req);
                     dirty = true;

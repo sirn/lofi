@@ -679,7 +679,7 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
 /// chooser: the requested command sits in a distinct content panel and Allow
 /// / Deny are real selectable buttons. Only Enter or an action key resolves
 /// the request; unrelated keys leave it open.
-pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
+pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::layout::Alignment;
     let t = app.theme;
     let Some(req) = app.pending_confirms.first() else {
@@ -694,23 +694,27 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
     let desired_w = area.width.saturating_mul(3).saturating_div(5).max(52);
     let w = desired_w.min(100).min(area.width);
     let content_w = w.saturating_sub(6).max(1) as usize;
-    let mut cmd_lines = prim::wrap(&req.command, content_w);
-    // Border, interior title/help, intro, label, command panel, and buttons
-    // consume the fixed chrome; truncate the command before those collapse.
-    let max_command_rows = area.height.saturating_sub(11).max(1) as usize;
-    if cmd_lines.len() > max_command_rows {
-        cmd_lines.truncate(max_command_rows);
-        if let Some(last) = cmd_lines.last_mut() {
-            *last = prim::truncate(last, content_w.saturating_sub(1));
-            last.push('…');
-        }
-    }
-    let desired_frame_h = u16::try_from(cmd_lines.len() + 10).unwrap_or(u16::MAX);
+    // Commands are preformatted source: preserve leading blank lines and
+    // indentation instead of treating them as flow text.
+    let cmd_lines = prim::wrap_pre(&req.command, content_w);
+    // Keep the dialog compact even on a tall terminal. The command panel is
+    // a viewport rather than a truncation point, so every wrapped row remains
+    // reachable with the scrolling keys.
+    const MAX_COMMAND_ROWS: usize = 12;
+    let available_command_rows = area.height.saturating_sub(11).max(1) as usize;
+    let command_rows = cmd_lines
+        .len()
+        .max(1)
+        .min(MAX_COMMAND_ROWS)
+        .min(available_command_rows);
+    let desired_frame_h = u16::try_from(command_rows + 10).unwrap_or(u16::MAX);
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
 
     let key = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let help = Line::from(vec![
+        Span::styled("↑/↓", key),
+        Span::styled(" scroll  ", Style::new().fg(t.subtle)),
         Span::styled("←/→", key),
         Span::styled(" choose  ", Style::new().fg(t.subtle)),
         Span::styled("enter", key),
@@ -770,11 +774,39 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
         .padding(Padding::horizontal(1));
     let command_inner = command_panel.inner(rows[3]);
     f.render_widget(command_panel, rows[3]);
+    app.confirm_total = cmd_lines.len();
+    app.confirm_view_h = command_inner.height as usize;
+    let max_scroll = app.confirm_total.saturating_sub(app.confirm_view_h);
+    app.confirm_scroll = app.confirm_scroll.min(max_scroll);
     let body_lines: Vec<Line> = cmd_lines
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, Style::new().fg(t.fg).bg(t.panel_bg))))
+        .iter()
+        .skip(app.confirm_scroll)
+        .take(app.confirm_view_h)
+        .map(|line| {
+            Line::from(Span::styled(
+                line.clone(),
+                Style::new().fg(t.fg).bg(t.panel_bg),
+            ))
+        })
         .collect();
     f.render_widget(Paragraph::new(body_lines), command_inner);
+    if app.confirm_total > app.confirm_view_h {
+        let track = Rect::new(
+            rows[3].right().saturating_sub(1),
+            command_inner.y,
+            1,
+            command_inner.height,
+        );
+        prim::render_scrollbar(
+            f,
+            track,
+            app.confirm_scroll,
+            app.confirm_view_h,
+            app.confirm_total,
+            t.subtle,
+            t.muted,
+        );
+    }
 
     let button = |label: &'static str, selected: bool| {
         let style = if selected {

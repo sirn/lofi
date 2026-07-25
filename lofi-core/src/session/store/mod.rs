@@ -14,7 +14,10 @@ use lofi_types::{Message, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
-pub use index::{load_event_at, load_events_at, load_index, EventIndex, IndexKind};
+pub use index::{
+    load_compaction_path, load_event_at, load_events_at, load_index, load_indexed_path, EventIndex,
+    IndexKind,
+};
 
 /// Transcript format version. Bumped only on a breaking on-disk change;
 /// older files are rejected (no migration yet — lofi has no shipped sessions
@@ -344,63 +347,111 @@ pub fn append_compaction(
     summarized: usize,
     kept: usize,
 ) -> Result<(u64, u64)> {
+    #[derive(Serialize)]
+    struct MessageCheckpoint<'a> {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_id: Option<&'a str>,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        role: lofi_types::Role,
+        blocks: &'a [lofi_types::ContentBlock],
+    }
+    #[derive(Serialize)]
+    struct CompactionCheckpoint<'a> {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_id: Option<&'a str>,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        summary: &'a str,
+        first_kept_entry_id: &'a str,
+        summarized_range: &'a [String; 2],
+        checkpointed_tail: bool,
+        summarized: usize,
+        kept: usize,
+    }
+
     let parent = match parent_hint {
         Some("") => None,
         Some(id) => Some(id.to_string()),
         None => last_event_id(path)?,
     };
     let ids: Vec<String> = (0..=kept_messages.len()).map(|_| short_id()).collect();
-    let mut events: Vec<SessionEvent> = kept_messages
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, message)| SessionEvent {
-            id: ids[index].clone(),
-            parent_id: if index == 0 {
-                parent.clone()
-            } else {
-                Some(ids[index - 1].clone())
-            },
-            kind: SessionEventKind::Message(message),
-        })
-        .collect();
-    let marker_index = kept_messages.len();
-    events.push(SessionEvent {
-        id: ids[marker_index].clone(),
-        parent_id: if marker_index == 0 {
-            parent
-        } else {
-            Some(ids[marker_index - 1].clone())
-        },
-        kind: SessionEventKind::Compaction {
-            summary,
-            first_kept_entry_id: if marker_index == 0 {
-                String::new()
-            } else {
-                ids[0].clone()
-            },
-            summarized_range,
-            checkpointed_tail: true,
-            summarized,
-            kept,
-        },
-    });
-    append_prepared_events(path, &events)
-}
-
-fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
     let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let mut payload = Vec::new();
-    for event in events {
-        serde_json::to_writer(&mut payload, event)
-            .map_err(|e| Error::State(format!("json: {e}")))?;
-        payload.push(b'\n');
-    }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    if let Err(error) = file.write_all(&payload).and_then(|()| file.flush()) {
+    let write = (|| -> Result<()> {
+        for (index, message) in kept_messages.iter().enumerate() {
+            let event = MessageCheckpoint {
+                id: &ids[index],
+                parent_id: if index == 0 {
+                    parent.as_deref()
+                } else {
+                    Some(&ids[index - 1])
+                },
+                kind: "message",
+                role: message.role,
+                blocks: &message.blocks,
+            };
+            serde_json::to_writer(&mut file, &event)
+                .map_err(|e| Error::State(format!("json: {e}")))?;
+            file.write_all(b"\n")?;
+        }
+        let marker_index = kept_messages.len();
+        let marker = CompactionCheckpoint {
+            id: &ids[marker_index],
+            parent_id: if marker_index == 0 {
+                parent.as_deref()
+            } else {
+                Some(&ids[marker_index - 1])
+            },
+            kind: "compaction",
+            summary: &summary,
+            first_kept_entry_id: ids
+                .first()
+                .filter(|_| marker_index > 0)
+                .map_or("", String::as_str),
+            summarized_range: &summarized_range,
+            checkpointed_tail: true,
+            summarized,
+            kept,
+        };
+        serde_json::to_writer(&mut file, &marker)
+            .map_err(|e| Error::State(format!("json: {e}")))?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = write {
+        let _ = file.set_len(byte_start);
+        return Err(error);
+    }
+    let byte_end = file.metadata()?.len();
+    Ok((byte_start, byte_end))
+}
+
+fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
+    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    // Serialize directly to disk. A complete payload buffer duplicated the
+    // whole checkpoint while its message bodies were already resident.
+    for event in events {
+        if let Err(error) = serde_json::to_writer(&mut file, event) {
+            let _ = file.set_len(byte_start);
+            return Err(Error::State(format!("json: {error}")));
+        }
+        if let Err(error) = file.write_all(b"\n") {
+            let _ = file.set_len(byte_start);
+            return Err(Error::Io(error));
+        }
+    }
+    if let Err(error) = file.flush() {
         let _ = file.set_len(byte_start);
         return Err(Error::Io(error));
     }
@@ -536,82 +587,98 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
     None
 }
 
-/// Parse a session file into a [`SessionEntry`] (metadata + message count),
-/// or `None` if the file is not a valid session. Only `Message` events are
-/// counted, so timing/turn-end lines do not inflate the "msgs" total.
-/// One-line preview of a session event for the `/resume` picker.
-fn entry_preview(kind: &SessionEventKind) -> String {
-    use lofi_types::Role;
-    match kind {
-        SessionEventKind::Message(m) => {
-            let text: String = m
-                .blocks
-                .iter()
-                .filter_map(|b| match b {
-                    lofi_types::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let prefix = match m.role {
-                Role::User => "user: ",
-                Role::Assistant => "agent: ",
-                _ => "",
-            };
-            format!("{prefix}{}", one_line(&text))
-        }
-        SessionEventKind::TurnEnd { .. } => String::new(),
-        SessionEventKind::TurnFailed { error, .. } => {
-            format!("agent: {} (failed)", one_line(error))
-        }
-        SessionEventKind::Compaction {
-            summarized, kept, ..
-        } => {
-            format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}")
-        }
-        SessionEventKind::NativeTool(rec) => {
-            format!("exec: {} {}", rec.name, one_line(&rec.args))
-        }
-        SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {
-            String::new()
-        }
-    }
+/// Minimal borrowed shape used by the session picker. Unknown fields, including
+/// large tool-result and native-tool result bodies, are skipped.
+#[derive(Deserialize)]
+struct EntryPreview<'a> {
+    #[serde(default, rename = "type")]
+    kind: &'a str,
+    #[serde(default)]
+    role: &'a str,
+    #[serde(default, borrow)]
+    blocks: Vec<EntryPreviewBlock<'a>>,
+    #[serde(default, borrow)]
+    error: std::borrow::Cow<'a, str>,
+    #[serde(default, borrow)]
+    name: std::borrow::Cow<'a, str>,
+    #[serde(default, borrow)]
+    args: std::borrow::Cow<'a, str>,
+    #[serde(default)]
+    summarized: usize,
+    #[serde(default)]
+    kept: usize,
 }
 
-/// Truncate to a single line and cap its length for a compact preview.
+#[derive(Deserialize)]
+struct EntryPreviewBlock<'a> {
+    #[serde(default, rename = "type")]
+    kind: &'a str,
+    #[serde(default, borrow)]
+    text: std::borrow::Cow<'a, str>,
+}
+
+/// Truncate to one line without allocating a Vec containing every character.
 fn one_line(s: &str) -> String {
     let line = s.split('\n').next().unwrap_or("");
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() > 80 {
-        format!("{}\u{2026}", chars[..80].iter().collect::<String>())
-    } else {
-        line.to_string()
+    line.char_indices()
+        .nth(80)
+        .map_or_else(|| line.to_string(), |(end, _)| format!("{}…", &line[..end]))
+}
+
+fn entry_preview(ev: &EntryPreview<'_>) -> String {
+    match ev.kind {
+        "message" | "" => {
+            let Some(text) = ev
+                .blocks
+                .iter()
+                .find_map(|b| (b.kind == "text" && !b.text.is_empty()).then_some(b.text.as_ref()))
+            else {
+                return String::new();
+            };
+            let prefix = match ev.role {
+                "user" => "user: ",
+                "assistant" => "agent: ",
+                _ => "",
+            };
+            format!("{prefix}{}", one_line(text))
+        }
+        "turn_failed" => format!("agent: {} (failed)", one_line(&ev.error)),
+        "compaction" => format!(
+            "compact: Compacted {} messages · kept {}",
+            ev.summarized, ev.kept
+        ),
+        "native_tool" => format!("exec: {} {}", ev.name, one_line(&ev.args)),
+        _ => String::new(),
     }
 }
 
 fn parse_entry(path: &Path) -> Option<SessionEntry> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let header: Header = serde_json::from_str(lines.next()?).ok()?;
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let header: Header = serde_json::from_str(line.trim_end_matches(['\n', '\r'])).ok()?;
     if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return None;
     }
     let mut count = 0usize;
     let mut last_message = String::new();
-    for l in lines {
-        if l.is_empty() {
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            break;
+        }
+        let raw = line.trim_end_matches(['\n', '\r']);
+        if raw.is_empty() {
             continue;
         }
-        let Ok(ev) = parse_event(l) else {
+        let Ok(ev) = serde_json::from_str::<EntryPreview<'_>>(raw) else {
             continue;
         };
-        if matches!(ev.kind, SessionEventKind::Message(_)) {
+        if ev.kind == "message" || (ev.kind.is_empty() && !ev.role.is_empty()) {
             count += 1;
         }
-        // Track the last user/agent message or compaction — not timing/
-        // TurnEnd metadata, which is always the final event and carries
-        // no useful preview text.
-        let preview = entry_preview(&ev.kind);
+        let preview = entry_preview(&ev);
         if !preview.is_empty() {
             last_message = preview;
         }

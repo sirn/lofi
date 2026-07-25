@@ -570,7 +570,37 @@ impl App {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let max_scroll = self.confirm_total.saturating_sub(self.confirm_view_h);
         let response = match k.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.confirm_scroll = self.confirm_scroll.saturating_sub(1);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.confirm_scroll = self.confirm_scroll.saturating_add(1).min(max_scroll);
+                None
+            }
+            KeyCode::PageUp => {
+                self.confirm_scroll = self
+                    .confirm_scroll
+                    .saturating_sub(self.confirm_view_h.max(1));
+                None
+            }
+            KeyCode::PageDown => {
+                self.confirm_scroll = self
+                    .confirm_scroll
+                    .saturating_add(self.confirm_view_h.max(1))
+                    .min(max_scroll);
+                None
+            }
+            KeyCode::Home => {
+                self.confirm_scroll = 0;
+                None
+            }
+            KeyCode::End => {
+                self.confirm_scroll = max_scroll;
+                None
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 self.confirm_selected = 0;
                 None
@@ -593,6 +623,9 @@ impl App {
             let req = self.pending_confirms.remove(0);
             let _ = req.respond.send(approved);
             self.confirm_selected = 0;
+            self.confirm_scroll = 0;
+            self.confirm_total = 0;
+            self.confirm_view_h = 0;
         }
         true
     }

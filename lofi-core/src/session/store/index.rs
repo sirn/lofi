@@ -189,3 +189,112 @@ pub fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>>
     }
     Ok(out)
 }
+
+/// Materialize only the lineage suffix needed by compaction. Once a
+/// compaction marker exists, everything before its checkpointed kept tail is
+/// represented by the marker summary and must not be deserialized again.
+pub fn load_compaction_path(
+    path: &Path,
+    index: &[EventIndex],
+    leaf_id: Option<&str>,
+) -> Result<Vec<SessionEvent>> {
+    use std::collections::HashMap;
+
+    if index.is_empty() {
+        return Ok(Vec::new());
+    }
+    let by_id: HashMap<&str, usize> = index
+        .iter()
+        .enumerate()
+        .map(|(i, event)| (event.id.as_str(), i))
+        .collect();
+    let mut current = match leaf_id {
+        Some(id) => by_id.get(id).copied(),
+        None => Some(index.len() - 1),
+    };
+    let mut lineage = Vec::new();
+    while let Some(i) = current {
+        lineage.push(i);
+        if lineage.len() > index.len() {
+            return Err(Error::State("cycle in session event lineage".to_string()));
+        }
+        current = index[i]
+            .parent_id
+            .as_deref()
+            .and_then(|id| by_id.get(id).copied());
+    }
+    if leaf_id.is_some() && lineage.is_empty() {
+        return Err(Error::State("session branch leaf not found".to_string()));
+    }
+    lineage.reverse();
+
+    let mut start = 0;
+    if let Some((marker_pos, &marker_index)) = lineage
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, i)| index[**i].kind == IndexKind::Compaction)
+    {
+        let marker = load_event_at(path, index[marker_index].offset)?;
+        if let super::SessionEventKind::Compaction {
+            first_kept_entry_id,
+            ..
+        } = marker.kind
+        {
+            // Include the marker in both cases: compact() needs its previous
+            // summary. For a non-empty checkpoint include the kept messages
+            // immediately before it as well.
+            start = if first_kept_entry_id.is_empty() {
+                marker_pos
+            } else {
+                lineage[..marker_pos]
+                    .iter()
+                    .position(|&i| index[i].id == first_kept_entry_id)
+                    .unwrap_or(marker_pos)
+            };
+        }
+    }
+    let offsets: Vec<u64> = lineage[start..].iter().map(|&i| index[i].offset).collect();
+    load_events_at(path, &offsets)
+}
+
+/// Materialize only one indexed lineage from a session file. The lightweight
+/// index owns the tree shape; large event bodies are parsed only for nodes on
+/// the selected path, avoiding a full transcript-sized allocation.
+pub fn load_indexed_path(
+    path: &Path,
+    index: &[EventIndex],
+    leaf_id: Option<&str>,
+) -> Result<Vec<SessionEvent>> {
+    use std::collections::HashMap;
+
+    if index.is_empty() {
+        return Ok(Vec::new());
+    }
+    let by_id: HashMap<&str, usize> = index
+        .iter()
+        .enumerate()
+        .map(|(i, event)| (event.id.as_str(), i))
+        .collect();
+    let mut current = match leaf_id {
+        Some(id) => by_id.get(id).copied(),
+        None => Some(index.len() - 1),
+    };
+    let mut lineage = Vec::new();
+    while let Some(i) = current {
+        lineage.push(i);
+        if lineage.len() > index.len() {
+            return Err(Error::State("cycle in session event lineage".to_string()));
+        }
+        current = index[i]
+            .parent_id
+            .as_deref()
+            .and_then(|id| by_id.get(id).copied());
+    }
+    if leaf_id.is_some() && lineage.is_empty() {
+        return Err(Error::State("session branch leaf not found".to_string()));
+    }
+    lineage.reverse();
+    let offsets: Vec<u64> = lineage.iter().map(|&i| index[i].offset).collect();
+    load_events_at(path, &offsets)
+}

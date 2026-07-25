@@ -5369,3 +5369,44 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
         .collect();
     assert_eq!(content, "```rust");
 }
+
+#[test]
+fn permission_dialog_caps_height_and_scrolls_command_preview() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let command = (0..30)
+        .map(|n| format!("command-line-{n:02}"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    let (req, _response) = confirm_request(&command);
+    a.pending_confirms.push(req);
+    let mut term = Terminal::new(TestBackend::new(90, 50)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    assert_eq!(
+        (a.confirm_total, a.confirm_view_h, a.confirm_scroll),
+        (30, 12, 0)
+    );
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(a.confirm_scroll, 2);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(a.confirm_scroll, 18);
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let screen = (0..50)
+        .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    assert!(screen.contains("command-line-29"), "{screen}");
+    assert!(!screen.contains("command-line-00"), "{screen}");
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    assert_eq!(a.confirm_scroll, 17);
+    assert_eq!(a.pending_confirms.len(), 1);
+}

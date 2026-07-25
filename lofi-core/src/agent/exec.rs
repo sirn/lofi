@@ -78,9 +78,108 @@ pub(crate) fn decode_json_string(s: &str) -> String {
     out
 }
 
+#[derive(Default)]
+pub(crate) struct CodePrefixDecoder {
+    code_start: Option<usize>,
+    processed: usize,
+    decoded: String,
+    done: bool,
+}
+
+impl CodePrefixDecoder {
+    pub(crate) fn update(&mut self, raw: &str) -> &str {
+        if self.done {
+            return self.decoded.trim_matches('\n');
+        }
+        if self.code_start.is_none() {
+            let prefix = extract_code_value_start(raw);
+            if let Some(start) = prefix {
+                self.code_start = Some(start);
+                self.processed = start;
+            } else {
+                return "";
+            }
+        }
+
+        // Re-decode only the unfinished escape at the end. Normal deltas are
+        // consumed exactly once, avoiding a fresh full-prefix String per event.
+        let suffix = &raw[self.processed..];
+        let complete = complete_json_string_prefix(suffix);
+        self.decoded
+            .push_str(&decode_json_string(&suffix[..complete]));
+        self.processed += complete;
+        self.done = complete > 0 && suffix.as_bytes()[complete - 1] == b'"';
+        self.decoded.trim_matches('\n')
+    }
+}
+
+fn extract_code_value_start(raw: &str) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let code_key = b"\"code\"";
+    let mut i = 0;
+    let mut in_str = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'\"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\"' {
+            if bytes[i..].starts_with(code_key) {
+                i += code_key.len();
+                while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+                    i += 1;
+                }
+                if bytes.get(i) != Some(&b':') {
+                    return None;
+                }
+                i += 1;
+                while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+                    i += 1;
+                }
+                return (bytes.get(i) == Some(&b'\"')).then_some(i + 1);
+            }
+            in_str = true;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn complete_json_string_prefix(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\"' {
+            return i + 1;
+        }
+        if bytes[i] == b'\\' {
+            if i + 1 >= bytes.len() {
+                break;
+            }
+            if bytes[i + 1] == b'u' && i + 6 > bytes.len() {
+                break;
+            }
+            i += if bytes[i + 1] == b'u' { 6 } else { 2 };
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
 /// Best-effort incremental extraction of the `code` string field from a
 /// partial tool-input JSON buffer. Returns the decoded content available so
 /// far, so the exec source can be streamed live as the model writes it.
+#[cfg(test)]
 pub(crate) fn extract_code_prefix(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let n = bytes.len();
