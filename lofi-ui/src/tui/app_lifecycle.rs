@@ -49,6 +49,7 @@ impl App {
             top_line: 0,
             last_base: 0,
             verbose: false,
+            debug: None,
             should_quit: false,
             session: SessionState {
                 store: None,
@@ -113,6 +114,20 @@ impl App {
     /// linearly.
     pub(super) fn branch_from(&mut self, id: String) {
         self.branch_hint = Some(id);
+    }
+
+    /// Apply one event while rebuilding a file-backed transcript. At each
+    /// turn boundary the completed turn is immediately reduced to its prompt;
+    /// its blocks can be reconstructed later from `turn_byte_ranges`. This
+    /// keeps resume peak memory bounded to one visible turn instead of the
+    /// entire transcript.
+    pub(super) fn apply_file_backed_replay_event(&mut self, ev: AgentEvent) {
+        if matches!(ev, AgentEvent::TurnStart { .. }) {
+            if let Some(turn) = self.turns.last_mut() {
+                turn.blocks.clear();
+            }
+        }
+        self.apply_event(ev);
     }
 
     /// Fold an [`AgentEvent`] into the current turn's blocks / status.
@@ -392,7 +407,7 @@ impl App {
             .unwrap_or(empty)
     }
 
-    /// Ensure frozen turn `idx`'s rendered lines are in the bounded cache,
+    /// Ensure frozen turn `idx`'s rendered lines are in the viewport cache,
     /// materializing from `turns` or the transcript file on a miss.
     /// `ensure_frozen` must have already recorded the turn's height.
     pub(super) fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
@@ -416,8 +431,8 @@ impl App {
     /// but the last (the last is the live, mutable one rebuilt each frame).
     /// On a wholesale replacement (`bump_render_epoch`) the cache is dropped;
     /// otherwise newly-superseded turns are rendered once, their height
-    /// recorded permanently in `frozen_heights`, and their (heavy) styled
-    /// lines entered into the bounded [`FrozenCache`] (oldest evicted). Heights
+    /// recorded permanently in `frozen_heights`. Their temporary rendered lines
+    /// are dropped here; the viewport pass caches only nearby turns. Heights
     /// are kept for every frozen turn so the viewport can be located and the
     /// scroll total computed without holding all rendered lines in memory.
     /// A viewport resize (width change) also drops the cache, since wrapping
@@ -444,8 +459,10 @@ impl App {
                 };
                 view::blocks::render_turn_lines(&cx, &turn)
             };
+            // Heights are the compact permanent index. Do not retain this
+            // rendered representation merely because its height was unknown;
+            // the viewport pass below will cache only nearby turns.
             self.frozen_heights.push(lines.len());
-            self.frozen_render.insert(idx, lines);
         }
         // Defensive: turns shrank without an epoch bump.
         if self.frozen_heights.len() > target {
@@ -453,6 +470,43 @@ impl App {
             // Drop any cached entries beyond the new frozen range.
             self.frozen_render.map.retain(|idx, _| *idx < target);
             self.frozen_render.order.retain(|idx| *idx < target);
+        }
+    }
+
+    /// Keep only rendered frozen turns near the current viewport and ensure
+    /// that working set is materialized. Turn heights remain resident for the
+    /// whole transcript, so locating the viewport does not require caching all
+    /// rendered lines.
+    pub(super) fn sync_frozen_cache_for_viewport(
+        &mut self,
+        off: usize,
+        height: usize,
+        width: usize,
+    ) {
+        let frozen = self.frozen_heights.len();
+        if frozen == 0 {
+            self.frozen_render.clear();
+            return;
+        }
+        let end = off.saturating_add(height);
+        let mut pos = 0usize;
+        let mut visible: Option<(usize, usize)> = None;
+        for idx in 0..frozen {
+            let turn_end = pos.saturating_add(self.frozen_heights[idx]);
+            if turn_end > off && pos < end {
+                visible = Some(visible.map_or((idx, idx), |(first, _)| (first, idx)));
+            }
+            pos = turn_end.saturating_add(1); // separator before next turn
+        }
+        // At the bottom the viewport may contain only the live last turn. Keep
+        // its nearest frozen neighbor as the scroll-up margin.
+        let visible = visible.or(Some((frozen - 1, frozen - 1)));
+        self.frozen_render.retain_near(visible, frozen);
+        let (first, last) = visible.expect("frozen turns are non-empty");
+        let first = first.saturating_sub(1);
+        let last = last.saturating_add(1).min(frozen - 1);
+        for idx in first..=last {
+            self.ensure_frozen_turn(idx, width);
         }
     }
 
@@ -578,6 +632,7 @@ impl App {
         self.last_compact_msg_count = self.messages_since_last_compact();
         self.compacted = true;
         self.bump_render_epoch();
+        self.debug_sample("compaction");
         true
     }
 

@@ -269,24 +269,22 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
         let entry = store.find(&opts.root, id)?.ok_or_else(|| {
             Error::State(format!("no session matching id '{id}' for this workspace"))
         })?;
-        let (_meta, events, offsets, file_size) = lofi_core::session::store::load(&entry.path)?;
+        let (_meta, index, file_size) = lofi_core::session::store::load_index(&entry.path)?;
         return Ok(tui::SessionConfig::resumed(
             store,
             entry.path,
-            events,
-            offsets,
+            index,
             file_size,
             opts.root.clone(),
         ));
     }
     if opts.continue_last {
         if let Some(entry) = store.most_recent(&opts.root)? {
-            let (_meta, events, offsets, file_size) = lofi_core::session::store::load(&entry.path)?;
+            let (_meta, index, file_size) = lofi_core::session::store::load_index(&entry.path)?;
             return Ok(tui::SessionConfig::resumed(
                 store,
                 entry.path,
-                events,
-                offsets,
+                index,
                 file_size,
                 opts.root.clone(),
             ));

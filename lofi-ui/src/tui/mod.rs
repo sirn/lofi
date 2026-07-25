@@ -29,8 +29,10 @@ mod app_input;
 mod app_lifecycle;
 mod app_nav;
 mod app_render;
+mod debug_stats;
 mod input;
 mod replay;
+mod resume;
 mod text;
 mod tree;
 pub mod view;
@@ -41,7 +43,7 @@ mod tests;
 // Glob re-export so `view`, `tests`, and this module call the moved
 // helpers by bare name; the submodules are cohesive slices of `tui`.
 #[allow(clippy::wildcard_imports)]
-use {input::*, replay::*, text::*, tree::*};
+use {input::*, replay::*, resume::*, text::*, tree::*};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
@@ -157,6 +159,7 @@ const DEFAULT_CTX_LIMIT: u64 = 200_000;
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
     ("/compact", "fold older history into a summary"),
+    ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
     ("/new", "start a fresh session"),
@@ -284,12 +287,9 @@ struct SessionState {
 pub(crate) struct SessionConfig {
     store: Option<SessionStore>,
     path: Option<PathBuf>,
-    /// Full event log loaded on resume; empty for fresh/ephemeral sessions.
-    events: Vec<SessionEvent>,
-    /// Byte offset of each event's line in the transcript file (parallel to
-    /// `events`), and the file's total size — used to build per-turn byte
-    /// ranges so frozen turns can be re-materialized from the file on demand.
-    offsets: Vec<u64>,
+    /// Lightweight tree/offset index loaded on resume. Message and tool bodies
+    /// remain on disk and are parsed only for the active turn/history.
+    index: Vec<store::EventIndex>,
     file_size: u64,
     cwd: PathBuf,
 }
@@ -300,8 +300,7 @@ impl SessionConfig {
         Self {
             store: None,
             path: None,
-            events: Vec::new(),
-            offsets: Vec::new(),
+            index: Vec::new(),
             file_size: 0,
             cwd,
         }
@@ -312,8 +311,7 @@ impl SessionConfig {
         Self {
             store: Some(store),
             path: None,
-            events: Vec::new(),
-            offsets: Vec::new(),
+            index: Vec::new(),
             file_size: 0,
             cwd,
         }
@@ -323,16 +321,14 @@ impl SessionConfig {
     pub(crate) fn resumed(
         store: SessionStore,
         path: PathBuf,
-        events: Vec<SessionEvent>,
-        offsets: Vec<u64>,
+        index: Vec<store::EventIndex>,
         file_size: u64,
         cwd: PathBuf,
     ) -> Self {
         Self {
             store: Some(store),
             path: Some(path),
-            events,
-            offsets,
+            index,
             file_size,
             cwd,
         }
@@ -343,7 +339,9 @@ impl SessionConfig {
     /// `None` for fresh/ephemeral sessions or sessions with no completed turn.
     #[must_use]
     pub(crate) fn last_run_model(&self) -> Option<RunModel> {
-        store::last_run_model(&self.events)
+        self.path
+            .as_deref()
+            .and_then(|p| last_run_model_from_index(p, &self.index))
     }
 }
 
@@ -601,21 +599,17 @@ struct TreeEntry {
     is_active: bool,
 }
 
-/// A bounded FIFO cache of rendered frozen turns, keyed by turn index.
-/// Only turns near the viewport are retained; the rest are re-rendered on
-/// demand from `turns`. Heights for *all* frozen turns live in
-/// `frozen_heights` (tiny) so the viewport can be located without fetching
-/// lines, keeping the heavy styled-line copy bounded by [`FROZEN_CACHE_CAP`]
-/// turns regardless of session length.
+/// Viewport-local cache of rendered frozen turns, keyed by turn index.
+/// Only turns intersecting the viewport (plus a one-turn margin) are retained;
+/// the rest are re-rendered on demand. Heights for *all* frozen turns live in
+/// `frozen_heights` (tiny), so the viewport can be located without retaining
+/// the heavy styled-line representation of the whole session.
 struct FrozenCache {
     order: VecDeque<usize>,
     map: HashMap<usize, Vec<view::RenderLine>>,
 }
 
 impl FrozenCache {
-    /// Maximum number of frozen turns whose rendered lines are kept in memory.
-    const CAP: usize = 64;
-
     fn new() -> Self {
         Self {
             order: VecDeque::new(),
@@ -640,11 +634,19 @@ impl FrozenCache {
         if self.map.insert(idx, entry).is_none() {
             self.order.push_back(idx);
         }
-        while self.order.len() > Self::CAP {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
-        }
+    }
+
+    /// Drop rendered turns outside the viewport-local working set. A one-turn
+    /// margin on either side avoids re-rendering immediately on a small scroll.
+    fn retain_near(&mut self, visible: Option<(usize, usize)>, frozen_turns: usize) {
+        let Some((first, last)) = visible else {
+            self.clear();
+            return;
+        };
+        let first = first.saturating_sub(1);
+        let last = last.saturating_add(1).min(frozen_turns.saturating_sub(1));
+        self.map.retain(|idx, _| (first..=last).contains(idx));
+        self.order.retain(|idx| (first..=last).contains(idx));
     }
 }
 
@@ -763,6 +765,8 @@ pub(crate) struct App {
     /// Bottom scroll offset from the last render; seeds `top_line` on un-pin.
     last_base: usize,
     verbose: bool,
+    /// Opt-in process/component diagnostics writer enabled by `/debug`.
+    debug: Option<debug_stats::DebugState>,
     should_quit: bool,
     session: SessionState,
     picker: Option<PickerState>,
@@ -851,8 +855,8 @@ pub(crate) struct App {
     /// Log viewport height at last render, for cursor-follow scrolling.
     log_view_h: usize,
     /// Rendered-line cache for frozen turns (all but the live last one),
-    /// bounded to [`FrozenCache::CAP`] turns near the viewport. Turns outside
-    /// the cache are re-rendered from `turns` on demand. The last turn is
+    /// restricted to turns intersecting the viewport plus a one-turn margin.
+    /// Turns outside the cache are re-rendered on demand. The last turn is
     /// rebuilt fresh each frame; earlier turns are immutable once a new turn
     /// is pushed, so their height is stable and only their (heavy) styled
     /// lines are evictable.
@@ -988,8 +992,7 @@ async fn run_loop(
     let SessionConfig {
         store,
         path,
-        events,
-        offsets,
+        index,
         file_size,
         cwd,
     } = session;
@@ -1000,17 +1003,14 @@ async fn run_loop(
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.model_choices = model_choices;
     app.session = SessionState { store, path, cwd };
-    let messages = messages_from_events(&events, &edit);
-    if let Ok(mut m) = app.history.lock() {
-        m.clone_from(&messages);
+    if let Some(path) = app.session.path.clone() {
+        let messages = history_from_index(&path, &index, &edit)?;
+        if let Ok(mut history) = app.history.lock() {
+            *history = messages;
+        }
+        replay_indexed_session(&mut app, &path, &index, file_size)?;
+        restore_compaction_from_index(&mut app, &path, &index);
     }
-    // Replay the durable event log through `apply_event` — the same builder
-    // the live stream uses — so resume and live share one code path. Totals
-    // are restored by the replayed `TurnEnd` events.
-    for ev in replay_session_events(&events) {
-        app.apply_event(ev);
-    }
-    app.turn_byte_ranges = turn_byte_ranges_from_events(&events, &offsets, file_size);
     // Freeze every turn except the last: its blocks are backed by the
     // transcript file (see `materialize_turn`), so drop them to keep memory
     // bounded by the viewport rather than the whole session. The last turn
@@ -1021,13 +1021,6 @@ async fn run_loop(
             turn.blocks.clear();
         }
     }
-    // Derive compaction state from the transcript so auto-compact's
-    // hysteresis and cooldown work immediately on resume, and the context
-    // gauge shows "c" when the session was compacted but not yet continued.
-    app.restore_compaction_state(&events);
-    // The event log was only needed to rebuild the view and history; free it
-    // now so a large transcript isn't held for the session's lifetime.
-    drop(events);
     app.bump_render_epoch();
     app.no_models_hint = no_models_hint.clone();
     if let Some(hint) = no_models_hint {
@@ -1089,6 +1082,7 @@ async fn run_loop(
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
                             app.run_finished();
+                            app.debug_sample("agent_settled");
                             if app.context_pressure {
                                 // Hard cap: force-compact + silent
                                 // continue, gated by the cooldown so a run

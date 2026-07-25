@@ -14,7 +14,7 @@ use lofi_types::{Message, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
-pub use index::{load_event_at, load_index, EventIndex, IndexKind};
+pub use index::{load_event_at, load_events_at, load_index, EventIndex, IndexKind};
 
 /// Transcript format version. Bumped only on a breaking on-disk change;
 /// older files are rejected (no migration yet — lofi has no shipped sessions

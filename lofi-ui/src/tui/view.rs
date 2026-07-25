@@ -42,27 +42,25 @@ pub(crate) use prim::VisLine;
 
 pub(crate) use prim::HStack;
 
-/// Frame-level vertical stack: the analogue of the log's [`Stack`] for the
-/// fixed chrome. Each region renders only its own content; this layout owns
-/// the gaps — one blank row between adjacent present regions, with
-/// zero-height regions skipped so they leave no gap (the idle working
-/// indicator collapses without doubling the separator).
+/// Frame-level vertical stack for fixed chrome. Spacing is explicit via
+/// [`VStack::spacer`], so adjacent components are joined unless the caller
+/// deliberately inserts blank space between them.
 enum VRegion {
     /// Fixed-height region; a height of 0 means the region is absent.
     Fixed(u16),
     /// Flexible region that fills the space left by the fixed regions.
     Fill,
+    /// Explicit blank space between components.
+    Spacer(u16),
 }
 
 struct VStack {
-    gap: u16,
     regions: Vec<VRegion>,
 }
 
 impl VStack {
-    fn new(gap: u16) -> Self {
+    fn new() -> Self {
         Self {
-            gap,
             regions: Vec::new(),
         }
     }
@@ -72,42 +70,30 @@ impl VStack {
     fn fill(&mut self) {
         self.regions.push(VRegion::Fill);
     }
+    fn spacer(&mut self, h: u16) {
+        self.regions.push(VRegion::Spacer(h));
+    }
 
-    /// Split `area` into one rect per region, clearing the gap rows between
-    /// present regions. Absent (height-0) regions yield `None` and leave no
-    /// gap, mirroring [`Stack`]'s skip-empty rule. The returned rect order
-    /// matches the region order; index by the position passed to
-    /// [`fixed`](Self::fixed)/[`fill`](Self::fill).
+    /// Split `area` into one rect per region. Spacer regions are cleared and
+    /// return `None`; zero-height fixed regions likewise remain absent.
     fn split(&self, f: &mut Frame, area: Rect) -> Vec<Option<Rect>> {
-        let present: Vec<usize> = self
-            .regions
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r, VRegion::Fill) || matches!(r, VRegion::Fixed(h) if *h > 0))
-            .map(|(i, _)| i)
-            .collect();
-        let mut constraints: Vec<Constraint> = Vec::new();
-        for (k, &i) in present.iter().enumerate() {
-            if k > 0 {
-                constraints.push(Constraint::Length(self.gap));
-            }
-            constraints.push(match self.regions[i] {
-                VRegion::Fixed(h) => Constraint::Length(h),
-                VRegion::Fill => Constraint::Min(0),
-            });
-        }
+        let constraints = self.regions.iter().map(|region| match region {
+            VRegion::Fixed(h) | VRegion::Spacer(h) => Constraint::Length(*h),
+            VRegion::Fill => Constraint::Min(0),
+        });
         let chunks = Layout::vertical(constraints).split(area);
-        let mut out = vec![None; self.regions.len()];
-        let mut ci = 0;
-        for (k, &i) in present.iter().enumerate() {
-            if k > 0 {
-                f.render_widget(Clear, chunks[ci]);
-                ci += 1;
-            }
-            out[i] = Some(chunks[ci]);
-            ci += 1;
-        }
-        out
+        self.regions
+            .iter()
+            .zip(chunks.iter())
+            .map(|(region, &rect)| match region {
+                VRegion::Spacer(_) => {
+                    f.render_widget(Clear, rect);
+                    None
+                }
+                VRegion::Fixed(0) => None,
+                VRegion::Fixed(_) | VRegion::Fill => Some(rect),
+            })
+            .collect()
     }
 }
 
@@ -123,24 +109,32 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     // on panel_bg with the `▌` gutter. The VStack gap supplies the blank
     // row above the mode line.
     let footer_h = input_h.saturating_add(4);
-    let mut vs = VStack::new(1);
+    let running = u16::from(app.run_active());
+    let mut vs = VStack::new();
     vs.fixed(1); // header
+    vs.spacer(1);
     vs.fill(); // log viewport
-    vs.fixed(u16::from(app.run_active())); // working indicator (absent when idle)
+    vs.spacer(1);
+    vs.fixed(running); // working indicator (absent when idle)
+    vs.spacer(running); // separate an active indicator from the footer
     vs.fixed(footer_h); // mode line + panel
+    vs.fixed(u16::from(app.debug.is_some())); // full-width debug bar, no spacer
     let rects = vs.split(f, area);
 
     if let Some(r) = rects[0] {
         render_header(f, r, app);
     }
-    if let Some(r) = rects[1] {
+    if let Some(r) = rects[2] {
         render_log(f, r, app);
     }
-    if let Some(r) = rects[2] {
+    if let Some(r) = rects[4] {
         render_working(f, r, app);
     }
-    if let Some(r) = rects[3] {
+    if let Some(r) = rects[6] {
         render_footer_block(f, r, app);
+    }
+    if let Some(r) = rects[7] {
+        render_debug_bar(f, r, app);
     }
     if app.picker.is_some() {
         render_picker(f, area, app);
@@ -336,6 +330,10 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             app.sel = Some(app.select_sel());
         }
     }
+
+    // Rendered frozen turns are viewport-local: evict turns that moved out of
+    // range and materialize only the visible turns plus a one-turn margin.
+    app.sync_frozen_cache_for_viewport(off, height, w);
 
     // Slice the visible window from the line sequence. Frozen turns entirely
     // above the viewport are skipped via their cached height (no line fetch);
@@ -752,6 +750,16 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         1,
     );
     f.render_widget(Paragraph::new(Line::from(right)), rrect);
+}
+
+/// Full-width diagnostics bar shown as its own bottom-level VStack region.
+fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
+    if let Some(line) = app.debug_memory_line() {
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().fg(app.theme.panel_bg).bg(app.theme.warn)),
+            area,
+        );
+    }
 }
 
 /// Gray usage line below the prompt: `  ↑in ↓out · ctx: used/limit` on the

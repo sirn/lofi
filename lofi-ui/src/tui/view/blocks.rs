@@ -1010,8 +1010,8 @@ fn trim_reasoning_summary(text: &str) -> String {
 
 /// An `exec` block drawn as a plain tree without a background tile or
 /// top/bottom padding. A two-cell left gutter aligns it with other transcript
-/// blocks. Header `Exec <label>`, the code with line numbers behind
-/// a `│` rail, then each native tool branched off that rail, and a final
+/// blocks. Header `· Exec <label>` with a status-colored dot, the code with
+/// line numbers behind a `│` rail, then each native tool branched off that rail, and a final
 /// `└ ✓ Succeed`/`└ ✗ Failed` line with a result preview once done.
 struct ExecBlock<'a> {
     tool: &'a ToolCall,
@@ -1027,8 +1027,18 @@ impl Component for ExecBlock<'_> {
             Some(l) if !l.is_empty() => format!("Exec {l}"),
             _ => "Exec".to_string(),
         };
+        let status_color = if !self.tool.done {
+            active_indicator(t)
+        } else if self.tool.is_error {
+            t.error
+        } else {
+            t.success
+        };
         out.push(prim::rline(
-            vec![Span::raw("  ")],
+            vec![
+                Span::raw("  "),
+                Span::styled("· ", Style::new().fg(status_color)),
+            ],
             vec![Span::styled(
                 header,
                 Style::new().fg(t.fg).add_modifier(Modifier::BOLD),

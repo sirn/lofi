@@ -26,6 +26,10 @@ impl App {
                 self.compact_now();
                 true
             }
+            "/debug" => {
+                self.toggle_debug();
+                true
+            }
             "/recall" => {
                 self.recall_now(cmd);
                 true
@@ -186,6 +190,7 @@ impl App {
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
+        lines.push(info_kv(t, "/debug", "toggle resource diagnostics"));
         lines.push(info_kv(
             t,
             "/recall [query]",
@@ -302,53 +307,56 @@ impl App {
         let Some(entry) = entry else {
             return;
         };
-        match store::load(&entry.path) {
-            Ok((_meta, events, offsets, file_size)) => {
-                let messages = messages_from_events(&events, &self.compaction.edit);
-                if let Ok(mut m) = self.history.lock() {
-                    *m = messages;
+        match store::load_index(&entry.path) {
+            Ok((_meta, index, file_size)) => {
+                let loaded = history_from_index(&entry.path, &index, &self.compaction.edit)
+                    .and_then(|messages| {
+                        if let Ok(mut history) = self.history.lock() {
+                            *history = messages;
+                        }
+                        self.turns.clear();
+                        self.turn_byte_ranges.clear();
+                        self.cost = 0.0;
+                        self.total_in = 0;
+                        self.total_out = 0;
+                        self.total_cache_read = 0;
+                        self.total_cache_write = 0;
+                        self.reset_compaction_gauges();
+                        replay_indexed_session(self, &entry.path, &index, file_size)?;
+                        restore_compaction_from_index(self, &entry.path, &index);
+                        Ok(())
+                    });
+                if let Err(e) = loaded {
+                    self.push_turn(Turn {
+                        prompt: "/resume".to_string(),
+                        blocks: vec![Block::Error(format!("load session: {e}"))],
+                    });
+                    return;
                 }
-                // Replay the durable event log through `apply_event` so the
-                // resume path and the live path share one builder. Totals
-                // (cost/usage) are restored by the replayed `TurnEnd` events,
-                // not by a separate accumulator — reset them first.
-                self.turns = Vec::new();
-                self.turn_byte_ranges = Vec::new();
-                self.cost = 0.0;
-                self.total_in = 0;
-                self.total_out = 0;
-                self.total_cache_read = 0;
-                self.total_cache_write = 0;
-                self.reset_compaction_gauges();
-                for ev in replay_session_events(&events) {
-                    self.apply_event(ev);
-                }
-                self.turn_byte_ranges = turn_byte_ranges_from_events(&events, &offsets, file_size);
-                // Freeze all but the last turn (file-backed; see `run_loop`).
                 if self.turns.len() > 1 {
                     let n = self.turns.len();
                     for turn in &mut self.turns[..n - 1] {
                         turn.blocks.clear();
                     }
                 }
-                self.restore_compaction_state(&events);
+                if !self.model_choices.is_empty() {
+                    if let Some(m) = last_run_model_from_index(&entry.path, &index) {
+                        let restored = format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str());
+                        let current = format!("{}:{}", self.model_label, self.thinking.as_str());
+                        if restored != current {
+                            self.pending_model_switch = Some(restored);
+                        }
+                    }
+                }
                 self.bump_render_epoch();
                 self.session.path = Some(entry.path);
                 self.pinned = true;
                 self.top_line = 0;
-                // Restore the resumed session's last-used model when it
-                // differs from the current one; the run loop rebuilds off
-                // `pending_model_switch` (the same path `/model` uses).
-                if let Some(q) = self.resume_model_switch(&events) {
-                    self.pending_model_switch = Some(q);
-                }
             }
-            Err(e) => {
-                self.push_turn(Turn {
-                    prompt: "/resume".to_string(),
-                    blocks: vec![Block::Error(format!("load session: {e}"))],
-                });
-            }
+            Err(e) => self.push_turn(Turn {
+                prompt: "/resume".to_string(),
+                blocks: vec![Block::Error(format!("load session: {e}"))],
+            }),
         }
     }
 
@@ -358,6 +366,7 @@ impl App {
     /// is available to switch to. Returns the query for
     /// `pending_model_switch` (the run loop rebuilds off it, the same path
     /// `/model` uses), or `None` when no switch is needed or possible.
+    #[cfg(test)]
     pub(super) fn resume_model_switch(&self, events: &[SessionEvent]) -> Option<String> {
         if self.model_choices.is_empty() {
             return None;
@@ -872,9 +881,7 @@ impl App {
         self.total_cache_read = 0;
         self.total_cache_write = 0;
         self.reset_compaction_gauges();
-        for ev in replay_session_events(&rolled_back) {
-            self.apply_event(ev);
-        }
+        replay_session_events(&rolled_back, |ev| self.apply_event(ev));
         self.restore_compaction_state(&rolled_back);
         self.bump_render_epoch();
         self.pinned = true;

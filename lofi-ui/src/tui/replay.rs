@@ -50,6 +50,7 @@ fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
 /// a tool-result (mirroring [`turns_from_events`]); its byte range runs from
 /// that line's offset to the next turn's start, or to `file_size` for the
 /// last turn. Parallel to the `Vec<Turn>` returned by [`turns_from_events`].
+#[cfg(test)]
 pub(super) fn turn_byte_ranges_from_events(
     events: &[SessionEvent],
     offsets: &[u64],
@@ -256,20 +257,20 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
     }
 }
 
-/// Build a `Vec<Turn>` from a transcript event log by replaying it through
-/// [`apply_event_to_turns`]. Used to materialize a frozen turn from its byte
+/// Build a `Vec<Turn>` from a transcript event log by replaying each converted
+/// event directly through [`apply_event_to_turns`]. Used to materialize a frozen turn from its byte
 /// range on demand (`materialize_turn`); the live path and full-session
 /// resume go through `App::apply_event` instead, which also updates totals.
 pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
-    for ev in replay_session_events(events) {
-        apply_event_to_turns(&mut turns, ev);
-    }
+    replay_session_events(events, |ev| apply_event_to_turns(&mut turns, ev));
     turns
 }
 
 /// Reconstruct a faithful [`AgentEvent`] stream from a transcript event log,
-/// so the resume path and the live path share one builder ([`App::apply_event`]).
+/// emitting each event immediately so resume never retains a second full
+/// transcript representation. The resume and live paths still share one
+/// builder ([`App::apply_event`]).
 ///
 /// Tool timings, thinking timings, and native-tool records are gathered first
 /// (they are written after the messages) so each `ToolUse` block can be
@@ -284,15 +285,18 @@ pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
 /// `ToolEnd` until the matching tool-result message arrives — keeping
 /// `apply_event`'s assumption that `ToolEnd` carries the result.
 #[allow(clippy::too_many_lines)]
-pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> {
+pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMut(AgentEvent)) {
     use std::collections::HashMap as Map;
     let visible: Vec<&SessionEvent> = visible_event_indices(events)
         .into_iter()
         .map(|i| &events[i])
         .collect();
 
-    let mut tool_elapsed: Map<String, u64> = Map::new();
-    let mut native_by_parent: Map<String, Vec<NativeToolRecord>> = Map::new();
+    // These indexes borrow the durable events. Cloning native records here
+    // used to duplicate every captured tool result during resume (several MiB
+    // in large sessions) before replay had even started.
+    let mut tool_elapsed: Map<&str, u64> = Map::new();
+    let mut native_by_parent: Map<&str, Vec<&NativeToolRecord>> = Map::new();
     // Thinking-block durations in emission order, matched positionally to
     // assistant `Thinking` blocks as they are replayed.
     let mut thinking_timing: Vec<u64> = Vec::new();
@@ -302,21 +306,20 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 tool_call_id,
                 elapsed_ms,
             } => {
-                tool_elapsed.insert(tool_call_id.clone(), *elapsed_ms);
+                tool_elapsed.insert(tool_call_id.as_str(), *elapsed_ms);
             }
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
                 thinking_timing.push(*elapsed_ms);
             }
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent
-                    .entry(rec.parent.clone())
+                    .entry(rec.parent.as_str())
                     .or_default()
-                    .push(rec.clone());
+                    .push(rec);
             }
             _ => {}
         }
     }
-    let mut out: Vec<AgentEvent> = Vec::new();
     let mut thinking_idx = 0usize;
     for ev in &visible {
         match &ev.kind {
@@ -336,7 +339,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                                 is_error,
                             } = b
                             {
-                                out.push(AgentEvent::ToolEnd {
+                                emit(AgentEvent::ToolEnd {
                                     id: tool_use_id.clone(),
                                     result: if *is_error {
                                         format!("error: {content}")
@@ -344,7 +347,10 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                                         content.clone()
                                     },
                                     is_error: *is_error,
-                                    elapsed_ms: tool_elapsed.get(tool_use_id).copied().unwrap_or(0),
+                                    elapsed_ms: tool_elapsed
+                                        .get(tool_use_id.as_str())
+                                        .copied()
+                                        .unwrap_or(0),
                                 });
                             }
                         }
@@ -359,25 +365,25 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                             _ => None,
                         })
                         .unwrap_or_default();
-                    out.push(AgentEvent::TurnStart { prompt });
+                    emit(AgentEvent::TurnStart { prompt });
                 }
                 Role::Assistant => {
                     for b in &msg.blocks {
                         match b {
                             ContentBlock::Text { text } => {
-                                out.push(AgentEvent::Text(text.clone()));
+                                emit(AgentEvent::Text(text.clone()));
                             }
                             ContentBlock::Thinking { text, .. } => {
-                                out.push(AgentEvent::Thinking(text.clone()));
+                                emit(AgentEvent::Thinking(text.clone()));
                                 let elapsed =
                                     thinking_timing.get(thinking_idx).copied().unwrap_or(0);
                                 thinking_idx += 1;
-                                out.push(AgentEvent::ThinkingEnd {
+                                emit(AgentEvent::ThinkingEnd {
                                     elapsed_ms: elapsed,
                                 });
                             }
                             ContentBlock::ToolUse { id, name, input } => {
-                                out.push(AgentEvent::ToolStart {
+                                emit(AgentEvent::ToolStart {
                                     id: id.clone(),
                                     name: name.clone(),
                                 });
@@ -389,7 +395,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                                 } else {
                                     (input.to_string(), None)
                                 };
-                                out.push(AgentEvent::ToolInput {
+                                emit(AgentEvent::ToolInput {
                                     id: id.clone(),
                                     code,
                                     label,
@@ -398,15 +404,15 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                                 // this exec, in order, before the `ToolEnd`
                                 // (which is deferred to the tool-result
                                 // message below).
-                                if let Some(natives) = native_by_parent.get(id) {
+                                if let Some(natives) = native_by_parent.get(id.as_str()) {
                                     for rec in natives {
-                                        out.push(AgentEvent::NativeToolStart {
+                                        emit(AgentEvent::NativeToolStart {
                                             parent: id.clone(),
                                             id: rec.call_id,
                                             name: rec.name.clone(),
                                             args: rec.args.clone(),
                                         });
-                                        out.push(AgentEvent::NativeToolEnd {
+                                        emit(AgentEvent::NativeToolEnd {
                                             parent: id.clone(),
                                             id: rec.call_id,
                                             result: rec.result.clone(),
@@ -430,7 +436,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                             is_error,
                         } = b
                         {
-                            out.push(AgentEvent::ToolEnd {
+                            emit(AgentEvent::ToolEnd {
                                 id: tool_use_id.clone(),
                                 result: if *is_error {
                                     format!("error: {content}")
@@ -438,7 +444,10 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                                     content.clone()
                                 },
                                 is_error: *is_error,
-                                elapsed_ms: tool_elapsed.get(tool_use_id).copied().unwrap_or(0),
+                                elapsed_ms: tool_elapsed
+                                    .get(tool_use_id.as_str())
+                                    .copied()
+                                    .unwrap_or(0),
                             });
                         }
                     }
@@ -457,7 +466,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 // The summary is injected into the agent history by
                 // `messages_from_events`; carry it on the marker block too
                 // so `/verbose` can expand it inline.
-                out.push(AgentEvent::Compaction {
+                emit(AgentEvent::Compaction {
                     summarized: *summarized,
                     kept: *kept,
                     summary: summary.clone(),
@@ -470,7 +479,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 usage,
                 ..
             } => {
-                out.push(AgentEvent::TurnEnd {
+                emit(AgentEvent::TurnEnd {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
                     cost: *cost,
@@ -485,7 +494,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
                 usage,
                 ..
             } => {
-                out.push(AgentEvent::TurnFailed {
+                emit(AgentEvent::TurnFailed {
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
                     error: error.clone(),
@@ -495,7 +504,6 @@ pub(super) fn replay_session_events(events: &[SessionEvent]) -> Vec<AgentEvent> 
             }
         }
     }
-    out
 }
 
 pub(super) fn messages_from_events(

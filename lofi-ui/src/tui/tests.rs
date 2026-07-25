@@ -2296,7 +2296,7 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
-    assert_eq!(sc.candidates, vec![8]); // /tree is index 8
+    assert_eq!(sc.candidates, vec![9]); // /tree is index 9
                                         // Typing the full command dismisses (nothing left to complete).
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
@@ -2309,8 +2309,9 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/".to_string();
     a.refresh_slash_complete();
     a.slash_complete_down(); // index 1 = /compact
-    a.slash_complete_down(); // index 2 = /exit
-    a.slash_complete_down(); // index 3 = /help
+    a.slash_complete_down(); // index 2 = /debug
+    a.slash_complete_down(); // index 3 = /exit
+    a.slash_complete_down(); // index 4 = /help
     a.slash_complete_accept();
     assert_eq!(a.input, "/help");
     assert_eq!(a.input_cursor, a.input.len());
@@ -4841,10 +4842,12 @@ fn frozen_cache_invalidates_on_width_change() {
     push_turn(&mut a);
 
     a.ensure_frozen(20);
+    a.sync_frozen_cache_for_viewport(0, 24, 20);
     let h_narrow = a.frozen_heights[0];
     assert!(a.frozen_render.get(0).is_some());
 
     a.ensure_frozen(100);
+    a.sync_frozen_cache_for_viewport(0, 24, 100);
     let h_wide = a.frozen_heights[0];
     assert!(a.frozen_render.get(0).is_some());
     // Without width invalidation the cache would keep its narrow rendering

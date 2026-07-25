@@ -162,10 +162,30 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
 /// Returns the underlying IO error if the session file cannot be read or the
 /// event at `offset` cannot be parsed.
 pub fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
+    let mut events = load_events_at(path, &[offset])?;
+    events
+        .pop()
+        .ok_or_else(|| Error::State(format!("no event at offset {offset} in {}", path.display())))
+}
+
+/// Parse selected event lines in one file pass. Offsets must be in ascending
+/// order. This is used by resume to materialize only the active branch, one
+/// turn at a time, without ever constructing the full transcript in memory.
+pub fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     use std::io::{BufRead, Seek, SeekFrom};
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-    reader.seek(SeekFrom::Start(offset))?;
+    let mut out = Vec::with_capacity(offsets.len());
     let mut buf = String::new();
-    reader.read_line(&mut buf)?;
-    parse_event(buf.trim_end_matches(['\n', '\r']))
+    for &offset in offsets {
+        reader.seek(SeekFrom::Start(offset))?;
+        buf.clear();
+        if reader.read_line(&mut buf)? == 0 {
+            return Err(Error::State(format!(
+                "no event at offset {offset} in {}",
+                path.display()
+            )));
+        }
+        out.push(parse_event(buf.trim_end_matches(['\n', '\r']))?);
+    }
+    Ok(out)
 }
