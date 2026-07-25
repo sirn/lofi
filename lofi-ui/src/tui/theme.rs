@@ -13,7 +13,8 @@ use ratatui::style::Color;
 /// truecolor.
 ///
 /// Token roles (kept deliberately small and generic):
-/// - `primary` / `secondary` — brand accents (wordmark, user indicator).
+/// - `primary` — brand/accent color.
+/// - `user` / `agent` — conversation-role colors.
 /// - `success` / `warn` / `error` / `info` — status semantics.
 /// - `fg` / `muted` / `subtle` — base, dimmed, and faint text.
 /// - `surface` — filled background for user messages and code tiles.
@@ -21,7 +22,10 @@ use ratatui::style::Color;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Theme {
     pub primary: Color,
-    pub secondary: Color,
+    /// User-role labels and indicators. Deliberately matches `primary`.
+    pub user: Color,
+    /// Agent-role labels. Kept separate from generic informational blue.
+    pub agent: Color,
     pub success: Color,
     pub warn: Color,
     pub error: Color,
@@ -48,7 +52,7 @@ pub(crate) struct Theme {
 
 /// User-message left indicator (distinct from the assistant tone).
 pub(crate) fn user_indicator(t: Theme) -> Color {
-    t.secondary
+    t.user
 }
 /// Active (streaming / running) left indicator.
 pub(crate) fn active_indicator(t: Theme) -> Color {
@@ -59,9 +63,10 @@ impl Theme {
     /// Dark background, xterm 256-color palette.
     pub(crate) fn dark() -> Self {
         Self {
-            primary: Color::Indexed(44),   // teal (modus-vivendi accent)
-            secondary: Color::Indexed(44), // teal — user indicator
-            success: Color::Indexed(77),   // green
+            primary: Color::Indexed(44), // teal (modus-vivendi accent)
+            user: Color::Indexed(44),    // teal — same as primary
+            agent: Color::Indexed(75),   // blue — distinct conversational voice
+            success: Color::Indexed(77), // green
             warn: Color::Indexed(178),     // amber
             error: Color::Indexed(203),    // red
             info: Color::Indexed(75),      // blue

@@ -115,8 +115,10 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
 
 // ── User message ─────────────────────────────────────────────────────────
 
-/// A user message: the prompt rendered as markdown with a `❯` lead on the
-/// first row and a 2-space margin on continuation rows. No background fill.
+/// A user message rendered as a full-width tile on the same background as
+/// the live prompt panel. Like an exec tile, it owns one filled padding row
+/// above and below its markdown body; the `❯` lead appears on the first
+/// content row and continuation rows retain the two-cell inset.
 struct UserMessage<'a> {
     prompt: &'a str,
 }
@@ -125,22 +127,47 @@ impl Component for UserMessage<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let w = cx.width;
+        let bg = t.panel_bg;
         let content_w = w.saturating_sub(2);
-        let mark = Style::new().fg(user_indicator(t));
-        render_markdown_body(
+        let mark = Style::new().fg(user_indicator(t)).bg(bg);
+        let mut body = render_markdown_body(
             self.prompt.trim(),
             t,
             w,
             content_w,
-            Style::new().fg(t.fg),
+            Style::new().fg(t.fg).bg(bg),
             move |i| {
                 if i == 0 {
                     vec![Span::styled("❯ ", mark)]
                 } else {
-                    vec![Span::raw("  ")]
+                    vec![Span::styled("  ", Style::new().bg(bg))]
                 }
             },
-        )
+        );
+        // Markdown constructs bring their own span styles (inline code,
+        // tables, fenced code). Overlay the prompt-panel background across
+        // every body span, then fill the remainder of each row so the user
+        // message reads as one uninterrupted tile.
+        for line in &mut body {
+            prim::apply_line_bg(&mut line.line, bg);
+            let used: usize = line
+                .line
+                .spans
+                .iter()
+                .map(|span| prim::width(span.content.as_ref()))
+                .sum();
+            if used < w {
+                line.line
+                    .spans
+                    .push(Span::styled(" ".repeat(w - used), Style::new().bg(bg)));
+            }
+        }
+
+        let mut out = Vec::with_capacity(body.len() + 2);
+        out.push(prim::rtile(Vec::new(), Vec::new(), bg, w));
+        out.extend(body);
+        out.push(prim::rtile(Vec::new(), Vec::new(), bg, w));
+        out
     }
 }
 

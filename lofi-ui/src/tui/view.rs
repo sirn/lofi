@@ -718,13 +718,15 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // A thin rule of `▁` spans the full width in the current mode color,
-    // visually tying the notification line to the mode chip on the right and
-    // the panel below. The chip and badges render on top as narrow widgets so
-    // the rule shows through the gaps between them.
-    let rule: String = std::iter::repeat_n('▁', w).collect();
+    // A diagonal rule spans the prompt/notification bar. It starts in the
+    // prompt panel's tone and is tinted by the active mode so focus changes
+    // remain visible without the old lower-block underline.
+    let rule: String = std::iter::repeat_n('╱', w).collect();
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(rule, Style::new().fg(color)))),
+        Paragraph::new(Line::from(Span::styled(
+            rule,
+            Style::new().fg(color).bg(t.panel_bg),
+        ))),
         area,
     );
     // Left badges sit at the 2-cell inset; only as wide as their content so
