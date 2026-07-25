@@ -10,7 +10,11 @@ pub(super) fn handle_event(
     current_run: &mut Option<RunHandle>,
 ) {
     if let Event::Mouse(m) = ev {
-        handle_mouse(*m, app);
+        // Centered overlays own input. Do not let clicks or wheel events mutate
+        // the obscured transcript underneath any modal.
+        if !app.modal_open() {
+            handle_mouse(*m, app);
+        }
         return;
     }
     if let Event::Paste(s) = ev {
@@ -37,7 +41,7 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Shell-policy confirmation modal: y = allow, anything else = deny.
+    // Shell-policy permission dialog: navigate actions, then explicitly confirm.
     if app.handle_confirm_key(k) {
         return;
     }
