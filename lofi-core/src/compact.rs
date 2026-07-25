@@ -330,7 +330,10 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         }
         // Oversized-turn guard: split the kept suffix at a completed
         // tool-cycle so an oversized final turn is partly summarized.
-        if opts.max_kept_tokens > 0 && cut > 0 {
+        // `cut == 0` (a single turn with no prior prompts) must also enter
+        // this path — otherwise the entire history is kept verbatim and
+        // `summarized == 0 < MIN_SUMMARIZED` makes compact refuse.
+        if opts.max_kept_tokens > 0 {
             let suffix_tokens = estimate_tokens(&live[cut..]);
             if suffix_tokens > opts.max_kept_tokens {
                 if let Some(split) = find_suffix_split(live, cut, opts.max_kept_tokens) {
@@ -343,14 +346,21 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
                 }
             }
         }
-        return CutPlan {
-            summarized: cut,
-            first_kept_event_id: Some(live[cut].event_id.clone()),
-        };
-    }
+        // When cut == 0 (a single user prompt with no prior prompts to
+        // summarize), returning summarized: 0 always fails the
+        // MIN_SUMMARIZED check. Fall through to the mid-cycle boundary
+        // logic to split the single turn at a completed tool-cycle.
+        if cut > 0 {
+            return CutPlan {
+                summarized: cut,
+                first_kept_event_id: Some(live[cut].event_id.clone()),
+            };
+        }
+    } // fall through to mid-cycle boundary when cut == 0
 
-    // No user prompt: single agentic chain — find a completed tool-cycle
-    // boundary in the first half and cut there; else compact-all.
+    // No user prompt (or a single user prompt that fell through): find a
+    // completed tool-cycle boundary in the first half and cut there; else
+    // compact-all.
     if let Some(mid) = find_mid_cycle_boundary(live) {
         if mid > 0 && mid < live.len() - 1 {
             return CutPlan {
@@ -1768,5 +1778,45 @@ mod tests {
             c.summary.contains("cleared") || !c.summary.contains(&big_result),
             "old kept tail results should be stubbed, not carried verbatim into summary"
         );
+    }
+
+    /// A single user prompt with many tool calls (cut == 0) and a token
+    /// budget must still compact via the oversized-turn guard, instead of
+    /// refusing with "not enough history to compact yet".
+    #[test]
+    fn compact_single_prompt_oversized_turn() {
+        // One user prompt followed by 6 exec tool cycles (12 messages).
+        // Each exec result is 20k chars → ~30k tokens total, well over the
+        // 2k-token budget. The oversized-turn guard must split at a
+        // completed tool-cycle so the leading messages are summarized.
+        let big = "x".repeat(20_000);
+        let msgs = [
+            user("do a big task"),
+            exec_call("t1", "lofi.read big1"),
+            exec_result("t1", &big),
+            exec_call("t2", "lofi.read big2"),
+            exec_result("t2", &big),
+            exec_call("t3", "lofi.read big3"),
+            exec_result("t3", &big),
+            exec_call("t4", "lofi.read big4"),
+            exec_result("t4", &big),
+            exec_call("t5", "lofi.read big5"),
+            exec_result("t5", &big),
+            exec_call("t6", "lofi.read big6"),
+            exec_result("t6", "ok"),
+        ];
+        let events = events_of(&msgs);
+        let opts = CompactOptions {
+            max_kept_tokens: 2_000,
+            ..Default::default()
+        };
+        let c = compact(&events, &opts).expect("should compact single oversized turn");
+        assert!(
+            c.summarized_count >= MIN_SUMMARIZED,
+            "summarized {} should be >= {MIN_SUMMARIZED}",
+            c.summarized_count
+        );
+        assert!(c.summary.contains("do a big task"));
+        assert!(!c.kept_messages.is_empty(), "should keep a tail");
     }
 }

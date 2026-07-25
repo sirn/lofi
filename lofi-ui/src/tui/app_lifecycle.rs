@@ -269,6 +269,15 @@ impl App {
                 self.context_pressure = true;
                 return;
             }
+            AgentEvent::Compaction { .. } => {
+                // A compaction marker (live or replayed). The context
+                // gauge's last reading reflects the pre-compaction fill;
+                // drop it so the gauge shows "c" and waits for the next
+                // round's real (smaller) usage.
+                self.status_usage = None;
+                self.prev_ctx_tokens = None;
+                self.compacted = true;
+            }
             // Remaining status/marker events do not mutate App-owned
             // counters here; the shared turn builder handles them.
             _ => {}
@@ -764,6 +773,16 @@ impl App {
         // `prev_ctx_tokens`: from the last TurnEnd/TurnFailed's usage, so the
         // hysteresis has a baseline and doesn't immediately re-trigger.
         self.prev_ctx_tokens = last_usage.map(|u| u.input_tokens + u.cache_read_tokens);
+        // `status_usage`: restore the last turn's usage so the context gauge
+        // shows a real number on resume. When the session ends with a
+        // Compaction marker (compacted == true), the gauge shows "c" instead;
+        // in that case clear status_usage so a stale pre-compaction reading
+        // doesn't override the "c" indicator.
+        if self.compacted {
+            self.status_usage = None;
+        } else {
+            self.status_usage = last_usage;
+        }
     }
 
     /// Gather the active-path events for compaction: load the transcript

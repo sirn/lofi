@@ -29,6 +29,14 @@ pub fn build_openai_responses_request(
         "input": input,
         "stream": true,
     });
+    // GPT-5.6 and later use `prompt_cache_key` to route requests sharing an
+    // exact prefix to the same cache shard. Without it, an append-only agent
+    // history can still bounce between shards and intermittently report a
+    // complete cache miss. Derive a stable, non-identifying key from the
+    // model, the oldest input item, and the first user item. It stays fixed
+    // while a conversation is appended, partitions unrelated sessions, and
+    // naturally changes when compaction rebuilds the prefix.
+    req["prompt_cache_key"] = json!(prompt_cache_key(model, &input));
     if let Some(mt) = model.max_tokens {
         req["max_output_tokens"] = json!(mt);
     }
@@ -53,6 +61,37 @@ pub fn build_openai_responses_request(
         req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
     }
     req
+}
+
+/// Stable cache-routing key for one append-only conversation prefix.
+///
+/// The rendered key contains no prompt text. The first input item captures
+/// the stable system/compaction prefix; the first user item partitions
+/// conversations that share the same system prompt. Both remain fixed across
+/// ordinary append-only turns. FNV-1a keeps the key stable across process
+/// restarts without adding a hashing dependency.
+fn prompt_cache_key(model: &Model, input: &[Value]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    let mut update = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    update(model.id.as_bytes());
+    if let Some(first) = input.first() {
+        update(first.to_string().as_bytes());
+    }
+    if let Some(first_user) = input
+        .iter()
+        .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+    {
+        update(first_user.to_string().as_bytes());
+    }
+    format!("lofi:{hash:016x}")
 }
 
 /// Map a thinking level to an `OpenAI` `reasoning.effort` value. `Off` returns
@@ -298,8 +337,65 @@ mod tests {
         assert_eq!(req["model"], "gpt-4o");
         assert_eq!(req["stream"], true);
         assert!(req.get("input").is_some());
+        assert_eq!(
+            req["prompt_cache_key"].as_str().map(str::len),
+            Some("lofi:".len() + 16)
+        );
         assert!(req.get("tools").is_none());
         assert!(req.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn request_cache_key_is_stable_while_history_is_appended() {
+        let system = Message {
+            role: lofi_types::Role::System,
+            blocks: vec![lofi_types::ContentBlock::Text {
+                text: "stable instructions".to_string(),
+            }],
+        };
+        let first_user = Message {
+            role: lofi_types::Role::User,
+            blocks: vec![lofi_types::ContentBlock::Text {
+                text: "initial prompt".to_string(),
+            }],
+        };
+        let appended = Message {
+            role: lofi_types::Role::Assistant,
+            blocks: vec![lofi_types::ContentBlock::Text {
+                text: "new response".to_string(),
+            }],
+        };
+        let first =
+            build_openai_responses_request(&model(), &[system.clone(), first_user.clone()], &[]);
+        let second = build_openai_responses_request(&model(), &[system, first_user, appended], &[]);
+        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+    }
+
+    #[test]
+    fn request_cache_key_changes_when_prefix_is_rebuilt() {
+        let message = |role, text: &str| Message {
+            role,
+            blocks: vec![lofi_types::ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        };
+        let first = build_openai_responses_request(
+            &model(),
+            &[
+                message(lofi_types::Role::System, "shared system"),
+                message(lofi_types::Role::User, "prefix one"),
+            ],
+            &[],
+        );
+        let second = build_openai_responses_request(
+            &model(),
+            &[
+                message(lofi_types::Role::System, "shared system"),
+                message(lofi_types::Role::User, "prefix two"),
+            ],
+            &[],
+        );
+        assert_ne!(first["prompt_cache_key"], second["prompt_cache_key"]);
     }
 
     #[test]
