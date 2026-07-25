@@ -173,6 +173,58 @@ fn rich_header_suffix_for_read_and_bash() {
 }
 
 #[test]
+fn user_message_is_prompt_background_tile_with_vertical_padding() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: "A long user prompt\nwith another line".to_string(),
+        blocks: Vec::new(),
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 32,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+
+    assert_eq!(
+        lines.len(),
+        4,
+        "top padding + two body rows + bottom padding"
+    );
+    for line in &lines {
+        let width: usize = line
+            .line
+            .spans
+            .iter()
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        assert_eq!(width, 32, "every tile row fills the viewport");
+        assert!(
+            line.line
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(a.theme.panel_bg)),
+            "every tile cell uses the live prompt background: {:?}",
+            line.line
+        );
+    }
+    assert_eq!(lines[0].content, (0, 0));
+    assert_eq!(lines[3].content, (0, 0));
+    assert!(lines[0].raw.is_none() && lines[3].raw.is_none());
+    let first_body: String = lines[1]
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(first_body.starts_with("❯ A long user prompt"));
+}
+
+#[test]
 fn render_tree_smoke() {
     use crate::tui::view::blocks::render_turns;
     let mut a = app();
@@ -1867,6 +1919,90 @@ fn paste_blocked_while_modal_open() {
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
     handle_event(&Event::Paste("pasted".to_string()), &mut a, None, &mut run);
     assert_eq!(a.input, "pasted");
+}
+
+fn confirm_request(
+    command: &str,
+) -> (
+    lofi_core::ConfirmRequest,
+    tokio::sync::oneshot::Receiver<bool>,
+) {
+    let (respond, response) = tokio::sync::oneshot::channel();
+    (
+        lofi_core::ConfirmRequest {
+            id: 1,
+            command: command.to_string(),
+            respond,
+        },
+        response,
+    )
+}
+
+#[test]
+fn permission_dialog_requires_an_explicit_choice() {
+    let mut a = app();
+    let (req, mut response) = confirm_request("rm -rf build");
+    a.pending_confirms.push(req);
+
+    // The old behavior denied on any non-y key. Printable noise must now be
+    // swallowed while leaving both the request and response pending.
+    assert!(a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE,)));
+    assert_eq!(a.pending_confirms.len(), 1);
+    assert!(matches!(
+        response.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    // Move to Deny and explicitly confirm it.
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(a.confirm_selected, 1);
+    a.handle_confirm_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(response.try_recv(), Ok(false));
+}
+
+#[test]
+fn permission_dialog_action_keys_resolve_directly() {
+    for (key, expected) in [('a', true), ('y', true), ('d', false), ('n', false)] {
+        let mut a = app();
+        let (req, mut response) = confirm_request("dangerous command");
+        a.pending_confirms.push(req);
+        a.handle_confirm_key(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        assert_eq!(response.try_recv(), Ok(expected), "key {key}");
+    }
+}
+
+#[test]
+fn permission_dialog_renders_command_and_selectable_actions() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let (req, _response) = confirm_request("sudo systemctl restart lofi");
+    a.pending_confirms.push(req);
+    let mut term = Terminal::new(TestBackend::new(90, 28)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let screen = (0..28)
+        .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    assert!(screen.contains("Permission Required"), "{screen}");
+    assert!(screen.contains("sudo systemctl restart lofi"), "{screen}");
+    assert!(
+        screen.contains("Allow") && screen.contains("Deny"),
+        "{screen}"
+    );
+    let allow = (0..28)
+        .flat_map(|y| (0..90).map(move |x| (x, y)))
+        .find(|&(x, y)| buf[(x, y)].symbol() == "A" && buf[(x, y)].bg == a.theme.success)
+        .expect("selected Allow button should use success background");
+    assert!(
+        allow.0 > 45,
+        "actions should sit toward the right: {allow:?}"
+    );
 }
 
 #[test]

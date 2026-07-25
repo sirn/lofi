@@ -626,68 +626,133 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         );
     }
 }
-/// Shell-policy confirmation modal: a small centered popup showing the
-/// command text and a `y/n` prompt. `y` allows, any other key denies.
-/// If multiple requests are queued, a counter is shown.
+/// Shell-policy permission dialog, inspired by Crush's explicit action
+/// chooser: the requested command sits in a distinct content panel and Allow
+/// / Deny are real selectable buttons. Only Enter or an action key resolves
+/// the request; unrelated keys leave it open.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType};
+    use ratatui::layout::Alignment;
+    use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
     let t = app.theme;
     let Some(req) = app.pending_confirms.first() else {
         return;
     };
-    let max_w = area.width.saturating_sub(4) as usize;
-    let cmd_lines = prim::wrap(&req.command, max_w.min(80));
-    let body_h = cmd_lines.len();
+
+    // Dim the application beneath the dialog. This changes only the rendered
+    // frame; the transcript and its semantic styles remain untouched.
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(t.subtle).bg(t.panel_bg));
+
+    let desired_w = area.width.saturating_mul(3).saturating_div(5).max(52);
+    let w = desired_w.min(100).min(area.width);
+    let content_w = w.saturating_sub(6).max(1) as usize;
+    let mut cmd_lines = prim::wrap(&req.command, content_w);
+    // Header, intro, label, command panel, buttons, and help use eight fixed
+    // rows around the command body. On very short terminals, keep that chrome
+    // and truncate the command panel rather than letting constraints collide.
+    let max_command_rows = area.height.saturating_sub(9).max(1) as usize;
+    if cmd_lines.len() > max_command_rows {
+        cmd_lines.truncate(max_command_rows);
+        if let Some(last) = cmd_lines.last_mut() {
+            *last = prim::truncate(last, content_w.saturating_sub(1));
+            last.push('…');
+        }
+    }
+    let natural_h = u16::try_from(cmd_lines.len() + 9).unwrap_or(u16::MAX);
+    let h = natural_h.min(area.height);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, popup);
+
     let queue_count = app.pending_confirms.len();
     let counter = if queue_count > 1 {
-        format!(" ({}/{})", 1, queue_count)
+        format!("  1/{queue_count}")
     } else {
         String::new()
     };
-    let title = format!(" Confirm{counter} ");
-    let title_w = prim::width(&title);
-    let inner_w = cmd_lines
-        .iter()
-        .map(|l| prim::width(l.as_str()))
-        .max()
-        .unwrap_or(0)
-        .max(title_w)
-        .min(max_w);
-    let w = u16::try_from(inner_w + 4).unwrap_or(50).min(area.width);
-    let h = u16::try_from(body_h + 4).unwrap_or(7).min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
-    f.render_widget(Clear, popup);
+    let title = format!(" Permission Required{counter} ");
     let block = WidgetBlock::bordered()
         .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .style(Style::new().fg(t.muted).bg(t.surface))
         .title(Span::styled(
             title,
             Style::new().fg(t.warn).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
+    if inner.height == 0 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1), // explanation
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // content label
+        Constraint::Min(1),    // command panel
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // actions
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // help
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Shell", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
+            Span::styled(" wants to run this command", Style::new().fg(t.muted)),
+        ])),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "Command",
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        )),
+        rows[2],
+    );
+
+    let command_panel = WidgetBlock::default()
+        .style(Style::new().fg(t.fg).bg(t.inline_bg))
+        .padding(Padding::horizontal(1));
+    let command_inner = command_panel.inner(rows[3]);
+    f.render_widget(command_panel, rows[3]);
     let body_lines: Vec<Line> = cmd_lines
-        .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::new().fg(t.fg).bg(t.inline_bg))))
         .collect();
-    f.render_widget(Paragraph::new(body_lines), inner);
-    let hint = Line::from(vec![
-        Span::styled("y", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-        Span::styled(" allow · ", Style::new().fg(t.muted)),
-        Span::styled("n", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-        Span::styled(" deny", Style::new().fg(t.muted)),
+    f.render_widget(Paragraph::new(body_lines), command_inner);
+
+    let button = |label: &'static str, selected: bool, selected_bg| {
+        let style = if selected {
+            Style::new()
+                .fg(t.fg)
+                .bg(selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(t.muted).bg(t.panel_bg)
+        };
+        Span::styled(format!("  {label}  "), style)
+    };
+    let actions = Line::from(vec![
+        button("Allow", app.confirm_selected == 0, t.success),
+        Span::raw("  "),
+        button("Deny", app.confirm_selected == 1, t.error),
+    ])
+    .alignment(Alignment::Right);
+    f.render_widget(Paragraph::new(actions), rows[5]);
+
+    let key = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+    let help = Line::from(vec![
+        Span::styled("←/→", key),
+        Span::styled(" choose  ", Style::new().fg(t.subtle)),
+        Span::styled("enter", key),
+        Span::styled(" confirm  ", Style::new().fg(t.subtle)),
+        Span::styled("esc", key),
+        Span::styled(" deny", Style::new().fg(t.subtle)),
     ]);
-    let hint_y = inner.bottom().saturating_sub(1);
-    f.render_widget(Paragraph::new(hint), Rect { y: hint_y, ..inner });
+    f.render_widget(Paragraph::new(help), rows[7]);
 }

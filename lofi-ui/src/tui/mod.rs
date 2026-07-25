@@ -818,6 +818,10 @@ pub(crate) struct App {
     /// The first item is shown as a centered modal; when the user
     /// responds, it is popped and the next one (if any) appears.
     pending_confirms: Vec<lofi_core::ConfirmRequest>,
+    /// Selected action in the permission dialog: 0 = Allow, 1 = Deny.
+    /// Navigation changes this; only Enter or an explicit action key resolves
+    /// the request, so stray key presses can never reject a command.
+    confirm_selected: usize,
     /// When the yank-to-clipboard badge was last triggered; shown on the
     /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
@@ -1195,6 +1199,9 @@ async fn run_loop(
             // Shell-policy confirmation request from the agent.
             req = confirm_rx.recv() => {
                 if let Some(req) = req {
+                    if app.pending_confirms.is_empty() {
+                        app.confirm_selected = 0;
+                    }
                     app.pending_confirms.push(req);
                     dirty = true;
                 }
