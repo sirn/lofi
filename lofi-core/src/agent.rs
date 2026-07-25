@@ -40,7 +40,7 @@ use lofi_code::policy::ResolvedPolicy;
 use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_providers::ir::chat::ToolSchema;
-use lofi_providers::ir::codec::assemble_message;
+use lofi_providers::ir::codec::MessageAssembler;
 use lofi_providers::{open, Provider};
 use lofi_types::BashConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,7 +69,9 @@ mod model;
 mod tests;
 
 pub use event::AgentEvent;
-pub(crate) use exec::{cap_exec_result, cap_tool_result, extract_code_prefix};
+#[cfg(test)]
+pub(crate) use exec::extract_code_prefix;
+pub(crate) use exec::{cap_exec_result, cap_tool_result, CodePrefixDecoder};
 pub use exec::{
     exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
 };

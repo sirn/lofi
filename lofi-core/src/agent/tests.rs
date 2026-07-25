@@ -253,6 +253,13 @@ fn extract_code_prefix_streams_and_trims_leading_newline() {
 }
 
 #[test]
+fn code_prefix_decoder_handles_split_escape_incrementally() {
+    let mut decoder = CodePrefixDecoder::default();
+    assert_eq!(decoder.update(r#"{"code":"\nlet x\u"#), "let x");
+    assert_eq!(decoder.update(r#"{"code":"\nlet x\u0061"}"#), "let xa");
+}
+
+#[test]
 fn initial_history_with_and_without_system() {
     let h = initial_history("sys", "hi");
     assert_eq!(h.len(), 2);
