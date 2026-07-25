@@ -447,7 +447,7 @@ impl Agent {
         let stream = self.provider.stream(&model, messages, &[schema]).await?;
         let mut stream = stream;
 
-        let mut events: Vec<StreamingEvent> = Vec::new();
+        let mut assembler = MessageAssembler::new();
         // Round usage is captured and emitted as `AgentEvent::Done` only when
         // the round is terminal (no tool calls), so `Done` remains a true
         // end-of-run signal rather than firing before tool execution.
@@ -457,6 +457,7 @@ impl Agent {
         // `code` field already streamed to the UI, for live exec streaming.
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
+        let mut tool_decoders: HashMap<String, CodePrefixDecoder> = HashMap::new();
         let collect = async {
             // Open thinking block timer: started on the first ThinkingDelta
             // of a run, closed when a non-thinking event arrives (or the
@@ -525,7 +526,8 @@ impl Agent {
                                 StreamingEvent::ToolUseInputDelta { id, delta } => {
                                     let raw = tool_raw.entry(id.clone()).or_default();
                                     raw.push_str(delta);
-                                    let decoded = extract_code_prefix(raw);
+                                    let decoded =
+                                        tool_decoders.entry(id.clone()).or_default().update(raw);
                                     let prev = tool_emitted.get(id).copied().unwrap_or(0);
                                     if let Some(chunk) = decoded.get(prev..) {
                                         if !chunk.is_empty() {
@@ -596,7 +598,7 @@ impl Agent {
                                     "round exceeded {MAX_ROUND_BYTES} byte budget"
                                 )));
                             }
-                            events.push(e);
+                            assembler.push(e);
                         }
                         Err(err) => {
                             return Err(err);
@@ -624,7 +626,7 @@ impl Agent {
 
         collect.await?;
 
-        let assistant = assemble_message(&events);
+        let assistant = assembler.finish();
         messages.push(assistant.clone());
 
         let tool_uses: Vec<(&str, &str, &serde_json::Value)> = assistant

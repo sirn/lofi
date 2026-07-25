@@ -87,113 +87,118 @@ pub fn is_done_marker(data: &str) -> bool {
     data.trim() == "[DONE]"
 }
 
-/// Fold accumulated [`StreamingEvent`]s into a final assistant [`Message`].
+/// Incrementally folds streaming events into an assistant message.
 ///
-/// Text deltas concatenate into a single `Text` block. Tool-use blocks are
-/// assembled from `ToolUseStart` + `ToolUseInputDelta`s + `ToolUseEnd`; the
-/// input JSON string is parsed at finalization (empty/invalid input becomes
-/// `Value::Null`). Providers identify in-flight tool calls by different
-/// fields (`OpenAI` sends an opaque id on the first delta, Anthropic sends a
-/// block index on later deltas), so the mappers normalize every delta to the
-/// real tool id and correlation here is by id only. An input delta whose id
-/// matches no in-flight tool is dropped rather than misattributed to an
-/// unrelated tool. `Done`/`Error` are ignored here.
-#[must_use]
-pub fn assemble_message(events: &[StreamingEvent]) -> Message {
-    #[derive(Debug)]
-    struct ToolBuilder {
-        id: String,
-        name: String,
-        input: String,
-        ended: bool,
+/// The builder retains only assembled content and in-flight tool JSON, rather
+/// than every delta that produced it.
+#[derive(Default)]
+pub struct MessageAssembler {
+    order: Vec<Slot>,
+    tools: Vec<ToolBuilder>,
+}
+
+#[derive(Debug)]
+struct ToolBuilder {
+    id: String,
+    name: String,
+    input: String,
+    ended: bool,
+}
+
+/// An in-order content-block builder. Streaming providers may interleave text,
+/// thinking, and tool-use blocks.
+enum Slot {
+    Text(String),
+    Thinking { text: String, sig: Option<String> },
+    Tool(usize),
+}
+
+impl MessageAssembler {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// An in-order content-block builder. Streaming providers emit text,
-    /// thinking, and tool-use blocks interleaved (Anthropic sends a thinking
-    /// block *before* the `tool_use` it justifies); the assembled message must
-    /// replay them in that order, not grouped by type.
-    enum Slot {
-        Text(String),
-        Thinking { text: String, sig: Option<String> },
-        Tool(usize),
-    }
-
-    let mut order: Vec<Slot> = Vec::new();
-    let mut tools: Vec<ToolBuilder> = Vec::new();
-
-    for ev in events {
-        match ev {
-            StreamingEvent::TextDelta(d) => match order.last_mut() {
-                Some(Slot::Text(s)) => s.push_str(d),
-                _ => order.push(Slot::Text(d.clone())),
+    pub fn push(&mut self, event: StreamingEvent) {
+        match event {
+            StreamingEvent::TextDelta(d) => match self.order.last_mut() {
+                Some(Slot::Text(s)) => s.push_str(&d),
+                _ => self.order.push(Slot::Text(d)),
             },
-            StreamingEvent::ThinkingDelta(d) => match order.last_mut() {
-                Some(Slot::Thinking { text, .. }) => text.push_str(d),
-                _ => order.push(Slot::Thinking {
-                    text: d.clone(),
-                    sig: None,
-                }),
+            StreamingEvent::ThinkingDelta(d) => match self.order.last_mut() {
+                Some(Slot::Thinking { text, .. }) => text.push_str(&d),
+                _ => self.order.push(Slot::Thinking { text: d, sig: None }),
             },
             StreamingEvent::ThinkingSignature(s) => {
-                // Attach to the most recent thinking slot; Anthropic sends
-                // the signature after the thinking text of the same block.
-                if let Some(Slot::Thinking { sig, .. }) = order.last_mut() {
-                    *sig = Some(s.clone());
+                if let Some(Slot::Thinking { sig, .. }) = self.order.last_mut() {
+                    *sig = Some(s);
                 }
             }
             StreamingEvent::ToolUseStart { id, name } => {
-                tools.push(ToolBuilder {
-                    id: id.clone(),
-                    name: name.clone(),
+                self.tools.push(ToolBuilder {
+                    id,
+                    name,
                     input: String::new(),
                     ended: false,
                 });
-                order.push(Slot::Tool(tools.len() - 1));
+                self.order.push(Slot::Tool(self.tools.len() - 1));
             }
             StreamingEvent::ToolUseInputDelta { id, delta } => {
-                let pos = tools.iter().rposition(|t| !t.ended && t.id == *id);
+                let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
                 if let Some(i) = pos {
-                    tools[i].input.push_str(delta);
+                    self.tools[i].input.push_str(&delta);
                 }
             }
             StreamingEvent::ToolUseEnd { id } => {
-                let pos = tools.iter().rposition(|t| !t.ended && t.id == *id);
+                let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
                 if let Some(i) = pos {
-                    tools[i].ended = true;
+                    self.tools[i].ended = true;
                 }
             }
-            _ => {}
+            StreamingEvent::Done(_) | StreamingEvent::Error(_) => {}
         }
     }
 
-    let mut blocks = Vec::new();
-    for slot in order {
-        match slot {
-            Slot::Text(text) => blocks.push(ContentBlock::Text { text }),
-            Slot::Thinking { text, sig } => blocks.push(ContentBlock::Thinking {
-                text,
-                signature: sig,
-            }),
-            Slot::Tool(i) => {
-                let t = &tools[i];
-                let input = if t.input.is_empty() {
-                    Value::Null
-                } else {
-                    serde_json::from_str(&t.input).unwrap_or(Value::Null)
-                };
-                blocks.push(ContentBlock::ToolUse {
-                    id: t.id.clone(),
-                    name: t.name.clone(),
-                    input,
-                });
+    #[must_use]
+    pub fn finish(self) -> Message {
+        let mut blocks = Vec::with_capacity(self.order.len());
+        for slot in self.order {
+            match slot {
+                Slot::Text(text) => blocks.push(ContentBlock::Text { text }),
+                Slot::Thinking { text, sig } => blocks.push(ContentBlock::Thinking {
+                    text,
+                    signature: sig,
+                }),
+                Slot::Tool(i) => {
+                    let t = &self.tools[i];
+                    let input = if t.input.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(&t.input).unwrap_or(Value::Null)
+                    };
+                    blocks.push(ContentBlock::ToolUse {
+                        id: t.id.clone(),
+                        name: t.name.clone(),
+                        input,
+                    });
+                }
             }
         }
+        Message {
+            role: Role::Assistant,
+            blocks,
+        }
     }
+}
 
-    Message {
-        role: Role::Assistant,
-        blocks,
+/// Fold accumulated [`StreamingEvent`]s into a final assistant [`Message`].
+#[must_use]
+pub fn assemble_message(events: &[StreamingEvent]) -> Message {
+    let mut assembler = MessageAssembler::new();
+    for event in events {
+        assembler.push(event.clone());
     }
+    assembler.finish()
 }
 
 #[cfg(test)]
