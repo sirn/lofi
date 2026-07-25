@@ -49,6 +49,7 @@ impl App {
             top_line: 0,
             last_base: 0,
             verbose: false,
+            debug: None,
             should_quit: false,
             session: SessionState {
                 store: None,
@@ -578,6 +579,7 @@ impl App {
         self.last_compact_msg_count = self.messages_since_last_compact();
         self.compacted = true;
         self.bump_render_epoch();
+        self.debug_sample("compaction", true);
         true
     }
 

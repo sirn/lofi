@@ -29,6 +29,7 @@ mod app_input;
 mod app_lifecycle;
 mod app_nav;
 mod app_render;
+mod debug_stats;
 mod input;
 mod replay;
 mod text;
@@ -157,6 +158,7 @@ const DEFAULT_CTX_LIMIT: u64 = 200_000;
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
     ("/compact", "fold older history into a summary"),
+    ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
     ("/new", "start a fresh session"),
@@ -763,6 +765,8 @@ pub(crate) struct App {
     /// Bottom scroll offset from the last render; seeds `top_line` on un-pin.
     last_base: usize,
     verbose: bool,
+    /// Opt-in process/component diagnostics writer enabled by `/debug`.
+    debug: Option<debug_stats::DebugState>,
     should_quit: bool,
     session: SessionState,
     picker: Option<PickerState>,
@@ -1089,6 +1093,7 @@ async fn run_loop(
                         if let Some(r) = current_run.take() {
                             r.handle.abort();
                             app.run_finished();
+                            app.debug_sample("agent_settled", true);
                             if app.context_pressure {
                                 // Hard cap: force-compact + silent
                                 // continue, gated by the cooldown so a run
@@ -1163,6 +1168,7 @@ async fn run_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
+                app.debug_sample("interval", false);
                 // The spinner and the retry countdown both animate and need
                 // periodic redraw; an idle session has nothing to draw — except
                 // while the yank badge is on screen, which must expire.

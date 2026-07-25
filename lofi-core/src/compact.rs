@@ -667,13 +667,21 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
         .filter(|s| !s.is_empty())
         .collect();
 
+    let headers_text = [stable, volatile].concat().join("\n\n");
+    let capped_brief = if brief.is_empty() {
+        String::new()
+    } else {
+        cap_brief(&brief)
+    };
+    // Apply the summary token budget: trim the brief (most volatile) to
+    // keep the structured headers + brief within MAX_SUMMARY_TOKENS.
+    let trimmed_brief = trim_brief_to_budget(&headers_text, &capped_brief);
     let mut parts: Vec<String> = Vec::new();
-    let headers = [stable, volatile].concat();
-    if !headers.is_empty() {
-        parts.push(headers.join("\n\n"));
+    if !headers_text.is_empty() {
+        parts.push(headers_text);
     }
-    if !brief.is_empty() {
-        parts.push(cap_brief(&brief));
+    if !trimmed_brief.is_empty() {
+        parts.push(trimmed_brief);
     }
     if parts.is_empty() {
         return String::new();
@@ -696,21 +704,66 @@ fn section(title: &str, items: &[String]) -> String {
 }
 
 /// Session Goal: the first few substantive user prompts, clipped.
+/// Prioritises the original intent (first 2 prompts) and the current
+/// direction (most recent 3), dropping the middle to avoid evicting the
+/// original goal on long sessions.
 fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
-    let mut out = Vec::new();
-    for b in blocks {
-        if let CompactBlock::User { text } = b {
+    let prompts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|b| {
+            let CompactBlock::User { text } = b else {
+                return None;
+            };
             let t = text.trim();
-            if t.is_empty() || out.len() >= 8 {
-                continue;
+            (!t.is_empty()).then_some(t)
+        })
+        .collect();
+    if prompts.is_empty() {
+        return Vec::new();
+    }
+    const HEAD: usize = 2; // original intent
+    const TAIL: usize = 3; // current direction
+    const MAX: usize = 8;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let n = prompts.len();
+    // Indices to keep: first HEAD, last TAIL, fill from the middle up to MAX.
+    let mut keep: Vec<usize> = Vec::new();
+    if n <= MAX {
+        (0..n).for_each(|i| keep.push(i));
+    } else {
+        (0..HEAD.min(n)).for_each(|i| keep.push(i));
+        let tail_start = n.saturating_sub(TAIL);
+        for i in tail_start..n {
+            if !keep.contains(&i) {
+                keep.push(i);
             }
-            out.push(clip(t, 200));
+        }
+        // Fill from the middle, preferring earlier (closer to the original
+        // goal) so the thread of intent is preserved.
+        for i in HEAD..tail_start {
+            if keep.len() >= MAX {
+                break;
+            }
+            keep.push(i);
+        }
+    }
+    keep.sort_unstable();
+    for &i in &keep {
+        let clipped = clip(prompts[i], 200);
+        let key = clipped.to_lowercase();
+        if seen.insert(key) {
+            out.push(clipped);
         }
     }
     out
 }
 
 /// User Preferences: user lines that read as a directive.
+/// Signal keywords must appear near the start of a clause (first 60 chars
+/// of a line/sentence) to avoid matching incidental questions like "can
+/// you use the openai provider?". Questions (lines ending in '?') are
+/// excluded entirely.
 fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
     const SIGNALS: &[&str] = &[
         "prefer",
@@ -728,17 +781,32 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         "instead of",
         "rather than",
     ];
+    /// Check if any signal appears in the first `max_prefix` chars (lowercased).
+    fn has_signal_near_start(lower: &str) -> bool {
+        const MAX_PREFIX: usize = 60;
+        let prefix = if lower.len() > MAX_PREFIX {
+            &lower[..MAX_PREFIX]
+        } else {
+            lower
+        };
+        SIGNALS.iter().any(|s| prefix.contains(s))
+    }
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for b in blocks {
         let CompactBlock::User { text } = b else {
             continue;
         };
-        let lower = text.to_lowercase();
-        if !SIGNALS.iter().any(|s| lower.contains(s)) {
+        let trimmed = text.trim();
+        // Skip questions — they are requests, not preferences.
+        if trimmed.ends_with('?') {
             continue;
         }
-        let line = clip(text.trim(), 160);
+        let lower = trimmed.to_lowercase();
+        if !has_signal_near_start(&lower) {
+            continue;
+        }
+        let line = clip(trimmed, 160);
         if line.len() < 8 {
             continue;
         }
@@ -853,18 +921,20 @@ fn extract_commit_message(cmd: &str) -> Option<String> {
 
 /// First short git hash in a bash result string.
 fn first_hash(text: &str) -> Option<String> {
-    let re = regex::Regex::new(r"\b[0-9a-f]{7,12}\b").ok()?;
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\b[0-9a-f]{7,12}\b").unwrap());
     re.find(text).map(|m| m.as_str().to_string())
 }
 
-/// The blocker regex. The pattern is a compile-time constant so this
-/// always succeeds; the fallback is defensive only.
-#[allow(clippy::unwrap_used)]
-fn blocker_regex() -> regex::Regex {
-    regex::Regex::new(BLOCKER_RE)
-        .or_else(|_| regex::Regex::new("$^"))
-        .or_else(|_| regex::Regex::new("."))
-        .unwrap()
+/// The blocker regex. Compiled once and cached for the process lifetime.
+fn blocker_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(BLOCKER_RE)
+            .or_else(|_| regex::Regex::new("$^"))
+            .or_else(|_| regex::Regex::new("."))
+            .unwrap()
+    })
 }
 
 /// Outstanding Context: errors and blockers from the recent tail (last ~25
@@ -938,6 +1008,11 @@ const BRIEF_MAX_LINES: usize = 120;
 const TRUNC_USER: usize = 256;
 const TRUNC_ASSISTANT: usize = 200;
 
+/// Soft token budget (chars/4) for the entire summary. The brief transcript
+/// is trimmed first (it is the most volatile and least structured part);
+/// section headers are left intact. 0 disables the budget guard.
+const MAX_SUMMARY_TOKENS: usize = 4_000;
+
 /// Build the compressed per-turn transcript: [user]/[assistant] sections
 /// with clipped text and one-liner tool actions.
 fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
@@ -998,10 +1073,28 @@ fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> St
                     let l = label.clone().unwrap_or_else(|| first_line(code, 60));
                     lines.push(format!("* exec \"{l}\""));
                 } else {
-                    for rec in native {
+                    // Collapse consecutive identical native-tool actions
+                    // into a single line with a repeat count.
+                    let mut i = 0;
+                    while i < native.len() {
+                        let rec = &native[i];
                         let args = clip(&rec.args, 80);
                         let marker = if rec.is_error { " (error)" } else { "" };
-                        lines.push(format!("* {} \"{}\"{}", rec.name, args, marker));
+                        // Count consecutive identical entries.
+                        let mut count = 1;
+                        while i + count < native.len()
+                            && native[i + count].name == rec.name
+                            && native[i + count].args == rec.args
+                            && native[i + count].is_error == rec.is_error
+                        {
+                            count += 1;
+                        }
+                        if count > 1 {
+                            lines.push(format!("* {} \"{}\"{} (x{count})", rec.name, args, marker));
+                        } else {
+                            lines.push(format!("* {} \"{}\"{}", rec.name, args, marker));
+                        }
+                        i += count;
                     }
                 }
             }
@@ -1045,18 +1138,62 @@ fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> St
 }
 
 /// Cap the brief transcript to the last BRIEF_MAX_LINES lines, noting how
-/// many earlier lines were omitted.
+/// many earlier lines were omitted. If the result still exceeds the summary
+/// token budget, further trim from the front (keeping the most recent lines).
 fn cap_brief(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
-    if lines.len() <= BRIEF_MAX_LINES {
-        return text.to_string();
+    let (kept, omitted) = if lines.len() <= BRIEF_MAX_LINES {
+        (lines.as_slice(), 0)
+    } else {
+        let omitted = lines.len() - BRIEF_MAX_LINES;
+        (&lines[lines.len() - BRIEF_MAX_LINES..], omitted)
+    };
+    let mut out = if omitted > 0 {
+        format!("...({omitted} earlier lines omitted)\n\n")
+    } else {
+        String::new()
+    };
+    out.push_str(&kept.join("\n"));
+    out
+}
+
+/// Trim the brief transcript (already line-capped by `cap_brief`) so the
+/// full summary stays within the soft token budget. Removes lines from the
+/// front of the brief (oldest first) until the estimated token count of the
+/// *entire* summary body fits. The brief is the most volatile part and the
+/// structured sections are always preserved.
+fn trim_brief_to_budget(headers: &str, brief: &str) -> String {
+    if MAX_SUMMARY_TOKENS == 0 {
+        return brief.to_string();
     }
-    let omitted = lines.len() - BRIEF_MAX_LINES;
-    let kept = &lines[lines.len() - BRIEF_MAX_LINES..];
-    format!(
-        "...({omitted} earlier lines omitted)\n\n{}",
+    let header_tokens = headers.len() / 4;
+    let budget = MAX_SUMMARY_TOKENS.saturating_sub(header_tokens);
+    let brief_tokens = brief.len() / 4;
+    if brief_tokens <= budget {
+        return brief.to_string();
+    }
+    // Keep the last N lines that fit within the remaining budget.
+    let lines: Vec<&str> = brief.split('\n').collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut kept_chars = 0;
+    let budget_chars = budget * 4;
+    for line in lines.iter().rev() {
+        if kept_chars + line.len() + 1 > budget_chars && !kept.is_empty() {
+            break;
+        }
+        kept_chars += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let omitted = lines.len() - kept.len();
+    if omitted > 0 {
+        format!(
+            "...({omitted} earlier lines trimmed)\n\n{}",
+            kept.join("\n")
+        )
+    } else {
         kept.join("\n")
-    )
+    }
 }
 
 /// The blocker pattern for the Outstanding Context section: matches lines
@@ -1119,12 +1256,19 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     }
     brief.push_str(&fresh_brief);
 
+    let headers_text = merged_headers.join("\n\n");
+    let capped_brief = if brief.is_empty() {
+        String::new()
+    } else {
+        cap_brief(&brief)
+    };
+    let trimmed_brief = trim_brief_to_budget(&headers_text, &capped_brief);
     let mut parts: Vec<String> = Vec::new();
-    if !merged_headers.is_empty() {
-        parts.push(merged_headers.join("\n\n"));
+    if !headers_text.is_empty() {
+        parts.push(headers_text);
     }
-    if !brief.is_empty() {
-        parts.push(cap_brief(&brief));
+    if !trimmed_brief.is_empty() {
+        parts.push(trimmed_brief);
     }
     if parts.is_empty() {
         return String::new();
@@ -1188,7 +1332,9 @@ fn extra_section_names(
 }
 
 /// Merge one section. Outstanding Context is volatile (fresh only). Files And
-/// Changes is unioned across categories. The rest dedup body lines and cap.
+/// Changes is unioned across categories. Session Goal preserves the original
+/// intent (first 2 prev items) before filling with recent ones. The rest
+/// dedup body lines and cap.
 fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     if name == "Outstanding Context" {
         if fresh.is_empty() {
@@ -1204,16 +1350,39 @@ fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     } else {
         15
     };
+    let parse_lines = |text: &str| -> Vec<String> {
+        text.split('\n')
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('['))
+            .map(|l| l.strip_prefix("- ").unwrap_or(l).to_string())
+            .collect()
+    };
+    let prev_lines = parse_lines(prev);
+    let fresh_lines = parse_lines(fresh);
     let mut lines: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in prev.split('\n').chain(fresh.split('\n')) {
-        let l = line.trim();
-        if l.is_empty() || l.starts_with('[') {
-            continue;
+    if name == "Session Goal" {
+        // Preserve the original intent: first 2 from prev always survive.
+        const PROTECTED: usize = 2;
+        for l in prev_lines.iter().take(PROTECTED) {
+            if seen.insert(l.clone()) {
+                lines.push(l.clone());
+            }
         }
-        let body = l.strip_prefix("- ").unwrap_or(l).to_string();
-        if seen.insert(body.clone()) {
-            lines.push(body);
+        // Then fill with fresh (most recent direction) and remaining prev.
+        for l in fresh_lines.iter().chain(prev_lines.iter().skip(PROTECTED)) {
+            if seen.insert(l.clone()) {
+                lines.push(l.clone());
+            }
+            if lines.len() >= cap {
+                break;
+            }
+        }
+    } else {
+        for l in prev_lines.iter().chain(fresh_lines.iter()) {
+            if seen.insert(l.clone()) {
+                lines.push(l.clone());
+            }
         }
     }
     if lines.is_empty() {
@@ -1639,6 +1808,95 @@ mod tests {
         let merged = merge_previous(&prev, &fresh);
         assert!(merged.contains("goal one"));
         assert!(merged.contains("goal two"));
+    }
+
+    #[test]
+    fn merge_previous_preserves_original_goals() {
+        // 8 prior goals + 5 fresh goals = 13 unique. The cap is 8.
+        // The first 2 prior goals must always survive.
+        let prev_goals: Vec<String> = (0..8).map(|i| format!("- original goal {i}")).collect();
+        let fresh_goals: Vec<String> = (0..5).map(|i| format!("- fresh goal {i}")).collect();
+        let prev = format!(
+            "{HANDOFF_PREAMBLE}\n\n[Session Goal]\n{}\n\n---\n\n[user]\nold",
+            prev_goals.join("\n")
+        );
+        let fresh = format!(
+            "{HANDOFF_PREAMBLE}\n\n[Session Goal]\n{}\n\n---\n\n[user]\nnew",
+            fresh_goals.join("\n")
+        );
+        let merged = merge_previous(&prev, &fresh);
+        // Original intent preserved.
+        assert!(merged.contains("original goal 0"));
+        assert!(merged.contains("original goal 1"));
+        // Most recent fresh goals also present.
+        assert!(merged.contains("fresh goal 4"));
+        // Not all 13 can fit (cap 8).
+        let goal_count = merged
+            .split("[Session Goal]")
+            .nth(1)
+            .unwrap_or("")
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .count();
+        assert!(goal_count <= 8, "goal_count={goal_count} should be <= 8");
+    }
+
+    #[test]
+    fn extract_preferences_skips_questions() {
+        let blocks = vec![
+            CompactBlock::User {
+                text: "Can you use the openai provider?".to_string(),
+            },
+            CompactBlock::User {
+                text: "Please always use 2-space indentation".to_string(),
+            },
+        ];
+        let prefs = extract_preferences(&blocks);
+        assert!(prefs.iter().all(|p| !p.contains("openai provider")));
+        assert!(prefs.iter().any(|p| p.contains("2-space indentation")));
+    }
+
+    #[test]
+    fn brief_collapses_consecutive_identical_tool_calls() {
+        let blocks = vec![CompactBlock::ToolCall {
+            id: "t1".to_string(),
+            code: String::new(),
+            label: None,
+            native: vec![
+                native("t1", "read", "foo.rs"),
+                native("t1", "read", "foo.rs"),
+                native("t1", "read", "foo.rs"),
+            ],
+        }];
+        let brief = build_brief(&blocks, &[]);
+        assert!(
+            brief.contains("(x3)"),
+            "brief should contain repeat count: {brief}"
+        );
+    }
+
+    #[test]
+    fn summary_stays_within_token_budget() {
+        // Build a conversation with many turns so the brief transcript
+        // would be large without the token budget.
+        let big = "x".repeat(2000);
+        let mut msgs = Vec::new();
+        msgs.push(user("do a big task"));
+        for i in 0..40 {
+            msgs.push(exec_call(&format!("t{i}"), "lofi.read"));
+            msgs.push(exec_result(&format!("t{i}"), &big));
+            msgs.push(assistant(&"step done with lots of text ".repeat(5)));
+        }
+        msgs.push(user("now summarize"));
+        msgs.push(assistant("done"));
+        let events = events_of(&msgs);
+        let c = compact(&events, &CompactOptions::default()).expect("should compact");
+        // The summary should be well under the budget (4k tokens = 16k chars).
+        let summary_chars = c.summary.len();
+        assert!(
+            summary_chars < 20_000,
+            "summary is {summary_chars} chars, should be under ~16k"
+        );
     }
 
     /// On a re-compact, the on-disk transcript still has the *original* unedited
