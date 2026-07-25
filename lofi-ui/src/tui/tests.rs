@@ -414,7 +414,7 @@ fn inline_markdown_code_stays_literal() {
     let spans = render_text_spans("use `inline_spans` here");
     let code = spans
         .iter()
-        .find(|s| s.content == "inline_spans")
+        .find(|s| s.content == " inline_spans ")
         .expect("code span");
     // Code spans have an inline_bg background; plain text does not.
     assert!(code.style.bg.is_some(), "code should have bg: {code:?}");
@@ -1106,7 +1106,7 @@ fn inline_markdown_table_renders_inline_formatting() {
     // The code cell should have the code style (fg = info).
     let code_span = spans
         .iter()
-        .find(|s| s.content == "code")
+        .find(|s| s.content == " code ")
         .expect("code span");
     assert!(
         code_span.style.fg.is_some(),

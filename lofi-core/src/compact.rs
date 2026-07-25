@@ -319,6 +319,10 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         .map(|(i, _)| i)
         .collect();
 
+    // Strategy 1: Cut at the last completed user-prompt boundary.
+    // Summarize everything before it; keep the final turn whole (unless the
+    // oversized-turn guard splits it). Requires at least two user prompts so
+    // the summarized prefix is non-empty.
     if let Some(&last_user) = user_indices.last() {
         let mut cut = last_user;
         // In-progress-turn guard: if the turn after the last user prompt has
@@ -330,15 +334,13 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         }
         // Oversized-turn guard: split the kept suffix at a completed
         // tool-cycle so an oversized final turn is partly summarized.
-        // `cut == 0` (a single turn with no prior prompts) must also enter
-        // this path — otherwise the entire history is kept verbatim and
-        // `summarized == 0 < MIN_SUMMARIZED` makes compact refuse.
         if opts.max_kept_tokens > 0 {
             let suffix_tokens = estimate_tokens(&live[cut..]);
             if suffix_tokens > opts.max_kept_tokens {
                 if let Some(split) = find_suffix_split(live, cut, opts.max_kept_tokens) {
                     cut = split;
                 } else {
+                    // No cycle boundary fits the budget — compact everything.
                     return CutPlan {
                         summarized: live.len(),
                         first_kept_event_id: None,
@@ -346,21 +348,20 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
                 }
             }
         }
-        // When cut == 0 (a single user prompt with no prior prompts to
-        // summarize), returning summarized: 0 always fails the
-        // MIN_SUMMARIZED check. Fall through to the mid-cycle boundary
-        // logic to split the single turn at a completed tool-cycle.
         if cut > 0 {
             return CutPlan {
                 summarized: cut,
                 first_kept_event_id: Some(live[cut].event_id.clone()),
             };
         }
-    } // fall through to mid-cycle boundary when cut == 0
+        // cut == 0: the only user prompt is at index 0, so there is no
+        // prefix to summarize. Fall through to strategy 2.
+    }
 
-    // No user prompt (or a single user prompt that fell through): find a
-    // completed tool-cycle boundary in the first half and cut there; else
-    // compact-all.
+    // Strategy 2: Split a single turn (or a promptless conversation) at a
+    // completed tool-cycle boundary near the midpoint. This lets a long
+    // agentic turn with many tool calls be partially summarized even when
+    // there is only one user prompt.
     if let Some(mid) = find_mid_cycle_boundary(live) {
         if mid > 0 && mid < live.len() - 1 {
             return CutPlan {
@@ -369,6 +370,9 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
             };
         }
     }
+
+    // Strategy 3: Compact-all. No suitable boundary was found; fold the
+    // entire live list into the summary.
     CutPlan {
         summarized: live.len(),
         first_kept_event_id: None,

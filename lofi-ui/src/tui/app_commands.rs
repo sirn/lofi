@@ -267,10 +267,7 @@ impl App {
         self.top_line = 0;
         // Reset the footer usage/cost stats so a fresh session doesn't
         // carry over the previous one's context gauge and accumulated cost.
-        self.status_usage = None;
-        self.prev_ctx_tokens = None;
-        self.last_compact_msg_count = 0;
-        self.compacted = false;
+        self.reset_compaction_gauges();
         self.cost = 0.0;
         self.turn_cost = 0.0;
         self.turn_has_round_usage = false;
@@ -322,10 +319,7 @@ impl App {
                 self.total_out = 0;
                 self.total_cache_read = 0;
                 self.total_cache_write = 0;
-                self.status_usage = None;
-                self.prev_ctx_tokens = None;
-                self.last_compact_msg_count = 0;
-                self.compacted = false;
+                self.reset_compaction_gauges();
                 for ev in replay_session_events(&events) {
                     self.apply_event(ev);
                 }
@@ -877,10 +871,7 @@ impl App {
         self.total_out = 0;
         self.total_cache_read = 0;
         self.total_cache_write = 0;
-        self.status_usage = None;
-        self.prev_ctx_tokens = None;
-        self.last_compact_msg_count = 0;
-        self.compacted = false;
+        self.reset_compaction_gauges();
         for ev in replay_session_events(&rolled_back) {
             self.apply_event(ev);
         }

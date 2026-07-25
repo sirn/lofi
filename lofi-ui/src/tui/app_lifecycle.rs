@@ -274,8 +274,7 @@ impl App {
                 // gauge's last reading reflects the pre-compaction fill;
                 // drop it so the gauge shows "c" and waits for the next
                 // round's real (smaller) usage.
-                self.status_usage = None;
-                self.prev_ctx_tokens = None;
+                self.reset_compaction_gauges();
                 self.compacted = true;
             }
             // Remaining status/marker events do not mutate App-owned
@@ -297,6 +296,31 @@ impl App {
         self.run_start = None;
         self.run = None;
         self.retry = None;
+    }
+
+    /// Reset compaction-related gauge state to the pre-compaction defaults.
+    /// Called from every site that invalidates the session context: the
+    /// `Compaction` event handler, `compact_now`, `/new`, `/resume`,
+    /// and `/rollback`. Centralizing the reset prevents drift when a new
+    /// field is added to the gauge cluster.
+    pub(super) fn reset_compaction_gauges(&mut self) {
+        self.status_usage = None;
+        self.prev_ctx_tokens = None;
+        self.last_compact_msg_count = 0;
+        self.compacted = false;
+    }
+
+    /// Derive the kept-tail token budget for `plan_cut` from the compaction
+    /// thresholds. Prefers the soft threshold, falls back to the hard
+    /// threshold, and uses 50% of the threshold so the kept tail stays well
+    /// under the cap. Returns 0 when no threshold is configured (disables the
+    /// oversized-turn guard).
+    pub(super) fn derive_compact_budget(&self) -> usize {
+        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
+        self.compaction
+            .soft_threshold(limit)
+            .or_else(|| self.compaction.hard_threshold(limit))
+            .map_or(0, |t| (t / 2) as usize)
     }
 
     /// Invalidate the frozen-turn cache. Call whenever `turns` is replaced
@@ -486,18 +510,7 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
-        // Derive a kept-tail token budget from the compaction thresholds so
-        // the oversized-turn guard in plan_cut fires: if the last turn alone
-        // exceeds the budget, it is split at a tool-cycle boundary so part of
-        // it is summarized too. Without this (max_kept_tokens=0) a single
-        // turn with many large tool results is kept verbatim and the
-        // compaction barely shrinks the context.
-        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
-        let budget = self
-            .compaction
-            .soft_threshold(limit)
-            .or_else(|| self.compaction.hard_threshold(limit))
-            .map_or(0, |t| (t / 2) as usize); // keep tail under ~50% of threshold
+        let budget = self.derive_compact_budget();
         let opts = CompactOptions {
             max_kept_tokens: budget,
             edit: self.compaction.edit.clone(),
@@ -561,8 +574,7 @@ impl App {
         // The context gauge's last reading reflects the pre-compaction fill;
         // drop it so the auto-trigger does not re-fire on the same crossing
         // and the gauge waits for the next round's real (smaller) usage.
-        self.status_usage = None;
-        self.prev_ctx_tokens = None;
+        self.reset_compaction_gauges();
         self.last_compact_msg_count = self.messages_since_last_compact();
         self.compacted = true;
         self.bump_render_epoch();
@@ -691,23 +703,18 @@ impl App {
             return usize::MAX;
         };
         let path = store::active_path_from_leaf(&events);
-        // Walk root-first; start counting only after the last Compaction
-        // marker on the path (the newest one, which is closest to the leaf).
-        let mut counting = true;
-        let mut n = 0usize;
-        for &i in &path {
-            match &events[i].kind {
-                SessionEventKind::Compaction { .. } => {
-                    counting = true;
-                    n = 0;
-                }
-                SessionEventKind::Message(m) if counting && m.role == Role::Assistant => {
-                    n += 1;
-                }
-                _ => {}
-            }
+        // Find the last Compaction marker on the active path, then count
+        // assistant messages after it. When there is no compaction marker,
+        // return a large count so the cooldown is effectively disabled.
+        let last_compaction = path
+            .iter()
+            .rev()
+            .find(|&&i| matches!(events[i].kind, SessionEventKind::Compaction { .. }))
+            .copied();
+        if last_compaction.is_none() {
+            return usize::MAX;
         }
-        n
+        count_assistant_after_compaction(&path, &events, last_compaction)
     }
 
     /// Derive compaction-related state from the transcript's active path
@@ -748,28 +755,10 @@ impl App {
             Some(idx) => path.last().is_some_and(|&last| last == idx),
             None => false,
         };
-        // `last_compact_msg_count`: count assistant messages after the last
-        // Compaction marker, same logic as `messages_since_last_compact`.
-        self.last_compact_msg_count = match last_compaction_idx {
-            Some(ci) => {
-                let mut n = 0usize;
-                for &i in &path {
-                    if i == ci {
-                        n = 0;
-                        continue;
-                    }
-                    if i > ci {
-                        if let SessionEventKind::Message(m) = &events[i].kind {
-                            if m.role == Role::Assistant {
-                                n += 1;
-                            }
-                        }
-                    }
-                }
-                n
-            }
-            None => 0,
-        };
+        // `last_compact_msg_count`: reuse the shared counting helper so
+        // there is one counting implementation.
+        self.last_compact_msg_count =
+            count_assistant_after_compaction(&path, events, last_compaction_idx);
         // `prev_ctx_tokens`: from the last TurnEnd/TurnFailed's usage, so the
         // hysteresis has a baseline and doesn't immediately re-trigger.
         self.prev_ctx_tokens = last_usage.map(|u| u.input_tokens + u.cache_read_tokens);
@@ -816,6 +805,35 @@ impl App {
         }
         Some(events)
     }
+}
+
+/// Count assistant messages on the active path after the last
+/// Compaction marker. Shared by restore_compaction_state (resume) and
+/// messages_since_last_compact (cooldown) so the counting logic lives in
+/// one place. Returns 0 when there is no compaction marker.
+fn count_assistant_after_compaction(
+    path: &[usize],
+    events: &[SessionEvent],
+    last_compaction_idx: Option<usize>,
+) -> usize {
+    let Some(ci) = last_compaction_idx else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for &i in path {
+        if i == ci {
+            n = 0;
+            continue;
+        }
+        if i > ci {
+            if let SessionEventKind::Message(m) = &events[i].kind {
+                if m.role == Role::Assistant {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
 }
 
 /// Parse a `scope:…` directive out of a `/recall` argument string. Returns

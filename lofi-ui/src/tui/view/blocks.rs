@@ -422,8 +422,12 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
         }
         let after = &rest[start + 1..];
         if let Some(end) = after.find('`') {
+            // Pad the code tile with one space on each side (styled with the
+            // same inline-bg) so adjacent text doesn't touch the tile and the
+            // layout doesn't shift when a code span appears/disappears.
+            let padded = format!(" {} ", &after[..end]);
             out.push(MappedSpan {
-                span: Span::styled(after[..end].to_string(), code_style),
+                span: Span::styled(padded, code_style),
                 content_start: pos + start + 1,
                 boundary_start: pos + start,
             });

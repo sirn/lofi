@@ -65,7 +65,7 @@ impl Theme {
         Self {
             primary: Color::Indexed(44),  // teal (modus-vivendi accent)
             user: Color::Indexed(44),     // teal — same as primary
-            agent: Color::Indexed(129),   // rich purple — bold contrast with teal and white
+            agent: Color::Indexed(5),     // magenta
             success: Color::Indexed(77),  // green
             warn: Color::Indexed(178),    // amber
             error: Color::Indexed(203),   // red
