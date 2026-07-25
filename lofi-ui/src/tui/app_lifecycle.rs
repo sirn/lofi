@@ -76,6 +76,7 @@ impl App {
             sel: None,
             mode: Mode::Input,
             pending_confirms: Vec::new(),
+            confirm_selected: 0,
             yank_notify: None,
             yank_cursor: None,
             notify: None,
