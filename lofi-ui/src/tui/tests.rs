@@ -173,6 +173,57 @@ fn rich_header_suffix_for_read_and_bash() {
 }
 
 #[test]
+fn user_message_is_prompt_background_tile_with_vertical_padding() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: "A long user prompt\nwith another line".to_string(),
+        blocks: Vec::new(),
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 32,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+
+    assert_eq!(
+        lines.len(),
+        4,
+        "top padding + two body rows + bottom padding"
+    );
+    for line in &lines {
+        let width: usize = line
+            .line
+            .spans
+            .iter()
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        assert_eq!(width, 32, "every tile row fills the viewport");
+        assert!(
+            line.line
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(a.theme.panel_bg)),
+            "every tile cell uses the live prompt background: {:?}",
+            line.line
+        );
+    }
+    assert_eq!(lines[0].content, (0, 0));
+    assert_eq!(lines[3].content, (0, 0));
+    assert!(lines[0].raw.is_none() && lines[3].raw.is_none());
+    let first_body: String = lines[1]
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(first_body.starts_with("❯ A long user prompt"));
+}
+#[test]
 fn render_tree_smoke() {
     use crate::tui::view::blocks::render_turns;
     let mut a = app();
