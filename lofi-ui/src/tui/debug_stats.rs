@@ -16,6 +16,25 @@ pub(super) struct DebugState {
     started: Instant,
     latest_rss_bytes: Option<u64>,
     latest_heap_bytes: Option<u64>,
+    previous_sample: Option<SampleTotals>,
+}
+
+#[derive(Clone, Copy)]
+struct SampleTotals {
+    rss_bytes: u64,
+    private_dirty_bytes: u64,
+    anonymous_bytes: u64,
+    allocator_allocated_bytes: Option<u64>,
+    component_bytes: u64,
+}
+
+#[derive(Default)]
+struct AllocatorMemory {
+    allocated_bytes: Option<u64>,
+    free_bytes: Option<u64>,
+    arena_bytes: Option<u64>,
+    mmap_bytes: Option<u64>,
+    releasable_bytes: Option<u64>,
 }
 
 #[derive(Default)]
@@ -179,6 +198,7 @@ impl DebugState {
             started: Instant::now(),
             latest_rss_bytes: None,
             latest_heap_bytes: None,
+            previous_sample: None,
         })
     }
 
@@ -209,6 +229,17 @@ impl DebugState {
             return Ok(());
         };
         let process = read_process_memory().unwrap_or_default();
+        let allocator = read_allocator_memory();
+        let components = app.component_memory_json();
+        let component_bytes = components["estimated_total_bytes"].as_u64().unwrap_or(0);
+        let totals = SampleTotals {
+            rss_bytes: process.rss_bytes,
+            private_dirty_bytes: process.private_dirty_bytes,
+            anonymous_bytes: process.anonymous_bytes,
+            allocator_allocated_bytes: allocator.allocated_bytes,
+            component_bytes,
+        };
+        let previous = self.previous_sample.replace(totals);
         self.latest_rss_bytes = (process.rss_bytes > 0).then_some(process.rss_bytes);
         self.latest_heap_bytes =
             (process.mappings.heap.rss_bytes > 0).then_some(process.mappings.heap.rss_bytes);
@@ -264,7 +295,27 @@ impl DebugState {
                 "cpu_user_ticks": process.cpu_user_ticks,
                 "cpu_system_ticks": process.cpu_system_ticks,
             },
-            "components": app.component_memory_json(),
+            "retention": {
+                "measured_component_bytes": component_bytes,
+                "private_dirty_minus_measured_bytes": signed_delta(process.private_dirty_bytes, component_bytes),
+                "anonymous_minus_measured_bytes": signed_delta(process.anonymous_bytes, component_bytes),
+                "rss_minus_measured_bytes": signed_delta(process.rss_bytes, component_bytes),
+            },
+            "allocator": {
+                "allocated_bytes": allocator.allocated_bytes,
+                "free_bytes": allocator.free_bytes,
+                "arena_bytes": allocator.arena_bytes,
+                "mmap_bytes": allocator.mmap_bytes,
+                "releasable_bytes": allocator.releasable_bytes,
+            },
+            "delta_from_previous": previous.map(|previous| serde_json::json!({
+                "rss_bytes": signed_delta(totals.rss_bytes, previous.rss_bytes),
+                "private_dirty_bytes": signed_delta(totals.private_dirty_bytes, previous.private_dirty_bytes),
+                "anonymous_bytes": signed_delta(totals.anonymous_bytes, previous.anonymous_bytes),
+                "allocator_allocated_bytes": option_delta(totals.allocator_allocated_bytes, previous.allocator_allocated_bytes),
+                "component_bytes": signed_delta(totals.component_bytes, previous.component_bytes),
+            })),
+            "components": components,
             "context": {
                 "run_active": app.run.is_some(),
                 "model": app.session_model(),
@@ -287,6 +338,22 @@ impl DebugState {
         file.flush()?;
         Ok(())
     }
+}
+
+fn signed_delta(current: u64, previous: u64) -> i128 {
+    i128::from(current) - i128::from(previous)
+}
+
+fn option_delta(current: Option<u64>, previous: Option<u64>) -> Option<i128> {
+    Some(signed_delta(current?, previous?))
+}
+
+fn read_allocator_memory() -> AllocatorMemory {
+    // Direct glibc allocator counters require unsafe FFI, which this workspace
+    // forbids. Keep the schema portable and report null on unsupported builds;
+    // private/anonymous retention proxies below remain available everywhere
+    // Linux exposes procfs.
+    AllocatorMemory::default()
 }
 
 fn message_heap_bytes(message: &Message) -> usize {
