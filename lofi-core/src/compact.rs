@@ -330,7 +330,10 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         }
         // Oversized-turn guard: split the kept suffix at a completed
         // tool-cycle so an oversized final turn is partly summarized.
-        if opts.max_kept_tokens > 0 && cut > 0 {
+        // `cut == 0` (a single turn with no prior prompts) must also enter
+        // this path — otherwise the entire history is kept verbatim and
+        // `summarized == 0 < MIN_SUMMARIZED` makes compact refuse.
+        if opts.max_kept_tokens > 0 {
             let suffix_tokens = estimate_tokens(&live[cut..]);
             if suffix_tokens > opts.max_kept_tokens {
                 if let Some(split) = find_suffix_split(live, cut, opts.max_kept_tokens) {
