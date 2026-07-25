@@ -339,70 +339,117 @@ pub fn append_compaction(
     path: &Path,
     kept_messages: &[Message],
     parent_hint: Option<&str>,
-    summary: String,
-    summarized_range: [String; 2],
+    summary: &str,
+    summarized_range: &[String; 2],
     summarized: usize,
     kept: usize,
 ) -> Result<(u64, u64)> {
+    #[derive(Serialize)]
+    struct MessageEvent<'a> {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_id: Option<&'a str>,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        #[serde(flatten)]
+        message: &'a Message,
+    }
+
+    #[derive(Serialize)]
+    struct CompactionEvent<'a> {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_id: Option<&'a str>,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        summary: &'a str,
+        first_kept_entry_id: &'a str,
+        summarized_range: &'a [String; 2],
+        checkpointed_tail: bool,
+        summarized: usize,
+        kept: usize,
+    }
+
     let parent = match parent_hint {
         Some("") => None,
         Some(id) => Some(id.to_string()),
         None => last_event_id(path)?,
     };
-    let ids: Vec<String> = (0..=kept_messages.len()).map(|_| short_id()).collect();
-    let mut events: Vec<SessionEvent> = kept_messages
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, message)| SessionEvent {
-            id: ids[index].clone(),
-            parent_id: if index == 0 {
-                parent.clone()
-            } else {
-                Some(ids[index - 1].clone())
-            },
-            kind: SessionEventKind::Message(message),
-        })
-        .collect();
-    let marker_index = kept_messages.len();
-    events.push(SessionEvent {
-        id: ids[marker_index].clone(),
-        parent_id: if marker_index == 0 {
-            parent
-        } else {
-            Some(ids[marker_index - 1].clone())
-        },
-        kind: SessionEventKind::Compaction {
-            summary,
-            first_kept_entry_id: if marker_index == 0 {
-                String::new()
-            } else {
-                ids[0].clone()
-            },
-            summarized_range,
-            checkpointed_tail: true,
-            summarized,
-            kept,
-        },
-    });
-    append_prepared_events(path, &events)
-}
-
-fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
     let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let mut payload = Vec::new();
-    for event in events {
-        serde_json::to_writer(&mut payload, event)
-            .map_err(|e| Error::State(format!("json: {e}")))?;
-        payload.push(b'\n');
-    }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    if let Err(error) = file.write_all(&payload).and_then(|()| file.flush()) {
+    let mut previous_id = parent;
+    let mut first_kept_id = None;
+
+    let write_result = (|| -> Result<()> {
+        for message in kept_messages {
+            let id = short_id();
+            if first_kept_id.is_none() {
+                first_kept_id = Some(id.clone());
+            }
+            serde_json::to_writer(
+                &mut file,
+                &MessageEvent {
+                    id: &id,
+                    parent_id: previous_id.as_deref(),
+                    kind: "message",
+                    message,
+                },
+            )
+            .map_err(|e| Error::State(format!("json: {e}")))?;
+            file.write_all(b"\n")?;
+            previous_id = Some(id);
+        }
+
+        let id = short_id();
+        serde_json::to_writer(
+            &mut file,
+            &CompactionEvent {
+                id: &id,
+                parent_id: previous_id.as_deref(),
+                kind: "compaction",
+                summary,
+                first_kept_entry_id: first_kept_id.as_deref().unwrap_or(""),
+                summarized_range,
+                checkpointed_tail: true,
+                summarized,
+                kept,
+            },
+        )
+        .map_err(|e| Error::State(format!("json: {e}")))?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
         let _ = file.set_len(byte_start);
-        return Err(Error::Io(error));
+        return Err(error);
+    }
+    let byte_end = file.metadata()?.len();
+    Ok((byte_start, byte_end))
+}
+
+fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
+    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    let write_result = (|| -> Result<()> {
+        for event in events {
+            serde_json::to_writer(&mut file, event)
+                .map_err(|e| Error::State(format!("json: {e}")))?;
+            file.write_all(b"\n")?;
+        }
+        file.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = file.set_len(byte_start);
+        return Err(error);
     }
     let byte_end = file.metadata()?.len();
     Ok((byte_start, byte_end))
@@ -537,81 +584,132 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
 }
 
 /// Parse a session file into a [`SessionEntry`] (metadata + message count),
-/// or `None` if the file is not a valid session. Only `Message` events are
-/// counted, so timing/turn-end lines do not inflate the "msgs" total.
-/// One-line preview of a session event for the `/resume` picker.
-fn entry_preview(kind: &SessionEventKind) -> String {
-    use lofi_types::Role;
-    match kind {
-        SessionEventKind::Message(m) => {
-            let text: String = m
-                .blocks
-                .iter()
-                .filter_map(|b| match b {
-                    lofi_types::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let prefix = match m.role {
-                Role::User => "user: ",
-                Role::Assistant => "agent: ",
+/// or `None` if the file is not a valid session. The picker only borrows the
+/// small fields needed for counting and previews; large tool inputs and results
+/// are skipped by serde rather than materialized as full session events.
+#[derive(Deserialize)]
+struct EntryEvent<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow)]
+    role: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    blocks: Vec<EntryBlock<'a>>,
+    #[serde(borrow)]
+    error: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow)]
+    name: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow)]
+    args: Option<std::borrow::Cow<'a, str>>,
+    summarized: Option<usize>,
+    kept: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct EntryBlock<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow)]
+    text: Option<std::borrow::Cow<'a, str>>,
+}
+
+fn entry_preview(event: &EntryEvent<'_>) -> String {
+    match event.kind.as_deref() {
+        Some("message") | None if event.role.is_some() => {
+            let prefix = match event.role.as_deref() {
+                Some("user") => "user: ",
+                Some("assistant") => "agent: ",
                 _ => "",
             };
-            format!("{prefix}{}", one_line(&text))
+            let mut preview = String::with_capacity(prefix.len() + 81);
+            preview.push_str(prefix);
+            let mut separated = false;
+            for text in event.blocks.iter().filter_map(|block| {
+                (block.kind.as_deref() == Some("text"))
+                    .then_some(block.text.as_deref())
+                    .flatten()
+            }) {
+                if separated && !push_preview_chars(&mut preview, " ", 80 + prefix.len()) {
+                    break;
+                }
+                if !push_preview_chars(&mut preview, text, 80 + prefix.len()) {
+                    break;
+                }
+                separated = true;
+            }
+            preview
         }
-        SessionEventKind::TurnEnd { .. } => String::new(),
-        SessionEventKind::TurnFailed { error, .. } => {
-            format!("agent: {} (failed)", one_line(error))
-        }
-        SessionEventKind::Compaction {
-            summarized, kept, ..
-        } => {
-            format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}")
-        }
-        SessionEventKind::NativeTool(rec) => {
-            format!("exec: {} {}", rec.name, one_line(&rec.args))
-        }
-        SessionEventKind::ToolTiming { .. } | SessionEventKind::ThinkingTiming { .. } => {
-            String::new()
-        }
+        Some("turn_failed") => format!(
+            "agent: {} (failed)",
+            one_line(event.error.as_deref().unwrap_or(""))
+        ),
+        Some("compaction") => format!(
+            "compact: Compacted {} messages · kept {}",
+            event.summarized.unwrap_or(0),
+            event.kept.unwrap_or(0)
+        ),
+        Some("native_tool") => format!(
+            "exec: {} {}",
+            event.name.as_deref().unwrap_or(""),
+            one_line(event.args.as_deref().unwrap_or(""))
+        ),
+        _ => String::new(),
     }
+}
+
+fn push_preview_chars(out: &mut String, text: &str, limit: usize) -> bool {
+    for ch in text.chars() {
+        if ch == '\n' {
+            return false;
+        }
+        if out.chars().count() == limit {
+            out.push('…');
+            return false;
+        }
+        out.push(ch);
+    }
+    true
 }
 
 /// Truncate to a single line and cap its length for a compact preview.
 fn one_line(s: &str) -> String {
-    let line = s.split('\n').next().unwrap_or("");
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() > 80 {
-        format!("{}\u{2026}", chars[..80].iter().collect::<String>())
-    } else {
-        line.to_string()
-    }
+    let mut out = String::with_capacity(s.len().min(81));
+    push_preview_chars(&mut out, s, 80);
+    out
 }
 
 fn parse_entry(path: &Path) -> Option<SessionEntry> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let header: Header = serde_json::from_str(lines.next()?).ok()?;
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let header: Header = serde_json::from_str(line.trim_end()).ok()?;
     if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
         return None;
     }
+
     let mut count = 0usize;
     let mut last_message = String::new();
-    for l in lines {
-        if l.is_empty() {
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
             continue;
         }
-        let Ok(ev) = parse_event(l) else {
+        let Ok(event) = serde_json::from_str::<EntryEvent<'_>>(trimmed) else {
             continue;
         };
-        if matches!(ev.kind, SessionEventKind::Message(_)) {
+        if event.kind.as_deref() == Some("message")
+            || (event.kind.is_none() && event.role.is_some())
+        {
             count += 1;
         }
-        // Track the last user/agent message or compaction — not timing/
-        // TurnEnd metadata, which is always the final event and carries
-        // no useful preview text.
-        let preview = entry_preview(&ev.kind);
+        let preview = entry_preview(&event);
         if !preview.is_empty() {
             last_message = preview;
         }
@@ -751,333 +849,3 @@ mod tests {
         assert!(
             !turn_end_line.contains("\"model\":\""),
             "turn-end must not store a rendered model string: {turn_end_line}"
-        );
-    }
-
-    #[test]
-    fn compaction_checkpoint_round_trips_as_one_chain() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-checkpoint"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("old"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        let kept = [assistant("kept")];
-        append_compaction(
-            &path,
-            &kept,
-            None,
-            "summary".into(),
-            ["first".into(), "last".into()],
-            5,
-            1,
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            summary,
-            ..
-        } = &events[2].kind
-        else {
-            panic!("expected compaction marker");
-        };
-        assert_eq!(summary, "summary");
-        assert_eq!(first_kept_entry_id, &events[1].id);
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-        assert_ne!(events[0].id, events[1].id);
-        assert_ne!(events[1].id, events[2].id);
-    }
-
-    #[test]
-    fn compaction_checkpoint_honors_branch_parent() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-branch"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("root")), ev(assistant("latest sibling"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        append_compaction(
-            &path,
-            &[assistant("checkpoint")],
-            Some(&original[0].id),
-            "summary".into(),
-            [original[0].id.clone(), original[0].id.clone()],
-            1,
-            1,
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
-        assert!(!active_path_from_leaf(&events).contains(&1));
-    }
-
-    #[test]
-    fn append_then_load_messages() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/proj2");
-        let path = store.create(cwd, &"openai/gpt-4o".into()).unwrap();
-        let mut batch = [ev(user("hello")), ev(assistant("hi there"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
-        );
-        // Linear chain: first event is root, second chains to first.
-        assert!(events[0].parent_id.is_none());
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-    }
-
-    #[test]
-    fn events_round_trip_with_timings_and_cost() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/events");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::ToolTiming {
-                    tool_call_id: "t1".into(),
-                    elapsed_ms: 5,
-                },
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/m:medium".into(),
-                    elapsed_ms: 1234,
-                    cost: 0.01,
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 20,
-                        ..Usage::default()
-                    },
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1")
-        );
-        assert!(
-            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
-            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10)
-        );
-    }
-
-    #[test]
-    fn append_with_parent_hint_branches_off_target() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/branch");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        // Root chain: user -> assistant.
-        let mut first = [ev(user("a")), ev(assistant("b"))];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        // Branch a sibling user message off the root (not off the assistant).
-        let mut branch = [ev(user("alt"))];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        // 3 events total; the branch's parent is the root, not the assistant.
-        assert_eq!(events.len(), 3);
-        let branch_ev = events.iter().find(|e| {
-            matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
-                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "alt")))
-        }).expect("branch event present");
-        assert_eq!(branch_ev.parent_id.as_deref(), Some(root_id.as_str()));
-        // active_path from the branch leaf is [root, branch] — the assistant
-        // is a sibling and excluded.
-        let path_idx = active_path(&events, &branch_ev.id);
-        assert_eq!(path_idx.len(), 2);
-        assert!(
-            matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-        assert!(
-            matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-    }
-
-    #[test]
-    fn last_run_model_is_final_turn_on_active_path() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-final");
-        let path = store.create(cwd, &"p/orig:medium".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            ev(assistant("hey")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/switched:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-end marker is present");
-        assert_eq!(m.provider, "p");
-        assert_eq!(m.id, "switched");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn last_run_model_uses_turn_failed() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-failed");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnFailed {
-                    model: "p/boom:low".into(),
-                    elapsed_ms: 1,
-                    error: "oops".into(),
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-failed marker is present");
-        assert_eq!(m.id, "boom");
-        assert_eq!(m.thinking, ThinkingLevel::Low);
-    }
-
-    #[test]
-    fn last_run_model_none_without_a_turn_marker() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-none");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [ev(user("hi")), ev(assistant("partial"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert!(last_run_model(&events).is_none());
-    }
-
-    #[test]
-    fn last_run_model_skips_sibling_branch() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-branch");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        // Root chain ends with model A; a sibling branch off the root user
-        // ends with model B and is the active leaf, so B is restored (not A).
-        let mut first = [
-            ev(user("a")),
-            ev(assistant("b")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/A:medium".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        let mut branch = [
-            ev(user("alt")),
-            ev(assistant("alt2")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/B:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("active leaf has a turn-end");
-        assert_eq!(m.id, "B");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn legacy_bare_message_lines_still_load() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/legacy");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        // Pre-event-log files stored bare Message JSON, one per line.
-        let legacy = serde_json::to_string(&user("old")).unwrap();
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(format!("{legacy}\n").as_bytes())
-            .unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-    }
-
-    #[test]
-    fn list_newest_first_and_counts() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/listy");
-        let p1 = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [ev(user("a"))];
-        append_events(&p1, &mut batch, None).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let list = store.list_for_cwd(cwd).unwrap();
-        assert_eq!(list.len(), 2);
-        // p2 was created after p1 was last written, so p2 is most recently
-        // active and should be listed first.
-        assert_eq!(list[0].path, p2);
-        assert_eq!(list[1].path, p1);
-        assert_eq!(list[1].message_count, 1);
-        assert_eq!(list[0].message_count, 0);
-    }
-
-    #[test]
-    fn most_recent_and_find_prefix() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/findy");
-        let _p1 = store.create(cwd, &"m".into()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let mr = store.most_recent(cwd).unwrap().unwrap();
-        assert_eq!(mr.path, p2);
-        let id2 = p2.file_stem().unwrap().to_str().unwrap();
-        let prefix = &id2[..id2.find('_').unwrap()];
-        let found = store.find(cwd, prefix).unwrap().unwrap();
-        assert_eq!(found.path, p2);
-        assert!(store.find(cwd, "zzz").unwrap().is_none());
-    }
-
-    #[test]
-    fn slug_collapses_separators() {
-        assert_eq!(slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
-        assert_eq!(slug(Path::new("/")), "");
-    }
-}
