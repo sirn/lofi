@@ -3,15 +3,112 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::tui::Theme;
+
+use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
+
+/// Shared modal chrome: a filled surface, one-cell horizontal breathing room,
+/// and a primary border so the active overlay is immediately obvious.
+fn rich_modal_block(t: Theme) -> WidgetBlock<'static> {
+    WidgetBlock::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t.primary))
+        .padding(Padding::horizontal(1))
+        .style(Style::new().fg(t.fg).bg(t.surface))
+}
+
+fn modal_title(t: Theme, title: impl Into<String>) -> Line<'static> {
+    let title = title.into();
+    Line::from(Span::styled(
+        title.trim().to_string(),
+        Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn modal_help(t: Theme, text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), Style::new().fg(t.subtle)))
+}
+
+fn centered_modal(area: Rect, width: u16, desired_h: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = desired_h.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
+#[derive(Clone, Copy)]
+struct ModalRows {
+    title: Rect,
+    content: Rect,
+    help: Rect,
+}
+
+/// Keep title and help attached to the inside edges when a terminal is too
+/// short, allowing the content viewport to collapse before either chrome row.
+fn modal_rows(inner: Rect) -> ModalRows {
+    let title_h = inner.height.min(1);
+    let help_h = inner.height.saturating_sub(title_h).min(1);
+    let content_y = inner.y.saturating_add(title_h);
+    let content_h = inner.height.saturating_sub(title_h + help_h);
+    ModalRows {
+        title: Rect::new(inner.x, inner.y, inner.width, title_h),
+        content: Rect::new(inner.x, content_y, inner.width, content_h),
+        help: Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(help_h),
+            inner.width,
+            help_h,
+        ),
+    }
+}
+
+fn render_modal_help_line(f: &mut Frame, area: Rect, help: Line<'static>) {
+    if area.height > 0 {
+        f.render_widget(
+            Paragraph::new(help).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
+    }
+}
+
+fn render_modal_help(f: &mut Frame, area: Rect, t: Theme, text: &str) {
+    render_modal_help_line(f, area, modal_help(t, text));
+}
+
+fn render_modal_frame(
+    f: &mut Frame,
+    popup: Rect,
+    t: Theme,
+    title: Line<'static>,
+    help: Line<'static>,
+) -> ModalRows {
+    let block = rich_modal_block(t);
+    let rows = modal_rows(block.inner(popup));
+    f.render_widget(block, popup);
+    if rows.title.height > 0 {
+        f.render_widget(Paragraph::new(title), rows.title);
+    }
+    render_modal_help_line(f, rows.help, help);
+    rows
+}
+
+fn focus_style(t: Theme) -> Style {
+    Style::new()
+        .fg(t.panel_bg)
+        .bg(t.primary)
+        .add_modifier(Modifier::BOLD)
+}
 
 pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    use ratatui::widgets::ListState;
     let Some(picker) = &app.picker else {
         return;
     };
     let t = app.theme;
     let total = picker.entries.len();
     let title = " Resume a session ";
+    let help = " ↑/↓ navigate  enter resume  esc close ";
 
     // Two lines per entry: header line + preview line.
     let items: Vec<ListItem> = picker
@@ -55,32 +152,14 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .max()
         .unwrap_or(0);
-    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
-    let h = u16::try_from(total.min(8) * 2 + 2)
-        .unwrap_or(14)
-        .min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
+    let desired_frame_h = u16::try_from(total.min(8) * 2 + 2).unwrap_or(14);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, title));
     let inner = block.inner(popup);
     let need_sb = total * 2 > inner.height as usize;
     let content = if need_sb {
@@ -92,11 +171,12 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
         inner
     };
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+        .style(Style::default().fg(t.fg).bg(t.surface))
+        .highlight_style(focus_style(t));
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_widget(block, popup);
     f.render_stateful_widget(list, content, &mut state);
+    render_modal_help(f, help_area, t, help);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(
@@ -115,23 +195,22 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
 /// start with the current input, anchored just above the prompt cursor.
 /// `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc` dismisses.
 pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    use ratatui::widgets::ListState;
     let Some(sc) = &app.slash_complete else {
         return;
     };
     let t = app.theme;
     let n_max = sc.candidates.len().min(8);
-    // Width: longest "cmd  desc" plus borders, capped to the screen.
-    let w = u16::try_from(
-        SLASH_COMMANDS
-            .iter()
-            .map(|(cmd, desc)| cmd.len() + 2 + desc.len())
-            .max()
-            .unwrap_or(20)
-            + 4,
-    )
-    .unwrap_or(40)
-    .min(area.width);
+    // Width: longest rich row or help footer, plus border and padding.
+    let row_w = SLASH_COMMANDS
+        .iter()
+        .map(|(cmd, desc)| prim::width(cmd) + 2 + prim::width(desc))
+        .max()
+        .unwrap_or(20);
+    let help_w = prim::width(" ↑/↓ navigate  enter complete  esc close ");
+    let w = u16::try_from(row_w.max(help_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
     // Anchor horizontally at the cursor's column within the prompt area,
     // so the popover tracks the cursor as the user types. `input_rect` is
     // already inset past the gutter, and the cursor x is relative to its
@@ -146,27 +225,22 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         .input_rect
         .y
         .saturating_add(u16::try_from(cursor_row).unwrap_or(u16::MAX));
-    // The popover sits above the cursor; cap its height to the rows
-    // available there so it never overflows the screen on short terminals.
-    // If not even a bordered single row fits, skip rendering entirely.
-    let avail_above = cursor_screen_y.min(area.height) as usize;
-    let n = n_max.min(avail_above.saturating_sub(2));
+    // The frame and its separate help row sit above the cursor as one
+    // anchored group. Reserve the outside help row before deciding how many
+    // candidates fit on short terminals.
+    let avail_above = cursor_screen_y.saturating_sub(area.y) as usize;
+    let n = n_max.min(avail_above.saturating_sub(3));
     if n == 0 {
         return;
     }
-    let h = u16::try_from(n + 2).unwrap_or(10);
-    // Bottom of the popover = the row just above the cursor's row.
-    let bottom_y = cursor_screen_y;
-    let popup_y = bottom_y.saturating_sub(h);
-    let popup_x = cursor_screen_x.min(area.width.saturating_sub(w));
-    let popup = Rect::new(popup_x, popup_y, w, h);
+    let frame_h = u16::try_from(n + 2).unwrap_or(10);
+    let group_h = frame_h.saturating_add(1);
+    let popup_y = cursor_screen_y.saturating_sub(group_h);
+    let popup_x = cursor_screen_x.min(area.right().saturating_sub(w));
+    let popup = Rect::new(popup_x, popup_y, w, frame_h);
+    let help_area = Rect::new(popup_x, popup.bottom(), w, 1);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " Commands ",
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, " Commands "));
     let inner = block.inner(popup);
     let total = sc.candidates.len();
     let need_sb = total > inner.height as usize;
@@ -192,11 +266,12 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+        .style(Style::default().fg(t.fg).bg(t.surface))
+        .highlight_style(focus_style(t));
     let mut state = ListState::default().with_selected(Some(sc.selected));
     f.render_widget(block, popup);
     f.render_stateful_widget(list, content, &mut state);
+    render_modal_help(f, help_area, t, " ↑/↓ navigate  enter complete  esc close ");
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(
@@ -228,7 +303,6 @@ fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'st
 /// scrollbar appears and `j`/`k`/`↑`/`↓`/`Ctrl+N`/`Ctrl+P`/`PgUp`/`PgDn`
 /// scroll it. `y` copies the body; `Esc`/`q`/`Enter` dismiss.
 pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType};
     let t = app.theme;
     let Some(info) = app.info.as_mut() else {
         return;
@@ -241,7 +315,7 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // Body lines are styled spans; we pre-wrap them span-aware (preserving
     // whitespace and styles) so the row count for the scrollbar and the
     // rendered output agree exactly.
-    let max_w = area.width.saturating_sub(2) as usize;
+    let max_w = area.width.saturating_sub(4) as usize;
     let line_w = |l: &Line| {
         l.spans
             .iter()
@@ -260,7 +334,7 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let wrapped = wrap_info_lines_styled(&info.lines, body_w);
     let total = wrapped.len();
     let view_h = total.min(max_body_h);
-    let h = u16::try_from(view_h + 3).unwrap_or(10).min(area.height);
+    let desired_frame_h = u16::try_from(view_h + 2).unwrap_or(10);
     // Publish scroll geometry for the key handler; clamp any stale offset.
     info.total = total;
     info.view_h = view_h;
@@ -269,39 +343,14 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let scroll = info.scroll;
 
-    let w = u16::try_from(inner_w + 2).unwrap_or(40).min(area.width);
-
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
+    let w = u16::try_from(inner_w + 4).unwrap_or(40).min(area.width);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, title));
     let inner = block.inner(popup);
     let body_w = u16::try_from(body_w).unwrap_or(inner.width);
     let body_rect = Rect {
         width: body_w,
-        height: inner.height.saturating_sub(1),
-        ..inner
-    };
-    let hint_rect = Rect {
-        y: body_rect.bottom(),
-        width: body_w,
-        height: 1,
         ..inner
     };
     f.render_widget(block, popup);
@@ -320,15 +369,10 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     hint_spans.push(Span::styled(" to copy · ", dim));
     hint_spans.push(Span::styled("q", key_style));
     hint_spans.push(Span::styled(" to dismiss", dim));
-    f.render_widget(Paragraph::new(Line::from(hint_spans)), hint_rect);
+    render_modal_help_line(f, help_area, Line::from(hint_spans));
 
     if need_sb {
-        let track = Rect::new(
-            inner.right().saturating_sub(1),
-            inner.y,
-            1,
-            inner.height.saturating_sub(1),
-        );
+        let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(f, track, scroll, view_h, total, t.subtle, t.muted);
     }
 }
@@ -342,13 +386,14 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
 /// The current model is highlighted; `↑/↓` or `j`/`k` move, `Enter` switches,
 /// `Esc`/`q` cancels.
 pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    use ratatui::widgets::ListState;
     let Some(picker) = &app.model_picker else {
         return;
     };
     let t = app.theme;
     let total = picker.choices.len();
-    let title = " Switch model  ↑/↓ j/k enter esc ";
+    let title = " Switch model ";
+    let help = " ↑/↓ navigate  enter switch  esc close ";
     let active = app.model_label.clone();
     let row_for = |c: &lofi_types::ModelChoice| {
         let mut s = format!("{}/{}", c.provider, c.id);
@@ -370,31 +415,15 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
         .map(|c| prim::width(&row_for(c)))
         .max()
         .unwrap_or(0);
-    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
     let rows = total.min(20);
-    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
+    let desired_frame_h = u16::try_from(rows + 2).unwrap_or(22);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, title));
     let inner = block.inner(popup);
     let need_sb = total > inner.height as usize;
     let content = if need_sb {
@@ -423,11 +452,12 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+        .style(Style::default().fg(t.fg).bg(t.surface))
+        .highlight_style(focus_style(t));
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_widget(block, popup);
     f.render_stateful_widget(list, content, &mut state);
+    render_modal_help(f, help_area, t, help);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(
@@ -446,13 +476,14 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
 /// current model (`off` plus its declared levels). The current level is
 /// highlighted; `↑/↓` or `j`/`k` move, `Enter` switches, `Esc`/`q` cancels.
 pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    use ratatui::widgets::ListState;
     let Some(picker) = &app.thinking_picker else {
         return;
     };
     let t = app.theme;
     let total = picker.levels.len();
-    let title = " Thinking level  ↑/↓ j/k enter esc ";
+    let title = " Thinking level ";
+    let help = " ↑/↓ navigate  enter apply  esc close ";
     let row_for = |l: &lofi_types::ThinkingLevel| l.as_str().to_string();
     let content_w = picker
         .levels
@@ -460,31 +491,15 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
         .map(|l| prim::width(&row_for(l)))
         .max()
         .unwrap_or(0);
-    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
     let rows = total.min(20);
-    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
+    let desired_frame_h = u16::try_from(rows + 2).unwrap_or(22);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, title));
     let inner = block.inner(popup);
     let need_sb = total > inner.height as usize;
     let content = if need_sb {
@@ -513,11 +528,12 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+        .style(Style::default().fg(t.fg).bg(t.surface))
+        .highlight_style(focus_style(t));
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_widget(block, popup);
     f.render_stateful_widget(list, content, &mut state);
+    render_modal_help(f, help_area, t, help);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(
@@ -533,44 +549,29 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType, ListState};
+    use ratatui::widgets::ListState;
     let Some(picker) = &app.tree_picker else {
         return;
     };
     let t = app.theme;
     let total = picker.entries.len();
-    let title = " Roll back to a turn  ↑/↓ j/k enter esc ";
+    let title = " Roll back to a turn ";
+    let help = " ↑/↓ navigate  enter restore  esc close ";
     let content_w = picker
         .entries
         .iter()
         .map(|e| prim::width(&e.prefix) + prim::width(&e.label))
         .max()
         .unwrap_or(0);
-    let w = u16::try_from(content_w.max(prim::width(title)) + 2)
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
     let rows = total.min(20);
-    let h = u16::try_from(rows + 2).unwrap_or(22).min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
+    let desired_frame_h = u16::try_from(rows + 2).unwrap_or(22);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        ));
+    let block = rich_modal_block(t, modal_title(t, title));
     let inner = block.inner(popup);
     let need_sb = total > inner.height as usize;
     let content = if need_sb {
@@ -608,11 +609,12 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(Style::default().bg(t.selection).fg(t.fg));
+        .style(Style::default().fg(t.fg).bg(t.surface))
+        .highlight_style(focus_style(t));
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_widget(block, popup);
     f.render_stateful_widget(list, content, &mut state);
+    render_modal_help(f, help_area, t, help);
     if need_sb {
         let track = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         prim::render_scrollbar(
@@ -626,68 +628,123 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         );
     }
 }
-/// Shell-policy confirmation modal: a small centered popup showing the
-/// command text and a `y/n` prompt. `y` allows, any other key denies.
-/// If multiple requests are queued, a counter is shown.
+/// Shell-policy permission dialog, inspired by Crush's explicit action
+/// chooser: the requested command sits in a distinct content panel and Allow
+/// / Deny are real selectable buttons. Only Enter or an action key resolves
+/// the request; unrelated keys leave it open.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{Block as WidgetBlock, BorderType};
+    use ratatui::layout::Alignment;
     let t = app.theme;
     let Some(req) = app.pending_confirms.first() else {
         return;
     };
-    let max_w = area.width.saturating_sub(4) as usize;
-    let cmd_lines = prim::wrap(&req.command, max_w.min(80));
-    let body_h = cmd_lines.len();
+
+    // Dim the application beneath the dialog. This changes only the rendered
+    // frame; the transcript and its semantic styles remain untouched.
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(t.subtle).bg(t.panel_bg));
+
+    let desired_w = area.width.saturating_mul(3).saturating_div(5).max(52);
+    let w = desired_w.min(100).min(area.width);
+    let content_w = w.saturating_sub(6).max(1) as usize;
+    let mut cmd_lines = prim::wrap(&req.command, content_w);
+    // Header, intro, label, command panel, and buttons use seven fixed rows
+    // around the command body. The separate help row is reserved outside the
+    // frame on short terminals.
+    let max_command_rows = area.height.saturating_sub(9).max(1) as usize;
+    if cmd_lines.len() > max_command_rows {
+        cmd_lines.truncate(max_command_rows);
+        if let Some(last) = cmd_lines.last_mut() {
+            *last = prim::truncate(last, content_w.saturating_sub(1));
+            last.push('…');
+        }
+    }
+    let desired_frame_h = u16::try_from(cmd_lines.len() + 8).unwrap_or(u16::MAX);
+    let (popup, help_area) = centered_modal_with_help(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+
+    let key = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+    let help = Line::from(vec![
+        Span::styled("←/→", key),
+        Span::styled(" choose  ", Style::new().fg(t.subtle)),
+        Span::styled("enter", key),
+        Span::styled(" confirm  ", Style::new().fg(t.subtle)),
+        Span::styled("esc", key),
+        Span::styled(" deny", Style::new().fg(t.subtle)),
+    ]);
+
     let queue_count = app.pending_confirms.len();
     let counter = if queue_count > 1 {
-        format!(" ({}/{})", 1, queue_count)
+        format!("  1/{queue_count}")
     } else {
         String::new()
     };
-    let title = format!(" Confirm{counter} ");
-    let title_w = prim::width(&title);
-    let inner_w = cmd_lines
-        .iter()
-        .map(|l| prim::width(l.as_str()))
-        .max()
-        .unwrap_or(0)
-        .max(title_w)
-        .min(max_w);
-    let w = u16::try_from(inner_w + 4).unwrap_or(50).min(area.width);
-    let h = u16::try_from(body_h + 4).unwrap_or(7).min(area.height);
-    let vert = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(h),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let horiz = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(w),
-        Constraint::Min(0),
-    ])
-    .split(vert[1]);
-    let popup = horiz[1];
-    f.render_widget(Clear, popup);
-    let block = WidgetBlock::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
+    let title = format!(" Permission Required{counter} ");
+    let block = rich_modal_block(
+        t,
+        Line::from(Span::styled(
             title,
             Style::new().fg(t.warn).add_modifier(Modifier::BOLD),
-        ));
+        )),
+    );
     let inner = block.inner(popup);
     f.render_widget(block, popup);
+    if inner.height == 0 {
+        render_modal_help_line(f, help_area, help);
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1), // explanation
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // content label
+        Constraint::Min(1),    // command panel
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // actions
+        Constraint::Length(1), // gap
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Shell", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
+            Span::styled(" wants to run this command", Style::new().fg(t.muted)),
+        ])),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "Command",
+            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        )),
+        rows[2],
+    );
+
+    let command_panel = WidgetBlock::default()
+        .style(Style::new().fg(t.fg).bg(t.panel_bg))
+        .padding(Padding::horizontal(1));
+    let command_inner = command_panel.inner(rows[3]);
+    f.render_widget(command_panel, rows[3]);
     let body_lines: Vec<Line> = cmd_lines
-        .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::new().fg(t.fg).bg(t.panel_bg))))
         .collect();
-    f.render_widget(Paragraph::new(body_lines), inner);
-    let hint = Line::from(vec![
-        Span::styled("y", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-        Span::styled(" allow · ", Style::new().fg(t.muted)),
-        Span::styled("n", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-        Span::styled(" deny", Style::new().fg(t.muted)),
-    ]);
-    let hint_y = inner.bottom().saturating_sub(1);
-    f.render_widget(Paragraph::new(hint), Rect { y: hint_y, ..inner });
+    f.render_widget(Paragraph::new(body_lines), command_inner);
+
+    let button = |label: &'static str, selected: bool| {
+        let style = if selected {
+            focus_style(t)
+        } else {
+            Style::new().fg(t.muted).bg(t.panel_bg)
+        };
+        Span::styled(format!(" {label} "), style)
+    };
+    let actions = Line::from(vec![
+        button("Allow", app.confirm_selected == 0),
+        Span::raw("  "),
+        button("Deny", app.confirm_selected == 1),
+    ])
+    .alignment(Alignment::Right);
+    f.render_widget(Paragraph::new(actions), rows[5]);
+
+    render_modal_help_line(f, help_area, help);
 }
