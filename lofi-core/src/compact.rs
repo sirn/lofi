@@ -87,6 +87,12 @@ pub struct Compaction {
 /// Options for compact.
 #[derive(Clone, Default)]
 pub struct CompactOptions {
+    /// Permit an explicit/required compaction even when the cut contains
+    /// fewer than the normal minimum number of messages. Message count is a
+    /// useful automatic-compaction economy heuristic, but it is not a valid
+    /// eligibility check for a manual request or hard context pressure: one
+    /// or two messages can themselves occupy most of the context window.
+    pub allow_small_summary: bool,
     /// Soft token budget (chars/4) for the kept tail. When the most recent
     /// turn alone exceeds it, the cut is pushed back to a completed
     /// tool-cycle boundary so the oversized turn is partly summarized too.
@@ -226,12 +232,14 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         }
     }
 
-    if live.len() < 3 {
+    if live.is_empty() {
         return None;
     }
 
     let plan = plan_cut(&live, opts);
-    if plan.summarized < MIN_SUMMARIZED {
+    if plan.summarized == 0
+        || (plan.summarized < MIN_SUMMARIZED && !opts.allow_small_summary)
+    {
         return None;
     }
 
