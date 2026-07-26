@@ -95,7 +95,7 @@ stderr are merged.
 status }`. `code` is the exit status (null on signal/timeout); `signal` is the
 Unix signal number (null unless killed by a signal); `duration_ms` is wall
 time; `status` is `"exited"`, `"signaled"`, or `"timeout"`. Output is
-tail-truncated to 2000 lines / 50 KB (keeping the end where errors land); when
+tail-truncated to 20 lines / 4 KB (keeping the end where errors land); when
 truncated, the full output is saved to a file under `lofi.tmp_dir` and the
 notice names it — page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are

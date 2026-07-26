@@ -1189,8 +1189,18 @@ fn native_body(nt: &NativeTool) -> NativeBody {
     let name = nt.name.as_str();
     let raw = nt.result.as_deref().unwrap_or("");
     if nt.is_error {
+        // Bash failures are structured results; display only their output.
+        // Keep the complete JSON untouched in the native record/transcript.
+        let display = if name == "bash" {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| value.get("output")?.as_str().map(str::to_string))
+                .unwrap_or_else(|| raw.to_string())
+        } else {
+            raw.to_string()
+        };
         return NativeBody {
-            lines: split_lines(raw),
+            lines: split_lines(&display),
             numbered: false,
             start_line: 1,
             is_diff: false,
@@ -1320,6 +1330,19 @@ fn native_body(nt: &NativeTool) -> NativeBody {
             notice: None,
         },
     }
+}
+
+fn native_preview_range(name: &str, total: usize, verbose: bool) -> std::ops::Range<usize> {
+    if verbose {
+        return 0..total;
+    }
+    let shown = total.min(PREVIEW_LINES);
+    let start = if name == "bash" {
+        total.saturating_sub(shown)
+    } else {
+        0
+    };
+    start..start + shown
 }
 
 fn split_lines(s: &str) -> Vec<String> {
@@ -1456,8 +1479,8 @@ impl Component for ExecBlockBranch<'_> {
         let avail = w
             .saturating_sub(indent)
             .saturating_sub(if numbered { lw + 1 } else { 0 });
-        let limit = if cx.app.verbose { total } else { PREVIEW_LINES };
-        let hidden = total.saturating_sub(limit);
+        let preview = native_preview_range(&self.nt.name, total, cx.app.verbose);
+        let hidden = total.saturating_sub(preview.len());
         let body_fg = if self.nt.is_error { t.error } else { t.muted };
         let blank_n = " ".repeat(lw + 1);
         let num_style = Style::new().fg(t.subtle);
@@ -1475,8 +1498,8 @@ impl Component for ExecBlockBranch<'_> {
         // (read/view/bash_read) label from `start_line`; an edit diff colors
         // each line by its `-`/`+`/` ` prefix; `hidden` counts logical lines
         // so the preview cap stays accurate.
-        for (i, line) in all.iter().take(limit).enumerate() {
-            let n = format!("{:>lw$} ", start + i, lw = lw);
+        for (i, line) in all[preview.clone()].iter().enumerate() {
+            let n = format!("{:>lw$} ", start + preview.start + i, lw = lw);
             let content_style = if body.is_diff {
                 match line.chars().next() {
                     Some('-') => diff_del,
@@ -1727,7 +1750,36 @@ use active_indicator as _;
 
 #[cfg(test)]
 mod tests {
-    use super::trim_reasoning_summary;
+    use super::{native_body, native_preview_range, trim_reasoning_summary};
+    use crate::tui::NativeTool;
+
+    #[test]
+    fn bash_preview_keeps_tail_while_other_tools_keep_head() {
+        assert_eq!(native_preview_range("bash", 10, false), 7..10);
+        assert_eq!(native_preview_range("read", 10, false), 0..3);
+        assert_eq!(native_preview_range("bash", 2, false), 0..2);
+        assert_eq!(native_preview_range("bash", 10, true), 0..10);
+    }
+
+    #[test]
+    fn bash_error_body_renders_only_structured_output() {
+        let raw = serde_json::json!({
+            "ok": false,
+            "output": "command not found\n",
+            "code": 127
+        })
+        .to_string();
+        let tool = NativeTool {
+            id: 1,
+            name: "bash".to_string(),
+            args: String::new(),
+            result: Some(raw.clone()),
+            is_error: true,
+            done: true,
+        };
+        assert_eq!(native_body(&tool).lines, vec!["command not found"]);
+        assert_eq!(tool.result.as_deref(), Some(raw.as_str()));
+    }
 
     #[test]
     fn reasoning_summary_trims_empty_placeholder_parts() {
