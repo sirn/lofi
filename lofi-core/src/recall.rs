@@ -785,24 +785,85 @@ fn safe_regex(pattern: &str) -> regex::Regex {
 }
 
 /// ±2 lines around the first regex match, with elision markers.
+///
+/// Each included line is bounded independently. Tool outputs are commonly a
+/// single JSON line, so line-count context alone is not a size bound: copying
+/// one 100 KiB matching line used to make a five-result recall return hundreds
+/// of KiB and leave that output capacity retained by the sandbox.
 fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let hit = lines.iter().position(|l| re.is_match(l))?;
-    let start = hit.saturating_sub(2);
-    let end = (hit + 3).min(lines.len());
-    let mut parts: Vec<String> = Vec::new();
-    if start > 0 {
-        parts.push(format!("...({start} lines above)"));
+    const CONTEXT_LINES: usize = 2;
+    const MAX_LINE_CHARS: usize = 500;
+
+    let mut previous: std::collections::VecDeque<(usize, &str)> =
+        std::collections::VecDeque::with_capacity(CONTEXT_LINES);
+    let mut selected: Vec<(usize, &str)> = Vec::with_capacity(CONTEXT_LINES * 2 + 1);
+    let mut hit = None;
+    let mut total_lines = 0usize;
+    for (index, line) in text.lines().enumerate() {
+        total_lines = index + 1;
+        if let Some(hit_index) = hit {
+            if index <= hit_index + CONTEXT_LINES {
+                selected.push((index, line));
+            }
+            continue;
+        }
+        if re.is_match(line) {
+            hit = Some(index);
+            selected.extend(previous.drain(..));
+            selected.push((index, line));
+        } else {
+            if previous.len() == CONTEXT_LINES {
+                previous.pop_front();
+            }
+            previous.push_back((index, line));
+        }
     }
-    parts.extend(
-        lines[start..end]
-            .iter()
-            .map(std::string::ToString::to_string),
-    );
-    if end < lines.len() {
-        parts.push(format!("...({} lines below)", lines.len() - end));
+    let hit = hit?;
+    let mut parts = Vec::with_capacity(selected.len() + 2);
+    let first = selected.first().map_or(hit, |(index, _)| *index);
+    if first > 0 {
+        parts.push(format!("...({first} lines above)"));
+    }
+    for (index, line) in &selected {
+        parts.push(if *index == hit {
+            clip_line_around_match(line, re, MAX_LINE_CHARS)
+        } else {
+            clip(line, MAX_LINE_CHARS)
+        });
+    }
+    let shown_through = selected.last().map_or(hit + 1, |(index, _)| index + 1);
+    if shown_through < total_lines {
+        parts.push(format!("...({} lines below)", total_lines - shown_through));
     }
     Some(parts.join("\n"))
+}
+
+/// Clip one long matching line while keeping the first match in view.
+fn clip_line_around_match(line: &str, re: &regex::Regex, max: usize) -> String {
+    let Some(found) = re.find(line) else {
+        return clip(line, max);
+    };
+    let total = line.chars().count();
+    if total <= max {
+        return line.to_string();
+    }
+    let match_start = line[..found.start()].chars().count();
+    let match_len = line[found.start()..found.end()].chars().count().max(1);
+    let visible_match = match_len.min(max);
+    let side_budget = max.saturating_sub(visible_match);
+    let mut start = match_start.saturating_sub(side_budget / 2);
+    let mut end = (start + max).min(total);
+    if end - start < max {
+        start = end.saturating_sub(max);
+    }
+    end = (start + max).min(total);
+    let body: String = line.chars().skip(start).take(end - start).collect();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        body,
+        if end < total { "…" } else { "" }
+    )
 }
 
 const STOPWORDS: &[&str] = &[
@@ -1073,6 +1134,47 @@ mod tests {
         assert!(out.text.contains("#1 [assistant]"));
         // Kept messages are outside the compaction range.
         assert!(!out.text.contains("#2 [user]"));
+    }
+
+    #[test]
+    fn search_snippet_bounds_a_huge_single_line_around_match() {
+        let text = format!("{}needle{}", "a".repeat(20_000), "z".repeat(20_000));
+        let events = vec![user("a", &text)];
+        let out = recall(
+            &events,
+            &RecallRequest {
+                query: Some("needle".to_string()),
+                scope: RecallScope::All,
+                ..Default::default()
+            },
+        );
+        assert!(out.text.contains("needle"), "{}", out.text);
+        assert!(
+            out.text.len() < 1_000,
+            "snippet was {} bytes",
+            out.text.len()
+        );
+        assert!(out.text.contains('…'));
+    }
+
+    #[test]
+    fn search_snippet_bounds_neighbor_context_lines() {
+        let text = format!("{}\nneedle\n{}", "a".repeat(20_000), "z".repeat(20_000));
+        let events = vec![user("a", &text)];
+        let out = recall(
+            &events,
+            &RecallRequest {
+                query: Some("needle".to_string()),
+                scope: RecallScope::All,
+                ..Default::default()
+            },
+        );
+        assert!(out.text.contains("needle"));
+        assert!(
+            out.text.len() < 1_500,
+            "snippet was {} bytes",
+            out.text.len()
+        );
     }
 
     #[test]
