@@ -445,9 +445,14 @@ pub enum SessionEventKind {
         /// layouts default to false.
         #[serde(default)]
         checkpointed_tail: bool,
-        /// How many live messages were folded into the summary (for the
+        /// How many live messages were folded by this compaction (for the
         /// visible marker on resume).
         summarized: usize,
+        /// Total original messages represented by the merged summary. This
+        /// preserves compaction's minimum-history bookkeeping across resume
+        /// and repeated compactions. Older markers fall back to `summarized`.
+        #[serde(default)]
+        represented: usize,
         /// How many messages were kept in the tail.
         kept: usize,
     },

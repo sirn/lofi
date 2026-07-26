@@ -685,8 +685,11 @@ impl App {
                 self.branch_hint.as_deref(),
                 c.summary.clone(),
                 c.summarized_range.clone().unwrap_or_default(),
-                c.summarized_count,
-                c.kept_count,
+                store::CompactionCounts {
+                    summarized: c.summarized_count,
+                    represented: c.represented_count,
+                    kept: c.kept_count,
+                },
             ) {
                 drop(history);
                 self.notify(

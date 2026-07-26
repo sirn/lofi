@@ -2541,6 +2541,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
             summarized: 3,
+            represented: 3,
             kept: 1,
         },
         SessionEventKind::Message(Message {
@@ -2634,8 +2635,11 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
         None,
         "summary".into(),
         [original[0].id.clone(), original[1].id.clone()],
-        2,
-        2,
+        store::CompactionCounts {
+            summarized: 2,
+            represented: 2,
+            kept: 2,
+        },
     )
     .unwrap();
 
@@ -3468,6 +3472,7 @@ fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
             summarized_range: ["e0".to_string(), "e1".to_string()],
             checkpointed_tail: true,
             summarized: 2,
+            represented: 2,
             kept: 2,
         },
         msg(assistant("continued")),
@@ -3725,6 +3730,7 @@ fn messages_from_events_prepends_compaction_summary() {
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
             summarized: 1,
+            represented: 1,
             kept: 2,
         },
         SessionEventKind::Message(assistant("continued")),
@@ -3775,6 +3781,7 @@ fn messages_from_events_compact_all_does_not_restore_old_messages() {
             summarized_range: ["e0".to_string(), "e1".to_string()],
             checkpointed_tail: false,
             summarized: 2,
+            represented: 2,
             kept: 0,
         },
         msg(assistant("continued")),
@@ -3850,6 +3857,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
             summarized: 1,
+            represented: 1,
             kept: 4,
         },
         msg(exec_call_full("t3")),
@@ -5480,4 +5488,95 @@ fn permission_dialog_caps_height_and_scrolls_command_preview() {
     a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
     assert_eq!(a.confirm_scroll, 17);
     assert_eq!(a.pending_confirms.len(), 1);
+}
+
+#[test]
+fn resumed_compaction_restores_summarized_message_count() {
+    // Exact regression: a hard compact kept no tail, its silent continuation
+    // produced only two messages, and the session was then resumed with -c.
+    // The marker's summarized count must survive resume so /compact does not
+    // treat the restored summary as a single message.
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = store::SessionStore::new(dir.path().join("sessions"));
+    let path = session_store
+        .create(std::path::Path::new("/tmp/resumed-compact"), &"p/m".into())
+        .unwrap();
+
+    let mut old: Vec<SessionEvent> = (0..5)
+        .map(|i| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&format!("old {i}"))),
+        })
+        .collect();
+    store::append_events(&path, &mut old, None).unwrap();
+    store::append_compaction(
+        &path,
+        &[],
+        None,
+        "previous summary".to_string(),
+        [old[0].id.clone(), old[4].id.clone()],
+        store::CompactionCounts {
+            summarized: old.len(),
+            represented: old.len(),
+            kept: 0,
+        },
+    )
+    .unwrap();
+
+    let large = "continued work ".repeat(2_000);
+    let mut continuation = vec![
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&large)),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&large)),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "p/m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: Usage {
+                    input_tokens: 113_000,
+                    ..Usage::default()
+                },
+            },
+        },
+    ];
+    store::append_events(&path, &mut continuation, None).unwrap();
+
+    let (_meta, index, _size) = store::load_index(&path).unwrap();
+    let mut a = app();
+    a.session.path = Some(path.clone());
+    *a.history.lock().unwrap() = history_from_index(&path, &index, &a.compaction.edit).unwrap();
+    restore_compaction_from_index(&mut a, &path, &index);
+
+    assert_eq!(a.history.lock().unwrap().len(), 3);
+    assert!(
+        a.compact_now(),
+        "restored summarized message count must permit compaction"
+    );
+    assert!(a.compacted);
+
+    let (_meta, events, _offset, _size) = store::load(&path).unwrap();
+    let marker = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            SessionEventKind::Compaction {
+                summarized,
+                represented,
+                ..
+            } => Some((*summarized, *represented)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(marker, (2, 7));
 }

@@ -1116,6 +1116,7 @@ mod tests {
                     summarized_range: ["a".to_string(), "b".to_string()],
                     checkpointed_tail: false,
                     summarized: 2,
+                    represented: 2,
                     kept: 2,
                 },
             ),
