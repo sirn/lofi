@@ -30,7 +30,6 @@ impl App {
             },
             compaction,
             prev_ctx_tokens: None,
-            last_compact_msg_count: 0,
             compacted: false,
             context_pressure: false,
             cost: 0.0,
@@ -326,7 +325,6 @@ impl App {
     pub(super) fn reset_compaction_gauges(&mut self) {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
-        self.last_compact_msg_count = 0;
         self.compacted = false;
     }
 
@@ -336,10 +334,9 @@ impl App {
     /// under the cap. Returns 0 when no threshold is configured (disables the
     /// oversized-turn guard).
     pub(super) fn derive_compact_budget(&self) -> usize {
-        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
         self.compaction
-            .soft_threshold(limit)
-            .or_else(|| self.compaction.hard_threshold(limit))
+            .soft_threshold(self.ctx_limit)
+            .or_else(|| self.compaction.hard_threshold(self.ctx_limit))
             .map_or(0, |t| (t / 2) as usize)
     }
 
@@ -726,7 +723,6 @@ impl App {
         // drop it so the auto-trigger does not re-fire on the same crossing
         // and the gauge waits for the next round's real (smaller) usage.
         self.reset_compaction_gauges();
-        self.last_compact_msg_count = self.messages_since_last_compact();
         self.compacted = true;
         self.bump_render_epoch();
         self.debug_sample("compaction");
@@ -807,8 +803,7 @@ impl App {
         let Some(usage) = self.status_usage else {
             return;
         };
-        let limit = self.ctx_limit.max(DEFAULT_CTX_LIMIT);
-        let Some(threshold) = self.compaction.soft_threshold(limit) else {
+        let Some(threshold) = self.compaction.soft_threshold(self.ctx_limit) else {
             return;
         };
         // Use the full prompt size (non-cached + cached) so heavy prompt
@@ -816,34 +811,29 @@ impl App {
         // with 150k cached tokens and 9k non-cached would read as 9k — well
         // below the threshold — and never auto-compact.
         let current = usage.input_tokens + usage.cache_read_tokens;
-        // `was_below` is true when the prior round was at or below the
-        // threshold (or there was no prior reading). Only an upward
-        // crossing — prev at/below, current above — triggers a compaction,
-        // so a session hovering above the threshold is not re-compacted
-        // every turn.
-        let was_below = match self.prev_ctx_tokens {
-            None => true,
-            Some(prev) => !(prev > threshold && current > threshold),
-        };
-        self.prev_ctx_tokens = Some(current);
-        if !was_below || current <= threshold {
+        if current <= threshold {
+            self.prev_ctx_tokens = Some(current);
             return;
         }
-        // Soft cooldown: if the last compaction was too few messages ago,
-        // the kept tail is likely still too large for another compaction to
-        // help. Skip rather than wasting a compact that barely shrinks the
-        // context (and then immediately re-triggers).
-        let msgs_since = self.messages_since_last_compact();
-        if self.last_compact_msg_count > 0
-            && msgs_since < self.compaction.min_messages_between_hard_compacts
+        if self
+            .prev_ctx_tokens
+            .is_some_and(|previous| previous > threshold)
         {
             return;
         }
-        if self.compact_now() {
-            // Reset the baseline so a still-above-threshold context can
-            // re-fire after the compaction (and a below-threshold one starts
-            // a fresh crossing).
-            self.prev_ctx_tokens = None;
+
+        // This is deliberately not gated by
+        // `min_messages_between_hard_compacts`. That cooldown belongs only
+        // to the hard force-compact + silent-continue loop: soft compaction is
+        // settled between turns and can safely fold even a short but very
+        // large tail. Reusing the hard cooldown here used to consume the
+        // first upward crossing without compacting; hysteresis then left the
+        // session permanently above the soft cap.
+        if !self.compact_now() {
+            // Consume a crossing only after a genuine attempt. If the
+            // transcript is not compactable yet, avoid retrying every settled
+            // turn while it remains above the cap.
+            self.prev_ctx_tokens = Some(current);
         }
     }
 
@@ -881,53 +871,31 @@ impl App {
     ///   (i.e. we compacted but haven't run a new turn yet, so the context
     ///   gauge has no real usage to show and should display `c`).
     ///
-    /// - `last_compact_msg_count`: the number of assistant messages after
-    ///   the last `Compaction` marker on the active path, so the auto-compact
-    ///   cooldown works immediately on resume instead of being disabled.
-    ///
-    /// - `prev_ctx_tokens`: the last completed turn's prompt size
-    ///   (`input_tokens + cache_read_tokens`), so the auto-compact
-    ///   hysteresis has a proper baseline and doesn't fire on the first
-    ///   post-resume turn when the context was already above threshold.
+    /// - `prev_ctx_tokens` / `status_usage`: the last completed turn's
+    ///   prompt size, but only when that usage was measured after the latest
+    ///   compaction. A pre-compaction reading is stale even when partial
+    ///   continuation messages follow the marker.
     pub(super) fn restore_compaction_state(&mut self, events: &[SessionEvent]) {
         let path = store::active_path_from_leaf(events);
-        let mut last_compaction_idx: Option<usize> = None;
-        let mut last_usage: Option<Usage> = None;
-        for &i in &path {
+        let mut last_compaction = None;
+        let mut last_usage = None;
+        for (pos, &i) in path.iter().enumerate() {
             match &events[i].kind {
-                SessionEventKind::Compaction { .. } => {
-                    last_compaction_idx = Some(i);
-                }
+                SessionEventKind::Compaction { .. } => last_compaction = Some(pos),
                 SessionEventKind::TurnEnd { usage, .. }
-                | SessionEventKind::TurnFailed { usage, .. } => {
-                    last_usage = Some(*usage);
-                }
+                | SessionEventKind::TurnFailed { usage, .. } => last_usage = Some((pos, *usage)),
                 _ => {}
             }
         }
-        // `compacted`: true only when the last event on the active path is a
-        // Compaction marker (no TurnEnd/TurnFailed after it).
-        self.compacted = match last_compaction_idx {
-            Some(idx) => path.last().is_some_and(|&last| last == idx),
-            None => false,
-        };
-        // `last_compact_msg_count`: reuse the shared counting helper so
-        // there is one counting implementation.
-        self.last_compact_msg_count =
-            count_assistant_after_compaction(&path, events, last_compaction_idx);
-        // `prev_ctx_tokens`: from the last TurnEnd/TurnFailed's usage, so the
-        // hysteresis has a baseline and doesn't immediately re-trigger.
-        self.prev_ctx_tokens = last_usage.map(|u| u.input_tokens + u.cache_read_tokens);
-        // `status_usage`: restore the last turn's usage so the context gauge
-        // shows a real number on resume. When the session ends with a
-        // Compaction marker (compacted == true), the gauge shows "c" instead;
-        // in that case clear status_usage so a stale pre-compaction reading
-        // doesn't override the "c" indicator.
-        if self.compacted {
-            self.status_usage = None;
-        } else {
-            self.status_usage = last_usage;
-        }
+        let usage_after_compaction = last_usage
+            .filter(|(pos, _)| last_compaction.is_none_or(|compact_pos| *pos > compact_pos))
+            .map(|(_, usage)| usage);
+        self.compacted = last_compaction.is_some() && usage_after_compaction.is_none();
+        // Rollback/resume does not itself compact. The first newly completed
+        // model round must be evaluated afresh so an old missed crossing does
+        // not suppress soft compaction for the rest of the session.
+        self.prev_ctx_tokens = None;
+        self.status_usage = usage_after_compaction;
     }
 
     /// Gather the active-path events for compaction: load the transcript
