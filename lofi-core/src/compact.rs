@@ -87,6 +87,10 @@ pub struct Compaction {
 /// Options for compact.
 #[derive(Clone, Default)]
 pub struct CompactOptions {
+    /// Provider-reported tokens currently occupying the context window.
+    /// This survives resume via the last turn's recorded usage. When it
+    /// exceeds `max_kept_tokens`, a few large messages are still compactable.
+    pub context_tokens: Option<usize>,
     /// Soft token budget (chars/4) for the kept tail. When the most recent
     /// turn alone exceeds it, the cut is pushed back to a completed
     /// tool-cycle boundary so the oversized turn is partly summarized too.
@@ -226,12 +230,23 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         }
     }
 
-    if live.len() < 3 {
+    if live.is_empty() {
+        return None;
+    }
+    // Message count is only an economy heuristic. After a hard compaction,
+    // the silent continuation can refill most of the context with one or two
+    // very large messages; resume restores the provider's real token count,
+    // while the checkpointed live slice remains short.
+    let context_over_budget = opts.max_kept_tokens > 0
+        && opts
+            .context_tokens
+            .is_some_and(|tokens| tokens > opts.max_kept_tokens);
+    if live.len() < 3 && !context_over_budget {
         return None;
     }
 
     let plan = plan_cut(&live, opts);
-    if plan.summarized < MIN_SUMMARIZED {
+    if plan.summarized == 0 || (plan.summarized < MIN_SUMMARIZED && !context_over_budget) {
         return None;
     }
 
@@ -1734,6 +1749,27 @@ mod tests {
     fn compact_returns_none_for_too_few() {
         let events = events_of(&[user("hi"), assistant("hello")]);
         assert!(compact(&events, &CompactOptions::default()).is_none());
+    }
+
+    #[test]
+    fn restored_large_context_overrides_message_count_heuristic() {
+        // Resume restores the provider-reported context count from TurnEnd.
+        // A prior hard compact followed by a silent continuation can leave
+        // only two post-checkpoint messages while those messages plus the
+        // merged summary still occupy most of the provider context.
+        let events = events_of(&[
+            assistant(&"continued work ".repeat(2_000)),
+            assistant(&"continued result ".repeat(2_000)),
+        ]);
+        let opts = CompactOptions {
+            context_tokens: Some(113_000),
+            max_kept_tokens: 100_000,
+            ..Default::default()
+        };
+        let compacted =
+            compact(&events, &opts).expect("provider-reported resumed context must be compactable");
+        assert_eq!(compacted.summarized_count, 2);
+        assert_eq!(compacted.kept_count, 0);
     }
 
     #[test]

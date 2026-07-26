@@ -330,6 +330,18 @@ impl App {
         self.compacted = false;
     }
 
+    /// Provider-reported occupancy used by both the footer and compaction
+    /// eligibility. Resume restores `status_usage` from the active path's last
+    /// TurnEnd/TurnFailed, so this is stable across `-c`.
+    pub(super) fn current_context_tokens(&self) -> u64 {
+        self.status_usage.map_or(0, |usage| {
+            usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_read_tokens
+                + usage.cache_write_tokens
+        })
+    }
+
     /// Derive the kept-tail token budget for `plan_cut` from the compaction
     /// thresholds. Prefers the soft threshold, falls back to the hard
     /// threshold, and uses 50% of the threshold so the kept tail stays well
@@ -655,6 +667,12 @@ impl App {
         };
         let budget = self.derive_compact_budget();
         let opts = CompactOptions {
+            // This is restored from the last TurnEnd on `-c`. Use the same
+            // authoritative count shown by the footer; the compactable
+            // checkpoint slice can contain few but very large messages.
+            context_tokens: self
+                .status_usage
+                .map(|_| usize::try_from(self.current_context_tokens()).unwrap_or(usize::MAX)),
             max_kept_tokens: budget,
             edit: self.compaction.edit.clone(),
             hooks: vec![std::sync::Arc::new(lofi_core::CodeCompactionHook)],

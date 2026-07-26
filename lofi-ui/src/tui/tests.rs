@@ -5481,3 +5481,73 @@ fn permission_dialog_caps_height_and_scrolls_command_preview() {
     assert_eq!(a.confirm_scroll, 17);
     assert_eq!(a.pending_confirms.len(), 1);
 }
+
+#[test]
+fn resumed_large_context_compacts_short_post_checkpoint_history() {
+    // Exact regression: a hard compact kept no tail, its silent continuation
+    // produced only two messages, and the session was then resumed with -c.
+    // The restored provider usage (also shown in the footer) must prevent the
+    // generic MIN_SUMMARIZED message-count heuristic from blocking /compact.
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = store::SessionStore::new(dir.path().join("sessions"));
+    let path = session_store
+        .create(std::path::Path::new("/tmp/resumed-compact"), &"p/m".into())
+        .unwrap();
+
+    let mut old: Vec<SessionEvent> = (0..5)
+        .map(|i| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&format!("old {i}"))),
+        })
+        .collect();
+    store::append_events(&path, &mut old, None).unwrap();
+    store::append_compaction(
+        &path,
+        &[],
+        None,
+        "previous summary".to_string(),
+        [old[0].id.clone(), old[4].id.clone()],
+        old.len(),
+        0,
+    )
+    .unwrap();
+
+    let large = "continued work ".repeat(2_000);
+    let mut continuation = vec![
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&large)),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant(&large)),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "p/m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: Usage {
+                    input_tokens: 113_000,
+                    ..Usage::default()
+                },
+            },
+        },
+    ];
+    store::append_events(&path, &mut continuation, None).unwrap();
+
+    let (_meta, index, _size) = store::load_index(&path).unwrap();
+    let mut a = app();
+    a.session.path = Some(path.clone());
+    *a.history.lock().unwrap() = history_from_index(&path, &index, &a.compaction.edit).unwrap();
+    restore_compaction_from_index(&mut a, &path, &index);
+
+    assert_eq!(a.current_context_tokens(), 113_000);
+    assert!(a.compact_now(), "restored 113k context must compact");
+    assert!(a.compacted);
+}

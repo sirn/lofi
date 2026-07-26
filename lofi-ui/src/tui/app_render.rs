@@ -71,9 +71,7 @@ impl App {
         // Cache tokens are included so the gauge reflects the real window usage
         // rather than only the non-cached slice. When the provider reports
         // cache activity, append the hit rate as `N% cached`.
-        let used = self.status_usage.map_or(0, |u| {
-            u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens
-        });
+        let used = self.current_context_tokens();
         let cached_suffix = self.status_usage.and_then(|u| {
             let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
             if prompt > 0 && (u.cache_read_tokens > 0 || u.cache_write_tokens > 0) {
