@@ -21,6 +21,49 @@ use super::prim::{self, RawLine, RenderLine};
 /// Lines of preview/output shown before truncating with `… (N hidden)`.
 const PREVIEW_LINES: usize = 3;
 
+/// Counts every visual row but retains only the requested component-relative
+/// window. This lets verbose tool bodies participate in layout without
+/// building a styled line for every row in the transcript.
+struct RenderWindow {
+    range: std::ops::Range<usize>,
+    total: usize,
+    lines: Vec<RenderLine>,
+}
+
+impl RenderWindow {
+    fn new(range: std::ops::Range<usize>) -> Self {
+        Self {
+            lines: Vec::with_capacity(range.end.saturating_sub(range.start).min(256)),
+            range,
+            total: 0,
+        }
+    }
+
+    fn push(&mut self, line: RenderLine) {
+        if self.range.contains(&self.total) {
+            self.lines.push(line);
+        }
+        self.total = self.total.saturating_add(1);
+    }
+
+    fn extend(&mut self, lines: impl IntoIterator<Item = RenderLine>) {
+        for line in lines {
+            self.push(line);
+        }
+    }
+
+    fn append_component(&mut self, component: &dyn Component, cx: &Cx) {
+        let height = component.height(cx);
+        let end = self.total.saturating_add(height);
+        if end > self.range.start && self.total < self.range.end {
+            let start = self.range.start.saturating_sub(self.total);
+            let stop = self.range.end.saturating_sub(self.total).min(height);
+            self.lines.extend(component.lines_window(cx, start..stop));
+        }
+        self.total = end;
+    }
+}
+
 /// Build the whole turn log as a single [`Text`], turns separated by blanks.
 #[allow(dead_code)] // reference renderer; used as a test oracle (view.rs uses the cached viewport path)
 pub fn render_turns(app: &App, width: u16) -> Text<'static> {
@@ -50,6 +93,24 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
 /// stores the result for frozen turns and rebuilds only the live last turn
 /// each frame.
 pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
+    turn_stack(turn).lines(cx)
+}
+
+/// Count a turn's visual rows without retaining its rendered output.
+pub fn render_turn_height(cx: &Cx, turn: &Turn) -> usize {
+    turn_stack(turn).height(cx)
+}
+
+/// Render only a component-relative row window from a turn.
+pub fn render_turn_window(
+    cx: &Cx,
+    turn: &Turn,
+    range: std::ops::Range<usize>,
+) -> Vec<RenderLine> {
+    turn_stack(turn).lines_window(cx, range)
+}
+
+fn turn_stack(turn: &Turn) -> Stack<'_> {
     let mut stack = Stack::new();
     if !turn.prompt.is_empty() {
         stack.push(UserMessage {
@@ -110,7 +171,7 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             }
         }
     }
-    stack.lines(cx)
+    stack
 }
 
 // ── User message ─────────────────────────────────────────────────────────
@@ -1019,9 +1080,23 @@ struct ExecBlock<'a> {
 
 impl Component for ExecBlock<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        self.render_window(cx, 0..usize::MAX).lines
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        self.render_window(cx, 0..0).total
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        self.render_window(cx, range).lines
+    }
+}
+
+impl ExecBlock<'_> {
+    fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
         let w = cx.width;
-        let mut out = Vec::new();
+        let mut out = RenderWindow::new(range);
 
         let header = match &self.tool.label {
             Some(l) if !l.is_empty() => format!("Exec {l}"),
@@ -1078,7 +1153,7 @@ impl Component for ExecBlock<'_> {
             // tail (`└`); once done the final `└` is the exec-result line, so
             // every native tool becomes a `├`.
             let is_last = idx + 1 == n_total && !self.tool.done;
-            out.extend(ExecBlockBranch { nt, is_last }.lines(cx));
+            out.append_component(&ExecBlockBranch { nt, is_last }, cx);
         }
 
         if self.tool.done {
@@ -1356,6 +1431,86 @@ fn split_lines(s: &str) -> Vec<String> {
 /// structured result: `(lines 20-25)` for `read`/`view`/`bash_read`, and
 /// `(took 1.2s)` for bash. `None` when the tool is still running, has no
 /// result yet, or the result doesn't carry useful metadata.
+/// Return the encoded interior of a JSON string field without deserializing
+/// its potentially large value.
+fn json_string_field<'a>(raw: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\"");
+    let key = raw.find(&needle)?;
+    let bytes = raw.as_bytes();
+    let mut i = key + needle.len();
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
+    if bytes.get(i) != Some(&b':') { return None; }
+    i += 1;
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
+    if bytes.get(i) != Some(&b'"') { return None; }
+    let start = i + 1;
+    i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i = i.saturating_add(2),
+            b'"' => return Some(&raw[start..i]),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn encoded_json_line_count(encoded: &str) -> usize {
+    let bytes = encoded.as_bytes();
+    let mut i = 0usize;
+    let mut breaks = 0usize;
+    let mut trailing = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'n' {
+                breaks += 1;
+                trailing += 1;
+            } else {
+                trailing = 0;
+            }
+            i += 2;
+        } else {
+            trailing = 0;
+            i += 1;
+        }
+    }
+    breaks.saturating_add(1).saturating_sub(trailing).max(1)
+}
+
+/// Decode one logical line at a time, and only across the requested range.
+fn for_each_encoded_json_line(
+    encoded: &str,
+    range: std::ops::Range<usize>,
+    mut f: impl FnMut(usize, String),
+) {
+    let wanted_end = range.end.min(encoded_json_line_count(encoded));
+    if range.start >= wanted_end { return; }
+    let bytes = encoded.as_bytes();
+    let mut start = 0usize;
+    let mut line = 0usize;
+    let mut i = 0usize;
+    while i <= bytes.len() && line < wanted_end {
+        let at_break = i == bytes.len()
+            || (bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'n');
+        if at_break {
+            if line >= range.start {
+                let quoted = format!("\"{}\"", &encoded[start..i]);
+                if let Ok(decoded) = serde_json::from_str::<String>(&quoted) {
+                    f(line, decoded);
+                }
+            }
+            line += 1;
+            if i == bytes.len() { break; }
+            i += 2;
+            start = i;
+        } else if bytes[i] == b'\\' {
+            i = i.saturating_add(2);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
     let raw = result?;
     if raw.is_empty() {
@@ -1412,10 +1567,24 @@ fn edit_diff(old: &str, new: &str) -> Vec<String> {
 
 impl Component for ExecBlockBranch<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        self.render_window(cx, 0..usize::MAX).lines
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        self.render_window(cx, 0..0).total
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        self.render_window(cx, range).lines
+    }
+}
+
+impl ExecBlockBranch<'_> {
+    fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
         let w = cx.width;
         let working = !self.nt.done && cx.active_turn;
-        let mut out = Vec::new();
+        let mut out = RenderWindow::new(range);
         let exec_cont = if self.is_last { "  " } else { "│ " };
 
         // Header: "Tool <name> <args> <suffix>" wrapped to fit, preserving
@@ -1468,13 +1637,29 @@ impl Component for ExecBlockBranch<'_> {
         }
 
         let indent = 2 + 2 + 2; // left gutter + exec-rail column + own rail
-                                // Each native tool returns structured output; interpret it per tool to
-                                // derive the body lines (and how to label / color them).
-        let body = native_body(self.nt);
-        let all: Vec<&str> = body.lines.iter().map(String::as_str).collect();
-        let numbered = body.numbered;
-        let start = body.start_line;
-        let total = all.len();
+        // Common large string payloads stay JSON-encoded here. Measurement
+        // scans escape boundaries only; rendering decodes requested lines.
+        let raw = result.as_str();
+        let encoded_field = match self.nt.name.as_str() {
+            "write" => Some("content"),
+            "bash" => Some("output"),
+            "read" | "view" | "bash_read" => Some("content"),
+            _ => None,
+        };
+        let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
+        let body = encoded.is_none().then(|| native_body(self.nt));
+        let numbered = body.as_ref().is_some_and(|body| body.numbered)
+            || matches!(self.nt.name.as_str(), "read" | "view" | "bash_read");
+        let start = body.as_ref().map_or_else(
+            || serde_json::from_str::<serde_json::Value>(raw).ok()
+                .and_then(|v| v.get("start_line")?.as_u64())
+                .unwrap_or(1) as usize,
+            |body| body.start_line,
+        );
+        let total = encoded.map_or_else(
+            || body.as_ref().map_or(0, |body| body.lines.len()),
+            encoded_json_line_count,
+        );
         let lw = total.to_string().len().max(3);
         let avail = w
             .saturating_sub(indent)
@@ -1494,13 +1679,11 @@ impl Component for ExecBlockBranch<'_> {
             Span::styled(exec_cont, Style::new().fg(t.subtle)),
             Span::styled("│ ", Style::new().fg(t.subtle)),
         ];
-        // Wrap each result line preserving its formatting. Numbered tools
-        // (read/view/bash_read) label from `start_line`; an edit diff colors
-        // each line by its `-`/`+`/` ` prefix; `hidden` counts logical lines
-        // so the preview cap stays accurate.
-        for (i, line) in all[preview.clone()].iter().enumerate() {
-            let n = format!("{:>lw$} ", start + preview.start + i, lw = lw);
-            let content_style = if body.is_diff {
+        // Emit one logical line. Wrapped rows are counted individually, but
+        // styled strings are retained only if they intersect this window.
+        let mut emit_line = |logical: usize, line: &str, out: &mut RenderWindow| {
+            let n = format!("{:>lw$} ", start + logical, lw = lw);
+            let content_style = if body.as_ref().is_some_and(|body| body.is_diff) {
                 match line.chars().next() {
                     Some('-') => diff_del,
                     Some('+') => diff_add,
@@ -1511,19 +1694,31 @@ impl Component for ExecBlockBranch<'_> {
             } else {
                 plain_style
             };
-            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
+            let local_start = out.range.start.saturating_sub(out.total);
+            let local_end = out.range.end.saturating_sub(out.total);
+            let (rows, segments) = prim::wrap_pre_window(line, avail, local_start..local_end);
+            let base = out.total;
+            for (j, seg) in segments.into_iter().enumerate() {
+                let row = local_start + j;
                 let mut deco = base_deco.clone();
-                let content = if numbered {
-                    deco.push(if j == 0 {
+                if numbered {
+                    deco.push(if row == 0 {
                         Span::styled(n.clone(), num_style)
                     } else {
                         Span::styled(blank_n.clone(), num_style)
                     });
-                    vec![Span::styled(seg, content_style)]
-                } else {
-                    vec![Span::styled(seg, content_style)]
-                };
-                out.push(prim::rline(deco, content));
+                }
+                out.lines.push(prim::rline(deco, vec![Span::styled(seg, content_style)]));
+            }
+            out.total = base.saturating_add(rows);
+        };
+        if let Some(encoded) = encoded {
+            for_each_encoded_json_line(encoded, preview.clone(), |i, line| {
+                emit_line(i, &line, &mut out);
+            });
+        } else if let Some(body) = body.as_ref() {
+            for (i, line) in body.lines[preview.clone()].iter().enumerate() {
+                emit_line(preview.start + i, line, &mut out);
             }
         }
         if hidden > 0 {
