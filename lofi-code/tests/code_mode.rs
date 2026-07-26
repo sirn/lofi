@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lofi_code::{
-    compile_ts, exec, AgentFn, AgentRequest, BashEnv, ExecCtx, ExecOptions, ToolEvent,
+    compile_ts, exec, AgentFn, AgentRequest, AgentStatus, BashEnv, ExecCtx, ExecOptions, ToolEvent,
 };
 use serde_json::{json, Value};
 
@@ -247,8 +247,23 @@ async fn agent_call_emits_tool_events() {
         Arc::new(move |ev: ToolEvent| events.lock().unwrap().push(ev))
             as Arc<dyn Fn(ToolEvent) + Send + Sync>
     };
-    let agent: AgentFn =
-        Arc::new(|_req: AgentRequest| Box::pin(async { Ok("subagent reply".to_string()) }));
+    let agent: AgentFn = Arc::new(|req: AgentRequest| {
+        Box::pin(async move {
+            if let Some(on_status) = req.on_status {
+                on_status(AgentStatus::Waiting);
+                on_status(AgentStatus::Running);
+            }
+            Ok(serde_json::json!({
+                "text": "subagent reply",
+                "model": "p/m",
+                "thinking": "off",
+                "rounds": 1,
+                "usage": {},
+                "cost": 0.0,
+                "durationMs": 1,
+            }))
+        })
+    });
     let cx = ExecCtx {
         root: dir.path().to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-test"),
@@ -275,6 +290,14 @@ async fn agent_call_emits_tool_events() {
             && evs.iter().any(|e| matches!(e, ToolEvent::End { .. }))
     };
     assert!(has("agent"), "missing agent tool events: {evs:?}");
+    let statuses = evs
+        .iter()
+        .filter_map(|event| match event {
+            ToolEvent::Status { status, .. } => Some(*status),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec![AgentStatus::Waiting, AgentStatus::Running]);
 }
 
 #[tokio::test]

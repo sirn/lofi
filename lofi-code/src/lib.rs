@@ -139,8 +139,19 @@ const JS_TO_JSON_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// `rquickjs`'s `AsyncRuntime` is `!Send` without the `parallel` feature, so
 /// the nested loop — which drives the code-mode sandbox — is inherently
 /// single-threaded and the closure future is `!Send`.
-pub type AgentFn =
-    Arc<dyn Fn(AgentRequest) -> LocalBoxFuture<'static, Result<String>> + Send + Sync>;
+pub type AgentFn = Arc<dyn Fn(AgentRequest) -> LocalBoxFuture<'static, Result<Json>> + Send + Sync>;
+
+/// Live lifecycle updates for one synchronous `lofi.agent()` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    /// The call is blocked behind the shared subagent concurrency limit.
+    Waiting,
+    /// The call acquired a slot and is now running.
+    Running,
+}
+
+/// Callback used by the nested-agent runtime to update its native-tool row.
+pub type AgentStatusFn = Arc<dyn Fn(AgentStatus) + Send + Sync>;
 /// Optional `lofi.recall` implementation: a sync callback from the
 /// `lofi.recall` native tool into the engine that owns the session
 /// transcript. The callback reads the session file fresh and runs the
@@ -157,12 +168,14 @@ pub type RecallFn = Arc<
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// A request to a nested agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentRequest {
     /// The user prompt for the subagent.
     pub prompt: String,
     /// Optional caller-supplied options (model override, system prompt, ...).
     pub opts: Option<Json>,
+    /// Live lifecycle callback for the native-tool renderer.
+    pub on_status: Option<AgentStatusFn>,
 }
 
 /// A native tool call observed inside the sandbox, forwarded to the UI so
@@ -205,6 +218,11 @@ pub enum ToolEvent {
         id: u64,
         name: String,
         args: String,
+    },
+    /// A running tool changed lifecycle state without completing.
+    Status {
+        id: u64,
+        status: AgentStatus,
     },
     End {
         id: u64,

@@ -109,15 +109,23 @@ A string property: the absolute path to the per-session tmp directory backing
 
 ## lofi.agent(prompt, opts?)
 
-Run a nested agent loop with the same provider, model, and workspace root.
-Returns the subagent's final assistant text as a string.
+Run a nested agent loop with the parent's workspace and policy. It uses the
+parent model by default and returns the final assistant text as a string.
 
 **Parameters:**
 - `prompt` (string, required) — the task for the subagent.
-- `opts` (object, optional) — options forwarded to the subagent.
+- `opts` (object, optional):
+  - `model` — validated `provider/model` override.
+  - `thinking` — `off`, `low`, `medium`, `high`, or `xhigh`; validated against
+    the selected model.
+  - `system` — replace the inherited system prompt for this run.
+  - `structured` — return `{ text, model, thinking, rounds, usage, cost,
+    durationMs }` instead of only the text.
 
 The subagent has the same `exec` tool and `lofi.*` surface. There is no
-iteration cap; rely on the subagent finishing on its own. Use it to delegate
+iteration or wall-clock cap; productive model streams are bounded by an idle
+timeout, and native tools retain their own limits. Concurrent calls default to
+three; excess calls are shown as waiting until a slot opens. Use it to delegate
 bounded subtasks without polluting your own context.
 
 ## lofi.recall({ query?, scope?, page?, expand? })

@@ -8,14 +8,12 @@
 //!
 //! ## No iteration cap (v1)
 //!
-//! Following the plan, neither [`Agent::run`] nor subagent runs impose an
-//! iteration cap. Runaway loops are bounded by **per-call timeouts**: each
-//! provider stream is wrapped in [`tokio::time::timeout`] with
-//! [`DEFAULT_STREAM_TIMEOUT`], and each `exec` call inherits
-//! [`lofi_code::DEFAULT_GUEST_TIMEOUT`] via [`lofi_code::ExecOptions`] as a
-//! *CPU-time* budget. A synchronous guest loop (see [`lofi_code`]) is
-//! interrupted by the `QuickJS` interrupt handler when the budget is
-//! exceeded; awaited tool calls do not consume it.
+//! Neither [`Agent::run`] nor subagent runs impose an iteration cap. Provider
+//! streams use [`DEFAULT_STREAM_IDLE_TIMEOUT`] so productive long reasoning
+//! is not cut off, while each `exec` call inherits
+//! [`lofi_code::DEFAULT_GUEST_TIMEOUT`] as a CPU-time budget. A synchronous
+//! guest loop is interrupted by the `QuickJS` handler when that budget is
+//! exceeded; awaited native tools retain their own limits.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,13 +33,16 @@ use crate::config_loader::load_config_or_default;
 use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
-use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions};
+use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions, SubagentRound};
 use lofi_code::policy::ResolvedPolicy;
 use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_providers::ir::chat::ToolSchema;
 use lofi_providers::ir::codec::MessageAssembler;
 use lofi_providers::{open, Provider};
+
+type SubagentModelResolver =
+    Arc<dyn Fn(&str, Option<ThinkingLevel>) -> Result<(Box<dyn Provider>, Model)> + Send + Sync>;
 use lofi_types::BashConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::oneshot;
@@ -104,12 +105,6 @@ const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 /// Fixed per-event charge added to the round byte budget to cover
 /// Vec/enum/dispatch overhead not captured by owned-string lengths.
 const PER_EVENT_OVERHEAD: usize = 64;
-/// Maximum accepted `lofi.agent({ timeoutMs })` value. A model-supplied
-/// timeout is clamped to this before conversion so an extreme integer cannot
-/// overflow `Duration` arithmetic (which panics) or push the total deadline
-/// past `Instant`'s range.
-const MAX_SUBAGENT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
-
 /// Where to durably commit a completed turn: the transcript path (and an
 /// optional branch point). Passed into [`Agent::run_continuation`] so the
 /// engine — which owns the timers and cost counter — is the sole writer of
@@ -275,6 +270,8 @@ pub struct Agent {
     /// Throttle for concurrent subagents: when set, `lofi.agent()` calls
     /// acquire a permit before running. `None` means no limit.
     subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Resolve validated per-call model/thinking overrides for subagents.
+    subagent_model_resolver: Option<SubagentModelResolver>,
 }
 
 impl Agent {
@@ -310,6 +307,7 @@ impl Agent {
             auto_mode: None,
             skills_dir: None,
             subagent_semaphore: None,
+            subagent_model_resolver: None,
         }
     }
 
@@ -337,6 +335,7 @@ impl Agent {
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
             subagent_semaphore: self.subagent_semaphore.clone(),
+            subagent_model_resolver: self.subagent_model_resolver.clone(),
         }
     }
 
@@ -363,6 +362,7 @@ impl Agent {
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
             subagent_semaphore: self.subagent_semaphore.clone(),
+            subagent_model_resolver: self.subagent_model_resolver.clone(),
         }
     }
 
@@ -386,6 +386,7 @@ impl Agent {
             auto_mode: self.auto_mode.clone(),
             skills_dir,
             subagent_semaphore: self.subagent_semaphore.clone(),
+            subagent_model_resolver: self.subagent_model_resolver.clone(),
         }
     }
 
@@ -419,6 +420,15 @@ impl Agent {
     pub fn with_subagent_limit(&self, max: usize) -> Self {
         Self {
             subagent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(max))),
+            ..self.clone()
+        }
+    }
+
+    /// Set the validated model resolver used by per-call subagent overrides.
+    #[must_use]
+    pub(crate) fn with_subagent_model_resolver(&self, resolver: SubagentModelResolver) -> Self {
+        Self {
+            subagent_model_resolver: Some(resolver),
             ..self.clone()
         }
     }
@@ -491,8 +501,8 @@ impl RoundTrip for Agent {
     fn round_trip<'a>(
         &'a self,
         messages: &'a mut Vec<Message>,
-    ) -> LocalBoxFuture<'a, Result<bool>> {
-        Box::pin(self.run_once(messages))
+    ) -> LocalBoxFuture<'a, Result<SubagentRound>> {
+        Box::pin(self.run_subagent_once(messages))
     }
 }
 

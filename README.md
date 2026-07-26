@@ -214,7 +214,7 @@ thinking_level = "medium"        # optional
 thinking_levels = ["low", "medium", "high", "xhigh"]  # optional
 
 [agent.subagents]                # optional
-max_concurrent = 3               # 0 = unlimited (default)
+max_concurrent = 3               # default; 0 = unlimited
 
 [providers.<name>]
 base_url = "..."                 # host root; optional (defaults per api_type)

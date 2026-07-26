@@ -271,6 +271,11 @@ fn bind_agent_tool<'js>(
                 let agent = agent.clone();
                 let tools = tools.clone();
                 let opts_json = opts.0.map(|v| js_to_json(&v)).filter(|v| !v.is_null());
+                let structured = opts_json
+                    .as_ref()
+                    .and_then(|o| o.get("structured"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 async move {
                     // Surface the subagent call as a native tool event so the
                     // UI can render it (with a preview of its result) under
@@ -294,18 +299,32 @@ fn bind_agent_tool<'js>(
                             message: Some(msg),
                         });
                     };
+                    let status_tools = tools.clone();
+                    let on_status: AgentStatusFn = Arc::new(move |status| {
+                        status_tools.emit(ToolEvent::Status { id, status });
+                    });
                     let req = AgentRequest {
                         prompt,
                         opts: opts_json,
+                        on_status: Some(on_status),
                     };
                     match agent(req).await {
-                        Ok(s) => {
+                        Ok(value) => {
+                            let result = value.to_string();
+                            let returned = if structured {
+                                value
+                            } else {
+                                value
+                                    .get("text")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map_or(value.clone(), |text| json!(text))
+                            };
                             tools.emit(ToolEvent::End {
                                 id,
-                                result: s.clone(),
+                                result,
                                 is_error: false,
                             });
-                            Ok(JsonV(json!(s)))
+                            Ok(JsonV(returned))
                         }
                         Err(e) => {
                             let msg = e.to_string();

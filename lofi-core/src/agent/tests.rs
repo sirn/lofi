@@ -143,6 +143,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         auto_mode: None,
         skills_dir: None,
         subagent_semaphore: None,
+        subagent_model_resolver: None,
     }
 }
 
@@ -442,6 +443,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         auto_mode: None,
         skills_dir: None,
         subagent_semaphore: None,
+        subagent_model_resolver: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -486,6 +488,7 @@ async fn failed_exec_closes_concurrent_pending_native_tools() {
         auto_mode: None,
         skills_dir: None,
         subagent_semaphore: None,
+        subagent_model_resolver: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
