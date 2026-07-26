@@ -533,10 +533,15 @@ impl App {
         let Some(path) = self.session.path.clone() else {
             return;
         };
-        // Reload events from disk (the picker was built from a snapshot; the
-        // file is the source of truth for the active-path walk).
-        let events = match store::load(&path) {
-            Ok((_meta, events, _offsets, _size)) => events,
+        // Reload only the selected lineage. Loading the whole append-only
+        // transcript here made a branch rollback deserialize every sibling and
+        // every compacted-away tool result, even though rollback immediately
+        // discarded all but root -> branch_point.
+        let events = store::load_index(&path).and_then(|(_meta, index, _size)| {
+            store::load_indexed_path(&path, &index, Some(&entry.branch_point))
+        });
+        let events = match events {
+            Ok(events) => events,
             Err(e) => {
                 self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
                 return;

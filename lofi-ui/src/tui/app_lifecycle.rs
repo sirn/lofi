@@ -724,11 +724,15 @@ impl App {
             expand: Vec::new(),
         };
 
-        let Some(events) = self.compaction_events() else {
-            self.notify(NotifyKind::Warn, "no session history yet");
-            return;
+        let outcome = if let Some(path) = &self.session.path {
+            lofi_core::recall::recall_file(path, &req)
+        } else {
+            let Some(events) = self.compaction_events() else {
+                self.notify(NotifyKind::Warn, "no session history yet");
+                return;
+            };
+            recall(&events, &req)
         };
-        let outcome = recall(&events, &req);
         // Render inline as a read-only turn so the result lives in the log
         // alongside the conversation; the prompt line echoes the invocation.
         let prompt = format!(

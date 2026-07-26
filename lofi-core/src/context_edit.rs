@@ -179,16 +179,12 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
 /// - anything else → `None` (not recoverable; the id was not a message event
 ///   or held no elidable block).
 #[must_use]
-pub fn recover_event_content(events: &[SessionEvent], id: &str) -> Option<String> {
-    let event = events.iter().find(|e| e.id == id)?;
-    let SessionEventKind::Message(msg) = &event.kind else {
-        return None;
-    };
+pub fn recover_message_content(msg: &Message) -> Option<String> {
     // Tool results: join the content of any ToolResult blocks.
     let results: Vec<&str> = msg
         .blocks
         .iter()
-        .filter_map(|b| match b {
+        .filter_map(|block| match block {
             ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
             _ => None,
         })
@@ -197,12 +193,21 @@ pub fn recover_event_content(events: &[SessionEvent], id: &str) -> Option<String
         return Some(results.join("\n\n"));
     }
     // Tool calls: return the first ToolUse's input (the verbatim code).
-    msg.blocks.iter().find_map(|b| match b {
+    msg.blocks.iter().find_map(|block| match block {
         ContentBlock::ToolUse { input, .. } => {
             Some(serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()))
         }
         _ => None,
     })
+}
+
+#[must_use]
+pub fn recover_event_content(events: &[SessionEvent], id: &str) -> Option<String> {
+    let event = events.iter().find(|event| event.id == id)?;
+    let SessionEventKind::Message(message) = &event.kind else {
+        return None;
+    };
+    recover_message_content(message)
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ pub struct EventIndex {
 pub enum IndexKind {
     UserPrompt,
     AssistantMessage,
+    SystemMessage,
     /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
     /// so the tree can show it as a `tool:` node and `find_turn_outcome` can
     /// follow it (it was previously `Other`, which caused `find_turn_outcome`
@@ -132,6 +133,7 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
                 Some("user") => IndexKind::UserPrompt,
                 Some("assistant") => IndexKind::AssistantMessage,
                 Some("tool") => IndexKind::ToolResult,
+                Some("system") => IndexKind::SystemMessage,
                 _ => IndexKind::Other,
             }
         };
@@ -166,6 +168,63 @@ pub fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
     events
         .pop()
         .ok_or_else(|| Error::State(format!("no event at offset {offset} in {}", path.display())))
+}
+
+/// Find and parse one event by id in a streaming file pass. The lightweight
+/// skeleton skips message blocks for non-matching lines, so recovering one
+/// elided result never deserializes the rest of a large transcript.
+pub fn load_event_by_id(path: &Path, id: &str) -> Result<Option<SessionEvent>> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut first = true;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let raw = line.trim_end_matches(['\n', '\r']);
+        if raw.is_empty() {
+            continue;
+        }
+        if first {
+            first = false;
+            continue;
+        }
+        let skeleton: EventSkeleton = serde_json::from_str(raw).map_err(|error| {
+            Error::State(format!("parse event id in {}: {error}", path.display()))
+        })?;
+        if skeleton.id == id {
+            return super::parse_event(raw).map(Some);
+        }
+    }
+}
+
+/// Visit selected raw event lines while retaining at most one line at a time.
+/// Offsets must be in ascending order. This is used by transcript-wide tools
+/// that need multiple streaming passes without materializing every event.
+pub fn visit_event_lines(
+    path: &Path,
+    offsets: &[u64],
+    mut visit: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut buf = String::new();
+    for &offset in offsets {
+        reader.seek(SeekFrom::Start(offset))?;
+        buf.clear();
+        if reader.read_line(&mut buf)? == 0 {
+            return Err(Error::State(format!(
+                "no event at offset {offset} in {}",
+                path.display()
+            )));
+        }
+        visit(buf.trim_end_matches(['\n', '\r']))?;
+    }
+    Ok(())
 }
 
 /// Parse selected event lines in one file pass. Offsets must be in ascending

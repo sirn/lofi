@@ -29,6 +29,9 @@ use crate::session::store;
 // them as `lofi_core::recall::*` without depending on `lofi_types::recall`.
 pub use lofi_types::recall::{CompactionTarget, RecallOutcome, RecallRequest, RecallScope};
 
+mod file;
+pub use file::recall_file;
+
 /// Entries per search-results page. Matches VCC's `PAGE_SIZE`.
 const PAGE_SIZE: usize = 5;
 /// How many recent entries browse mode (no query) shows. Matches VCC's
@@ -130,10 +133,11 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         };
     }
 
-    // Load clipped entries + keep the raw messages for full-text search and
-    // for re-rendering expanded entries at full content.
+    // Load clipped entries for display. Keep only borrowed references to raw
+    // messages for search/expand: cloning the full transcript here used to
+    // duplicate every tool result, and search then duplicated it a second time
+    // into a Vec<String>. On a 55 MiB session that created a ~165 MiB peak.
     let entries = load_all_messages(events, false, allowed_ids.as_ref(), &native_by_parent);
-    let raw_messages = load_raw_messages(events, allowed_ids.as_ref());
 
     if !has_query {
         // Browse mode: most recent DEFAULT_RECENT entries, flat.
@@ -149,6 +153,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         return RecallOutcome { text, status };
     }
 
+    let raw_messages = raw_messages(events, allowed_ids.as_ref());
     let query = req.query.as_deref().unwrap_or("").trim();
     let page = req.page.max(1);
     let all_hits = search_entries(&entries, &raw_messages, query);
@@ -182,7 +187,7 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         let raw_by_index: HashMap<usize, &Message> = raw_messages
             .iter()
             .enumerate()
-            .map(|(i, m)| (entries[i].index, m))
+            .map(|(i, message)| (entries[i].index, *message))
             .collect();
         for hit in &mut page_hits {
             if !expand_set.contains(&hit.entry.index) {
@@ -412,20 +417,18 @@ fn load_all_messages(
 
 /// The raw messages parallel to `load_all_messages`'s output (same scope,
 /// same order, same global indices), kept for full-text search and expand.
-fn load_raw_messages(
-    events: &[SessionEvent],
+fn raw_messages<'a>(
+    events: &'a [SessionEvent],
     allowed_ids: Option<&std::collections::HashSet<String>>,
-) -> Vec<Message> {
-    let mut out: Vec<Message> = Vec::new();
-    for e in events {
-        let allowed = allowed_ids.is_none_or(|ids| ids.contains(&e.id));
-        if let SessionEventKind::Message(m) = &e.kind {
-            if allowed {
-                out.push(m.clone());
-            }
-        }
-    }
-    out
+) -> Vec<&'a Message> {
+    events
+        .iter()
+        .filter(|event| allowed_ids.is_none_or(|ids| ids.contains(&event.id)))
+        .filter_map(|event| match &event.kind {
+            SessionEventKind::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Render one message to a flat entry. Native tool records whose parent is
@@ -605,30 +608,22 @@ fn extract_path(name: &str, args_json: &str) -> Option<String> {
 /// Search the rendered entries. A query with regex metacharacters is treated
 /// as one pattern; otherwise it's tokenized into terms and ranked by BM25.
 #[allow(clippy::too_many_lines)]
-fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) -> Vec<SearchHit> {
+fn search_entries(entries: &[RecallEntry], messages: &[&Message], query: &str) -> Vec<SearchHit> {
     debug_assert_eq!(entries.len(), messages.len());
     let raw_query = query.trim();
     if raw_query.is_empty() {
         return Vec::new();
     }
 
-    let docs: Vec<String> = (0..entries.len())
-        .map(|i| {
-            let e = &entries[i];
-            let text = full_text(&messages[i]);
-            format!("{} {} {}", e.role, text, e.files.join(" "))
-        })
-        .collect();
-
     if looks_like_regex(raw_query) {
         let re = safe_regex(raw_query);
         let mut hits: Vec<SearchHit> = Vec::new();
-        for (i, hay) in docs.iter().enumerate() {
-            if re.is_match(hay) {
-                let snip = line_snippet(&full_text(&messages[i]), &re);
+        for (index, message) in messages.iter().enumerate() {
+            if message_matches(message, |text| re.is_match(text)) {
+                let snippet = message_snippet(message, &re);
                 hits.push(SearchHit {
-                    entry: entries[i].clone(),
-                    snippet: snip,
+                    entry: entries[index].clone(),
+                    snippet,
                     match_count: 1,
                 });
                 if hits.len() >= MAX_SEARCH_RESULTS {
@@ -646,48 +641,51 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
     }
     let patterns: Vec<regex::Regex> = terms
         .iter()
-        .map(|t| regex::Regex::new(&regex::escape(t)).unwrap())
+        .map(|term| regex::Regex::new(&regex::escape(term)).unwrap())
         .collect();
 
-    // BM25 context.
-    let n = docs.len();
-    let avg_dl = docs
+    // Compute BM25 statistics directly over borrowed block strings. The old
+    // path assembled a full String for every message and retained all of them
+    // in a docs Vec, duplicating the complete transcript during every recall.
+    let n = messages.len();
+    let lengths: Vec<usize> = messages
         .iter()
-        .map(|d| d.split_whitespace().count())
-        .sum::<usize>() as f64
-        / n.max(1) as f64;
+        .map(|message| message_word_count(message))
+        .collect();
+    let avg_dl = lengths.iter().sum::<usize>() as f64 / n.max(1) as f64;
     let mut df: Vec<usize> = vec![0; terms.len()];
-    for d in &docs {
-        for (i, p) in patterns.iter().enumerate() {
-            if p.is_match(d) {
-                df[i] += 1;
+    for message in messages {
+        for (index, pattern) in patterns.iter().enumerate() {
+            if message_matches(message, |text| pattern.is_match(text)) {
+                df[index] += 1;
             }
         }
     }
 
     let min_match = if terms.len() >= 3 { 2 } else { 1 };
     let mut scored: Vec<(f64, SearchHit)> = Vec::new();
-    for (i, d) in docs.iter().enumerate() {
-        let mut mc = 0;
+    for (index, message) in messages.iter().enumerate() {
+        let mut match_count = 0;
         let mut score = 0.0;
-        let dl = d.split_whitespace().count() as f64;
-        for (j, p) in patterns.iter().enumerate() {
-            let tf = p.find_iter(d).count();
+        let dl = lengths[index] as f64;
+        for (term_index, pattern) in patterns.iter().enumerate() {
+            let tf = message_match_count(message, pattern);
             if tf == 0 {
                 continue;
             }
-            mc += 1;
-            let idf = (((n - df[j]) as f64 + 0.5) / (df[j] as f64 + 0.5) + 1.0).ln();
+            match_count += 1;
+            let idf =
+                (((n - df[term_index]) as f64 + 0.5) / (df[term_index] as f64 + 0.5) + 1.0).ln();
             let k = 1.2;
             let b = 0.75;
             let tfn =
                 (tf as f64 * (k + 1.0)) / (tf as f64 + k * (1.0 - b + b * dl / avg_dl.max(1.0)));
             score += idf * tfn;
         }
-        if mc < min_match {
+        if match_count < min_match {
             continue;
         }
-        let snip_re = regex::Regex::new(
+        let snippet_re = regex::Regex::new(
             &patterns
                 .iter()
                 .map(regex::Regex::as_str)
@@ -695,25 +693,22 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
                 .join("|"),
         )
         .unwrap();
-        let snip = line_snippet(&full_text(&messages[i]), &snip_re);
         scored.push((
             score,
             SearchHit {
-                entry: entries[i].clone(),
-                snippet: snip,
-                match_count: mc,
+                entry: entries[index].clone(),
+                snippet: message_snippet(message, &snippet_re),
+                match_count,
             },
         ));
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Score-ratio noise floor: drop entries far below the top hit (multi-term
-    // OR semantics otherwise pull in tangential matches).
     if scored.len() > 1 && terms.len() >= 2 {
         let top = scored[0].0;
         if top > 0.0 {
             let threshold = top * 0.1;
-            if let Some(cut) = scored.iter().position(|(s, _)| *s < threshold) {
+            if let Some(cut) = scored.iter().position(|(score, _)| *score < threshold) {
                 scored.truncate(cut);
             }
         }
@@ -721,33 +716,57 @@ fn search_entries(entries: &[RecallEntry], messages: &[Message], query: &str) ->
     if scored.len() > MAX_SEARCH_RESULTS {
         scored.truncate(MAX_SEARCH_RESULTS);
     }
-    scored.into_iter().map(|(_, h)| h).collect()
+    scored.into_iter().map(|(_, hit)| hit).collect()
 }
 
-fn full_text(msg: &Message) -> String {
-    let mut out = String::new();
-    for b in &msg.blocks {
-        match b {
-            ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => {
-                out.push_str(text);
-                out.push('\n');
-            }
-            ContentBlock::ToolUse { id, name, input } => {
-                let _ = id;
-                if let Some(code) = input.get("code").and_then(|v| v.as_str()) {
-                    out.push_str(code);
-                    out.push('\n');
+fn for_each_search_text(message: &Message, mut visit: impl FnMut(&str)) {
+    visit(match message.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool_result",
+        Role::System => "system",
+    });
+    for block in &message.blocks {
+        match block {
+            ContentBlock::Text { text }
+            | ContentBlock::Thinking { text, .. }
+            | ContentBlock::ToolResult { content: text, .. } => visit(text),
+            ContentBlock::ToolUse { name, input, .. } => {
+                visit(name);
+                if let Some(code) = input.get("code").and_then(serde_json::Value::as_str) {
+                    visit(code);
                 }
-                out.push_str(name);
-                out.push('\n');
-            }
-            ContentBlock::ToolResult { content, .. } => {
-                out.push_str(content);
-                out.push('\n');
             }
         }
     }
-    out
+}
+
+fn message_matches(message: &Message, mut predicate: impl FnMut(&str) -> bool) -> bool {
+    let mut matched = false;
+    for_each_search_text(message, |text| matched |= predicate(text));
+    matched
+}
+
+fn message_match_count(message: &Message, pattern: &regex::Regex) -> usize {
+    let mut count = 0;
+    for_each_search_text(message, |text| count += pattern.find_iter(text).count());
+    count
+}
+
+fn message_word_count(message: &Message) -> usize {
+    let mut count = 0;
+    for_each_search_text(message, |text| count += text.split_whitespace().count());
+    count
+}
+
+fn message_snippet(message: &Message, pattern: &regex::Regex) -> Option<String> {
+    let mut snippet = None;
+    for_each_search_text(message, |text| {
+        if snippet.is_none() && pattern.is_match(text) {
+            snippet = line_snippet(text, pattern);
+        }
+    });
+    snippet
 }
 
 fn looks_like_regex(s: &str) -> bool {

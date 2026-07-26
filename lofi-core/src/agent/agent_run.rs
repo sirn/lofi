@@ -122,34 +122,32 @@ impl Agent {
             }
             None => SessionRecorder::new(commit.path.clone(), self.run_model()),
         });
-        // `lofi.recall` reads the full on-disk transcript (including
-        // compacted-away messages) fresh on each call, so the native tool
-        // sees the same history `/recall` does. Built once from the commit
-        // path; `None` for ephemeral runs (no session file).
+        // `lofi.recall` streams the on-disk transcript through a lightweight
+        // index instead of deserializing the whole append-only file. It still
+        // sees compacted-away messages and abandoned branches when requested.
         let recall: Option<RecallFn> = commit.map(|c| {
             let path = c.path.clone();
             Arc::new(move |req: &lofi_types::recall::RecallRequest| {
-                match crate::session::store::load(&path) {
-                    Ok((_meta, events, _off, _size)) => crate::recall::recall(&events, req),
-                    Err(_) => lofi_types::recall::RecallOutcome {
-                        text: "recall: session file unreadable.".to_string(),
-                        status: "error".to_string(),
-                    },
-                }
+                crate::recall::recall_file(&path, req)
             }) as RecallFn
         });
         let result: Option<ResultFn> = commit.map(|c| {
             let path = c.path.clone();
             Arc::new(move |id: &str| -> String {
-                match crate::session::store::load(&path) {
-                    Ok((_meta, events, _off, _size)) => {
-                        match crate::context_edit::recover_event_content(&events, id) {
-                            Some(s) => s,
-                            None => format!(
-                                "no recoverable content for event {id:?} (not a message event, or held no elidable block)."
-                            ),
+                match crate::session::store::load_event_by_id(&path, id) {
+                    Ok(Some(event)) => match event.kind {
+                        lofi_types::SessionEventKind::Message(message) => {
+                            crate::context_edit::recover_message_content(&message).unwrap_or_else(|| {
+                                format!(
+                                    "no recoverable content for event {id:?} (message held no elidable block)."
+                                )
+                            })
                         }
-                    }
+                        _ => format!(
+                            "no recoverable content for event {id:?} (not a message event)."
+                        ),
+                    },
+                    Ok(None) => format!("no recoverable content for event {id:?} (event not found)."),
                     Err(_) => "result: session file unreadable.".to_string(),
                 }
             }) as ResultFn

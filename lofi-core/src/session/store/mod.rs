@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 pub use index::{
-    load_compaction_path, load_event_at, load_events_at, load_index, load_indexed_path, EventIndex,
-    IndexKind,
+    load_compaction_path, load_event_at, load_event_by_id, load_events_at, load_index,
+    load_indexed_path, visit_event_lines, EventIndex, IndexKind,
 };
 
 /// Transcript format version. Bumped only on a breaking on-disk change;

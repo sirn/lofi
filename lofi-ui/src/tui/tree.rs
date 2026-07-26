@@ -406,6 +406,7 @@ fn push_tree_entry(
             )
         }
         store::IndexKind::AssistantMessage
+        | store::IndexKind::SystemMessage
         | store::IndexKind::NativeTool
         | store::IndexKind::Other => return,
     };
