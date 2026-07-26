@@ -3068,12 +3068,21 @@ fn verbose_toggles() {
     let mut a = app();
     assert!(!a.verbose);
     let before = a.turns.len();
+    a.frozen_heights = vec![3, 5, 8];
     a.toggle_verbose();
     assert!(a.verbose);
+    assert_eq!(a.debug_after_draw, Some("verbose"));
+    assert!(a.frozen_heights.is_empty());
+    assert_eq!(a.frozen_heights_other_mode, vec![3, 5, 8]);
     // Verbose state surfaces on the rule line, not as a chat turn.
     assert_eq!(a.turns.len(), before);
+    a.debug_after_draw = None;
+    a.frozen_heights = vec![30, 50, 80];
     a.toggle_verbose();
     assert!(!a.verbose);
+    assert_eq!(a.debug_after_draw, Some("verbose"));
+    assert_eq!(a.frozen_heights, vec![3, 5, 8]);
+    assert_eq!(a.frozen_heights_other_mode, vec![30, 50, 80]);
     assert_eq!(a.turns.len(), before);
 }
 #[test]

@@ -765,6 +765,10 @@ pub(crate) struct App {
     /// Bottom scroll offset from the last render; seeds `top_line` on un-pin.
     last_base: usize,
     verbose: bool,
+    /// Debug event to sample after the next completed frame. `/verbose`
+    /// schedules this so diagnostics capture the render/materialization cost,
+    /// not merely the cheap boolean toggle that precedes it.
+    debug_after_draw: Option<&'static str>,
     /// Opt-in process/component diagnostics writer enabled by `/debug`.
     debug: Option<debug_stats::DebugState>,
     should_quit: bool,
@@ -869,8 +873,12 @@ pub(crate) struct App {
     frozen_render: FrozenCache,
     /// Line count per frozen turn (all of them), so the viewport can be
     /// located and `total` computed without fetching rendered lines. Synced
-    /// to `turns.len()-1`.
+    /// to `turns.len()-1` for the active verbose mode.
     frozen_heights: Vec<usize>,
+    /// Height index for the inactive verbose mode. `/verbose` swaps this
+    /// with `frozen_heights`, avoiding a full transcript reparse when
+    /// collapsing or revisiting a mode that has already been measured.
+    frozen_heights_other_mode: Vec<usize>,
     /// Bumped whenever `turns` is replaced wholesale (resume, `/new`,
     /// `/clear`); a mismatch with `frozen_epoch` discards the cache.
     render_epoch: u64,
@@ -1065,6 +1073,9 @@ async fn run_loop(
     loop {
         if dirty {
             guard.draw(&mut app)?;
+            if let Some(event) = app.debug_after_draw.take() {
+                app.debug_sample(event);
+            }
             dirty = false;
         }
 

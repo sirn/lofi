@@ -183,7 +183,8 @@ impl App {
                 .map(String::capacity)
                 .sum::<usize>();
         let index_bytes = self.turn_byte_ranges.capacity() * size_of::<Option<(u64, u64)>>()
-            + self.frozen_heights.capacity() * size_of::<usize>();
+            + (self.frozen_heights.capacity() + self.frozen_heights_other_mode.capacity())
+                * size_of::<usize>();
         let estimated_total = history_bytes
             + turns_bytes
             + render_cache_bytes
