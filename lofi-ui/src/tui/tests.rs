@@ -5604,16 +5604,19 @@ fn resumed_compaction_restores_summarized_message_count() {
 
     let (_meta, index, _size) = store::load_index(&path).unwrap();
     let mut a = app();
+    a.compaction.auto.max_context_tokens = Some(100_000);
     a.session.path = Some(path.clone());
     *a.history.lock().unwrap() = history_from_index(&path, &index, &a.compaction.edit).unwrap();
     restore_compaction_from_index(&mut a, &path, &index);
 
     assert_eq!(a.history.lock().unwrap().len(), 3);
+    assert_eq!(a.status_usage.unwrap().input_tokens, 113_000);
+    assert_eq!(a.prev_ctx_tokens, None);
+    a.maybe_auto_compact();
     assert!(
-        a.compact_now(),
-        "restored summarized message count must permit compaction"
+        a.compacted,
+        "resume must evaluate the next settled state and soft compaction must not reuse the hard cooldown"
     );
-    assert!(a.compacted);
 
     let (_meta, events, _offset, _size) = store::load(&path).unwrap();
     let marker = events
