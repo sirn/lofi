@@ -87,6 +87,23 @@ pub async fn build_agent(
     } else {
         agent
     };
+    // Resolve subagent model/thinking overrides against the same startup
+    // registry and provider configuration as the parent agent.
+    let resolver_registry = registry.clone();
+    let resolver_config = config.clone();
+    let agent = agent.with_subagent_model_resolver(Arc::new(move |query, thinking| {
+        let query = match thinking {
+            Some(level) => format!("{query}:{}", level.as_str()),
+            None => query.to_string(),
+        };
+        let (model, _) = select_model(&resolver_registry, &resolver_config, Some(&query))?;
+        let provider_cfg = resolver_config
+            .providers
+            .get(&model.provider)
+            .ok_or_else(|| Error::Config(format!("provider not found: {}", model.provider)))?;
+        let provider = open(model.api, provider_cfg)?;
+        Ok((provider, model))
+    }));
     // Throttle concurrent subagents when configured.
     let agent = if config.agent.subagents.max_concurrent > 0 {
         agent.with_subagent_limit(config.agent.subagents.max_concurrent)

@@ -414,6 +414,22 @@ impl Agent {
             .await
     }
 
+    /// Run one nested-agent round while retaining its usage and cost.
+    pub(super) async fn run_subagent_once(
+        &self,
+        messages: &mut Vec<Message>,
+    ) -> Result<SubagentRound> {
+        let mut stats = TurnStats::new();
+        let finished = self
+            .run_once_inner(messages, None, Some(&mut stats), None, None, None)
+            .await?;
+        Ok(SubagentRound {
+            finished,
+            usage: stats.usage,
+            cost: stats.cost,
+        })
+    }
+
     /// Shared core of [`run_once`] with an optional event sender.
     ///
     /// Events are emitted via an awaited [`Sender::send`] so a slow receiver
@@ -798,6 +814,13 @@ impl Agent {
                             args,
                         });
                     }
+                    ToolEvent::Status { id, status } => {
+                        let _ = native_tx.send(AgentEvent::NativeToolStatus {
+                            parent: event_parent.clone(),
+                            id,
+                            waiting: status == lofi_code::AgentStatus::Waiting,
+                        });
+                    }
                     ToolEvent::End {
                         id,
                         result,
@@ -956,38 +979,103 @@ impl Agent {
     fn make_agent_fn(&self) -> AgentFn {
         let self_clone = self.clone();
         let sem = self.subagent_semaphore.clone();
+        let model_resolver = self.subagent_model_resolver.clone();
         Arc::new(move |req: lofi_code::AgentRequest| {
-            let agent = self_clone.clone();
+            let mut agent = self_clone.clone();
             let sem = sem.clone();
+            let model_resolver = model_resolver.clone();
             Box::pin(async move {
-                // Acquire a concurrency permit before starting the subagent.
-                // When no semaphore is configured this is a no-op.
+                let opts_json = req.opts.as_ref();
+                if opts_json.is_some_and(|opts| !opts.is_object()) {
+                    return Err(Error::Config("subagent options must be an object".into()));
+                }
+                let system = match opts_json.and_then(|o| o.get("system")) {
+                    Some(value) => value
+                        .as_str()
+                        .ok_or_else(|| Error::Config("subagent `system` must be a string".into()))?
+                        .to_string(),
+                    None => agent.system_prompt.clone(),
+                };
+                let model = opts_json
+                    .and_then(|o| o.get("model"))
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            Error::Config("subagent `model` must be a string".into())
+                        })
+                    })
+                    .transpose()?;
+                let thinking = opts_json
+                    .and_then(|o| o.get("thinking"))
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            Error::Config("subagent `thinking` must be a string".into())
+                        })
+                    })
+                    .transpose()?
+                    .map(|level| {
+                        ThinkingLevel::parse(level).ok_or_else(|| {
+                            Error::Config(format!(
+                                "unknown subagent thinking level `{level}` \
+                                 (expected off|low|medium|high|xhigh)"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                if let Some(query) = model {
+                    let resolver = model_resolver.as_ref().ok_or_else(|| {
+                        Error::Config("subagent model override is unavailable".into())
+                    })?;
+                    let (provider, selected) = resolver(query, thinking)?;
+                    agent = agent.with_model(provider, selected);
+                } else if let Some(level) = thinking {
+                    let query = format!("{}/{}", agent.model.provider, agent.model.id);
+                    let resolver = model_resolver.as_ref().ok_or_else(|| {
+                        Error::Config("subagent thinking override is unavailable".into())
+                    })?;
+                    let (provider, selected) = resolver(&query, Some(level))?;
+                    agent = agent.with_model(provider, selected);
+                }
+
+                // Report semaphore contention explicitly. `try_acquire_owned`
+                // distinguishes a queued call from one that can begin now.
                 let _permit = match &sem {
-                    Some(s) => Some(s.acquire().await),
+                    Some(s) => match s.clone().try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {
+                            if let Some(on_status) = &req.on_status {
+                                on_status(lofi_code::AgentStatus::Waiting);
+                            }
+                            let permit = s.clone().acquire_owned().await.map_err(|_| {
+                                Error::Sandbox("subagent concurrency limiter closed".into())
+                            })?;
+                            if let Some(on_status) = &req.on_status {
+                                on_status(lofi_code::AgentStatus::Running);
+                            }
+                            Some(permit)
+                        }
+                        Err(tokio::sync::TryAcquireError::Closed) => {
+                            return Err(Error::Sandbox(
+                                "subagent concurrency limiter closed".into(),
+                            ));
+                        }
+                    },
                     None => None,
                 };
-                // Honor a caller-supplied `timeoutMs` (per round-trip); fall
-                // back to the default. A total deadline of 20× the per-round
-                // timeout bounds runaway loops that complete within each call.
-                let per_rt_ms = req
-                    .opts
-                    .as_ref()
-                    .and_then(|o| o.get("timeoutMs").and_then(serde_json::Value::as_u64))
-                    .map_or(2 * 60 * 1000, |ms| ms.min(MAX_SUBAGENT_TIMEOUT_MS));
-                let per_rt = Duration::from_millis(per_rt_ms);
-                // `checked_mul` so a large (clamped) per-round value cannot
-                // overflow `Duration` multiplication (which panics in debug).
-                let total = per_rt.checked_mul(20).unwrap_or(per_rt);
-                let opts = SubagentOptions {
-                    system: agent.system_prompt.clone(),
-                    timeout: per_rt,
-                    total_timeout: Some(total),
-                };
+                let opts = SubagentOptions { system };
                 let parent = SubagentCtx {
                     root: agent.root.clone(),
                     strings: HashMap::new(),
                 };
-                subagent::run(&parent, &agent, &req.prompt, &opts).await
+                let result = subagent::run(&parent, &agent, &req.prompt, &opts).await?;
+                Ok(serde_json::json!({
+                    "text": result.text,
+                    "model": format!("{}/{}", agent.model.provider, agent.model.id),
+                    "thinking": agent.model.thinking.as_str(),
+                    "rounds": result.rounds,
+                    "usage": result.usage,
+                    "cost": result.cost,
+                    "durationMs": result.duration_ms,
+                }))
             })
         })
     }

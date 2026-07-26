@@ -4,15 +4,12 @@
 //! drives a nested agent loop using the parent's tool registry and workspace
 //! root. The single agent tool is the code-mode `exec` (see [`lofi_code`]).
 //!
-//! ## No iteration cap (v1)
+//! ## No iteration or wall-clock cap (v1)
 //!
-//! There is deliberately **no iteration cap** in v1: the subagent relies on the
-//! model's own termination (a final assistant turn with no tool call) and the
-//! per-call timeouts enforced by the provider/agent layer. Those bound provider
-//! waits and awaited native-tool calls; a *synchronous* guest loop is not
-//! interruptible (see [`lofi_code`]). A fixed cap would truncate genuine
-//! work; the timeouts bound runaway loops without imposing an arbitrary
-//! ceiling on useful runs.
+//! There is deliberately no fixed iteration or wall-clock cap: either would
+//! truncate useful long-running work. Provider streams are bounded by an idle
+//! timeout, native tools carry their own timeouts, and synchronous guest code
+//! is bounded by the sandbox CPU interrupt budget (see [`lofi_code`]).
 //!
 //! ## Wiring
 //!
@@ -21,15 +18,12 @@
 //! runtime context, and `subagent::run` accepts any `R: RoundTrip`.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use futures::future::LocalBoxFuture;
 
 use lofi_error::{Error, Result};
 use lofi_types::{ContentBlock, Message, Role};
-
-/// Default per-round-trip timeout for a subagent call (120s).
-pub const DEFAULT_ROUND_TRIP_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// One agent round-trip: feed the current message history to the model and
 /// append the assistant's response. Returns `Ok(true)` when the assistant
@@ -43,31 +37,43 @@ pub const DEFAULT_ROUND_TRIP_TIMEOUT: Duration = Duration::from_mins(2);
 /// This trait decouples `subagent` from `agent`, which implements it later.
 pub trait RoundTrip: Send + Sync {
     /// Perform a single model round-trip, appending to `messages`.
-    fn round_trip<'a>(&'a self, messages: &'a mut Vec<Message>)
-        -> LocalBoxFuture<'a, Result<bool>>;
+    fn round_trip<'a>(
+        &'a self,
+        messages: &'a mut Vec<Message>,
+    ) -> LocalBoxFuture<'a, Result<SubagentRound>>;
+}
+
+/// Accounting returned by one nested provider round.
+#[derive(Debug, Clone, Copy)]
+pub struct SubagentRound {
+    /// Whether the assistant finished without requesting another tool call.
+    pub finished: bool,
+    /// This round's token usage.
+    pub usage: lofi_types::Usage,
+    /// This round's model cost.
+    pub cost: f64,
 }
 
 /// Options for a subagent run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SubagentOptions {
     /// System prompt prefix.
     pub system: String,
-    /// Per-round-trip timeout.
-    pub timeout: Duration,
-    /// Optional wall-clock deadline for the whole nested loop. Bounds
-    /// runaway agents that keep completing within each per-round-trip
-    /// timeout. `None` disables the total cap.
-    pub total_timeout: Option<Duration>,
 }
 
-impl Default for SubagentOptions {
-    fn default() -> Self {
-        Self {
-            system: String::new(),
-            timeout: DEFAULT_ROUND_TRIP_TIMEOUT,
-            total_timeout: None,
-        }
-    }
+/// Summary of a completed synchronous subagent run.
+#[derive(Debug, Clone)]
+pub struct SubagentResult {
+    /// Final assistant text.
+    pub text: String,
+    /// Number of provider rounds (including the final text-only round).
+    pub rounds: u64,
+    /// Aggregated token usage across every round.
+    pub usage: lofi_types::Usage,
+    /// Aggregated model cost across every round.
+    pub cost: f64,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
 }
 
 /// Shared, read-only context inherited from the parent agent.
@@ -106,8 +112,8 @@ pub fn initial_history(system: &str, prompt: &str) -> Vec<Message> {
 ///
 /// Builds a fresh history from `system` + `prompt`, then calls
 /// `round_trip.round_trip(&mut messages)` repeatedly until the model emits a
-/// final turn (no tool call) or a round-trip times out. The code-mode `exec`
-/// tool runs against the parent's workspace root.
+/// final turn (no tool call). The code-mode `exec` tool runs against the
+/// parent's workspace root. Provider idle and native-tool limits still apply.
 ///
 /// # Errors
 /// Returns [`Error::Provider`] if every round-trip attempt fails, or
@@ -117,37 +123,42 @@ pub async fn run(
     round_trip: &dyn RoundTrip,
     prompt: &str,
     opts: &SubagentOptions,
-) -> Result<String> {
+) -> Result<SubagentResult> {
+    let started = Instant::now();
     let mut messages = initial_history(&opts.system, prompt);
-    // `checked_add` so an extreme total timeout cannot overflow `Instant`'s
-    // range (treated as "no deadline" rather than panicking).
-    let deadline = opts
-        .total_timeout
-        .and_then(|d| tokio::time::Instant::now().checked_add(d));
+    let mut rounds = 0u64;
+    let mut usage = lofi_types::Usage::default();
+    let mut cost = 0.0;
 
     loop {
-        let now = tokio::time::Instant::now();
-        if let Some(dl) = deadline {
-            if now >= dl {
-                return Err(Error::Provider("subagent total timeout exceeded".into()));
-            }
-        }
-        // Cap each round by the remaining total budget so a round started
-        // near the deadline can't run a full `opts.timeout` past it.
-        let budget = match deadline {
-            Some(dl) => opts.timeout.min(dl - now),
-            None => opts.timeout,
-        };
-        // Apply the per-round-trip timeout so a stuck provider call can't
-        // hang the nested loop indefinitely.
-        let finished = tokio::time::timeout(budget, round_trip.round_trip(&mut messages))
-            .await
-            .map_err(|_| {
-                Error::Provider(format!("subagent round-trip timed out after {budget:?}"))
-            })??;
-        if finished {
-            return final_text(&messages)
-                .ok_or_else(|| Error::Provider("subagent finished with no assistant text".into()));
+        // Do not impose a wall-clock deadline here. Provider streams already
+        // carry an idle timeout, and native tools carry their own limits;
+        // productive reasoning and long-running tools must not be cut off by
+        // the old blanket 120-second round timeout.
+        let round = round_trip.round_trip(&mut messages).await?;
+        rounds = rounds.saturating_add(1);
+        usage.input_tokens = usage.input_tokens.saturating_add(round.usage.input_tokens);
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(round.usage.output_tokens);
+        usage.cache_read_tokens = usage
+            .cache_read_tokens
+            .saturating_add(round.usage.cache_read_tokens);
+        usage.cache_write_tokens = usage
+            .cache_write_tokens
+            .saturating_add(round.usage.cache_write_tokens);
+        cost += round.cost;
+        if round.finished {
+            let text = final_text(&messages).ok_or_else(|| {
+                Error::Provider("subagent finished with no assistant text".into())
+            })?;
+            return Ok(SubagentResult {
+                text,
+                rounds,
+                usage,
+                cost,
+                duration_ms: started.elapsed().as_millis() as u64,
+            });
         }
     }
 }
@@ -176,6 +187,62 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    struct TwoRoundTrip {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    impl RoundTrip for TwoRoundTrip {
+        fn round_trip<'a>(
+            &'a self,
+            messages: &'a mut Vec<Message>,
+        ) -> LocalBoxFuture<'a, Result<SubagentRound>> {
+            Box::pin(async move {
+                let call = self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if call == 1 {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        blocks: vec![ContentBlock::Text {
+                            text: "done".into(),
+                        }],
+                    });
+                }
+                Ok(SubagentRound {
+                    finished: call == 1,
+                    usage: lofi_types::Usage {
+                        input_tokens: 10,
+                        output_tokens: 2,
+                        cache_read_tokens: 3,
+                        cache_write_tokens: 1,
+                    },
+                    cost: 0.25,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn run_returns_structured_accounting() {
+        let runner = TwoRoundTrip {
+            calls: std::sync::atomic::AtomicU64::new(0),
+        };
+        let parent = SubagentCtx {
+            root: PathBuf::new(),
+            strings: std::collections::HashMap::new(),
+        };
+        let result = run(&parent, &runner, "go", &SubagentOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(result.rounds, 2);
+        assert_eq!(result.usage.input_tokens, 20);
+        assert_eq!(result.usage.output_tokens, 4);
+        assert_eq!(result.usage.cache_read_tokens, 6);
+        assert_eq!(result.usage.cache_write_tokens, 2);
+        assert!((result.cost - 0.5).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn initial_history_with_system() {
