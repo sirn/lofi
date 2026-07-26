@@ -332,6 +332,17 @@ pub fn append_events(
     append_prepared_events(path, events)
 }
 
+/// Message-count bookkeeping persisted with a compaction checkpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionCounts {
+    /// Messages folded by this compaction, used by the visible marker.
+    pub summarized: usize,
+    /// Original messages represented by the merged summary across compactions.
+    pub represented: usize,
+    /// Messages retained verbatim in the tail.
+    pub kept: usize,
+}
+
 /// Append a compaction checkpoint as one batch: edited kept-tail messages
 /// followed by the marker. A failed write is rolled back to the original file
 /// length so the transcript cannot expose a partial checkpoint as its leaf.
@@ -344,8 +355,7 @@ pub fn append_compaction(
     parent_hint: Option<&str>,
     summary: String,
     summarized_range: [String; 2],
-    summarized: usize,
-    kept: usize,
+    counts: CompactionCounts,
 ) -> Result<(u64, u64)> {
     #[derive(Serialize)]
     struct MessageCheckpoint<'a> {
@@ -369,6 +379,7 @@ pub fn append_compaction(
         summarized_range: &'a [String; 2],
         checkpointed_tail: bool,
         summarized: usize,
+        represented: usize,
         kept: usize,
     }
 
@@ -416,8 +427,9 @@ pub fn append_compaction(
                 .map_or("", String::as_str),
             summarized_range: &summarized_range,
             checkpointed_tail: true,
-            summarized,
-            kept,
+            summarized: counts.summarized,
+            represented: counts.represented,
+            kept: counts.kept,
         };
         serde_json::to_writer(&mut file, &marker)
             .map_err(|e| Error::State(format!("json: {e}")))?;
@@ -838,8 +850,11 @@ mod tests {
             None,
             "summary".into(),
             ["first".into(), "last".into()],
-            5,
-            1,
+            CompactionCounts {
+                summarized: 5,
+                represented: 5,
+                kept: 1,
+            },
         )
         .unwrap();
 
@@ -876,8 +891,11 @@ mod tests {
             Some(&original[0].id),
             "summary".into(),
             [original[0].id.clone(), original[0].id.clone()],
-            1,
-            1,
+            CompactionCounts {
+                summarized: 1,
+                represented: 1,
+                kept: 1,
+            },
         )
         .unwrap();
 

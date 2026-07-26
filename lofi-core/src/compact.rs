@@ -70,6 +70,9 @@ pub struct Compaction {
     /// Number of live messages folded into the summary (excluding the prior
     /// summary message itself).
     pub summarized_count: usize,
+    /// Total original messages represented by the merged summary. This is
+    /// persisted so resume preserves the history count across re-compactions.
+    pub represented_count: usize,
     /// Number of messages kept in the tail.
     pub kept_count: usize,
     /// Event id of the first kept message — recorded in the
@@ -132,16 +135,27 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     // active path (its summary is previous_summary; its first_kept_entry_id
     // is where the already-summarized range ends).
     let mut previous_summary: Option<String> = None;
+    // The summary stands in for this many messages. Keep that semantic count
+    // across resume instead of treating the restored summary as one message
+    // when applying the minimum-history economy guard below.
+    let mut previously_summarized = 0usize;
     let mut live_start_id: Option<String> = None;
     let mut previous_marker_pos: Option<usize> = None;
     for (path_pos, &i) in path.iter().enumerate().rev() {
         if let SessionEventKind::Compaction {
             summary,
             first_kept_entry_id,
+            summarized,
+            represented,
             ..
         } = &events[i].kind
         {
             previous_summary = Some(summary.clone());
+            previously_summarized = if *represented == 0 {
+                *summarized
+            } else {
+                *represented
+            };
             live_start_id = Some(first_kept_entry_id.clone());
             previous_marker_pos = Some(path_pos);
             break;
@@ -226,12 +240,14 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         }
     }
 
-    if live.len() < 3 {
+    if live.is_empty() {
         return None;
     }
 
     let plan = plan_cut(&live, opts);
-    if plan.summarized < MIN_SUMMARIZED {
+    if plan.summarized == 0
+        || previously_summarized.saturating_add(plan.summarized) < MIN_SUMMARIZED
+    {
         return None;
     }
 
@@ -275,6 +291,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         summary,
         kept_messages,
         summarized_count: plan.summarized,
+        represented_count: previously_summarized.saturating_add(plan.summarized),
         kept_count,
         first_kept_event_id: plan.first_kept_event_id,
         summarized_range,
@@ -1737,6 +1754,46 @@ mod tests {
     }
 
     #[test]
+    fn previous_compaction_restores_summarized_message_count() {
+        let mut events = events_of(&[
+            user("old prompt"),
+            assistant("old response"),
+            assistant("old follow-up"),
+            assistant("old result"),
+            assistant("old conclusion"),
+        ]);
+        events.push(SessionEvent {
+            id: "marker".to_string(),
+            parent_id: Some("e4".to_string()),
+            kind: SessionEventKind::Compaction {
+                summary: "previous summary".to_string(),
+                first_kept_entry_id: String::new(),
+                summarized_range: ["e0".to_string(), "e4".to_string()],
+                checkpointed_tail: true,
+                summarized: 5,
+                represented: 0, // legacy marker: fall back to summarized
+                kept: 0,
+            },
+        });
+        events.push(SessionEvent {
+            id: "e6".to_string(),
+            parent_id: Some("marker".to_string()),
+            kind: SessionEventKind::Message(assistant("continued work")),
+        });
+        events.push(SessionEvent {
+            id: "e7".to_string(),
+            parent_id: Some("e6".to_string()),
+            kind: SessionEventKind::Message(assistant("continued result")),
+        });
+
+        let compacted = compact(&events, &CompactOptions::default())
+            .expect("restored summarized count must satisfy the history guard");
+        assert_eq!(compacted.summarized_count, 2);
+        assert_eq!(compacted.represented_count, 7);
+        assert_eq!(compacted.kept_count, 0);
+    }
+
+    #[test]
     fn compact_refuses_when_too_little_to_fold() {
         // Four messages: the prefix before the last user prompt is only two
         // messages — below MIN_SUMMARIZED, so compact returns None.
@@ -1910,6 +1967,7 @@ mod tests {
                 summarized_range: ["e0".to_string(), "e1".to_string()],
                 checkpointed_tail: false,
                 summarized: 2,
+                represented: 2,
                 kept: 0,
             },
         });
@@ -1971,6 +2029,7 @@ mod tests {
                 summarized_range: ["e0".to_string(), "e3".to_string()],
                 checkpointed_tail: false,
                 summarized: 4,
+                represented: 4,
                 kept: 4,
             },
         });
