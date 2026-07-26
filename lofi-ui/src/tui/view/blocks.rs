@@ -50,6 +50,25 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
 /// stores the result for frozen turns and rebuilds only the live last turn
 /// each frame.
 pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
+    let stack = turn_stack(turn);
+    stack.lines(cx)
+}
+
+/// Count a turn without materializing its rendered rows.
+pub fn render_turn_height(cx: &Cx, turn: &Turn) -> usize {
+    turn_stack(turn).height(cx)
+}
+
+/// Materialize only a component-relative visual row range.
+pub fn render_turn_window(
+    cx: &Cx,
+    turn: &Turn,
+    range: std::ops::Range<usize>,
+) -> Vec<RenderLine> {
+    turn_stack(turn).lines_window(cx, range)
+}
+
+fn turn_stack(turn: &Turn) -> Stack<'_> {
     let mut stack = Stack::new();
     if !turn.prompt.is_empty() {
         stack.push(UserMessage {
@@ -110,7 +129,7 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
             }
         }
     }
-    stack.lines(cx)
+    stack
 }
 
 // ── User message ─────────────────────────────────────────────────────────

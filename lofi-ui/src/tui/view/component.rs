@@ -37,6 +37,22 @@ pub trait Component {
     /// Render this unit to an owned block of lines, each tagged with the
     /// char range of its selectable content.
     fn lines(&self, cx: &Cx) -> Vec<RenderLine>;
+
+    /// Number of visual rows without retaining their rendered representation.
+    /// Components with potentially large bodies override this together with
+    /// `lines_window`; the default keeps small components simple.
+    fn height(&self, cx: &Cx) -> usize {
+        self.lines(cx).len()
+    }
+
+    /// Render only visual rows in `range` (component-relative).
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        self.lines(cx)
+            .into_iter()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+            .collect()
+    }
 }
 
 /// A vertical stack of components joined by a blank line; children that
@@ -59,18 +75,52 @@ impl<'a> Stack<'a> {
 
 impl Component for Stack<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let mut out = Vec::new();
+        self.lines_window(cx, 0..usize::MAX)
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        let mut total = 0usize;
         let mut first = true;
         for child in &self.children {
-            let lines = child.lines(cx);
-            if lines.is_empty() {
+            let height = child.height(cx);
+            if height == 0 {
                 continue;
             }
             if !first {
-                out.push(prim::rblank());
+                total = total.saturating_add(1);
             }
-            out.extend(lines);
+            total = total.saturating_add(height);
             first = false;
+        }
+        total
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        let mut out = Vec::with_capacity(range.end.saturating_sub(range.start));
+        let mut pos = 0usize;
+        let mut first = true;
+        for child in &self.children {
+            let height = child.height(cx);
+            if height == 0 {
+                continue;
+            }
+            if !first {
+                if range.contains(&pos) {
+                    out.push(prim::rblank());
+                }
+                pos = pos.saturating_add(1);
+            }
+            let end = pos.saturating_add(height);
+            if end > range.start && pos < range.end {
+                let start = range.start.saturating_sub(pos);
+                let stop = range.end.saturating_sub(pos).min(height);
+                out.extend(child.lines_window(cx, start..stop));
+            }
+            pos = end;
+            first = false;
+            if pos >= range.end {
+                break;
+            }
         }
         out
     }
