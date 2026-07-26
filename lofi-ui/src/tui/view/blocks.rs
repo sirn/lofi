@@ -1372,6 +1372,30 @@ fn native_body(nt: &NativeTool) -> NativeBody {
                 notice: b("truncated").then_some("(truncated)".into()),
             }
         }
+        "agent" => {
+            let text = s("text");
+            let model = s("model");
+            let thinking = s("thinking");
+            let rounds = n("rounds");
+            let duration_ms = n("durationMs");
+            let cost = v
+                .get("cost")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let notice = (!model.is_empty()).then(|| {
+                format!(
+                    "({model}, {thinking}, {rounds} rounds, {}, ${cost:.4})",
+                    prim::fmt_duration(std::time::Duration::from_millis(duration_ms as u64))
+                )
+            });
+            NativeBody {
+                lines: split_lines(text),
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice,
+            }
+        }
         "grep" => {
             let mut lines = Vec::new();
             if let Some(arr) = v.get("matches").and_then(|x| x.as_array()) {
@@ -1619,7 +1643,7 @@ impl ExecBlockBranch<'_> {
     fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
         let w = cx.width;
-        let working = !self.nt.done && cx.active_turn;
+        let working = !self.nt.done && !self.nt.waiting && cx.active_turn;
         let mut out = RenderWindow::new(range);
         let exec_cont = if self.is_last { "  " } else { "│ " };
 
@@ -1635,7 +1659,9 @@ impl ExecBlockBranch<'_> {
                 Style::new().fg(t.subtle),
             ));
         }
-        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
+        if self.nt.waiting {
+            content.push(Span::styled(" (waiting)", Style::new().fg(t.warn)));
+        } else if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
             content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
         }
         let header_deco = vec![
@@ -1644,7 +1670,11 @@ impl ExecBlockBranch<'_> {
                 if self.is_last { "└ " } else { "├ " },
                 Style::new().fg(t.subtle),
             ),
-            prim::status_icon(t, working, self.nt.is_error, cx.spinner()),
+            if self.nt.waiting {
+                Span::styled("○ ", Style::new().fg(t.warn))
+            } else {
+                prim::status_icon(t, working, self.nt.is_error, cx.spinner())
+            },
         ];
         let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
         let cont_deco = vec![
@@ -2012,6 +2042,7 @@ mod tests {
             result: Some(raw.clone()),
             is_error: true,
             done: true,
+            waiting: false,
         };
         assert_eq!(native_body(&tool).lines, vec!["command not found"]);
         assert_eq!(tool.result.as_deref(), Some(raw.as_str()));

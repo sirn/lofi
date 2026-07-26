@@ -1078,14 +1078,38 @@ pub struct AgentConfig {
 }
 
 /// Subagent settings (`[agent.subagents]`).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubagentConfig {
     /// Maximum number of subagents (`lofi.agent()` calls) that may run
-    /// concurrently. When `0` (the default) there is no limit — every
-    /// `lofi.agent()` call proceeds immediately. Set to e.g. `3` to
-    /// throttle: excess calls wait for a slot before starting.
-    #[serde(default)]
+    /// concurrently. Defaults to `3`; set to `0` to disable throttling.
+    /// Excess calls wait for a slot before starting.
+    #[serde(default = "default_subagent_max_concurrent")]
     pub max_concurrent: usize,
+}
+
+const fn default_subagent_max_concurrent() -> usize {
+    3
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_subagent_max_concurrent(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod subagent_config_tests {
+    use super::SubagentConfig;
+
+    #[test]
+    fn default_concurrency_is_three() {
+        assert_eq!(SubagentConfig::default().max_concurrent, 3);
+        let parsed: SubagentConfig =
+            serde_json::from_str("{}").expect("empty subagent config parses");
+        assert_eq!(parsed.max_concurrent, 3);
+    }
 }
 
 /// Compaction settings.

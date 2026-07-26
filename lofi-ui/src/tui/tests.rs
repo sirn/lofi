@@ -96,6 +96,54 @@ fn native_tool_events_nest_under_their_exec() {
 /// The native tool header shows a parenthetical line-range suffix for `read`
 /// and a `(took Ns)` suffix for `bash`, derived from the structured result.
 #[test]
+fn subagent_waiting_state_is_rendered() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    let a = app();
+    let turn = Turn {
+        prompt: String::new(),
+        blocks: vec![Block::Tool(ToolCall {
+            id: "e1".to_string(),
+            name: "exec".to_string(),
+            input: String::new(),
+            label: None,
+            native: vec![NativeTool {
+                id: 0,
+                name: "agent".to_string(),
+                args: "inspect".to_string(),
+                result: None,
+                is_error: false,
+                done: false,
+                waiting: true,
+            }],
+            result: None,
+            is_error: false,
+            done: false,
+            elapsed: None,
+        })],
+    };
+    let cx = Cx {
+        app: &a,
+        theme: crate::tui::theme::Theme::default(),
+        width: 100,
+        active_turn: true,
+    };
+    let lines = render_turn_lines(&cx, &turn);
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Tool agent inspect (waiting)"), "{text}");
+}
+
+#[test]
 fn rich_header_suffix_for_read_and_bash() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -124,6 +172,7 @@ fn rich_header_suffix_for_read_and_bash() {
                     ),
                     is_error: false,
                     done: true,
+                    waiting: false,
                 },
                 NativeTool {
                     id: 1,
@@ -141,6 +190,7 @@ fn rich_header_suffix_for_read_and_bash() {
                     ),
                     is_error: false,
                     done: true,
+                    waiting: false,
                 },
             ],
             result: Some("{\"value\":null}".to_string()),

@@ -182,6 +182,7 @@ struct NativeTool {
     result: Option<String>,
     is_error: bool,
     done: bool,
+    waiting: bool,
 }
 
 /// A single tool call accumulated across ToolStart/ToolInput/ToolEnd.
