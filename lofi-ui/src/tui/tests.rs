@@ -27,6 +27,17 @@ fn push_turn(app: &mut App) {
 }
 
 #[test]
+fn compact_thresholds_use_the_models_actual_small_context_window() {
+    let mut a = app();
+    a.ctx_limit = 100_000;
+    a.compaction.auto.context_ratio = Some(0.5);
+    a.compaction.reserved_context_tokens = 20_000;
+
+    assert_eq!(a.compaction.soft_threshold(a.ctx_limit), Some(50_000));
+    assert_eq!(a.derive_compact_budget(), 25_000);
+}
+
+#[test]
 fn failed_exec_settles_pending_native_tools() {
     let mut a = app();
     push_turn(&mut a);
@@ -5604,16 +5615,26 @@ fn resumed_compaction_restores_summarized_message_count() {
 
     let (_meta, index, _size) = store::load_index(&path).unwrap();
     let mut a = app();
+    a.compaction.auto.max_context_tokens = Some(100_000);
     a.session.path = Some(path.clone());
     *a.history.lock().unwrap() = history_from_index(&path, &index, &a.compaction.edit).unwrap();
     restore_compaction_from_index(&mut a, &path, &index);
 
     assert_eq!(a.history.lock().unwrap().len(), 3);
+    assert_eq!(a.status_usage.unwrap().input_tokens, 113_000);
+    assert_eq!(a.prev_ctx_tokens, None);
+    a.apply_event(AgentEvent::RoundUsage {
+        cost: 0.0,
+        usage: Usage {
+            input_tokens: 113_000,
+            ..Usage::default()
+        },
+    });
+    a.maybe_auto_compact();
     assert!(
-        a.compact_now(),
-        "restored summarized message count must permit compaction"
+        a.compacted,
+        "resume must evaluate the next settled state and soft compaction must not reuse the hard cooldown"
     );
-    assert!(a.compacted);
 
     let (_meta, events, _offset, _size) = store::load(&path).unwrap();
     let marker = events
@@ -5629,4 +5650,73 @@ fn resumed_compaction_restores_summarized_message_count() {
         })
         .unwrap();
     assert_eq!(marker, (2, 7));
+}
+
+#[test]
+fn resume_does_not_restore_usage_measured_before_latest_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = store::SessionStore::new(dir.path().join("sessions"));
+    let path = session_store
+        .create(
+            std::path::Path::new("/tmp/stale-compact-usage"),
+            &"p/m".into(),
+        )
+        .unwrap();
+
+    let mut old = vec![
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(user("old prompt")),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant("old response")),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "p/m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: Usage {
+                    input_tokens: 149_000,
+                    ..Usage::default()
+                },
+            },
+        },
+    ];
+    store::append_events(&path, &mut old, None).unwrap();
+    store::append_compaction(
+        &path,
+        &[],
+        None,
+        "summary".to_string(),
+        [old[0].id.clone(), old[1].id.clone()],
+        store::CompactionCounts {
+            summarized: 2,
+            represented: 2,
+            kept: 0,
+        },
+    )
+    .unwrap();
+    // Simulate shutdown during the silent continuation: content was
+    // checkpointed after compact, but no post-compact usage marker exists.
+    let mut continuation = vec![SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: msg(assistant("partial continuation")),
+    }];
+    store::append_events(&path, &mut continuation, None).unwrap();
+
+    let (_meta, index, _size) = store::load_index(&path).unwrap();
+    let mut a = app();
+    restore_compaction_from_index(&mut a, &path, &index);
+
+    assert_eq!(a.status_usage, None);
+    assert_eq!(a.prev_ctx_tokens, None);
+    assert!(!a.settled_usage_fresh);
+    assert!(a.compacted);
 }

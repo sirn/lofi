@@ -104,6 +104,22 @@ pub async fn build_agent(
         let provider = open(model.api, provider_cfg)?;
         Ok((provider, model))
     }));
+    // Expose the same startup registry to sandbox code so callers can choose
+    // model/thinking overrides without guessing configured identifiers.
+    let catalog_choices = registry.choices();
+    let agent = agent.with_subagent_model_catalog(Arc::new(move || {
+        let models = catalog_choices
+            .iter()
+            .map(|choice| serde_json::json!({
+                "id": format!("{}/{}", choice.provider, choice.id),
+                "name": choice.name,
+                "thinking": choice.thinking_levels.iter().map(|level| level.as_str()).collect::<Vec<_>>(),
+                "supportsImage": choice.supports_image,
+                "contextWindow": choice.context_window,
+            }))
+            .collect::<Vec<_>>();
+        serde_json::json!({"ok": true, "models": models})
+    }));
     // Throttle concurrent subagents when configured.
     let agent = if config.agent.subagents.max_concurrent > 0 {
         agent.with_subagent_limit(config.agent.subagents.max_concurrent)

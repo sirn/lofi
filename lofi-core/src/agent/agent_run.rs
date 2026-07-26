@@ -484,6 +484,9 @@ impl Agent {
                     Ok(None) => break,
                     Ok(Some(ev)) => match ev {
                         Ok(e) => {
+                            // A protocol-level Done event terminates the round even if
+                            // the HTTP/SSE connection remains open afterward.
+                            let terminal = matches!(e, StreamingEvent::Done(_));
                             let is_thinking_ev = matches!(
                                 e,
                                 StreamingEvent::ThinkingDelta(_)
@@ -613,6 +616,9 @@ impl Agent {
                                 )));
                             }
                             assembler.push(e);
+                            if terminal {
+                                break;
+                            }
                         }
                         Err(err) => {
                             return Err(err);
@@ -883,6 +889,10 @@ impl Agent {
                 tmp_dir: self.tmp_dir.clone(),
                 strings,
                 agent: Some(agent_fn.clone()),
+                models: self
+                    .subagent_model_catalog
+                    .clone()
+                    .map(|catalog| catalog as lofi_code::ModelsFn),
                 recall: recall.clone(),
                 result: result.clone(),
                 on_tool_event: Some(on_tool_event),
@@ -976,7 +986,7 @@ impl Agent {
     /// [`subagent::run`] with a fresh nested loop reusing the same provider,
     /// model, and workspace root. The subagent's final assistant text becomes
     /// the `lofi.agent()` return value inside the sandbox.
-    fn make_agent_fn(&self) -> AgentFn {
+    pub(super) fn make_agent_fn(&self) -> AgentFn {
         let self_clone = self.clone();
         let sem = self.subagent_semaphore.clone();
         let model_resolver = self.subagent_model_resolver.clone();

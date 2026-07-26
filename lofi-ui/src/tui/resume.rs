@@ -141,21 +141,18 @@ pub(super) fn restore_compaction_from_index(
     index: &[store::EventIndex],
 ) {
     let active = active_index_path(index);
-    let mut last_comp = None;
+    let mut last_compaction_pos = None;
     let mut last_usage = None;
-    let mut assistants = 0;
-    for &i in &active {
+    for (pos, &i) in active.iter().enumerate() {
         match index[i].kind {
-            store::IndexKind::Compaction => {
-                last_comp = Some(i);
-                assistants = 0;
-            }
-            store::IndexKind::AssistantMessage if last_comp.is_some() => assistants += 1,
+            store::IndexKind::Compaction => last_compaction_pos = Some(pos),
             store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => {
                 if let Ok(ev) = store::load_event_at(path, index[i].offset) {
                     match ev.kind {
                         SessionEventKind::TurnEnd { usage, .. }
-                        | SessionEventKind::TurnFailed { usage, .. } => last_usage = Some(usage),
+                        | SessionEventKind::TurnFailed { usage, .. } => {
+                            last_usage = Some((pos, usage));
+                        }
                         _ => {}
                     }
                 }
@@ -163,8 +160,16 @@ pub(super) fn restore_compaction_from_index(
             _ => {}
         }
     }
-    app.compacted = last_comp.is_some_and(|i| active.last() == Some(&i));
-    app.last_compact_msg_count = if last_comp.is_some() { assistants } else { 0 };
-    app.prev_ctx_tokens = last_usage.map(|u: Usage| u.input_tokens + u.cache_read_tokens);
-    app.status_usage = if app.compacted { None } else { last_usage };
+    // A compaction invalidates every older provider-usage measurement. This
+    // remains true when partial continuation messages follow the marker but
+    // no new terminal usage event was committed before shutdown.
+    let usage_after_compaction = last_usage
+        .filter(|(pos, _)| last_compaction_pos.is_none_or(|compact_pos| *pos > compact_pos))
+        .map(|(_, usage)| usage);
+    app.compacted = last_compaction_pos.is_some() && usage_after_compaction.is_none();
+    // Resume itself never compacts. Leave hysteresis unarmed so the first
+    // newly completed model round is evaluated against the soft cap instead
+    // of inheriting a missed pre-shutdown crossing forever.
+    app.prev_ctx_tokens = None;
+    app.status_usage = usage_after_compaction;
 }

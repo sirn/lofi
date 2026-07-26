@@ -43,6 +43,7 @@ use lofi_providers::{open, Provider};
 
 type SubagentModelResolver =
     Arc<dyn Fn(&str, Option<ThinkingLevel>) -> Result<(Box<dyn Provider>, Model)> + Send + Sync>;
+type SubagentModelCatalog = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 use lofi_types::BashConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::oneshot;
@@ -272,6 +273,8 @@ pub struct Agent {
     subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Resolve validated per-call model/thinking overrides for subagents.
     subagent_model_resolver: Option<SubagentModelResolver>,
+    /// Discoverable model catalog exposed to sandbox code as `lofi.models()`.
+    subagent_model_catalog: Option<SubagentModelCatalog>,
 }
 
 impl Agent {
@@ -308,6 +311,7 @@ impl Agent {
             skills_dir: None,
             subagent_semaphore: None,
             subagent_model_resolver: None,
+            subagent_model_catalog: None,
         }
     }
 
@@ -336,6 +340,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             subagent_semaphore: self.subagent_semaphore.clone(),
             subagent_model_resolver: self.subagent_model_resolver.clone(),
+            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -363,6 +368,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             subagent_semaphore: self.subagent_semaphore.clone(),
             subagent_model_resolver: self.subagent_model_resolver.clone(),
+            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -387,6 +393,7 @@ impl Agent {
             skills_dir,
             subagent_semaphore: self.subagent_semaphore.clone(),
             subagent_model_resolver: self.subagent_model_resolver.clone(),
+            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -429,6 +436,15 @@ impl Agent {
     pub(crate) fn with_subagent_model_resolver(&self, resolver: SubagentModelResolver) -> Self {
         Self {
             subagent_model_resolver: Some(resolver),
+            ..self.clone()
+        }
+    }
+
+    /// Set the catalog exposed through `lofi.models()`.
+    #[must_use]
+    pub(crate) fn with_subagent_model_catalog(&self, catalog: SubagentModelCatalog) -> Self {
+        Self {
+            subagent_model_catalog: Some(catalog),
             ..self.clone()
         }
     }

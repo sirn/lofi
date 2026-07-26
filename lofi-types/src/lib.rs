@@ -1100,6 +1100,7 @@ impl Default for SubagentConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod subagent_config_tests {
     use super::SubagentConfig;
 

@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use lofi_code::{
     compile_ts, exec, AgentFn, AgentRequest, AgentStatus, BashEnv, ExecCtx, ExecOptions, ToolEvent,
@@ -27,6 +28,7 @@ fn ctx(root: &Path) -> ExecCtx {
         tmp_dir,
         strings: HashMap::new(),
         agent: None,
+        models: None,
         on_tool_event: None,
         recall: None,
         result: None,
@@ -163,6 +165,7 @@ async fn strings_exposed_as_lofi_strings() {
         tmp_dir: std::env::temp_dir().join("lofi-test"),
         strings,
         agent: None,
+        models: None,
         on_tool_event: None,
         recall: None,
         result: None,
@@ -238,6 +241,23 @@ async fn exec_tmp_dir_exposed() {
 }
 
 #[tokio::test]
+async fn models_call_returns_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = ctx(dir.path());
+    cx.models = Some(Arc::new(|| {
+        serde_json::json!({
+            "ok": true,
+            "models": [{"id": "p/m", "thinking": ["low", "high"]}]
+        })
+    }));
+    let res = exec("return lofi.models();", &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value["models"][0]["id"], "p/m");
+    assert_eq!(res.value["models"][0]["thinking"][1], "high");
+}
+
+#[tokio::test]
 async fn agent_call_emits_tool_events() {
     use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
@@ -269,6 +289,7 @@ async fn agent_call_emits_tool_events() {
         tmp_dir: std::env::temp_dir().join("lofi-test"),
         strings: HashMap::new(),
         agent: Some(agent),
+        models: None,
         on_tool_event: Some(cb),
         recall: None,
         result: None,
@@ -281,7 +302,7 @@ async fn agent_call_emits_tool_events() {
         skills_dir: None,
     };
     let src = "const text = await lofi.agent('do stuff'); \
-               const rich = await lofi.agent('do stuff', { structured: true }); \
+               const rich = await lofi.agent('do stuff', { model: 'p/m', thinking: 'high', structured: true }); \
                return { text, rich };";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value["text"], "subagent reply");
@@ -327,6 +348,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         tmp_dir: std::env::temp_dir().join("lofi-test"),
         strings: HashMap::new(),
         agent: None,
+        models: None,
         on_tool_event: Some(cb),
         recall: None,
         result: None,

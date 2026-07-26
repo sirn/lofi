@@ -1576,6 +1576,16 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
             ));
         }
     }
+    if name == "agent" {
+        let model = json_string_field(raw, "model")?;
+        let thinking = json_string_field(raw, "thinking").unwrap_or("off");
+        let rounds = json_u64_field(raw, "rounds").unwrap_or(0);
+        let duration = json_u64_field(raw, "durationMs").unwrap_or(0);
+        return Some(format!(
+            "({model}:{thinking}, {rounds} rounds, {})",
+            prim::fmt_duration(Duration::from_millis(duration))
+        ));
+    }
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     match name {
         "read" | "view" | "bash_read" => {
@@ -1696,7 +1706,7 @@ impl ExecBlockBranch<'_> {
         // outcome of an action; errors stay visible regardless so a failure
         // is never silently swallowed.
         if !cx.app.verbose
-            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit")
+            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit" | "agent")
             && !self.nt.is_error
         {
             return out;

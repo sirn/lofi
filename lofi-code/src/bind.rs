@@ -9,17 +9,20 @@ use super::convert::js_to_json;
 use super::*;
 
 /// Bind the builtin file/shell tool methods onto `lofi`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn bind_tools<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
     agent: Option<AgentFn>,
+    models: Option<ModelsFn>,
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_agent_tool(ctx, lofi, tools, agent)?;
+    bind_models_tool(ctx, lofi, models)?;
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
@@ -255,6 +258,60 @@ fn bind_file_tools<'js>(
     Ok(())
 }
 
+/// Bind `lofi.models()`, the discoverable nested-agent model catalog.
+fn bind_models_tool<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    models: Option<ModelsFn>,
+) -> rquickjs::Result<()> {
+    lofi.set(
+        "models",
+        Function::new(ctx.clone(), move || -> rquickjs::Result<JsonV> {
+            let value = models.as_ref().map_or_else(
+                || json!({"ok": false, "error": "models() is not available in this context"}),
+                |catalog| catalog(),
+            );
+            Ok(JsonV(value))
+        })?,
+    )
+}
+
+/// Compact native-tool preview for a completed subagent. The full text is
+/// still returned to the caller; this avoids storing a duplicate JSON-escaped
+/// copy of a potentially long response in the UI/transcript.
+fn subagent_preview(value: &Json) -> String {
+    let text = value.get("text").and_then(Json::as_str).unwrap_or("");
+    let model = value
+        .get("model")
+        .and_then(Json::as_str)
+        .unwrap_or("unknown");
+    let thinking = value
+        .get("thinking")
+        .and_then(Json::as_str)
+        .unwrap_or("off");
+    let rounds = value.get("rounds").and_then(Json::as_u64).unwrap_or(0);
+    let duration = value.get("durationMs").and_then(Json::as_u64).unwrap_or(0);
+    let cost = value.get("cost").and_then(Json::as_f64).unwrap_or(0.0);
+    let mut preview = text.lines().take(3).collect::<Vec<_>>().join("\n");
+    if preview.chars().count() > 1_000 {
+        preview = preview.chars().take(1_000).collect();
+    }
+    let truncated = text.lines().count() > 3 || text.chars().count() > preview.chars().count();
+    if truncated {
+        preview.push_str("\n…");
+    }
+    json!({
+        "text": preview,
+        "model": model,
+        "thinking": thinking,
+        "rounds": rounds,
+        "durationMs": duration,
+        "cost": cost,
+        "truncated": truncated,
+    })
+    .to_string()
+}
+
 /// Bind `agent` / `spawn`.
 fn bind_agent_tool<'js>(
     ctx: &Ctx<'js>,
@@ -310,7 +367,9 @@ fn bind_agent_tool<'js>(
                     };
                     match agent(req).await {
                         Ok(value) => {
-                            let result = value.to_string();
+                            // The native row gets a compact, human-oriented result;
+                            // structured accounting remains available to guest code.
+                            let result = subagent_preview(&value);
                             let returned = if structured {
                                 value
                             } else {

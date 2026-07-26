@@ -3,7 +3,7 @@
 
 use super::*;
 use async_trait::async_trait;
-use futures::stream;
+use futures::{stream, StreamExt};
 use lofi_types::{Api, SessionEventKind, Usage};
 use tempfile::tempdir;
 
@@ -29,6 +29,26 @@ impl Provider for PendingAfterRoundProvider {
             Some(events) => Ok(Box::pin(stream::iter(events.into_iter().map(Ok)))),
             None => std::future::pending().await,
         }
+    }
+}
+
+struct TerminalThenPendingProvider;
+
+#[async_trait]
+impl Provider for TerminalThenPendingProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        Ok(Box::pin(
+            stream::iter([
+                Ok(StreamingEvent::TextDelta("done".to_string())),
+                Ok(StreamingEvent::Done(Usage::default())),
+            ])
+            .chain(stream::pending()),
+        ))
     }
 }
 
@@ -144,6 +164,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         skills_dir: None,
         subagent_semaphore: None,
         subagent_model_resolver: None,
+        subagent_model_catalog: None,
     }
 }
 
@@ -335,6 +356,67 @@ async fn run_once_tool_call_executes_and_appends_result() {
 }
 
 #[tokio::test]
+async fn subagent_callback_honors_model_and_thinking_override() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::TextDelta("reply".to_string()),
+            StreamingEvent::Done(Usage::default()),
+        ]],
+        dir.path(),
+    )
+    .with_subagent_model_resolver(Arc::new(|query, thinking| {
+        assert_eq!(query, "q/other");
+        assert_eq!(thinking, Some(ThinkingLevel::High));
+        let mut selected = model();
+        selected.provider = "q".into();
+        selected.id = "other".into();
+        selected.thinking = ThinkingLevel::High;
+        Ok((
+            Box::new(MockProvider {
+                rounds: std::sync::Mutex::new(vec![vec![
+                    StreamingEvent::TextDelta("reply".to_string()),
+                    StreamingEvent::Done(Usage::default()),
+                ]]),
+            }) as Box<dyn Provider>,
+            selected,
+        ))
+    }));
+    let callback = agent.make_agent_fn();
+    let value = callback(lofi_code::AgentRequest {
+        prompt: "go".into(),
+        opts: Some(serde_json::json!({"model": "q/other", "thinking": "high"})),
+        on_status: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(value["text"], "reply");
+    assert_eq!(value["model"], "q/other");
+    assert_eq!(value["thinking"], "high");
+}
+
+#[tokio::test]
+async fn run_once_stops_at_done_without_polling_stream_again() {
+    // A protocol terminal event is sufficient even when the transport keeps
+    // the connection open. This is the Responses/subagent hang regression.
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(TerminalThenPendingProvider);
+    let agent = Agent {
+        provider,
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let mut messages = vec![user_msg("go")];
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        agent.run_once(&mut messages),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(finished);
+}
+
+#[tokio::test]
 async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
@@ -444,6 +526,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         skills_dir: None,
         subagent_semaphore: None,
         subagent_model_resolver: None,
+        subagent_model_catalog: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -489,6 +572,7 @@ async fn failed_exec_closes_concurrent_pending_native_tools() {
         skills_dir: None,
         subagent_semaphore: None,
         subagent_model_resolver: None,
+        subagent_model_catalog: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];

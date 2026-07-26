@@ -419,7 +419,8 @@ global `lofi` object:
 - `lofi.edit({ path, old, new })` → `{ ok: true }` (errors if `old` is missing
   or appears more than once)
 - `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code, command, directory, signal, duration_ms, status }` (`status` is `"exited"`, `"signaled"`, or `"timeout"`); output keeps the last 20 lines / 4 KB and links to the full pageable log when truncated
-- `lofi.agent(prompt, opts?)` → the subagent's final assistant text
+- `lofi.models()` → `{ ok, models: [{ id, name, thinking, supportsImage, contextWindow }] }`
+- `lofi.agent(prompt, opts?)` → final text; options include `model`, `thinking`, `system`, and `structured`
 
 File tools canonicalize paths against the workspace root and reject escapes.
 `bash` runs with `cwd` = workspace root. `print(...)` buffers into the tool

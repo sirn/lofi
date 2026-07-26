@@ -107,6 +107,16 @@ A string property: the absolute path to the per-session tmp directory backing
 `lofi.bash` full-output logs. This directory is a read root — `lofi.read`,
 `lofi.ls`, `lofi.find`, and `lofi.grep` can access files under it.
 
+## lofi.models()
+
+List models available to nested agents. Use this before selecting a per-call
+model or thinking override.
+
+**Returns:** `{ ok, models }`, where each model is
+`{ id, name, thinking, supportsImage, contextWindow }`. `id` is the
+qualified `provider/model` value accepted by `lofi.agent`; `thinking` is
+the array of supported non-off levels (`off` is always accepted).
+
 ## lofi.agent(prompt, opts?)
 
 Run a nested agent loop with the parent's workspace and policy. It uses the

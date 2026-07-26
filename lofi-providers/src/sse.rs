@@ -61,15 +61,6 @@ where
 /// hostile provider stream.
 const MAX_SSE_PENDING_BYTES: usize = 1024 * 1024;
 
-/// Maximum bytes to drain from the upstream after the terminal sentinel
-/// (data: [DONE] or `message_stop`) before giving up and dropping the
-/// connection. Some providers emit a trailing cost or
-/// usage chunk *after* [DONE]; reading it to EOF lets the server close
-/// the socket cleanly instead of seeing EPIPE, which it would otherwise
-/// log as a client disconnect. The cap bounds a misbehaving upstream that
-/// keeps sending after the sentinel without ever ending.
-const MAX_DRAIN_BYTES: usize = 64 * 1024;
-
 /// Push a fatal decode error and stop the stream.
 fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
     state
@@ -92,14 +83,8 @@ struct SseState<M> {
     queued: std::collections::VecDeque<Result<StreamingEvent>>,
     /// `true` once the upstream byte stream has ended.
     exhausted: bool,
-    /// `true` once a terminal sentinel (`data: [DONE]` or `message_stop`)
-    /// was seen. The unfold still drains the upstream to EOF (see
-    /// [`MAX_DRAIN_BYTES`]) so the server can close cleanly, then stops.
+    /// `true` once a terminal sentinel or mapper terminal event was seen.
     done: bool,
-    /// Bytes consumed by the post-sentinel drain, bounded by
-    /// [`MAX_DRAIN_BYTES`]. Once the cap is hit the connection is dropped
-    /// rather than reading indefinitely.
-    drained: usize,
     mapper: M,
 }
 
@@ -120,7 +105,6 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
         queued: std::collections::VecDeque::new(),
         exhausted: false,
         done: false,
-        drained: 0,
         mapper,
     };
     futures::stream::unfold(state, step).boxed()
@@ -128,10 +112,9 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
 
 /// One unfold step: emit the next queued event, or pull and decode chunks
 /// until one produces an event (or the upstream ends). Once the terminal
-/// sentinel is seen, the remaining upstream bytes are drained (bounded by
-/// [`MAX_DRAIN_BYTES`]) before the unfold terminates, so providers that emit
-/// a trailing cost/usage chunk after [DONE] see a clean EOF instead of an
-/// EPIPE they would log as a client disconnect.
+/// sentinel is seen, the response is dropped immediately. A protocol terminal
+/// event must never wait for transport EOF: HTTP/SSE peers may keep the connection
+/// open for reuse or heartbeats after the logical response has completed.
 async fn step<M: SseMapper>(
     mut state: SseState<M>,
 ) -> Option<(Result<StreamingEvent>, SseState<M>)> {
@@ -143,20 +126,6 @@ async fn step<M: SseMapper>(
             return None;
         }
         if state.done {
-            // Terminal sentinel seen: drain the remaining upstream so the
-            // server closes the socket cleanly, then stop. Stop draining
-            // once the cap is hit; a well-behaved provider ends within a
-            // chunk or two, while a misbehaving one is dropped rather than
-            // read indefinitely. A transport error during the drain is
-            // ignored since the stream already terminated successfully.
-            while state.drained < MAX_DRAIN_BYTES {
-                match state.bytes.next().await {
-                    Some(Ok(chunk)) => {
-                        state.drained = state.drained.saturating_add(chunk.len());
-                    }
-                    _ => break,
-                }
-            }
             state.exhausted = true;
             return None;
         }
@@ -318,8 +287,18 @@ fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
         }
         match state.mapper.map(ev) {
             Ok(events) => {
+                let terminal = events
+                    .iter()
+                    .any(|event| matches!(event, StreamingEvent::Done(_)));
                 for e in events {
                     state.queued.push_back(Ok(e));
+                }
+                // Provider mappers normalize their logical terminal event to
+                // Done. Stop after emitting it; transport EOF is not part of
+                // the completion contract and may never arrive.
+                if terminal {
+                    state.done = true;
+                    return;
                 }
             }
             Err(e) => {
@@ -363,7 +342,6 @@ mod tests {
             queued: std::collections::VecDeque::new(),
             exhausted: false,
             done: false,
-            drained: 0,
             mapper: text_mapper,
         };
         let stream = futures::stream::unfold(state, step);
@@ -381,7 +359,6 @@ mod tests {
             queued: std::collections::VecDeque::new(),
             exhausted: false,
             done: false,
-            drained: 0,
             mapper: text_mapper,
         };
         let stream = futures::stream::unfold(state, step);
@@ -505,6 +482,44 @@ mod tests {
         assert!(out.len() > 1);
     }
 
+    #[derive(Default)]
+    struct DoneMapper;
+
+    impl SseMapper for DoneMapper {
+        fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
+            if event.data == "done" {
+                Ok(vec![StreamingEvent::Done(Default::default())])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mapper_done_terminates_without_transport_eof() {
+        let byte_stream =
+            futures::stream::once(async { Ok(Bytes::from_static(b"data: done\n\n")) })
+                .chain(futures::stream::pending());
+        let state = SseState {
+            bytes: Box::pin(byte_stream),
+            pending_bytes: Vec::new(),
+            pending_lines: String::new(),
+            pending_cr: false,
+            queued: std::collections::VecDeque::new(),
+            exhausted: false,
+            done: false,
+            mapper: DoneMapper,
+        };
+        let events = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            futures::stream::unfold(state, step).collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+    }
+
     #[tokio::test]
     async fn done_marker_terminates_stream() {
         let body = b"data: {\"text\":\"a\"}\n\ndata: [DONE]\n\ndata: {\"text\":\"after\"}\n\n";
@@ -517,12 +532,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trailing_chunks_after_done_are_drained_not_emitted() {
-        // Some OpenAI-compatible providers emit a trailing
-        // cost/usage chunk *after* `data: [DONE]`. The decoder must drain it
-        // to EOF so the server sees a clean close instead of EPIPE, while
-        // still emitting only the pre-sentinel events. Splitting the trailing
-        // chunk separately exercises the post-done drain loop.
+    async fn trailing_chunks_after_done_are_not_polled_or_emitted() {
+        // A terminal sentinel ends the logical response immediately. Trailing
+        // chunks are not emitted, and a peer that stays open cannot hold the
+        // caller hostage after completion.
         let chunks: Vec<&'static [u8]> = vec![
             b"data: {\"text\":\"a\"}\n\ndata: [DONE]\n\n",
             b"data: {\"choices\":[],\"cost\":\"0\"}\n\n",
@@ -533,7 +546,7 @@ mod tests {
             1,
             "trailing chunk must not produce events: {out:?}"
         );
-        assert!(out[0].is_ok(), "drain must not surface a transport error");
+        assert!(out[0].is_ok(), "terminal handling must remain successful");
         assert_eq!(
             *out[0].as_ref().unwrap(),
             StreamingEvent::TextDelta("a".to_string())
