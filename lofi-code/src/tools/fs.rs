@@ -19,6 +19,45 @@ pub(super) fn default_tmp_dir() -> PathBuf {
     dir
 }
 
+/// Atomically replace a regular file and durably commit both its contents and
+/// directory entry. The temporary file lives beside the destination so rename
+/// cannot cross filesystems.
+pub(super) fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("file path has no parent"))?;
+    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let mut attempt = 0_u64;
+    let (tmp, mut file) = loop {
+        let tmp = parent.join(format!(".{stem}.lofi-{}-{attempt}.tmp", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let result = (|| {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Resolve `p` against `root`, rejecting escapes.
 ///
 /// If the target exists, it is canonicalized directly. If not (the common

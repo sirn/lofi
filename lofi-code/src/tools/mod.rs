@@ -32,8 +32,8 @@ pub mod write;
 
 pub use env::BashEnv;
 use fs::{
-    default_tmp_dir, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf,
-    resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
+    atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
+    reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
 };
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
@@ -727,6 +727,31 @@ mod tests {
         assert_eq!(v["signal"], Value::Null);
         assert_eq!(v["status"], json!("exited"));
         assert!(v["duration_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn bash_keeps_only_a_compact_tail_and_saves_full_output() {
+        let (_dir, tools) = tools();
+        let v = tools
+            .bash(json!({
+                "cmd": "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done"
+            }))
+            .await
+            .unwrap();
+        let output = v["output"].as_str().unwrap();
+        assert!(!output.contains("line10\n"), "output: {output}");
+        assert!(output.starts_with("line11\n"), "output: {output}");
+        assert!(output.contains("line30\n"), "output: {output}");
+        assert!(output.contains("[Showing lines 11-30 of 30 (4.0KB limit)."));
+
+        let path = output
+            .split("Full output: ")
+            .nth(1)
+            .and_then(|tail| tail.split(". Use lofi.read").next())
+            .unwrap();
+        let full = std::fs::read_to_string(path).unwrap();
+        assert!(full.starts_with("line1\n"));
+        assert!(full.contains("line30\n"));
     }
 
     #[tokio::test]

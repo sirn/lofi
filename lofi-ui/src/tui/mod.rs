@@ -1040,6 +1040,12 @@ async fn run_loop(
         );
     }
 
+    // LOFI_DEBUG opts into the same diagnostics as /debug, but from process
+    // startup so resume/replay and subsequent activity are logged without an
+    // interactive command. Enable after session restoration so the first
+    // sample describes the fully initialized application.
+    app.enable_debug_from_env();
+
     // Create the confirmation channel for shell-policy `ask` decisions.
     // The agent sends ConfirmRequests; the TUI shows a yes/no prompt and
     // responds through the embedded oneshot.

@@ -418,7 +418,7 @@ global `lofi` object:
 - `lofi.write({ path, text })` → `{ ok: true }`
 - `lofi.edit({ path, old, new })` → `{ ok: true }` (errors if `old` is missing
   or appears more than once)
-- `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code, command, directory, signal, duration_ms, status }` (`status` is `"exited"`, `"signaled"`, or `"timeout"`)
+- `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code, command, directory, signal, duration_ms, status }` (`status` is `"exited"`, `"signaled"`, or `"timeout"`); output keeps the last 20 lines / 4 KB and links to the full pageable log when truncated
 - `lofi.agent(prompt, opts?)` → the subagent's final assistant text
 
 File tools canonicalize paths against the workspace root and reject escapes.
