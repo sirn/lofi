@@ -49,6 +49,7 @@ impl App {
             top_line: 0,
             last_base: 0,
             verbose: false,
+            debug_after_draw: None,
             debug: None,
             should_quit: false,
             session: SessionState {
@@ -410,24 +411,47 @@ impl App {
             .unwrap_or(empty)
     }
 
-    /// Ensure frozen turn `idx`'s rendered lines are in the viewport cache,
-    /// materializing from `turns` or the transcript file on a miss.
-    /// `ensure_frozen` must have already recorded the turn's height.
+    /// Cache a frozen turn only when its complete styled representation is
+    /// reasonably small. Large /verbose turns are rendered by row window
+    /// instead, preventing one tool result from dominating RSS.
     pub(super) fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
-        if !self.frozen_render.contains(idx) {
-            let theme = self.theme;
-            let turn = self.materialize_turn(idx);
-            let lines = {
-                let cx = view::component::Cx {
-                    app: self,
-                    theme,
-                    width,
-                    active_turn: false,
-                };
-                view::blocks::render_turn_lines(&cx, &turn)
-            };
-            self.frozen_render.insert(idx, lines);
+        const MAX_CACHED_TURN_ROWS: usize = 4096;
+        if self.frozen_render.contains(idx)
+            || self.frozen_heights.get(idx).copied().unwrap_or(usize::MAX) > MAX_CACHED_TURN_ROWS
+        {
+            return;
         }
+        let theme = self.theme;
+        let turn = self.materialize_turn(idx);
+        let lines = {
+            let cx = view::component::Cx {
+                app: self,
+                theme,
+                width,
+                active_turn: false,
+            };
+            view::blocks::render_turn_lines(&cx, &turn)
+        };
+        self.frozen_render.insert(idx, lines);
+    }
+
+    /// Render a frozen turn's requested row window from its file-backed
+    /// source. Used for oversized turns that deliberately bypass the cache.
+    pub(super) fn frozen_turn_window(
+        &self,
+        idx: usize,
+        width: usize,
+        range: std::ops::Range<usize>,
+    ) -> Vec<view::RenderLine> {
+        let theme = self.theme;
+        let turn = self.materialize_turn(idx);
+        let cx = view::component::Cx {
+            app: self,
+            theme,
+            width,
+            active_turn: false,
+        };
+        view::blocks::render_turn_window(&cx, &turn, range)
     }
 
     /// Sync the frozen-turn cache to the current `turns`. Frozen turns are all
@@ -453,19 +477,19 @@ impl App {
             let idx = self.frozen_heights.len();
             let theme = self.theme;
             let turn = self.materialize_turn(idx);
-            let lines = {
+            let height = {
                 let cx = view::component::Cx {
                     app: self,
                     theme,
                     width,
                     active_turn: false,
                 };
-                view::blocks::render_turn_lines(&cx, &turn)
+                view::blocks::render_turn_height(&cx, &turn)
             };
-            // Heights are the compact permanent index. Do not retain this
-            // rendered representation merely because its height was unknown;
-            // the viewport pass below will cache only nearby turns.
-            self.frozen_heights.push(lines.len());
+            // Heights are the compact permanent index. Measuring a newly
+            // frozen verbose turn must not materialize its complete styled
+            // output; the viewport pass renders only rows it needs.
+            self.frozen_heights.push(height);
         }
         // Defensive: turns shrank without an epoch bump.
         if self.frozen_heights.len() > target {

@@ -3070,10 +3070,13 @@ fn verbose_toggles() {
     let before = a.turns.len();
     a.toggle_verbose();
     assert!(a.verbose);
+    assert_eq!(a.debug_after_draw, Some("verbose"));
     // Verbose state surfaces on the rule line, not as a chat turn.
     assert_eq!(a.turns.len(), before);
+    a.debug_after_draw = None;
     a.toggle_verbose();
     assert!(!a.verbose);
+    assert_eq!(a.debug_after_draw, Some("verbose"));
     assert_eq!(a.turns.len(), before);
 }
 #[test]

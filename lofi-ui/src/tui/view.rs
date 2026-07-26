@@ -245,9 +245,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let n_turns = app.turns.len();
     let running = app.run_active();
 
-    // The last turn is the only mutable one; rebuild it fresh this frame.
-    let last_lines: Vec<RenderLine> = if n_turns == 0 {
-        Vec::new()
+    // Measure the live last turn without materializing its styled rows. Tool
+    // bodies can be enormous in /verbose; only the viewport window is built
+    // below after the scroll offset is known.
+    let last_h = if n_turns == 0 {
+        0
     } else {
         let cx = component::Cx {
             app,
@@ -255,14 +257,13 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             width: w,
             active_turn: running,
         };
-        blocks::render_turn_lines(&cx, &app.turns[n_turns - 1])
+        blocks::render_turn_height(&cx, &app.turns[n_turns - 1])
     };
 
     // Total line count mirrors `render_turns`: per-turn lines plus a blank
     // between turns (no trailing blank — the separator below the log is
     // owned by the working/input layout).
     let frozen_total: usize = app.frozen_heights.iter().sum();
-    let last_h = last_lines.len();
     app.last_turn_height = last_h;
     let mut total: usize = frozen_total + last_h;
     total += if n_turns == 0 { 1 } else { n_turns - 1 };
@@ -287,11 +288,27 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // count; pinning the row makes the viewport follow the cursor instead.
     // `nav_show_cursor` below clamps to the nearest edge if the row no longer
     // fits (e.g. a height shrink).
-    if let Some(anchor) = nav_anchor {
-        app.reseat_nav_cursor(anchor, &last_lines, w);
-    }
-    if let Some(anchor) = sel_anchor {
-        app.reseat_sel_anchor(anchor, &last_lines, w);
+    if nav_anchor.is_some() || sel_anchor.is_some() {
+        // Resize re-seating needs content offsets across the whole live turn.
+        // This is an exceptional path; steady-state rendering remains
+        // viewport-local.
+        let last_lines = if n_turns == 0 {
+            Vec::new()
+        } else {
+            let cx = component::Cx {
+                app,
+                theme,
+                width: w,
+                active_turn: running,
+            };
+            blocks::render_turn_lines(&cx, &app.turns[n_turns - 1])
+        };
+        if let Some(anchor) = nav_anchor {
+            app.reseat_nav_cursor(anchor, &last_lines, w);
+        }
+        if let Some(anchor) = sel_anchor {
+            app.reseat_sel_anchor(anchor, &last_lines, w);
+        }
     }
     // Keep the cursor on its previous viewport row: the re-seat above put it
     // on its content character; shift the viewport top to match so the cursor
@@ -375,13 +392,41 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     // Entirely above the viewport; advance without fetching.
                     pos += h;
                 } else {
-                    app.ensure_frozen_turn(i, w);
+                    let turn_start = pos;
                     if let Some(lines) = app.frozen_render.get(i) {
                         feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                    } else {
+                        let start = off.saturating_sub(turn_start);
+                        let stop = start.saturating_add(want).min(h);
+                        let lines = app.frozen_turn_window(i, w, start..stop);
+                        pos = turn_start + start;
+                        feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
                     }
                 }
             } else {
-                feed_segment(&last_lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                // Render only the rows of the mutable last turn that intersect
+                // the viewport. This is the critical /verbose path: a huge
+                // tool result contributes to total height without retaining a
+                // styled line for every output row.
+                let turn_start = pos;
+                if turn_start + last_h <= off {
+                    pos += last_h;
+                } else {
+                    let start = off.saturating_sub(turn_start);
+                    let stop = start.saturating_add(want).min(last_h);
+                    let cx = component::Cx {
+                        app,
+                        theme,
+                        width: w,
+                        active_turn: running,
+                    };
+                    let lines =
+                        blocks::render_turn_window(&cx, &app.turns[n_turns - 1], start..stop);
+                    // The returned slice starts at this global row, not at
+                    // the turn's first row.
+                    pos = turn_start + start;
+                    feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                }
             }
             if want == 0 {
                 break;

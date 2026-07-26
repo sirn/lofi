@@ -11,6 +11,7 @@ impl App {
         // The state itself surfaces as the `[VERBOSE]` tag on the rule line
         // rather than a chat turn, so toggling stays out of the transcript.
         self.bump_render_epoch();
+        self.debug_after_draw = Some("verbose");
     }
 
     /// Handle a submitted line starting with '/'. Returns true if it was a

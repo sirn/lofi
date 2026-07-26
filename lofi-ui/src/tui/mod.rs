@@ -765,6 +765,10 @@ pub(crate) struct App {
     /// Bottom scroll offset from the last render; seeds `top_line` on un-pin.
     last_base: usize,
     verbose: bool,
+    /// Debug event to sample after the next completed frame. `/verbose`
+    /// schedules this so diagnostics capture the render/materialization cost,
+    /// not merely the cheap boolean toggle that precedes it.
+    debug_after_draw: Option<&'static str>,
     /// Opt-in process/component diagnostics writer enabled by `/debug`.
     debug: Option<debug_stats::DebugState>,
     should_quit: bool,
@@ -1065,6 +1069,9 @@ async fn run_loop(
     loop {
         if dirty {
             guard.draw(&mut app)?;
+            if let Some(event) = app.debug_after_draw.take() {
+                app.debug_sample(event);
+            }
             dirty = false;
         }
 
