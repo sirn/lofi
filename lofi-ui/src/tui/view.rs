@@ -102,7 +102,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let input_lines = app.input_lines(area.width as usize).max(1);
     let input_h = u16::try_from(input_lines).unwrap_or(u16::MAX);
     // Keep the prompt cursor on screen within its capped height.
-    app.sync_input_scroll(area.width.saturating_sub(2) as usize, input_lines);
+    app.sync_input_scroll(area.width.saturating_sub(3) as usize, input_lines);
 
     // The footer: a mode-badge line on the default background, then the
     // panel — a leading blank, the prompt, a blank, and the usage line —
@@ -202,8 +202,10 @@ fn feed_segment(
 }
 
 fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
-    let w = area.width as usize;
-    let height = area.height as usize;
+    let scroll_area = prim::scroll_area(area);
+    let content = scroll_area.content;
+    let w = content.width as usize;
+    let height = content.height as usize;
     // Detect a re-wrap before `ensure_frozen` updates `frozen_width`: the
     // absolute `top_line` is meaningless across a width change, so it is
     // re-anchored to the viewport's previous relative position below. A height
@@ -269,7 +271,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     total += if n_turns == 0 { 1 } else { n_turns - 1 };
 
     let base = total.saturating_sub(height);
-    app.log_rect = area;
+    app.log_rect = content;
     // A re-wrap shifts absolute line indices, so a `top_line` carried over
     // from the previous width may now point past the new bottom — clamping it
     // would snap a scrolled-up view to the bottom and stick there (`pinned`).
@@ -532,30 +534,20 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let para = Paragraph::new(vis).scroll((0, 0));
-    f.render_widget(para, area);
-    draw_scrollbar(f, area, off, total, app.theme);
+    f.render_widget(para, content);
+    draw_scrollbar(f, scroll_area.gutter, off, height, total, app.theme);
 }
 
-/// Thin right-edge scrollbar for a chrome viewport: delegates to the
-/// shared [`prim::render_scrollbar`] on the rightmost column of `area`,
-/// using the theme's thumb/track tones. Only drawn when content overflows.
+/// Draw a scrollbar in its dedicated gutter using the theme's muted tones.
 fn draw_scrollbar(
     f: &mut Frame,
-    area: Rect,
+    gutter: Rect,
     off: usize,
+    visible: usize,
     total: usize,
     t: crate::tui::theme::Theme,
 ) {
-    let track = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-    prim::render_scrollbar(
-        f,
-        track,
-        off,
-        area.height as usize,
-        total,
-        t.subtle,
-        t.muted,
-    );
+    prim::render_scrollbar(f, gutter, off, visible, total, t.subtle, t.muted);
 }
 
 /// One-line working indicator above the prompt, shown only while a run is
@@ -604,8 +596,9 @@ fn render_working(f: &mut Frame, area: Rect, app: &App) {
 /// by the frame [`VStack`].
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
-    let w = area.width as usize;
-    let content_w = w;
+    let scroll_area = prim::scroll_area(area);
+    let content = scroll_area.content;
+    let content_w = content.width as usize;
     // In Navigate/Select the prompt is inert: dim it and hide the cursor so
     // the transcript cursor is the focus. A centered modal (info, /resume,
     // /tree) likewise hides the cursor — it owns input while open.
@@ -626,22 +619,29 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::new().bg(t.panel_bg)),
-        area,
+        content,
     );
 
     if active {
         let (vrow, x_in) = app.input_cursor_pos(content_w);
         if vrow >= start && vrow < end {
-            let x = area
+            let x = content
                 .x
                 .saturating_add(u16::try_from(x_in).unwrap_or(u16::MAX));
-            let y = area
+            let y = content
                 .y
                 .saturating_add(u16::try_from(vrow - start).unwrap_or(u16::MAX));
             f.set_cursor_position((x, y));
         }
     }
-    draw_scrollbar(f, area, start, total, t);
+    draw_scrollbar(
+        f,
+        scroll_area.gutter,
+        start,
+        content.height as usize,
+        total,
+        t,
+    );
 }
 
 /// The footer block: a mode-badge line, the prompt, a blank, and a usage
@@ -685,7 +685,7 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     ])
     .split(inner);
     // chunks[0] is the leading blank (panel_bg and rail already painted).
-    app.input_rect = chunks[1];
+    app.input_rect = prim::scroll_area(chunks[1]).content;
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
 }
