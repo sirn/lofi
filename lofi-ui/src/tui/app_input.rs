@@ -5,9 +5,10 @@ use super::*;
 impl App {
     /// Number of select rows the input occupies after soft-wrapping to the
     /// prompt width, capped at [`MAX_INPUT_LINES`]. `width` is the full
-    /// terminal width; 2 cells are reserved for the `❯ `/`  ` prefix.
+    /// terminal width; 2 cells are reserved for the prompt's left inset and
+    /// one for the shared scrollbar gutter.
     pub(super) fn input_lines(&self, width: usize) -> usize {
-        let content_w = width.saturating_sub(2);
+        let content_w = width.saturating_sub(3);
         self.input_select_rows(content_w).len().min(MAX_INPUT_LINES)
     }
 

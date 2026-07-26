@@ -2140,6 +2140,44 @@ fn prompt_panel_uses_full_height_user_rail() {
 }
 
 #[test]
+fn scrollbars_use_a_gutter_outside_transcript_and_prompt_text() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(
+        (0..30)
+            .map(|_| "a transcript line that reaches the right edge")
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    a.input = (0..12).map(|_| "prompt row").collect::<Vec<_>>().join("\n");
+    a.input_cursor = a.input.len();
+
+    let mut term = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+
+    // The semantic content rectangles stop before the terminal's rightmost
+    // column. That column belongs exclusively to each viewport's scrollbar.
+    assert_eq!(a.log_rect.right(), 59);
+    assert_eq!(a.input_rect.right(), 59);
+    let log_gutter_x = a.log_rect.right();
+    let input_gutter_x = a.input_rect.right();
+    assert!(
+        (a.log_rect.y..a.log_rect.bottom())
+            .any(|y| matches!(buf[(log_gutter_x, y)].symbol(), "┃" | "│")),
+        "transcript scrollbar should be in its own gutter"
+    );
+    assert!(
+        (a.input_rect.y..a.input_rect.bottom())
+            .any(|y| matches!(buf[(input_gutter_x, y)].symbol(), "┃" | "│")),
+        "prompt scrollbar should be in its own gutter"
+    );
+}
+
+#[test]
 fn autocomplete_uses_primary_focus_default_background_and_no_header() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
