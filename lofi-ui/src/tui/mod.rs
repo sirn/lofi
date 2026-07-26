@@ -1050,9 +1050,14 @@ async fn run_loop(
 
     // LOFI_DEBUG opts into the same diagnostics as /debug, but from process
     // startup so resume/replay and subsequent activity are logged without an
-    // interactive command. Enable after session restoration so the first
-    // sample describes the fully initialized application.
+    // interactive command. Enable after session restoration. The immediate
+    // sample is the pre-draw baseline; schedule a second sample after the
+    // first frame so resume/replay cost is distinguishable from lazy layout
+    // and frozen-turn height materialization.
     app.enable_debug_from_env();
+    if app.debug.is_some() {
+        app.debug_after_draw = Some("initial_draw");
+    }
 
     // Create the confirmation channel for shell-policy `ask` decisions.
     // The agent sends ConfirmRequests; the TUI shows a yes/no prompt and

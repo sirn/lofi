@@ -402,25 +402,70 @@ impl App {
         let Some(path) = &self.session.path else {
             return empty;
         };
-        let bytes = {
-            use std::io::{Read, Seek, SeekFrom};
-            let Ok(mut f) = std::fs::File::open(path) else {
+        // Stream one event line at a time instead of allocating a buffer as
+        // large as the whole turn range. Historical turns can span several
+        // MiB (many tool rounds); the old range-wide Vec made the first draw's
+        // height pass leave an allocation matching the largest turn in the
+        // glibc heap even though the buffer was immediately freed.
+        use std::io::{BufRead, Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return empty;
+        };
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return empty;
+        }
+        let mut reader = std::io::BufReader::new(file.take(end - start));
+        let mut line = String::new();
+        let mut events = Vec::new();
+        let mut exec_ids = std::collections::HashSet::new();
+        loop {
+            line.clear();
+            let Ok(read) = reader.read_line(&mut line) else {
                 return empty;
             };
-            if f.seek(SeekFrom::Start(start)).is_err() {
-                return empty;
+            if read == 0 {
+                break;
             }
-            let mut buf = Vec::with_capacity(usize::try_from(end - start).unwrap_or(0));
-            if f.take(end - start).read_to_end(&mut buf).is_err() {
-                return empty;
+            let raw = line.trim_end_matches(['\n', '\r']);
+            if raw.is_empty() {
+                continue;
             }
-            buf
-        };
-        let events: Vec<SessionEvent> = String::from_utf8_lossy(&bytes)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| lofi_core::session::store::parse_event(l).ok())
-            .collect();
+            let Ok(mut event) = lofi_core::session::store::parse_event(raw) else {
+                continue;
+            };
+            // Successful exec results are not rendered at all in collapsed
+            // mode (the nested native-tool rows already show the work). Track
+            // exec call ids from assistant messages, then discard only their
+            // matching hidden result bodies. Results of other tools and all
+            // errors remain intact because their collapsed previews are
+            // visible. Verbose mode reparses the exact durable content.
+            if !self.verbose {
+                if let SessionEventKind::Message(message) = &mut event.kind {
+                    if message.role == Role::Assistant {
+                        exec_ids.extend(message.blocks.iter().filter_map(|block| match block {
+                            ContentBlock::ToolUse { id, name, .. } if name == "exec" => {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        }));
+                    }
+                    for block in &mut message.blocks {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error: false,
+                        } = block
+                        {
+                            if exec_ids.contains(tool_use_id) {
+                                content.clear();
+                                content.shrink_to_fit();
+                            }
+                        }
+                    }
+                }
+            }
+            events.push(event);
+        }
         turns_from_session_events(&events)
             .into_iter()
             .next()
