@@ -115,6 +115,19 @@ fn render_modal_frame(
     rows
 }
 
+/// Extend a modal's content rect through its existing right padding cell,
+/// then split that span into content plus the universal scrollbar gutter.
+/// This preserves the modal's one-cell breathing room while ensuring list or
+/// body text can never occupy the scrollbar column.
+fn modal_scroll_area(content: Rect) -> prim::ScrollArea {
+    prim::scroll_area(Rect::new(
+        content.x,
+        content.y,
+        content.width.saturating_add(1),
+        content.height,
+    ))
+}
+
 fn focus_style(t: Theme) -> Style {
     Style::new()
         .fg(t.panel_bg)
@@ -220,9 +233,8 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
     let need_sb = total > rows.content.height as usize;
-    // The scrollbar occupies the block's right padding gutter, so it does
-    // not consume a content column.
-    let content = rows.content;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
     let row_width = content.width as usize;
     let items: Vec<ListItem> = rows_data
         .into_iter()
@@ -245,10 +257,9 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
-        let track = Rect::new(rows.content.right(), rows.content.y, 1, rows.content.height);
         prim::render_scrollbar(
             f,
-            track,
+            scroll_area.gutter,
             state.offset(),
             rows.content.height as usize,
             total,
@@ -327,9 +338,8 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     );
     let total = sc.candidates.len();
     let need_sb = total > content_rows.height as usize;
-    // The scrollbar occupies the block's right padding gutter, so it does
-    // not consume a content column.
-    let content = content_rows;
+    let scroll_area = modal_scroll_area(content_rows);
+    let content = scroll_area.content;
     let cmd_style = Style::new().fg(t.fg);
     let desc_style = Style::new().fg(t.subtle);
     let items: Vec<ListItem> = sc
@@ -349,10 +359,9 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default().with_selected(Some(sc.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
-        let track = Rect::new(content_rows.right(), content_rows.y, 1, content_rows.height);
         prim::render_scrollbar(
             f,
-            track,
+            scroll_area.gutter,
             state.offset(),
             content_rows.height as usize,
             total,
@@ -402,8 +411,8 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_w = max_body.min(max_w).max(prim::width(&title));
     let max_body_h = (area.height as usize).saturating_sub(4);
     let need_sb = wrap_info_lines_styled(&info.lines, inner_w.max(1)).len() > max_body_h;
-    // The scrollbar is drawn over the right padding gutter rather than
-    // taking a column from the body.
+    // The modal's existing right padding cell is the dedicated scrollbar
+    // gutter, leaving the full measured body width available for text.
     let body_w = inner_w;
     let wrapped = wrap_info_lines_styled(&info.lines, body_w);
     let total = wrapped.len();
@@ -443,8 +452,16 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(body, body_rect);
 
     if need_sb {
-        let track = Rect::new(rows.content.right(), rows.content.y, 1, rows.content.height);
-        prim::render_scrollbar(f, track, scroll, actual_view_h, total, t.subtle, t.muted);
+        let scroll_area = modal_scroll_area(rows.content);
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            scroll,
+            actual_view_h,
+            total,
+            t.subtle,
+            t.muted,
+        );
     }
 }
 
@@ -496,9 +513,8 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
     let need_sb = total > rows.content.height as usize;
-    // The scrollbar occupies the block's right padding gutter, so it does
-    // not consume a content column.
-    let content = rows.content;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
     let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker
@@ -522,10 +538,9 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
-        let track = Rect::new(rows.content.right(), rows.content.y, 1, rows.content.height);
         prim::render_scrollbar(
             f,
-            track,
+            scroll_area.gutter,
             state.offset(),
             rows.content.height as usize,
             total,
@@ -564,9 +579,8 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
     let need_sb = total > rows.content.height as usize;
-    // The scrollbar occupies the block's right padding gutter, so it does
-    // not consume a content column.
-    let content = rows.content;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
     let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker
@@ -590,10 +604,9 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
-        let track = Rect::new(rows.content.right(), rows.content.y, 1, rows.content.height);
         prim::render_scrollbar(
             f,
-            track,
+            scroll_area.gutter,
             state.offset(),
             rows.content.height as usize,
             total,
@@ -628,9 +641,8 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
     let need_sb = total > rows.content.height as usize;
-    // The scrollbar occupies the block's right padding gutter, so it does
-    // not consume a content column.
-    let content = rows.content;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
     let tree_art = Style::new().fg(t.subtle);
     let items: Vec<ListItem> = picker
         .entries
@@ -663,10 +675,9 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default().with_selected(Some(picker.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
-        let track = Rect::new(rows.content.right(), rows.content.y, 1, rows.content.height);
         prim::render_scrollbar(
             f,
-            track,
+            scroll_area.gutter,
             state.offset(),
             rows.content.height as usize,
             total,
@@ -773,9 +784,11 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .style(Style::new().fg(t.fg).bg(t.panel_bg))
         .padding(Padding::horizontal(1));
     let command_inner = command_panel.inner(rows[3]);
+    let command_scroll_area = modal_scroll_area(command_inner);
+    let command_content = command_scroll_area.content;
     f.render_widget(command_panel, rows[3]);
     app.confirm_total = cmd_lines.len();
-    app.confirm_view_h = command_inner.height as usize;
+    app.confirm_view_h = command_content.height as usize;
     let max_scroll = app.confirm_total.saturating_sub(app.confirm_view_h);
     app.confirm_scroll = app.confirm_scroll.min(max_scroll);
     let body_lines: Vec<Line> = cmd_lines
@@ -789,17 +802,11 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
             ))
         })
         .collect();
-    f.render_widget(Paragraph::new(body_lines), command_inner);
+    f.render_widget(Paragraph::new(body_lines), command_content);
     if app.confirm_total > app.confirm_view_h {
-        let track = Rect::new(
-            rows[3].right().saturating_sub(1),
-            command_inner.y,
-            1,
-            command_inner.height,
-        );
         prim::render_scrollbar(
             f,
-            track,
+            command_scroll_area.gutter,
             app.confirm_scroll,
             app.confirm_view_h,
             app.confirm_total,

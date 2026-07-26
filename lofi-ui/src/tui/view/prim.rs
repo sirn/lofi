@@ -585,10 +585,39 @@ impl<'a> HStack<'a> {
     }
 }
 
-/// A 1-cell-wide vertical scrollbar drawn in `track`. `position` is the
-/// top visible row, `visible` the viewport height, `total` the full row
-/// count. The thumb is sized proportional to `visible/total` and positioned
-/// by `position`; nothing is drawn when everything fits.
+/// A scrollable region split into a content viewport and a dedicated
+/// one-cell right gutter. Content must always be measured and rendered in
+/// `content`; the scrollbar is drawn only in `gutter`, so it can never
+/// replace the last text cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollArea {
+    pub content: Rect,
+    pub gutter: Rect,
+}
+
+/// Reserve the rightmost column of `area` as a scrollbar gutter. The gutter
+/// remains reserved when everything fits; in that case it is simply left
+/// blank. Keeping the split stable avoids re-wrapping content when a scrollbar
+/// appears or disappears.
+pub fn scroll_area(area: Rect) -> ScrollArea {
+    let gutter_w = area.width.min(1);
+    let content_w = area.width.saturating_sub(gutter_w);
+    ScrollArea {
+        content: Rect::new(area.x, area.y, content_w, area.height),
+        gutter: Rect::new(
+            area.x.saturating_add(content_w),
+            area.y,
+            gutter_w,
+            area.height,
+        ),
+    }
+}
+
+/// A 1-cell-wide vertical scrollbar drawn in a dedicated `gutter`.
+/// `position` is the top visible row, `visible` the viewport height, and
+/// `total` the full row count. The thumb is sized proportional to
+/// `visible/total` and positioned by `position`; nothing is drawn when
+/// everything fits.
 ///
 /// The thumb uses the heavy box-drawing `┃` over a light `│` track — a
 /// thin, calm indicator rather than a solid block.
@@ -601,7 +630,7 @@ pub fn render_scrollbar(
     track_color: Color,
     thumb_color: Color,
 ) {
-    if total == 0 || visible >= total || track.height == 0 {
+    if total == 0 || visible >= total || track.width == 0 || track.height == 0 {
         return;
     }
     let h = track.height as usize;
@@ -628,6 +657,17 @@ mod tests {
 
     fn spans_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn scroll_area_reserves_a_stable_right_gutter() {
+        let split = scroll_area(Rect::new(4, 2, 10, 6));
+        assert_eq!(split.content, Rect::new(4, 2, 9, 6));
+        assert_eq!(split.gutter, Rect::new(13, 2, 1, 6));
+
+        let narrow = scroll_area(Rect::new(4, 2, 0, 6));
+        assert_eq!(narrow.content.width, 0);
+        assert_eq!(narrow.gutter.width, 0);
     }
 
     #[test]
