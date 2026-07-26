@@ -736,13 +736,14 @@ pub(crate) struct App {
     /// first round reports usage, and reset to `None` after a compaction
     /// or a session rollback so the baseline re-evaluates cleanly.
     prev_ctx_tokens: Option<u64>,
-    /// Message count at the time of the last compaction, used as a soft
-    /// cooldown for auto-compaction so a tail too large to compact further
-    /// is not re-compacted every turn (which would waste tokens for no
-    /// benefit). Reset on rollback/resume.
-    last_compact_msg_count: usize,
-    /// Whether the session has been compacted at least once. Drives a `c`
-    /// prefix on the context gauge so the user can tell the history is folded.
+    /// Set only after the active run reports provider usage. Cleared at each
+    /// run boundary and consumed by the settled compaction hook, preventing a
+    /// resumed/stale usage sample from triggering compaction after a run that
+    /// never reached the provider.
+    settled_usage_fresh: bool,
+    /// Whether the current history was compacted more recently than its
+    /// latest measured provider usage. Drives a `c` prefix on the context
+    /// gauge until a post-compaction round reports the real, smaller fill.
     compacted: bool,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
     /// hard context cap. The run loop reads (and clears) it on channel close
