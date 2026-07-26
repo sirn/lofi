@@ -58,7 +58,7 @@ impl BuiltinTools {
                 )));
             }
             let updated = content.replacen(&old, &new, 1);
-            std::fs::write(&resolved, updated)
+            atomic_write(&resolved, updated.as_bytes())
                 .map_err(|e| Error::Tool(format!("edit {label}: {e}")))?;
             Ok(())
         })

@@ -289,8 +289,8 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
 }
 
 /// Append session events to a transcript file (one JSON line each). The
-/// file is flushed before returning so a crash after the turn still has the
-/// data.
+/// file is synchronized before returning so a crash after the turn still has
+/// the data.
 ///
 /// Each event is stamped with a fresh `id` (any incoming `id` is
 /// overwritten) and chained to the previous one: the first event's
@@ -422,7 +422,7 @@ pub fn append_compaction(
         serde_json::to_writer(&mut file, &marker)
             .map_err(|e| Error::State(format!("json: {e}")))?;
         file.write_all(b"\n")?;
-        file.flush()?;
+        file.sync_data()?;
         Ok(())
     })();
     if let Err(error) = write {
@@ -451,7 +451,7 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
             return Err(Error::Io(error));
         }
     }
-    if let Err(error) = file.flush() {
+    if let Err(error) = file.sync_data() {
         let _ = file.set_len(byte_start);
         return Err(Error::Io(error));
     }
@@ -709,9 +709,10 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(contents.as_bytes())?;
-        f.flush()?;
+        f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 

@@ -315,7 +315,41 @@ pub(super) fn write_auto_cache(
     }
     let json = serde_json::to_string_pretty(cache)
         .map_err(|e| Error::State(format!("auto-models cache encode error: {e}")))?;
-    std::fs::write(path, json)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::State("discovery cache path has no parent".into()))?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("discovery");
+    let mut attempt = 0_u64;
+    let (tmp, mut file) = loop {
+        let tmp = parent.join(format!(".{stem}.{}-{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
     Ok(())
 }
 
