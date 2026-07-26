@@ -4,6 +4,12 @@ use super::*;
 
 impl App {
     pub(super) fn toggle_verbose(&mut self) {
+        // Record the current state before invalidating/rendering, then schedule
+        // the same ordinary memory event after the next frame. The paired
+        // records are distinguished by context.verbose (false → true when
+        // expanding, true → false when collapsing), and their delta isolates
+        // the toggle from unrelated work since the previous debug sample.
+        self.debug_sample("verbose");
         self.verbose = !self.verbose;
         // Folded tool bodies are baked into the frozen-render cache at freeze
         // time, so a toggle must invalidate it — otherwise only the live
@@ -11,6 +17,7 @@ impl App {
         // The state itself surfaces as the `[VERBOSE]` tag on the rule line
         // rather than a chat turn, so toggling stays out of the transcript.
         self.bump_render_epoch();
+        self.debug_after_draw = Some("verbose");
     }
 
     /// Handle a submitted line starting with '/'. Returns true if it was a
