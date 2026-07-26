@@ -1,12 +1,5 @@
 //! lofi process entry point.
 
-// Rendering expanded tool output can create a large, short-lived allocation
-// burst. glibc commonly keeps those freed pages in its arenas, making a
-// `/verbose` toggle look like permanent application growth. mimalloc returns
-// abandoned pages more eagerly and keeps settled RSS close to live state.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 // The TUI and QuickJS sandbox already run on a LocalSet. A current-thread
 // runtime also prevents parallel subagents from distributing their large
 // transient allocation working sets across many runtime workers. Network and
