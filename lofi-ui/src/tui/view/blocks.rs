@@ -21,6 +21,36 @@ use super::prim::{self, RawLine, RenderLine};
 /// Lines of preview/output shown before truncating with `… (N hidden)`.
 const PREVIEW_LINES: usize = 3;
 
+/// Counts all component rows while retaining only a requested window.
+struct LineWindow {
+    range: std::ops::Range<usize>,
+    total: usize,
+    lines: Vec<RenderLine>,
+}
+
+impl LineWindow {
+    fn new(range: std::ops::Range<usize>) -> Self {
+        Self { lines: Vec::with_capacity(range.end.saturating_sub(range.start).min(256)), range, total: 0 }
+    }
+    fn push(&mut self, line: RenderLine) {
+        if self.range.contains(&self.total) { self.lines.push(line); }
+        self.total = self.total.saturating_add(1);
+    }
+    fn extend(&mut self, lines: impl IntoIterator<Item = RenderLine>) {
+        for line in lines { self.push(line); }
+    }
+    fn component(&mut self, child: &dyn Component, cx: &Cx) {
+        let height = child.height(cx);
+        let end = self.total.saturating_add(height);
+        if end > self.range.start && self.total < self.range.end {
+            let start = self.range.start.saturating_sub(self.total);
+            let stop = self.range.end.saturating_sub(self.total).min(height);
+            self.lines.extend(child.lines_window(cx, start..stop));
+        }
+        self.total = end;
+    }
+}
+
 /// Build the whole turn log as a single [`Text`], turns separated by blanks.
 #[allow(dead_code)] // reference renderer; used as a test oracle (view.rs uses the cached viewport path)
 pub fn render_turns(app: &App, width: u16) -> Text<'static> {
@@ -1018,10 +1048,16 @@ struct ExecBlock<'a> {
 }
 
 impl Component for ExecBlock<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> { self.render_window(cx, 0..usize::MAX).lines }
+    fn height(&self, cx: &Cx) -> usize { self.render_window(cx, 0..0).total }
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> { self.render_window(cx, range).lines }
+}
+
+impl ExecBlock<'_> {
+    fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> LineWindow {
         let t = cx.theme;
         let w = cx.width;
-        let mut out = Vec::new();
+        let mut out = LineWindow::new(range);
 
         let header = match &self.tool.label {
             Some(l) if !l.is_empty() => format!("Exec {l}"),
@@ -1078,7 +1114,7 @@ impl Component for ExecBlock<'_> {
             // tail (`└`); once done the final `└` is the exec-result line, so
             // every native tool becomes a `├`.
             let is_last = idx + 1 == n_total && !self.tool.done;
-            out.extend(ExecBlockBranch { nt, is_last }.lines(cx));
+            out.component(&ExecBlockBranch { nt, is_last }, cx);
         }
 
         if self.tool.done {
@@ -1309,489 +1345,3 @@ fn native_body(nt: &NativeTool) -> NativeBody {
                     let line = m
                         .get("line")
                         .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("");
-                    lines.push(format!("{file}:{line}:{content}"));
-                }
-            }
-            NativeBody {
-                lines,
-                numbered: false,
-                start_line: 1,
-                is_diff: false,
-                notice: b("truncated").then_some("(truncated)".into()),
-            }
-        }
-        _ => NativeBody {
-            lines: split_lines(raw),
-            numbered: false,
-            start_line: 1,
-            is_diff: false,
-            notice: None,
-        },
-    }
-}
-
-fn native_preview_range(name: &str, total: usize, verbose: bool) -> std::ops::Range<usize> {
-    if verbose {
-        return 0..total;
-    }
-    let shown = total.min(PREVIEW_LINES);
-    let start = if name == "bash" {
-        total.saturating_sub(shown)
-    } else {
-        0
-    };
-    start..start + shown
-}
-
-fn split_lines(s: &str) -> Vec<String> {
-    s.trim_end_matches('\n')
-        .split('\n')
-        .map(String::from)
-        .collect()
-}
-
-/// A short parenthetical annotation for the tool header, derived from the
-/// structured result: `(lines 20-25)` for `read`/`view`/`bash_read`, and
-/// `(took 1.2s)` for bash. `None` when the tool is still running, has no
-/// result yet, or the result doesn't carry useful metadata.
-fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
-    let raw = result?;
-    if raw.is_empty() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    match name {
-        "read" | "view" | "bash_read" => {
-            let start = v.get("start_line").and_then(serde_json::Value::as_u64)?;
-            if start == 0 {
-                return None;
-            }
-            let content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
-            let count = content.split('\n').count();
-            if count == 0 {
-                return None;
-            }
-            let end = start + count as u64 - 1;
-            if end <= start {
-                return None;
-            }
-            Some(format!("(lines {start}-{end})"))
-        }
-        "bash" => {
-            let ms = v.get("duration_ms").and_then(serde_json::Value::as_u64)?;
-            if ms == 0 {
-                return None;
-            }
-            let dur = std::time::Duration::from_millis(ms);
-            Some(format!("(took {})", prim::fmt_duration(dur)))
-        }
-        _ => None,
-    }
-}
-
-/// A line diff of `old` vs `new` (what `edit` replaced), as `-`/`+`/` `
-/// prefixed lines. The renderer colors these by prefix.
-fn edit_diff(old: &str, new: &str) -> Vec<String> {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut out = Vec::new();
-    for change in diff.iter_all_changes() {
-        let prefix = match change.tag() {
-            ChangeTag::Delete => '-',
-            ChangeTag::Insert => '+',
-            ChangeTag::Equal => ' ',
-        };
-        let val = change.value();
-        let line = val.strip_suffix('\n').unwrap_or(val);
-        out.push(format!("{prefix}{line}"));
-    }
-    out
-}
-
-impl Component for ExecBlockBranch<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let w = cx.width;
-        let working = !self.nt.done && cx.active_turn;
-        let mut out = Vec::new();
-        let exec_cont = if self.is_last { "  " } else { "│ " };
-
-        // Header: "Tool <name> <args> <suffix>" wrapped to fit, preserving
-        // per-part colors (muted label, info name, subtle args/suffix).
-        let mut content = vec![
-            Span::styled("Tool ", Style::new().fg(t.muted)),
-            Span::styled(self.nt.name.clone(), Style::new().fg(t.info)),
-        ];
-        if !self.nt.args.is_empty() {
-            content.push(Span::styled(
-                format!(" {}", self.nt.args),
-                Style::new().fg(t.subtle),
-            ));
-        }
-        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
-            content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
-        }
-        let header_deco = vec![
-            Span::raw("  "),
-            Span::styled(
-                if self.is_last { "└ " } else { "├ " },
-                Style::new().fg(t.subtle),
-            ),
-            prim::status_icon(t, working, self.nt.is_error, cx.spinner()),
-        ];
-        let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
-        let cont_deco = vec![
-            Span::raw("  "),
-            Span::styled(exec_cont, Style::new().fg(t.subtle)),
-            Span::raw(" ".repeat(name_w)),
-        ];
-        out.extend(prim::rline_wrapped(header_deco, &cont_deco, content, w));
-
-        let Some(result) = &self.nt.result else {
-            return out;
-        };
-        if result.is_empty() {
-            return out;
-        }
-        // In non-verbose mode, hide read-only results for a cleaner
-        // transcript — file reads/greps/finds/ls clutter the view. Mutating
-        // tools (bash, write, edit) keep their result so the user sees the
-        // outcome of an action; errors stay visible regardless so a failure
-        // is never silently swallowed.
-        if !cx.app.verbose
-            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit")
-            && !self.nt.is_error
-        {
-            return out;
-        }
-
-        let indent = 2 + 2 + 2; // left gutter + exec-rail column + own rail
-                                // Each native tool returns structured output; interpret it per tool to
-                                // derive the body lines (and how to label / color them).
-        let body = native_body(self.nt);
-        let all: Vec<&str> = body.lines.iter().map(String::as_str).collect();
-        let numbered = body.numbered;
-        let start = body.start_line;
-        let total = all.len();
-        let lw = total.to_string().len().max(3);
-        let avail = w
-            .saturating_sub(indent)
-            .saturating_sub(if numbered { lw + 1 } else { 0 });
-        let preview = native_preview_range(&self.nt.name, total, cx.app.verbose);
-        let hidden = total.saturating_sub(preview.len());
-        let body_fg = if self.nt.is_error { t.error } else { t.muted };
-        let blank_n = " ".repeat(lw + 1);
-        let num_style = Style::new().fg(t.subtle);
-        let numbered_style = Style::new().fg(t.fg);
-        let plain_style = Style::new().fg(body_fg);
-        let diff_del = Style::new().fg(t.error);
-        let diff_add = Style::new().fg(t.success);
-        let diff_ctx = Style::new().fg(t.muted);
-        let base_deco = vec![
-            Span::raw("  "),
-            Span::styled(exec_cont, Style::new().fg(t.subtle)),
-            Span::styled("│ ", Style::new().fg(t.subtle)),
-        ];
-        // Wrap each result line preserving its formatting. Numbered tools
-        // (read/view/bash_read) label from `start_line`; an edit diff colors
-        // each line by its `-`/`+`/` ` prefix; `hidden` counts logical lines
-        // so the preview cap stays accurate.
-        for (i, line) in all[preview.clone()].iter().enumerate() {
-            let n = format!("{:>lw$} ", start + preview.start + i, lw = lw);
-            let content_style = if body.is_diff {
-                match line.chars().next() {
-                    Some('-') => diff_del,
-                    Some('+') => diff_add,
-                    _ => diff_ctx,
-                }
-            } else if numbered {
-                numbered_style
-            } else {
-                plain_style
-            };
-            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
-                let mut deco = base_deco.clone();
-                let content = if numbered {
-                    deco.push(if j == 0 {
-                        Span::styled(n.clone(), num_style)
-                    } else {
-                        Span::styled(blank_n.clone(), num_style)
-                    });
-                    vec![Span::styled(seg, content_style)]
-                } else {
-                    vec![Span::styled(seg, content_style)]
-                };
-                out.push(prim::rline(deco, content));
-            }
-        }
-        if hidden > 0 {
-            let cap = format!("({hidden} lines hidden)");
-            out.push(prim::rline(
-                vec![
-                    Span::raw("  "),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                    Span::styled("… ", Style::new().fg(t.subtle)),
-                ],
-                vec![Span::styled(cap, Style::new().fg(t.subtle))],
-            ));
-        }
-        if let Some(notice) = body.notice {
-            out.push(prim::rline(
-                vec![
-                    Span::raw("  "),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                    Span::styled("… ", Style::new().fg(t.subtle)),
-                ],
-                vec![Span::styled(notice, Style::new().fg(t.subtle))],
-            ));
-        }
-        out
-    }
-}
-
-// ── Non-exec tool ────────────────────────────────────────────────────────
-
-/// A non-`exec` tool — e.g. a hallucinated name the model emitted despite
-/// only `exec` being advertised — rendered as a single status line without
-/// the tree. Not reached in normal operation; kept as a defensive fallback.
-struct ToolLine<'a> {
-    tool: &'a ToolCall,
-}
-
-impl Component for ToolLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let working = !self.tool.done && cx.active_turn;
-        let icon = prim::status_icon(t, working, self.tool.is_error, cx.spinner());
-        let mut content = vec![Span::styled(
-            self.tool.name.clone(),
-            Style::new().fg(t.info),
-        )];
-        if let Some(first) = self.tool.input.split('\n').next() {
-            if !first.is_empty() {
-                content.push(prim::subtle(format!(" {first}"), t));
-            }
-        }
-        vec![prim::rline(vec![Span::raw("  "), icon], content)]
-    }
-}
-
-// ── Fatal error ─────────────────────────────────────────────────────────
-
-/// A fatal error line: `✗ <message>`.
-struct ErrorLine<'a> {
-    msg: &'a str,
-}
-
-impl Component for ErrorLine<'_> {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let err = Style::new().fg(t.error);
-        // `✗ ` lead on the first line, a 2-space indent on continuations so
-        // wrapped rows align under the message. Long messages used to be
-        // clipped at the terminal edge on a single line.
-        let content_w = cx.width.saturating_sub(4); // "  " + "✗ "
-        let mut out = Vec::new();
-        for (i, seg) in prim::wrap(self.msg, content_w).iter().enumerate() {
-            let deco = if i == 0 {
-                vec![Span::raw("  "), Span::styled("✗ ", err)]
-            } else {
-                vec![Span::raw("  "), Span::raw("  ")]
-            };
-            out.push(prim::rline(deco, vec![Span::styled(seg.clone(), err)]));
-        }
-        out
-    }
-}
-
-// ── Turn-end rule ─────────────────────────────────────────────────────────
-
-/// Turn-end separator: `Done in Ns with <label>`. Appended to a turn when
-/// its run finishes. Carries only model, level, and duration so the line
-/// never overflows; nothing is wrapped below it.
-struct TurnEnd {
-    label: String,
-    elapsed: Duration,
-}
-
-impl Component for TurnEnd {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(self.elapsed);
-        vec![prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![
-                Span::styled(format!("Done in {dur} with "), Style::new().fg(t.subtle)),
-                Span::styled(self.label.clone(), Style::new().fg(t.muted)),
-            ],
-            vec![],
-        )]
-    }
-}
-
-/// Turn-failed separator. Line 1 carries model, level, and duration only
-/// (`◇ Failed in Ns with <label>`) so the status never overflows; the provider
-/// error is wrapped below it, indented and word-broken with a wide-char
-/// fallback. Mirrors [`TurnEnd`] but signals the turn did not complete;
-/// the turn's partial content precedes it on the same branch.
-///
-/// When the error is empty the failure was already surfaced as a fatal `✗`
-/// line (see [`ErrorLine`]) earlier in the turn, so nothing is repeated
-/// below the header. The builder drops the text in that case rather than
-/// rendering a redundant copy.
-struct TurnFailed {
-    label: String,
-    elapsed: Duration,
-    error: String,
-}
-
-impl Component for TurnFailed {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let dur = prim::fmt_duration(self.elapsed);
-        let mut out = vec![prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.error)),
-            ],
-            vec![
-                Span::styled(format!("Failed in {dur} with "), Style::new().fg(t.error)),
-                Span::styled(self.label.clone(), Style::new().fg(t.error)),
-            ],
-            vec![],
-        )];
-        let err = self.error.trim();
-        if !err.is_empty() {
-            // Wrap below the header so a long provider error isn't clipped
-            // at the terminal edge. Indented to align under the label;
-            // blank source lines are preserved as blank wrapped lines.
-            let indent = "    ";
-            let content_w = cx.width.saturating_sub(indent.len());
-            for raw in err.split('\n') {
-                let line = raw.trim_end();
-                if line.is_empty() {
-                    out.push(prim::rblank());
-                } else {
-                    for seg in prim::wrap(line, content_w) {
-                        out.push(prim::render(
-                            vec![Span::raw(indent)],
-                            vec![Span::styled(seg, Style::new().fg(t.error))],
-                            vec![],
-                        ));
-                    }
-                }
-            }
-        }
-        out
-    }
-}
-
-/// Compaction marker: `◇ Compacted N messages · kept M` in the muted tint,
-/// appended to a turn when `/compact` (or the auto-trigger) folds the
-/// older history into a summary. Under `/verbose` the folded summary text
-/// is expanded below the marker (soft-wrapped, muted) so the fold can be
-/// inspected without leaving the transcript.
-struct CompactionLine {
-    summarized: usize,
-    kept: usize,
-    summary: String,
-}
-
-impl Component for CompactionLine {
-    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let t = cx.theme;
-        let body = format!(
-            "Compacted {} messages · kept {}",
-            self.summarized, self.kept
-        );
-        let marker = prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![Span::styled(body, Style::new().fg(t.muted))],
-            vec![],
-        );
-        let mut out = vec![marker];
-        if cx.app.verbose {
-            let text = self.summary.trim();
-            if !text.is_empty() {
-                let indent = "    ";
-                let content_w = cx.width.saturating_sub(indent.len());
-                for raw in text.split('\n') {
-                    let line = raw.trim_end();
-                    if line.is_empty() {
-                        out.push(prim::rblank());
-                    } else {
-                        for seg in prim::wrap(line, content_w) {
-                            out.push(prim::render(
-                                vec![Span::raw(indent)],
-                                vec![Span::styled(seg, Style::new().fg(t.muted))],
-                                vec![],
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-}
-
-// `active_indicator` is re-exported for the working indicator in the chrome;
-// keep the import here so the component module can surface it if needed.
-#[allow(unused_imports)]
-use active_indicator as _;
-
-#[cfg(test)]
-mod tests {
-    use super::{native_body, native_preview_range, trim_reasoning_summary};
-    use crate::tui::NativeTool;
-
-    #[test]
-    fn bash_preview_keeps_tail_while_other_tools_keep_head() {
-        assert_eq!(native_preview_range("bash", 10, false), 7..10);
-        assert_eq!(native_preview_range("read", 10, false), 0..3);
-        assert_eq!(native_preview_range("bash", 2, false), 0..2);
-        assert_eq!(native_preview_range("bash", 10, true), 0..10);
-    }
-
-    #[test]
-    fn bash_error_body_renders_only_structured_output() {
-        let raw = serde_json::json!({
-            "ok": false,
-            "output": "command not found\n",
-            "code": 127
-        })
-        .to_string();
-        let tool = NativeTool {
-            id: 1,
-            name: "bash".to_string(),
-            args: String::new(),
-            result: Some(raw.clone()),
-            is_error: true,
-            done: true,
-        };
-        assert_eq!(native_body(&tool).lines, vec!["command not found"]);
-        assert_eq!(tool.result.as_deref(), Some(raw.as_str()));
-    }
-
-    #[test]
-    fn reasoning_summary_trims_empty_placeholder_parts() {
-        let text = "**Checking**\n<!-- -->\n\nActual <!-- --> content.\n\n**Done**\nResult";
-        assert_eq!(
-            trim_reasoning_summary(text),
-            "Actual <!-- --> content.\n\n**Done**\nResult"
-        );
-    }
-
-    #[test]
-    fn reasoning_summary_trims_plain_empty_placeholder() {
-        assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
-    }
-}
