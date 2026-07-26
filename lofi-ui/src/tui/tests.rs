@@ -4301,6 +4301,30 @@ fn scroll_keeps_cursor_when_still_visible() {
 }
 
 #[test]
+fn navigating_to_latest_line_pins_before_settle_reflows_log() {
+    let mut a = app();
+    a.mode = Mode::Navigate;
+    a.log_total = 20;
+    a.log_view_h = 5;
+    a.last_base = 15;
+    a.log_off = 10;
+    a.top_line = 10;
+    a.nav_cursor = 14;
+    a.pinned = false;
+
+    // Reaching the final line means follow the tail. This must be recorded
+    // before the next render because run settlement can change the last
+    // turn's height in between.
+    a.nav_bottom();
+    assert!(a.pinned);
+    assert_eq!(a.top_line, 15);
+
+    // Simulate settlement adding/reflowing rows before rendering again.
+    a.last_base = 18;
+    assert_eq!(a.view_off(), 18);
+}
+
+#[test]
 fn scroll_at_boundary_leaves_mode_untouched() {
     let mut a = app();
     a.mode = Mode::Input;

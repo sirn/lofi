@@ -1,6 +1,11 @@
 //! lofi process entry point.
 
-#[tokio::main]
+// The TUI and QuickJS sandbox already run on a LocalSet. A current-thread
+// runtime also prevents parallel subagents from spreading large transient
+// allocations across glibc's per-worker arenas, which otherwise retain tens
+// of MiB after the subagents finish. Network and process I/O remain async;
+// explicit spawn_blocking work still uses Tokio's blocking pool.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // The TUI owns the alternate screen, so tracing stays opt-in to avoid
     // interleaving log output with rendered frames.

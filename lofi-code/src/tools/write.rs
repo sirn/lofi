@@ -30,7 +30,7 @@ impl BuiltinTools {
             if let Some(parent) = resolved.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&resolved, text)?;
+            atomic_write(&resolved, text.as_bytes())?;
             Ok(())
         })
         .await

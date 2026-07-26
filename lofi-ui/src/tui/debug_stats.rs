@@ -84,6 +84,24 @@ struct ProcessMemory {
 }
 
 impl App {
+    /// Enable debug logging at startup when `LOFI_DEBUG` is present. This is
+    /// intentionally silent: the dedicated debug status line makes the mode
+    /// visible without showing a startup notification.
+    pub(super) fn enable_debug_from_env(&mut self) {
+        if std::env::var_os("LOFI_DEBUG").is_none() || self.debug.is_some() {
+            return;
+        }
+        match DebugState::create() {
+            Ok(debug) => {
+                self.debug = Some(debug);
+                self.debug_sample("enabled");
+            }
+            Err(error) => {
+                self.notify(NotifyKind::Error, format!("enable debug logging: {error}"));
+            }
+        }
+    }
+
     pub(super) fn toggle_debug(&mut self) {
         if self.debug.is_some() {
             self.debug_sample("disabled");
@@ -335,7 +353,7 @@ impl DebugState {
         });
         serde_json::to_writer(&mut *file, &record)?;
         file.write_all(b"\n")?;
-        file.flush()?;
+        file.sync_data()?;
         Ok(())
     }
 }

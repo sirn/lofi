@@ -250,8 +250,13 @@ impl App {
         } else {
             off
         };
-        self.pinned = false;
         self.top_line = new_top.min(base);
+        // Reaching the latest transcript line is an explicit request to
+        // follow the tail. Record that intent immediately rather than waiting
+        // for a render to infer it from offsets: a settling event can append
+        // or reflow rows before that render and otherwise make the viewport
+        // fall back to the previous bottom.
+        self.pinned = cur == total.saturating_sub(1) && self.top_line >= base;
     }
 
     /// Render turn `idx` at `width` without touching the frozen cache. Used to

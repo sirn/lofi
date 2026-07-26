@@ -1,4 +1,10 @@
-use super::truncate::{format_size, truncate_tail, DEFAULT_MAX_BYTES};
+use super::truncate::{format_size, truncate_tail_with};
+
+/// Bash results stay deliberately compact because the same value is shown to
+/// the user and sent back to the model. The complete output remains pageable
+/// through the per-session log named in the truncation notice.
+const BASH_MAX_LINES: usize = 20;
+const BASH_MAX_BYTES: usize = 4 * 1024;
 use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -22,7 +28,7 @@ impl BuiltinTools {
     /// number, null unless killed by a signal), `duration_ms`, and `status`
     /// (`"exited"`, `"signaled"`, or `"timeout"`).
     ///
-    /// Output is tail-truncated to 50 KB / 2000 lines (whichever is hit
+    /// Output is tail-truncated to 4 KB / 20 lines (whichever is hit
     /// first), keeping the end where errors and final results land. When
     /// truncated, the full captured output is written to a temp file under
     /// the session tmp dir and its absolute path is included in the notice
@@ -217,12 +223,15 @@ impl BuiltinTools {
         }
     }
 
-    /// Tail-truncate `full` to 50 KB / 2000 lines and, when truncation occurs,
+    /// Tail-truncate `full` to 4 KB / 20 lines and, when truncation occurs,
     /// write the full output to a temp file under the session tmp dir and append
     /// a notice pointing at it. `pipe_capped` indicates the pipe-level safety cap
     /// (8 MiB) was hit, in which case the temp file holds only what was captured.
     fn format_bash_output(&self, full: &str, pipe_capped: bool) -> String {
-        let t = truncate_tail(full);
+        // A command's conventional final newline terminates its last line; it
+        // is not an additional blank line and must not consume one tail slot.
+        let truncation_input = full.strip_suffix('\n').unwrap_or(full);
+        let t = truncate_tail_with(truncation_input, BASH_MAX_LINES, BASH_MAX_BYTES);
         if !t.truncated && !pipe_capped {
             return full.to_string();
         }
@@ -240,7 +249,7 @@ impl BuiltinTools {
             let _ = write!(
             out,
             "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
-            format_size(DEFAULT_MAX_BYTES),
+            format_size(BASH_MAX_BYTES),
         );
         } else if pipe_capped && !t.truncated {
             let _ = write!(
@@ -253,7 +262,7 @@ impl BuiltinTools {
             out,
             "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             t.total_lines,
-            format_size(DEFAULT_MAX_BYTES)
+            format_size(BASH_MAX_BYTES)
         );
         }
         out
@@ -267,7 +276,9 @@ impl BuiltinTools {
         let path = self.tmp_dir.join(format!("lofi-bash-{id}.log"));
         let mut f = std::fs::File::create(&path)?;
         f.write_all(content.as_bytes())?;
-        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::File::open(&self.tmp_dir)?.sync_all()?;
         Ok(path.to_string_lossy().into_owned())
     }
 }
