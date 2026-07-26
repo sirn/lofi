@@ -37,6 +37,22 @@ pub trait Component {
     /// Render this unit to an owned block of lines, each tagged with the
     /// char range of its selectable content.
     fn lines(&self, cx: &Cx) -> Vec<RenderLine>;
+
+    /// Count visual rows. Large components override this so measuring the
+    /// scroll range does not materialize their rendered output.
+    fn height(&self, cx: &Cx) -> usize {
+        self.lines(cx).len()
+    }
+
+    /// Render only a component-relative visual-row window. Large components
+    /// override this so the retained output is bounded by the viewport.
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        self.lines(cx)
+            .into_iter()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+            .collect()
+    }
 }
 
 /// A vertical stack of components joined by a blank line; children that
@@ -59,18 +75,49 @@ impl<'a> Stack<'a> {
 
 impl Component for Stack<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        let mut out = Vec::new();
+        self.lines_window(cx, 0..usize::MAX)
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        let mut total = 0usize;
         let mut first = true;
         for child in &self.children {
-            let lines = child.lines(cx);
-            if lines.is_empty() {
+            let height = child.height(cx);
+            if height == 0 {
+                continue;
+            }
+            total = total.saturating_add(height + usize::from(!first));
+            first = false;
+        }
+        total
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        let mut out = Vec::with_capacity(range.end.saturating_sub(range.start).min(256));
+        let mut pos = 0usize;
+        let mut first = true;
+        for child in &self.children {
+            let height = child.height(cx);
+            if height == 0 {
                 continue;
             }
             if !first {
-                out.push(prim::rblank());
+                if range.contains(&pos) {
+                    out.push(prim::rblank());
+                }
+                pos = pos.saturating_add(1);
             }
-            out.extend(lines);
+            let end = pos.saturating_add(height);
+            if end > range.start && pos < range.end {
+                let start = range.start.saturating_sub(pos);
+                let stop = range.end.saturating_sub(pos).min(height);
+                out.extend(child.lines_window(cx, start..stop));
+            }
+            pos = end;
             first = false;
+            if pos >= range.end {
+                break;
+            }
         }
         out
     }

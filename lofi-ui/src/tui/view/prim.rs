@@ -338,14 +338,28 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
 /// continuation rows start flush (matching [`wrap_line_styled`]). A blank or
 /// empty source line yields one empty row so a line-number rail stays visible.
 pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
-    let mut out = Vec::new();
+    wrap_pre_window(s, max_w, 0..usize::MAX).1
+}
+
+/// Count preformatted wrapped rows while retaining only the requested range.
+pub fn wrap_pre_window(
+    s: &str,
+    max_w: usize,
+    range: std::ops::Range<usize>,
+) -> (usize, Vec<String>) {
+    let mut total = 0usize;
+    let mut out = Vec::with_capacity(range.end.saturating_sub(range.start).min(256));
+    let mut emit = |value: String| {
+        if range.contains(&total) {
+            out.push(value);
+        }
+        total = total.saturating_add(1);
+    };
     for line in s.split('\n') {
         if max_w == 0 || line.is_empty() {
-            out.push(line.to_string());
+            emit(line.to_string());
             continue;
         }
-        // Indent = leading ASCII whitespace, stripped before wrapping and
-        // prepended to every output row.
         let indent_len = line
             .bytes()
             .take_while(|&b| b == b' ' || b == b'\t')
@@ -354,22 +368,18 @@ pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
         let body = &line[indent_len..];
         let content_w = max_w.saturating_sub(width(indent));
         if content_w == 0 {
-            // Indent alone fills the row; emit verbatim (terminal clips).
-            out.push(line.to_string());
+            emit(line.to_string());
             continue;
         }
         let cells: Vec<(char, Style)> = body.chars().map(|c| (c, Style::default())).collect();
         for group in wrap_cells(&cells, content_w) {
-            out.push(format!(
+            emit(format!(
                 "{indent}{}",
                 group.iter().map(|(c, _)| *c).collect::<String>()
             ));
         }
     }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
+    (total, out)
 }
 
 /// Shared greedy word-wrap core: break a styled cell run into `max_w`-wide
