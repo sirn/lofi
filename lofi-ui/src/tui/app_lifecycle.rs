@@ -59,6 +59,10 @@ impl App {
             },
             picker: None,
             tree_picker: None,
+            tree_picker_index: None,
+            tree_picker_pending: std::collections::HashSet::new(),
+            picker_load_tx: None,
+            picker_generation: Arc::new(AtomicU64::new(0)),
             model_picker: None,
             thinking_picker: None,
             model_choices: Vec::new(),
@@ -419,7 +423,12 @@ impl App {
         let mut events = if let Some(offsets) = selected_offsets {
             // Indexed resume/tree turns can be non-contiguous in the physical
             // append-only file. Load only their selected lineage events.
-            match cursor.events_at(offsets) {
+            let loaded = if self.verbose {
+                cursor.events_at(offsets)
+            } else {
+                cursor.collapsed_events_at(offsets)
+            };
+            match loaded {
                 Ok(events) => events,
                 Err(_) => return empty,
             }

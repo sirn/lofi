@@ -142,7 +142,7 @@ impl App {
         let history = components["history_bytes"].as_u64().unwrap_or(0);
         let value = |n: Option<u64>| n.map_or_else(|| "–".to_string(), format_bytes);
         Some(Line::from(format!(
-            "  Debug · Total RSS {} · Heap {} · Measured {} · History {}",
+            "  Debug · Total RSS {} · Heap RSS {} · Measured {} · History {}",
             value(debug.latest_rss_bytes),
             value(debug.latest_heap_bytes),
             format_bytes(measured),

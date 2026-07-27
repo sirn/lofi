@@ -292,15 +292,71 @@ impl App {
             self.notify(NotifyKind::Warn, "sessions are disabled (--no-session)");
             return;
         };
-        match store.list_for_cwd(&self.session.cwd) {
-            Ok(entries) if entries.is_empty() => {
+        match store.list_files_for_cwd(&self.session.cwd) {
+            Ok(files) if files.is_empty() => {
                 self.notify(NotifyKind::Info, "no saved sessions for this workspace");
             }
-            Ok(entries) => {
+            Ok(files) => {
+                let generation = self
+                    .picker_generation
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
                 self.picker = Some(PickerState {
-                    entries,
+                    entries: files
+                        .iter()
+                        .cloned()
+                        .map(|file| PickerEntry {
+                            file,
+                            preview: None,
+                            details: None,
+                        })
+                        .collect(),
                     selected: 0,
+                    generation,
                 });
+                if let Some(tx) = self.picker_load_tx.clone() {
+                    let generation_clock = Arc::clone(&self.picker_generation);
+                    std::thread::spawn(move || {
+                        for (index, file) in files.iter().enumerate() {
+                            if generation_clock.load(Ordering::Relaxed) != generation {
+                                return;
+                            }
+                            if let Some(preview) = store::SessionStore::quick_preview(file) {
+                                if tx
+                                    .send(PickerLoad::ResumePreviews {
+                                        generation,
+                                        rows: vec![(index, preview)],
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        for (index, file) in files.iter().enumerate() {
+                            if generation_clock.load(Ordering::Relaxed) != generation {
+                                return;
+                            }
+                            let Some(entry) = store::SessionStore::inspect_file(file) else {
+                                continue;
+                            };
+                            if tx
+                                .send(PickerLoad::ResumeRows {
+                                    generation,
+                                    rows: vec![(index, entry)],
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                } else if let Some(picker) = self.picker.as_mut() {
+                    for row in &mut picker.entries {
+                        row.preview = store::SessionStore::quick_preview(&row.file);
+                        row.details = store::SessionStore::inspect_file(&row.file);
+                    }
+                }
             }
             Err(e) => {
                 self.notify(NotifyKind::Error, format!("list sessions: {e}"));
@@ -308,13 +364,103 @@ impl App {
         }
     }
 
+    pub(super) fn apply_picker_load(&mut self, load: PickerLoad) {
+        match load {
+            PickerLoad::ResumePreviews { generation, rows } => {
+                let Some(picker) = self
+                    .picker
+                    .as_mut()
+                    .filter(|picker| picker.generation == generation)
+                else {
+                    return;
+                };
+                for (index, preview) in rows {
+                    if let Some(row) = picker.entries.get_mut(index) {
+                        row.preview = Some(preview);
+                    }
+                }
+            }
+            PickerLoad::ResumeRows { generation, rows } => {
+                let Some(picker) = self
+                    .picker
+                    .as_mut()
+                    .filter(|picker| picker.generation == generation)
+                else {
+                    return;
+                };
+                for (index, entry) in rows {
+                    if let Some(row) = picker.entries.get_mut(index) {
+                        row.details = Some(entry);
+                    }
+                }
+            }
+            PickerLoad::TreeReady {
+                generation,
+                entries,
+                index,
+            } => {
+                let Some(picker) = self
+                    .tree_picker
+                    .as_mut()
+                    .filter(|picker| picker.generation == generation)
+                else {
+                    return;
+                };
+                if entries.is_empty() {
+                    self.tree_picker = None;
+                    self.notify(NotifyKind::Info, "no branch points in this session yet");
+                } else {
+                    picker.selected = entries.len().saturating_sub(1);
+                    picker.entries = entries;
+                    picker.loading = false;
+                    self.tree_picker_index = Some(index);
+                    self.tree_picker_pending.clear();
+                    self.tree_picker_pending
+                        .extend(picker.entries.len().saturating_sub(20)..picker.entries.len());
+                }
+            }
+            PickerLoad::TreeRows { generation, rows } => {
+                let Some(picker) = self
+                    .tree_picker
+                    .as_mut()
+                    .filter(|picker| picker.generation == generation)
+                else {
+                    return;
+                };
+                for (index, mut entry) in rows {
+                    self.tree_picker_pending.remove(&index);
+                    // Prompt bodies are fetched only if that row is confirmed;
+                    // retaining every full prompt defeats progressive loading.
+                    entry.prefill.clear();
+                    if let Some(row) = picker.entries.get_mut(index) {
+                        *row = entry;
+                    }
+                }
+            }
+            PickerLoad::TreeFailed { generation, error } => {
+                if self
+                    .tree_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.generation == generation)
+                {
+                    self.tree_picker = None;
+                    self.notify(
+                        NotifyKind::Error,
+                        format!("load session for /tree: {error}"),
+                    );
+                }
+            }
+        }
+    }
+
     /// Load the selected session into the transcript and close the picker.
     pub(super) fn picker_confirm_inner(&mut self, picker: PickerState) {
+        self.picker_generation.fetch_add(1, Ordering::Relaxed);
         let entry = picker.entries.into_iter().nth(picker.selected);
         let Some(entry) = entry else {
             return;
         };
-        match store::SessionCursor::open_snapshot(entry.path.clone()) {
+        match store::SessionCursor::open_snapshot(entry.file.path.clone()) {
             Ok((cursor, snapshot)) => {
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;
@@ -509,20 +655,127 @@ impl App {
             );
             return;
         };
-        let snapshot = match cursor.tree_snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
-                return;
+        let generation = self
+            .picker_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.tree_picker_index = None;
+        self.tree_picker_pending.clear();
+        self.tree_picker = Some(TreePickerState {
+            entries: Vec::new(),
+            selected: 0,
+            generation,
+            loading: true,
+        });
+        if let Some(tx) = self.picker_load_tx.clone() {
+            let cursor = cursor.clone();
+            let generation_clock = Arc::clone(&self.picker_generation);
+            std::thread::spawn(move || match cursor.tree_snapshot() {
+                Ok(snapshot) => {
+                    if generation_clock.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    let index = Arc::new(snapshot.index);
+                    let skeletons =
+                        build_tree_entry_skeletons(&index, snapshot.leaf_id.as_deref(), &cursor);
+                    if tx
+                        .send(PickerLoad::TreeReady {
+                            generation,
+                            entries: skeletons.clone(),
+                            index: Arc::clone(&index),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    // Hydrate only the initial visible tail. Historical rows
+                    // stay file-backed until navigation brings them on screen.
+                    let start = skeletons.len().saturating_sub(20);
+                    hydrate_tree_entry_window(
+                        &index,
+                        &cursor,
+                        &skeletons,
+                        start..skeletons.len(),
+                        |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
+                        || generation_clock.load(Ordering::Relaxed) != generation,
+                    );
+                }
+                Err(error) => {
+                    let _ = tx.send(PickerLoad::TreeFailed {
+                        generation,
+                        error: error.to_string(),
+                    });
+                }
+            });
+        } else {
+            match cursor.tree_snapshot() {
+                Ok(snapshot) => {
+                    let entries =
+                        build_tree_entries(&snapshot.index, snapshot.leaf_id.as_deref(), cursor);
+                    if entries.is_empty() {
+                        self.tree_picker = None;
+                        self.notify(NotifyKind::Info, "no branch points in this session yet");
+                    } else {
+                        let selected = entries.len().saturating_sub(1);
+                        self.tree_picker = Some(TreePickerState {
+                            entries,
+                            selected,
+                            generation,
+                            loading: false,
+                        });
+                    }
+                }
+                Err(e) => {
+                    self.tree_picker = None;
+                    self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
+                }
             }
+        }
+    }
+
+    fn request_tree_viewport(&mut self) {
+        const VIEW_ROWS: usize = 20;
+        let Some(picker) = self.tree_picker.as_ref() else {
+            return;
         };
-        let entries = build_tree_entries(&snapshot.index, snapshot.leaf_id.as_deref(), cursor);
-        if entries.is_empty() {
-            self.notify(NotifyKind::Info, "no branch points in this session yet");
+        let Some(index) = self.tree_picker_index.clone() else {
+            return;
+        };
+        let Some(tx) = self.picker_load_tx.clone() else {
+            return;
+        };
+        let generation = picker.generation;
+        let start = picker
+            .selected
+            .saturating_sub(VIEW_ROWS.saturating_sub(1))
+            .min(picker.entries.len().saturating_sub(VIEW_ROWS));
+        let end = (start + VIEW_ROWS).min(picker.entries.len());
+        // Include one page before the visible viewport. Since the tree starts
+        // at its tail and users normally move upward, this amortizes topology
+        // setup to roughly once per 20 rows instead of once per keypress.
+        let prefetch_start = start.saturating_sub(VIEW_ROWS);
+        let requested: Vec<_> = (prefetch_start..end)
+            .filter(|row| !picker.entries[*row].hydrated && !self.tree_picker_pending.contains(row))
+            .map(|row| (row, picker.entries[row].clone()))
+            .collect();
+        if requested.is_empty() {
             return;
         }
-        let selected = entries.len().saturating_sub(1);
-        self.tree_picker = Some(TreePickerState { entries, selected });
+        self.tree_picker_pending
+            .extend(requested.iter().map(|(row, _)| *row));
+        let Some(cursor) = self.session.cursor.clone() else {
+            return;
+        };
+        let generation_clock = Arc::clone(&self.picker_generation);
+        std::thread::spawn(move || {
+            hydrate_tree_entry_rows(
+                &index,
+                &cursor,
+                &requested,
+                |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
+                || generation_clock.load(Ordering::Relaxed) != generation,
+            );
+        });
     }
 
     /// Confirm the hovered entry: roll the transcript back to the chosen
@@ -531,9 +784,16 @@ impl App {
     /// input box. The visual rollback replaces the old "branch ready" badge —
     /// the user sees the conversation up to the branch point immediately.
     pub(super) fn tree_picker_confirm_inner(&mut self, picker: &TreePickerState) {
+        self.picker_generation.fetch_add(1, Ordering::Relaxed);
+        self.tree_picker_index = None;
+        self.tree_picker_pending.clear();
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
+        if !entry.hydrated {
+            self.notify(NotifyKind::Info, "selected tree row is still loading");
+            return;
+        }
         // Persist the selected head first, then rebuild exclusively from a
         // cursor snapshot. If replay fails, restore both the durable head and
         // the previous view from the old cursor snapshot.
@@ -564,8 +824,15 @@ impl App {
             );
             return;
         }
-        if !entry.prefill.is_empty() {
-            self.input = entry.prefill;
+        let prefill = if !entry.prefill.is_empty() {
+            entry.prefill
+        } else if entry.source_kind == store::IndexKind::UserPrompt {
+            load_prompt_text(&cursor, entry.source_offset)
+        } else {
+            String::new()
+        };
+        if !prefill.is_empty() {
+            self.input = prefill;
             self.input_cursor = self.input.len();
         }
     }
@@ -744,6 +1011,11 @@ impl App {
             return false;
         };
         let len = self.active_modal_mut().map_or(0, |m| m.len());
+        // A progressive picker draws before it has rows. Escape still closes
+        // it, but Enter cannot confirm an absent selection.
+        if len == 0 && matches!(k.code, KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab) {
+            return true;
+        }
         // Confirm/cancel (and the single-item Tab shortcut) take `&mut self`
         // (or take the picker) and are handled before borrowing the modal for
         // navigation.
@@ -779,8 +1051,16 @@ impl App {
                 Slot::Thinking => self.thinking_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
-                Slot::Picker => self.picker = None,
-                Slot::Tree => self.tree_picker = None,
+                Slot::Picker => {
+                    self.picker = None;
+                    self.picker_generation.fetch_add(1, Ordering::Relaxed);
+                }
+                Slot::Tree => {
+                    self.tree_picker = None;
+                    self.tree_picker_index = None;
+                    self.tree_picker_pending.clear();
+                    self.picker_generation.fetch_add(1, Ordering::Relaxed);
+                }
                 Slot::Model => self.model_picker = None,
                 Slot::Thinking => self.thinking_picker = None,
             },
@@ -824,6 +1104,9 @@ impl App {
                 m.set_selected(if s == 0 { len - 1 } else { s - 1 });
             }
             _ => {}
+        }
+        if self.tree_picker.is_some() {
+            self.request_tree_viewport();
         }
         true
     }

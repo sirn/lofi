@@ -206,46 +206,62 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let total = picker.entries.len();
     let title = " Resume a session ";
     let help = " ↑/↓ navigate  enter resume  esc close ";
+    let desired_rows = total.max(1).min(12);
+    let desired_frame_h = u16::try_from(desired_rows + 4).unwrap_or(16);
 
-    // Each session is one dense row: its latest transcript preview on the
-    // left and activity metadata pinned to the right.
-    let rows_data: Vec<(&str, String)> = picker
-        .entries
+    // Size from only the selected viewport. Progressive enrichment of an old
+    // off-screen row must not make every frame walk and allocate the full list.
+    let preliminary_start = picker
+        .selected
+        .saturating_sub(desired_rows.saturating_sub(1))
+        .min(total.saturating_sub(desired_rows));
+    let row_data = |row: &crate::tui::PickerEntry| match &row.details {
+        Some(entry) => (
+            entry.last_message.clone(),
+            resume_metadata(entry.message_count, entry.last_active),
+        ),
+        None => (
+            row.preview
+                .clone()
+                .unwrap_or_else(|| "loading…".to_string()),
+            relative_age(row.file.last_active),
+        ),
+    };
+    let content_w = picker.entries
+        [preliminary_start..(preliminary_start + desired_rows.min(total))]
         .iter()
-        .map(|e| {
-            (
-                e.last_message.as_str(),
-                resume_metadata(e.message_count, e.last_active),
-            )
+        .map(|row| {
+            let (preview, meta) = row_data(row);
+            prim::width(&preview) + 2 + prim::width(&meta)
         })
-        .collect();
-    let content_w = rows_data
-        .iter()
-        .map(|(preview, meta)| prim::width(preview) + 2 + prim::width(meta))
         .max()
         .unwrap_or(0);
     let chrome_w = prim::width(title).max(prim::width(help));
     let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
-    let desired_frame_h = u16::try_from(total.min(12) + 4).unwrap_or(16);
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
     let scroll_area = modal_scroll_area(rows.content);
     let content = scroll_area.content;
+    let view_h = content.height as usize;
+    let start = picker
+        .selected
+        .saturating_sub(view_h.saturating_sub(1))
+        .min(total.saturating_sub(view_h));
+    let end = (start + view_h).min(total);
     let row_width = content.width as usize;
-    let items: Vec<ListItem> = rows_data
-        .into_iter()
-        .map(|(preview, meta)| {
+    let items: Vec<ListItem> = picker.entries[start..end]
+        .iter()
+        .map(|row| {
+            let (preview, meta) = row_data(row);
             let meta_w = prim::width(&meta);
             let preview_w = row_width.saturating_sub(meta_w.saturating_add(2));
-            let preview = prim::truncate(preview, preview_w);
-            let preview_spans = resume_preview_spans(t, preview);
+            let preview = prim::truncate(&preview, preview_w);
             ListItem::new(
                 HStack::new(row_width)
-                    .left(preview_spans)
+                    .left(resume_preview_spans(t, preview))
                     .right([Span::styled(meta, Style::new().fg(t.muted))])
                     .build(),
             )
@@ -254,14 +270,15 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items)
         .style(Style::default().fg(t.fg))
         .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
+    let selected = (picker.selected < total).then_some(picker.selected.saturating_sub(start));
+    let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
+    if total > view_h {
         prim::render_scrollbar(
             f,
             scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
+            start,
+            view_h,
             total,
             t.subtle,
             t.muted,
@@ -623,69 +640,81 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     };
     let t = app.theme;
     let total = picker.entries.len();
-    let title = " Roll back to a turn ";
+    let title = if picker.loading {
+        " Loading session tree… "
+    } else {
+        " Roll back to a turn "
+    };
     let help = " ↑/↓ navigate  enter restore  esc close ";
-    let content_w = picker
-        .entries
+    let desired_rows = total.max(1).min(20);
+    let preliminary_start = picker
+        .selected
+        .saturating_sub(desired_rows.saturating_sub(1))
+        .min(total.saturating_sub(desired_rows));
+    let content_w = picker.entries
+        [preliminary_start..(preliminary_start + desired_rows.min(total))]
         .iter()
-        .map(|e| prim::width(&e.prefix) + prim::width(&e.label))
+        .map(|entry| prim::width(&entry.prefix) + prim::width(&entry.label))
         .max()
         .unwrap_or(0);
     let chrome_w = prim::width(title).max(prim::width(help));
     let w = u16::try_from(content_w.max(chrome_w) + 4)
         .unwrap_or(40)
         .min(area.width);
-    let visible_rows = total.min(20);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
+    let desired_frame_h = u16::try_from(desired_rows + 4).unwrap_or(24);
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
     let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
     let scroll_area = modal_scroll_area(rows.content);
     let content = scroll_area.content;
+    let view_h = content.height as usize;
+    let start = picker
+        .selected
+        .saturating_sub(view_h.saturating_sub(1))
+        .min(total.saturating_sub(view_h));
+    let end = (start + view_h).min(total);
     let tree_art = Style::new().fg(t.subtle);
-    let items: Vec<ListItem> = picker
-        .entries
+    let items: Vec<ListItem> = picker.entries[start..end]
         .iter()
-        .map(|e| {
-            // Color by turn kind so user/agent/compact nodes read at a
-            // glance; the active path (the displayed conversation) is bolded.
-            let kind_color = if e.label.starts_with("user:") {
+        .map(|entry| {
+            let kind_color = if entry.label.starts_with("user:") {
                 t.user
-            } else if e.label.starts_with("agent:") {
+            } else if entry.label.starts_with("agent:") {
                 t.agent
-            } else if e.label.starts_with("tool:") || e.label.starts_with("exec:") {
+            } else if entry.label.starts_with("tool:") || entry.label.starts_with("exec:") {
                 t.success
             } else {
-                t.muted // compact:
+                t.muted
             };
             let mut label_style = Style::new().fg(kind_color);
-            if e.is_active {
+            if entry.is_active {
                 label_style = label_style.add_modifier(Modifier::BOLD);
             }
             ListItem::new(Line::from(vec![
-                Span::styled(e.prefix.clone(), tree_art),
-                Span::styled(e.label.clone(), label_style),
+                Span::styled(entry.prefix.clone(), tree_art),
+                Span::styled(entry.label.clone(), label_style),
             ]))
         })
         .collect();
     let list = List::new(items)
         .style(Style::default().fg(t.fg))
         .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
+    let selected = (picker.selected < total).then_some(picker.selected.saturating_sub(start));
+    let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
+    if total > view_h {
         prim::render_scrollbar(
             f,
             scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
+            start,
+            view_h,
             total,
             t.subtle,
             t.muted,
         );
     }
 }
+
 /// Shell-policy permission dialog, inspired by Crush's explicit action
 /// chooser: the requested command sits in a distinct content panel and Allow
 /// / Deny are real selectable buttons. Only Enter or an action key resolves

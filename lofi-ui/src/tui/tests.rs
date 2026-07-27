@@ -2412,6 +2412,10 @@ fn tree_picker_is_centered() {
                 prefix: "`- ".into(),
                 prefill: String::new(),
                 is_active: true,
+                source_index: 0,
+                source_offset: 0,
+                source_kind: store::IndexKind::TurnEnd,
+                hydrated: true,
             },
             TreeEntry {
                 branch_point: "y".into(),
@@ -2419,9 +2423,15 @@ fn tree_picker_is_centered() {
                 prefix: "|- ".into(),
                 prefill: String::new(),
                 is_active: false,
+                source_index: 1,
+                source_offset: 0,
+                source_kind: store::IndexKind::UserPrompt,
+                hydrated: true,
             },
         ],
         selected: 0,
+        generation: 0,
+        loading: false,
     });
     let backend = TestBackend::new(80, 22);
     let mut term = Terminal::new(backend).unwrap();
@@ -3386,6 +3396,35 @@ fn tree_exec_label_shows_native_tools() {
         "exec label should not contain the raw result, got: {}",
         exec_entry.label
     );
+
+    // The interactive picker uses the progressive hydrator, not the
+    // synchronous fallback above. Keep that path covered independently so an
+    // optimization cannot silently degrade exec rows to raw result previews.
+    let cursor = a.session.cursor.as_ref().unwrap();
+    let snapshot = cursor.tree_snapshot().unwrap();
+    let skeletons =
+        build_tree_entry_skeletons(&snapshot.index, snapshot.leaf_id.as_deref(), cursor);
+    let mut hydrated = Vec::new();
+    hydrate_tree_entry_window(
+        &snapshot.index,
+        cursor,
+        &skeletons,
+        0..skeletons.len(),
+        |rows| {
+            hydrated.extend(rows);
+            true
+        },
+        || false,
+    );
+    let progressive_exec = hydrated
+        .iter()
+        .map(|(_, entry)| entry)
+        .find(|entry| entry.label.starts_with("exec:"))
+        .expect("progressive hydration should produce an exec node");
+    assert!(progressive_exec.label.contains("write demo.txt"));
+    assert!(progressive_exec.label.contains("edit demo.txt"));
+    assert!(progressive_exec.label.contains("read demo.txt"));
+    assert!(!progressive_exec.label.contains("exec result"));
 }
 
 #[test]

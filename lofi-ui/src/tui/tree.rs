@@ -25,7 +25,11 @@ struct TreeCtx<'a> {
     children_by_parent: &'a HashMap<&'a store::IndexId, Vec<usize>>,
     by_id: &'a HashMap<&'a store::IndexId, usize>,
     cursor: &'a store::SessionCursor,
-    native_tools: &'a HashMap<String, Vec<(String, String)>>,
+    native_tools: std::cell::RefCell<HashMap<String, Vec<(String, String)>>>,
+    lazy_native_tools: bool,
+    hydrate: bool,
+    retain_prefill: bool,
+    hydrate_only: Option<&'a std::collections::HashSet<usize>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -34,9 +38,108 @@ pub(super) fn build_tree_entries(
     leaf_id: Option<&str>,
     cursor: &store::SessionCursor,
 ) -> Vec<TreeEntry> {
-    // Build a map from exec tool-call id to its native tool calls
-    // (name, args) for the `exec:` label.
-    let native_tools = build_native_tool_map(indices, cursor);
+    build_tree_entries_inner(indices, leaf_id, cursor, true, true, None)
+}
+
+pub(super) fn build_tree_entry_skeletons(
+    indices: &[store::EventIndex],
+    leaf_id: Option<&str>,
+    cursor: &store::SessionCursor,
+) -> Vec<TreeEntry> {
+    build_tree_entries_inner(indices, leaf_id, cursor, false, false, None)
+}
+
+/// Hydrate tree labels tail-first without rebuilding the tree topology for
+/// every batch. Exec rows project only their own native-call request metadata;
+/// nested result bodies remain skipped and historical execs remain lazy.
+pub(super) fn hydrate_tree_entry_rows(
+    indices: &[store::EventIndex],
+    cursor: &store::SessionCursor,
+    requested: &[(usize, TreeEntry)],
+    mut emit: impl FnMut(Vec<(usize, TreeEntry)>) -> bool,
+    cancelled: impl Fn() -> bool,
+) {
+    if requested.is_empty() || cancelled() {
+        return;
+    }
+    let mut children_by_parent: HashMap<&store::IndexId, Vec<usize>> = HashMap::new();
+    let mut by_id: HashMap<&store::IndexId, usize> = HashMap::new();
+    for (index, entry) in indices.iter().enumerate() {
+        if !entry.id.is_empty() {
+            by_id.insert(&entry.id, index);
+        }
+        if let Some(parent) = entry.parent_id.as_ref().filter(|parent| !parent.is_empty()) {
+            children_by_parent.entry(parent).or_default().push(index);
+        }
+    }
+    let ctx = TreeCtx {
+        indices,
+        children_by_parent: &children_by_parent,
+        by_id: &by_id,
+        cursor,
+        native_tools: std::cell::RefCell::new(HashMap::new()),
+        lazy_native_tools: true,
+        hydrate: true,
+        retain_prefill: false,
+        hydrate_only: None,
+    };
+    let mut rows = Vec::with_capacity(requested.len());
+    for (display_index, skeleton) in requested {
+        if cancelled() {
+            return;
+        }
+        let mut entry = Vec::with_capacity(1);
+        push_tree_entry(
+            &ctx,
+            skeleton.source_index,
+            &skeleton.prefix,
+            skeleton.is_active,
+            &mut entry,
+        );
+        if let Some(entry) = entry.pop() {
+            rows.push((*display_index, entry));
+        }
+    }
+    if !rows.is_empty() {
+        let _ = emit(rows);
+    }
+}
+
+pub(super) fn hydrate_tree_entry_window(
+    indices: &[store::EventIndex],
+    cursor: &store::SessionCursor,
+    skeletons: &[TreeEntry],
+    display_range: std::ops::Range<usize>,
+    emit: impl FnMut(Vec<(usize, TreeEntry)>) -> bool,
+    cancelled: impl Fn() -> bool,
+) {
+    let requested: Vec<_> = display_range
+        .filter_map(|index| {
+            skeletons
+                .get(index)
+                .filter(|entry| !entry.hydrated)
+                .cloned()
+                .map(|entry| (index, entry))
+        })
+        .collect();
+    hydrate_tree_entry_rows(indices, cursor, &requested, emit, cancelled);
+}
+
+fn build_tree_entries_inner(
+    indices: &[store::EventIndex],
+    leaf_id: Option<&str>,
+    cursor: &store::SessionCursor,
+    hydrate: bool,
+    retain_prefill: bool,
+    hydrate_only: Option<&std::collections::HashSet<usize>>,
+) -> Vec<TreeEntry> {
+    // Native tool details are label-only data. Do not read them while building
+    // the shape used for the first progressive draw.
+    let native_tools = if hydrate && hydrate_only.is_none() {
+        build_native_tool_map(indices, cursor)
+    } else {
+        HashMap::new()
+    };
     let mut children_by_parent: HashMap<&store::IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&store::IndexId, usize> = HashMap::new();
     for (i, ix) in indices.iter().enumerate() {
@@ -88,7 +191,11 @@ pub(super) fn build_tree_entries(
         children_by_parent: &children_by_parent,
         by_id: &by_id,
         cursor,
-        native_tools: &native_tools,
+        native_tools: std::cell::RefCell::new(native_tools),
+        lazy_native_tools: false,
+        hydrate,
+        retain_prefill,
+        hydrate_only,
     };
     for (pos, &idx) in trunk.iter().enumerate() {
         let is_last = pos == n - 1;
@@ -151,29 +258,63 @@ pub(super) fn build_tree_entries(
     out
 }
 
-/// Build a map from exec tool-call id to its native tool calls (name, args)
-/// for the `exec:` label in `/tree`. Scans the index for `NativeTool` events
-/// and loads each one from disk to extract the `parent` (exec tool-call id)
-/// and `name`/`args`.
+/// Build a map from exec tool-call id to native display metadata.
+/// Projection skips native result bodies, which may be much larger than the
+/// parent/name/args needed by the tree label.
 fn build_native_tool_map(
     indices: &[store::EventIndex],
     cursor: &store::SessionCursor,
 ) -> HashMap<String, Vec<(String, String)>> {
+    let offsets: Vec<u64> = indices
+        .iter()
+        .filter(|entry| entry.kind == store::IndexKind::NativeTool)
+        .map(|entry| entry.offset)
+        .collect();
     let mut map: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for ix in indices {
-        if ix.kind != store::IndexKind::NativeTool {
-            continue;
-        }
-        let Ok(ev) = cursor.event_at(ix.offset) else {
-            continue;
-        };
-        if let SessionEventKind::NativeTool(rec) = ev.kind {
-            map.entry(rec.parent.clone())
-                .or_default()
-                .push((rec.name, one_line(&rec.args)));
-        }
+    let Ok(summaries) = cursor.native_tool_summaries(&offsets) else {
+        return map;
+    };
+    for (parent, name, args) in summaries {
+        map.entry(parent).or_default().push((name, one_line(&args)));
     }
     map
+}
+
+/// Load native call request metadata for one exec result by walking forward
+/// through that turn's indexed chain. Result bodies are skipped by projection.
+fn load_native_tools_for_turn(
+    ctx: &TreeCtx<'_>,
+    tool_result_index: usize,
+    tool_use_id: &str,
+) -> Vec<(String, String)> {
+    let mut offsets = Vec::new();
+    let mut current = tool_result_index;
+    let mut visited = std::collections::HashSet::new();
+    while visited.insert(current) {
+        let Some(children) = ctx.children_by_parent.get(&ctx.indices[current].id) else {
+            break;
+        };
+        let Some(&next) = children
+            .iter()
+            .find(|&&child| ctx.indices[child].kind != store::IndexKind::UserPrompt)
+        else {
+            break;
+        };
+        match ctx.indices[next].kind {
+            store::IndexKind::NativeTool => offsets.push(ctx.indices[next].offset),
+            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => break,
+            _ => {}
+        }
+        current = next;
+    }
+    let Ok(summaries) = ctx.cursor.native_tool_summaries(&offsets) else {
+        return Vec::new();
+    };
+    summaries
+        .into_iter()
+        .filter(|(parent, _, _)| parent == tool_use_id)
+        .map(|(_, name, args)| (name, one_line(&args)))
+        .collect()
 }
 
 /// Active path (root-first indices) from a leaf id, using the lightweight
@@ -319,96 +460,131 @@ fn push_tree_entry(
     is_active: bool,
     out: &mut Vec<TreeEntry>,
 ) {
+    if ctx
+        .hydrate_only
+        .is_some_and(|sources| !sources.contains(&idx))
+    {
+        return;
+    }
     let ix = &ctx.indices[idx];
-    let (label, prefill, branch_point) = match ix.kind {
-        store::IndexKind::UserPrompt => {
-            let prompt = load_prompt_text(ctx.cursor, ix.offset);
-            (
-                format!("user: {}", one_line(&prompt)),
-                prompt,
-                ix.parent_id
-                    .as_ref()
-                    .map(store::IndexId::to_event_id)
-                    .unwrap_or_default(),
-            )
+    let (label, prefill, branch_point) = if !ctx.hydrate {
+        let label = match ix.kind {
+            store::IndexKind::UserPrompt => "user: loading…",
+            store::IndexKind::ToolResult => "tool: loading…",
+            store::IndexKind::TurnEnd => "agent: loading…",
+            store::IndexKind::TurnFailed => "agent: loading… (failed)",
+            store::IndexKind::Compaction => "compact: loading…",
+            _ => return,
         }
-        store::IndexKind::ToolResult => {
-            let (name, tool_use_id, content, is_error) =
-                load_tool_result(idx, ctx.indices, ctx.by_id, ctx.cursor);
-            let marker = if is_error { "\u{2717} " } else { "" };
-            // For `exec` tool results, show the native tool calls made
-            // inside the exec block instead of the raw result.
-            let label = if name == "exec" {
-                if let Some(tools) = ctx.native_tools.get(&tool_use_id) {
-                    let summary = tools
-                        .iter()
-                        .map(|(n, a)| format!("{n} {a}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("exec: {marker}{}", one_line(&summary))
-                } else {
-                    format!("exec: {marker}{}", one_line(&content))
-                }
-            } else {
-                format!("tool: {marker}{name}: {}", one_line(&content))
-            };
-            (label, String::new(), ix.id.to_event_id())
-        }
-        store::IndexKind::TurnEnd => {
-            let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
-            (
-                format!(
-                    "agent: {}",
-                    if preview.is_empty() {
-                        "(turn end)".to_string()
+        .to_string();
+        let branch_point = match ix.kind {
+            store::IndexKind::UserPrompt | store::IndexKind::Compaction => ix
+                .parent_id
+                .as_ref()
+                .map(store::IndexId::to_event_id)
+                .unwrap_or_default(),
+            _ => ix.id.to_event_id(),
+        };
+        (label, String::new(), branch_point)
+    } else {
+        match ix.kind {
+            store::IndexKind::UserPrompt => {
+                let prompt = load_prompt_text(ctx.cursor, ix.offset);
+                (
+                    format!("user: {}", one_line(&prompt)),
+                    if ctx.retain_prefill {
+                        prompt
                     } else {
-                        preview
+                        String::new()
+                    },
+                    ix.parent_id
+                        .as_ref()
+                        .map(store::IndexId::to_event_id)
+                        .unwrap_or_default(),
+                )
+            }
+            store::IndexKind::ToolResult => {
+                let (name, tool_use_id, content, is_error) =
+                    load_tool_result(idx, ctx.indices, ctx.by_id, ctx.cursor);
+                let marker = if is_error { "\u{2717} " } else { "" };
+                let label = if name == "exec" {
+                    let mut tools = ctx.native_tools.borrow().get(&tool_use_id).cloned();
+                    if tools.is_none() && ctx.lazy_native_tools {
+                        let loaded = load_native_tools_for_turn(ctx, idx, &tool_use_id);
+                        ctx.native_tools
+                            .borrow_mut()
+                            .insert(tool_use_id.clone(), loaded.clone());
+                        tools = Some(loaded);
                     }
-                ),
-                String::new(),
-                ix.id.to_event_id(),
-            )
+                    if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+                        let summary = tools
+                            .iter()
+                            .map(|(name, args)| format!("{name} {args}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("exec: {marker}{}", one_line(&summary))
+                    } else {
+                        format!("exec: {marker}{}", one_line(&content))
+                    }
+                } else {
+                    format!("tool: {marker}{name}: {}", one_line(&content))
+                };
+                (label, String::new(), ix.id.to_event_id())
+            }
+            store::IndexKind::TurnEnd => {
+                let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
+                (
+                    format!(
+                        "agent: {}",
+                        if preview.is_empty() {
+                            "(turn end)".to_string()
+                        } else {
+                            preview
+                        }
+                    ),
+                    String::new(),
+                    ix.id.to_event_id(),
+                )
+            }
+            store::IndexKind::TurnFailed => {
+                let error = load_failed_error(ctx.cursor, ix.offset);
+                (
+                    format!("agent: {} (failed)", one_line(&error)),
+                    String::new(),
+                    ix.id.to_event_id(),
+                )
+            }
+            store::IndexKind::Compaction => {
+                let (summarized, kept, checkpointed, first_kept) =
+                    load_compaction_details(ctx.cursor, ix.offset);
+                let branch_point = if checkpointed && !first_kept.is_empty() {
+                    ctx.by_id
+                        .get(&store::IndexId::parse(first_kept))
+                        .and_then(|&i| {
+                            ctx.indices[i]
+                                .parent_id
+                                .as_ref()
+                                .map(store::IndexId::to_event_id)
+                        })
+                        .unwrap_or_default()
+                } else {
+                    ix.parent_id
+                        .as_ref()
+                        .map(store::IndexId::to_event_id)
+                        .unwrap_or_default()
+                };
+                (
+                    format!("compact: Compacted {summarized} messages · kept {kept}"),
+                    String::new(),
+                    branch_point,
+                )
+            }
+            store::IndexKind::AssistantMessage
+            | store::IndexKind::SystemMessage
+            | store::IndexKind::NativeTool
+            | store::IndexKind::Cursor
+            | store::IndexKind::Other => return,
         }
-        store::IndexKind::TurnFailed => {
-            let error = load_failed_error(ctx.cursor, ix.offset);
-            (
-                format!("agent: {} (failed)", one_line(&error)),
-                String::new(),
-                ix.id.to_event_id(),
-            )
-        }
-        store::IndexKind::Compaction => {
-            let (summarized, kept, checkpointed, first_kept) =
-                load_compaction_details(ctx.cursor, ix.offset);
-            let branch_point = if checkpointed && !first_kept.is_empty() {
-                // The direct parent is the final checkpoint copy; branch from
-                // the first copy's parent, the true pre-compaction leaf.
-                ctx.by_id
-                    .get(&store::IndexId::parse(first_kept))
-                    .and_then(|&i| {
-                        ctx.indices[i]
-                            .parent_id
-                            .as_ref()
-                            .map(store::IndexId::to_event_id)
-                    })
-                    .unwrap_or_default()
-            } else {
-                ix.parent_id
-                    .as_ref()
-                    .map(store::IndexId::to_event_id)
-                    .unwrap_or_default()
-            };
-            (
-                format!("compact: Compacted {summarized} messages \u{00b7} kept {kept}"),
-                String::new(),
-                branch_point,
-            )
-        }
-        store::IndexKind::AssistantMessage
-        | store::IndexKind::SystemMessage
-        | store::IndexKind::NativeTool
-        | store::IndexKind::Cursor
-        | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {
         prefix: prefix.to_string(),
@@ -416,6 +592,10 @@ fn push_tree_entry(
         prefill,
         branch_point,
         is_active,
+        source_index: idx,
+        source_offset: ix.offset,
+        source_kind: ix.kind,
+        hydrated: ctx.hydrate,
     });
 }
 

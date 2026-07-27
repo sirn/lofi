@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 use index::{
-    load_compaction_path, load_event_at, load_event_by_id, load_event_range, load_events_at,
-    load_index, load_indexed_path, visit_event_values, visit_events,
+    load_collapsed_events_at, load_compaction_path, load_event_at, load_event_by_id,
+    load_event_range, load_events_at, load_index, load_indexed_path, visit_event_values,
+    visit_events,
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
@@ -51,6 +52,15 @@ struct Header {
     kind: String,
     #[serde(flatten)]
     meta: SessionMeta,
+}
+
+/// A session file discovered using directory metadata only. This is cheap
+/// enough for an interactive picker to sort and draw before transcript
+/// metadata is indexed.
+#[derive(Debug, Clone)]
+pub struct SessionFile {
+    pub path: PathBuf,
+    pub last_active: std::time::SystemTime,
 }
 
 /// A discoverable session on disk: its metadata, file path, and message count.
@@ -290,6 +300,15 @@ impl SessionCursor {
         load_event_at(&self.path, offset)
     }
 
+    /// Read events for collapsed transcript display while skipping successful
+    /// result bodies that are not rendered in that mode.
+    ///
+    /// # Errors
+    /// Propagates transcript seek, read, and parsing failures.
+    pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
+        load_collapsed_events_at(&self.path, offsets)
+    }
+
     /// Read events at byte offsets obtained from this cursor's snapshot.
     ///
     /// # Errors
@@ -335,6 +354,63 @@ impl SessionCursor {
         visit: impl FnMut(T) -> Result<()>,
     ) -> Result<()> {
         visit_event_values(&self.path, offsets, visit)
+    }
+
+    /// Read only the display metadata for native calls at snapshot-derived
+    /// offsets. The native result field is skipped by serde's streaming
+    /// deserializer, so a large tool result is neither allocated nor retained
+    /// merely to render an exec summary.
+    ///
+    /// # Errors
+    /// Propagates transcript seek/read/parse failures.
+    pub fn native_tool_summaries(&self, offsets: &[u64]) -> Result<Vec<(String, String, String)>> {
+        #[derive(Deserialize)]
+        struct NativeToolSummary {
+            parent: String,
+            name: String,
+            args: String,
+        }
+
+        let mut summaries = Vec::with_capacity(offsets.len());
+        visit_event_values::<NativeToolSummary>(&self.path, offsets, |record| {
+            summaries.push((record.parent, record.name, record.args));
+            Ok(())
+        })?;
+        Ok(summaries)
+    }
+
+    /// Read only the first text block from user-message events. Assistant and
+    /// tool payloads in the same record shape are skipped without allocation;
+    /// startup replay uses this to build file-backed historical turn shells.
+    ///
+    /// # Errors
+    /// Propagates transcript seek/read/parse failures.
+    pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct PromptProjection {
+            #[serde(default)]
+            blocks: Vec<PromptBlockProjection>,
+        }
+        #[derive(Deserialize)]
+        struct PromptBlockProjection {
+            #[serde(default, rename = "type")]
+            kind: String,
+            #[serde(default)]
+            text: String,
+        }
+
+        let mut prompts = Vec::with_capacity(offsets.len());
+        visit_event_values::<PromptProjection>(&self.path, offsets, |event| {
+            prompts.push(
+                event
+                    .blocks
+                    .into_iter()
+                    .find_map(|block| (block.kind == "text").then_some(block.text))
+                    .unwrap_or_default(),
+            );
+            Ok(())
+        })?;
+        Ok(prompts)
     }
 
     /// Read all non-cursor events physically contained in one committed byte
@@ -622,8 +698,20 @@ impl SessionStore {
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
     pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
-        let dir = self.dir_for_cwd(cwd);
         let mut entries = Vec::new();
+        for file in self.list_files_for_cwd(cwd)? {
+            if let Some(entry) = Self::inspect_file(&file) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Discover session files using directory metadata only, newest first.
+    /// No transcript contents are read or indexed.
+    pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
+        let dir = self.dir_for_cwd(cwd);
+        let mut files = Vec::new();
         let read = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -635,13 +723,28 @@ impl SessionStore {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(entry) = parse_entry(&path) {
-                entries.push(entry);
-            }
+            let last_active = ent
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            files.push(SessionFile { path, last_active });
         }
-        // Newest activity first: descending by file mtime (last write).
-        entries.sort_by_key(|e| std::cmp::Reverse(e.last_active));
-        Ok(entries)
+        files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
+        Ok(files)
+    }
+
+    /// Read a provisional latest-message preview from a bounded window at
+    /// physical EOF. This is intentionally independent of logical cursor
+    /// projection: the exact enrichment may later correct it after a rollback.
+    #[must_use]
+    pub fn quick_preview(file: &SessionFile) -> Option<String> {
+        quick_entry_preview(&file.path)
+    }
+
+    /// Enrich one cheaply discovered session file for picker display.
+    #[must_use]
+    pub fn inspect_file(file: &SessionFile) -> Option<SessionEntry> {
+        parse_entry(&file.path, file.last_active)
     }
 
     /// The most recent session for `cwd`, or `None` if none exist.
@@ -1103,8 +1206,6 @@ pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
 }
 
 /// Indices of the events on the path from the leaf `leaf_id` to the root,
-
-/// Indices of the events on the path from the leaf `leaf_id` to the root,
 /// in root-first order (oldest to newest). Returns an empty `Vec` if
 /// `leaf_id` is not found.
 #[must_use]
@@ -1216,15 +1317,59 @@ fn entry_preview(ev: &EntryPreview) -> String {
     }
 }
 
-fn parse_entry(path: &Path) -> Option<SessionEntry> {
-    let cursor = SessionCursor::open(path.to_path_buf()).ok()?;
-    let snapshot = cursor.snapshot().ok()?;
-    let message_count = snapshot
-        .index
+fn quick_entry_preview(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // JSONL strings escape embedded newlines, so physical newlines delimit
+    // records. Keep this bounded: a huge tool-result line at EOF must not make
+    // merely opening the picker allocate that complete payload.
+    const TAIL_BYTES: u64 = 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::with_capacity(usize::try_from(len - start).ok()?);
+    file.read_to_end(&mut tail).ok()?;
+    // Reverse-split directly over the bounded buffer; no Vec of every line is
+    // needed. A partial record at the start simply fails projection.
+    for line in tail.rsplit(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<EntryPreview>(line) else {
+            continue;
+        };
+        let preview = entry_preview(&event);
+        if !preview.is_empty() {
+            return Some(preview);
+        }
+    }
+    None
+}
+
+fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
+    // One index pass is enough to restore the durable head and project its
+    // lineage. The old picker path opened a cursor and then snapshotted it,
+    // indexing every file twice.
+    let (meta, index, _file_size) = load_index(path).ok()?;
+    let cursor_record = index
         .iter()
-        .filter(|event| {
+        .rev()
+        .find(|event| event.kind == IndexKind::Cursor);
+    let leaf = match cursor_record {
+        Some(event) => event.cursor_leaf.as_ref().map(IndexId::to_event_id),
+        None => index
+            .iter()
+            .rev()
+            .find(|event| event.kind != IndexKind::Cursor)
+            .map(|event| event.id.to_event_id()),
+    };
+    let selected = lineage_indices(&index, leaf.as_deref()).ok()?;
+    let message_count = selected
+        .iter()
+        .filter(|&&i| {
             matches!(
-                event.kind,
+                index[i].kind,
                 IndexKind::UserPrompt
                     | IndexKind::AssistantMessage
                     | IndexKind::ToolResult
@@ -1232,22 +1377,28 @@ fn parse_entry(path: &Path) -> Option<SessionEntry> {
             )
         })
         .count();
-    let offsets: Vec<u64> = snapshot.index.iter().map(|event| event.offset).collect();
+    // Usually the first candidate is meaningful. Read newest-to-oldest and
+    // stop immediately instead of parsing every selected event.
     let mut last_message = String::new();
-    cursor
-        .visit_event_values::<EntryPreview>(&offsets, |event| {
-            let preview = entry_preview(&event);
-            if !preview.is_empty() {
-                last_message = preview;
-            }
+    for &i in selected.iter().rev() {
+        if matches!(index[i].kind, IndexKind::Cursor | IndexKind::Other) {
+            continue;
+        }
+        let offset = index[i].offset;
+        if visit_event_values::<EntryPreview>(path, &[offset], |event| {
+            last_message = entry_preview(&event);
             Ok(())
         })
-        .ok()?;
-    let last_active = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        .is_err()
+        {
+            return None;
+        }
+        if !last_message.is_empty() {
+            break;
+        }
+    }
     Some(SessionEntry {
-        meta: snapshot.meta,
+        meta,
         path: path.to_path_buf(),
         message_count,
         last_active,
@@ -1319,6 +1470,129 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
         (dir, store)
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn collapsed_loader_skips_only_invisible_success_bodies() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/collapsed-projection"), &"p/m".into())
+            .unwrap();
+        let large = "x".repeat(128 * 1024);
+        let mut events = vec![
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text {
+                        text: "  raw prompt  \n".to_string(),
+                    }],
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::ToolUse {
+                        id: "exec-1".to_string(),
+                        name: "exec".to_string(),
+                        input: serde_json::json!({"code": "x"}),
+                    }],
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::Tool,
+                    blocks: vec![ContentBlock::ToolResult {
+                        tool_use_id: "exec-1".to_string(),
+                        content: large.clone(),
+                        is_error: false,
+                    }],
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
+                    parent: "exec-1".to_string(),
+                    call_id: 0,
+                    name: "read".to_string(),
+                    args: "a.txt".to_string(),
+                    result: large.clone(),
+                    is_error: false,
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
+                    parent: "exec-1".to_string(),
+                    call_id: 1,
+                    name: "write".to_string(),
+                    args: "b.txt".to_string(),
+                    result: "visible write result".to_string(),
+                    is_error: false,
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
+                    parent: "exec-1".to_string(),
+                    call_id: 2,
+                    name: "read".to_string(),
+                    args: "missing".to_string(),
+                    result: "visible error".to_string(),
+                    is_error: true,
+                }),
+            },
+        ];
+        append_events(&path, &mut events, None).unwrap();
+        let (_, index, _) = load_index(&path).unwrap();
+        let offsets: Vec<_> = index
+            .iter()
+            .filter(|entry| entry.kind != IndexKind::Cursor)
+            .map(|entry| entry.offset)
+            .collect();
+        let collapsed = load_collapsed_events_at(&path, &offsets).unwrap();
+        let complete = load_events_at(&path, &offsets).unwrap();
+
+        let tool_result = match &collapsed[2].kind {
+            SessionEventKind::Message(message) => match &message.blocks[0] {
+                ContentBlock::ToolResult { content, .. } => content,
+                _ => panic!("expected tool result"),
+            },
+            _ => panic!("expected tool message"),
+        };
+        assert!(tool_result.is_empty());
+        let natives: Vec<_> = collapsed
+            .iter()
+            .filter_map(|event| match &event.kind {
+                SessionEventKind::NativeTool(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert!(natives[0].result.is_empty());
+        assert_eq!(natives[1].result, "visible write result");
+        assert_eq!(natives[2].result, "visible error");
+        let full_read = complete.iter().find_map(|event| match &event.kind {
+            SessionEventKind::NativeTool(record) if record.name == "read" && !record.is_error => {
+                Some(&record.result)
+            }
+            _ => None,
+        });
+        assert_eq!(full_read.map(String::len), Some(large.len()));
+        assert_eq!(
+            SessionCursor::new(path, None)
+                .prompt_texts(&[offsets[0]])
+                .unwrap(),
+            vec!["  raw prompt  \n".to_string()]
+        );
     }
 
     #[test]

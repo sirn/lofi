@@ -48,7 +48,7 @@ use {input::*, replay::*, resume::*, text::*, tree::*};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -351,11 +351,20 @@ impl SessionConfig {
     }
 }
 
+/// One progressively enriched row in the '/resume' picker.
+#[derive(Debug, Clone)]
+struct PickerEntry {
+    file: store::SessionFile,
+    preview: Option<String>,
+    details: Option<SessionEntry>,
+}
+
 /// State for the '/resume' session-picker overlay.
 #[derive(Debug, Clone)]
 struct PickerState {
-    entries: Vec<SessionEntry>,
+    entries: Vec<PickerEntry>,
     selected: usize,
+    generation: u64,
 }
 
 /// A read-only, scrollable information modal (e.g. `/help`, `/session`
@@ -484,6 +493,8 @@ struct SlashComplete {
 struct TreePickerState {
     entries: Vec<TreeEntry>,
     selected: usize,
+    generation: u64,
+    loading: bool,
 }
 
 /// A list-style modal overlay (the `/resume` and `/tree` pickers). The
@@ -603,6 +614,10 @@ struct TreeEntry {
     prefix: String,
     prefill: String,
     is_active: bool,
+    source_index: usize,
+    source_offset: u64,
+    source_kind: store::IndexKind,
+    hydrated: bool,
 }
 
 /// Viewport-local cache of rendered frozen turns, keyed by turn index.
@@ -675,6 +690,30 @@ pub(crate) enum Mode {
     Input,
     Navigate,
     Select,
+}
+
+enum PickerLoad {
+    ResumePreviews {
+        generation: u64,
+        rows: Vec<(usize, String)>,
+    },
+    ResumeRows {
+        generation: u64,
+        rows: Vec<(usize, SessionEntry)>,
+    },
+    TreeReady {
+        generation: u64,
+        entries: Vec<TreeEntry>,
+        index: Arc<Vec<store::EventIndex>>,
+    },
+    TreeRows {
+        generation: u64,
+        rows: Vec<(usize, TreeEntry)>,
+    },
+    TreeFailed {
+        generation: u64,
+        error: String,
+    },
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -784,6 +823,15 @@ pub(crate) struct App {
     picker: Option<PickerState>,
     /// '/tree' overlay state, when open. See [`TreePickerState`].
     tree_picker: Option<TreePickerState>,
+    /// Lightweight full-tree index retained only while /tree is open. Event
+    /// bodies remain file-backed and are hydrated one visible window at a time.
+    tree_picker_index: Option<Arc<Vec<store::EventIndex>>>,
+    /// Display-row indices already queued for tree hydration.
+    tree_picker_pending: std::collections::HashSet<usize>,
+    /// Background picker enrichment channel installed by the interactive run
+    /// loop. Unit tests leave it absent and use the synchronous fallback.
+    picker_load_tx: Option<tokio::sync::mpsc::UnboundedSender<PickerLoad>>,
+    picker_generation: Arc<AtomicU64>,
     /// `/model` overlay state, when open. See [`ModelPickerState`].
     model_picker: Option<ModelPickerState>,
     /// `/thinking` overlay state, when open. See [`ThinkingPickerState`].
@@ -1079,6 +1127,8 @@ async fn run_loop(
         agent = Some(a.with_confirm_tx(confirm_tx));
     }
 
+    let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.picker_load_tx = Some(picker_load_tx);
     let mut current_run: Option<RunHandle> = None;
     let mut events = EventStream::new();
     let mut last_err: Option<String> = None;
@@ -1226,6 +1276,12 @@ async fn run_loop(
                     if n.at.elapsed() >= NOTIFY_TTL {
                         app.notify = None;
                     }
+                    dirty = true;
+                }
+            }
+            picker_load = picker_load_rx.recv() => {
+                if let Some(load) = picker_load {
+                    app.apply_picker_load(load);
                     dirty = true;
                 }
             }

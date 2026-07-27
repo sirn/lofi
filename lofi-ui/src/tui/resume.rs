@@ -123,6 +123,11 @@ fn messages_from_cursor(
     Ok(out)
 }
 
+/// Restore the transcript as file-backed turn shells. Historical turns need
+/// only their prompt, offsets, and terminal accounting at startup; their full
+/// blocks are materialized from disk only when the viewport reaches them.
+/// The final turn remains fully resident so the initial bottom view renders
+/// without a second disk pass.
 pub(super) fn replay_indexed_session(
     app: &mut App,
     cursor: &store::SessionCursor,
@@ -135,18 +140,42 @@ pub(super) fn replay_indexed_session(
         .enumerate()
         .filter_map(|(p, &i)| (index[i].kind == store::IndexKind::UserPrompt).then_some(p))
         .collect();
+    let prompt_offsets: Vec<u64> = starts
+        .iter()
+        .map(|&start_pos| index[visible[start_pos]].offset)
+        .collect();
+    let prompts = cursor.prompt_texts(&prompt_offsets)?;
     app.turn_byte_ranges.clear();
     app.turn_event_offsets.clear();
     for (turn, &start_pos) in starts.iter().enumerate() {
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
-        let offsets: Vec<u64> = visible[start_pos..end_pos]
-            .iter()
-            .map(|&i| index[i].offset)
-            .collect();
-        let events = cursor.events_at(&offsets)?;
-        replay_selected_session_events(&events, |ev| {
-            app.apply_file_backed_replay_event(ev);
-        });
+        let selected = &visible[start_pos..end_pos];
+        let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
+        let is_last = turn + 1 == starts.len();
+        if is_last {
+            let events = cursor.events_at(&offsets)?;
+            replay_selected_session_events(&events, |ev| {
+                app.apply_file_backed_replay_event(ev);
+            });
+        } else {
+            app.apply_file_backed_replay_event(AgentEvent::TurnStart {
+                prompt: prompts.get(turn).cloned().unwrap_or_default(),
+            });
+            // Preserve cumulative cost/token accounting without parsing any
+            // message, tool-result, thinking, or native-result body.
+            for &i in selected {
+                if !matches!(
+                    index[i].kind,
+                    store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
+                ) {
+                    continue;
+                }
+                let event = cursor.event_at(index[i].offset)?;
+                replay_selected_session_events(&[event], |ev| {
+                    app.apply_file_backed_replay_event(ev);
+                });
+            }
+        }
         let start = index[visible[start_pos]].offset;
         // Physical EOF is correct only when this index represents the file's
         // final appended leaf. A /tree rollback passes a projected lineage;
@@ -159,8 +188,8 @@ pub(super) fn replay_indexed_session(
         if let Some(range) = app.turn_byte_ranges.last_mut() {
             *range = Some((start, end));
         }
-        if let Some(selected) = app.turn_event_offsets.last_mut() {
-            *selected = Some(offsets);
+        if let Some(event_offsets) = app.turn_event_offsets.last_mut() {
+            *event_offsets = Some(offsets);
         }
     }
     Ok(())
