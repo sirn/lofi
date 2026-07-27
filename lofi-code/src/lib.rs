@@ -9,21 +9,20 @@
 //!
 //! `rquickjs`'s `futures` feature gives us [`AsyncRuntime`]/[`AsyncContext`]
 //! and the `async_with!` macro. Native tool functions are `Async` closures
-//! returning `rquickjs::Result<JsonV>`; rquickjs wraps their future in a
-//! resolved/rejected promise via `Promise::wrap_future`. The guest's IIFE is
+//! returning an owned `ToolOutput`; rquickjs wraps each future in a promise.
+//! The guest's IIFE is
 //! evaluated to a promise and awaited with `Promise::into_future`; the
 //! `async_with!` driver polls both the guest future and rquickjs's internal
 //! spawner (which runs the tool futures) on each wake, so tokio-backed tools
 //! (e.g. `bash`) drive naturally on the host runtime.
 //!
-//! Tool errors are surfaced as thrown JS exceptions: the closure returns
-//! `Err(rquickjs::Error::IntoJs { message })`, which rquickjs converts into a
-//! rejected promise carrying a JS `Error` whose `.message` is the tool error
-//! text. The IIFE wrapper installs a top-level `try`/`catch` so an uncaught
-//! tool error becomes a structured `{ __lofi_sandbox_error__ }` result instead
-//! of a rejected promise (rejected promises retain their rejection value in
-//! rquickjs 0.9 and trip a runtime-GC assertion at shutdown; resolving always
-//! is leak-free).
+//! Tool closures return an owned `ToolOutput`. Its `IntoJs` implementation
+//! recursively converts successful JSON values and throws a genuine JavaScript
+//! `Error` for failures. This avoids rquickjs's generic Rust-conversion error
+//! wording while retaining the leak-free owned-value bridge. The IIFE wrapper
+//! catches uncaught tool errors and resolves them as a structured
+//! `{ __lofi_sandbox_error__ }` result; resolving avoids rquickjs 0.9 retaining
+//! a rejected promise's value through runtime shutdown.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +32,9 @@ use std::time::{Duration, Instant};
 
 use rquickjs::async_with;
 use rquickjs::prelude::*;
-use rquickjs::{Array, AsyncContext, AsyncRuntime, Ctx, Function, IntoJs, Object, Promise, Value};
+use rquickjs::{
+    Array, AsyncContext, AsyncRuntime, Ctx, Exception, Function, IntoJs, Object, Promise, Value,
+};
 use serde_json::{json, Value as Json};
 use swc_common::sync::Lrc;
 use swc_common::{FileName, FilePathMapping, Globals, SourceMap, Span, Spanned, GLOBALS};
@@ -275,17 +276,37 @@ pub struct ExecResult {
     pub logs: String,
 }
 
-/// Newtype wrapper letting `serde_json::Value` cross the `IntoJs` boundary.
+/// Owned JSON result passed from a native future into `QuickJS`.
 ///
-/// We build JS values from the Rust side inside rquickjs's spawned tool
-/// futures. Returning a raw `rquickjs::Value` from such a future confuses
-/// rquickjs 0.9's promise bookkeeping and leaks the value at runtime
-/// shutdown; converting a plain Rust enum via a custom `IntoJs` is leak-free.
+/// Returning a raw `rquickjs::Value` from a spawned tool future confuses
+/// rquickjs 0.9's promise bookkeeping and leaks the value at shutdown. This
+/// owned wrapper delays conversion until rquickjs is resolving the promise.
 struct JsonV(Json);
 
 impl<'js> IntoJs<'js> for JsonV {
     fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
         json_to_js(ctx, &self.0)
+    }
+}
+
+/// Outcome of a native tool future.
+///
+/// This is deliberately not `rquickjs::Result<JsonV>`. rquickjs's generic
+/// `Result<T>` conversion describes every `Err` as a Rust-to-JavaScript
+/// conversion failure. Tool failures are domain errors, so convert them into
+/// genuine JavaScript `Error` exceptions without the misleading
+/// `Error converting from 'lofi' into js 'value'` prefix.
+enum ToolOutput {
+    Value(Json),
+    Error(String),
+}
+
+impl<'js> IntoJs<'js> for ToolOutput {
+    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        match self {
+            Self::Value(value) => json_to_js(ctx, &value),
+            Self::Error(message) => Err(Exception::throw_message(ctx, &message)),
+        }
     }
 }
 

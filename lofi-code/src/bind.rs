@@ -2,7 +2,8 @@
 //!
 //! `bind_tools` mounts the file and shell methods as native `QuickJS`
 //! functions; `tool_result` translates a tool `Result` into a
-//! `rquickjs::Result<JsonV>` so tool errors surface as thrown JS `Error`s.
+//! `ToolOutput`; its `IntoJs` implementation resolves JSON values and throws
+//! genuine JavaScript `Error`s for tool failures.
 
 use super::convert::js_to_json;
 #[allow(clippy::wildcard_imports)]
@@ -367,17 +368,13 @@ fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<
     Ok(())
 }
 
-/// Translate a builtin tool [`Result`] into a `rquickjs::Result<JsonV>`,
-/// surfacing tool errors as a thrown JS `Error` (via rquickjs's `IntoJs`
-/// error path, which is leak-free in rquickjs 0.9).
-fn tool_result(res: std::result::Result<Json, Error>) -> rquickjs::Result<JsonV> {
+/// Translate a builtin tool [`Result`] into the owned value that crosses
+/// the native-future boundary. Conversion to a JS value/error happens only
+/// when rquickjs settles the promise.
+fn tool_result(res: std::result::Result<Json, Error>) -> ToolOutput {
     match res {
-        Ok(v) => Ok(JsonV(v)),
-        Err(e) => Err(rquickjs::Error::IntoJs {
-            from: "lofi",
-            to: "value",
-            message: Some(e.to_string()),
-        }),
+        Ok(value) => ToolOutput::Value(value),
+        Err(error) => ToolOutput::Error(error.to_string()),
     }
 }
 

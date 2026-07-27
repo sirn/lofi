@@ -101,6 +101,66 @@ async fn pi_write_then_read_round_trip() {
 }
 
 #[tokio::test]
+async fn every_native_api_result_can_be_returned_as_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".lofi/skills/demo")).unwrap();
+    std::fs::write(
+        dir.path().join(".lofi/skills/demo/SKILL.md"),
+        "# Demo\nA test skill.\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("source.txt"), "alpha\nbeta\n").unwrap();
+
+    // Keep each native result intact. This is the exact usage the public API
+    // promises: await a tool and return its object without rebuilding fields.
+    let src = r#"
+        const read = await lofi.read("source.txt");
+        const ls = await lofi.ls(".");
+        const find = await lofi.find("*.txt", ".");
+        const grep = await lofi.grep("beta", "source.txt");
+        const write = await lofi.write({ path: "written.txt", text: "before" });
+        const edit = await lofi.edit({ path: "written.txt", old: "before", new: "after" });
+        const bash = await lofi.bash({ cmd: "printf native-output" });
+        const skills = await lofi.skills();
+        const skill = await lofi.skill("demo");
+        const docs = await lofi.docs("lofi.read");
+        const docsSearch = await lofi.docs_search("read file");
+        const recall = await lofi.recall();
+        const result = await lofi.result("missing");
+        return { read, ls, find, grep, write, edit, bash, skills, skill,
+                 docs, docsSearch, recall, result };
+    "#;
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+
+    let value = res.value.as_object().expect("returned API result map");
+    for name in [
+        "read",
+        "ls",
+        "find",
+        "grep",
+        "write",
+        "edit",
+        "bash",
+        "skills",
+        "skill",
+        "docs",
+        "docsSearch",
+        "recall",
+        "result",
+    ] {
+        assert!(value.contains_key(name), "missing direct result for {name}");
+    }
+    assert_eq!(value["read"]["content"], json!("alpha\nbeta\n"));
+    assert_eq!(value["bash"]["output"], json!("native-output"));
+    assert_eq!(value["skill"]["name"], json!("demo"));
+    assert_eq!(value["docs"]["ok"], json!(true));
+    assert_eq!(value["recall"]["status"], json!("unavailable"));
+    assert!(value["result"].as_str().is_some());
+}
+
+#[tokio::test]
 async fn path_escape_throws_a_js_error() {
     let dir = tempfile::tempdir().unwrap();
     // The IIFE wrapper would turn an uncaught throw into a sandbox error;
@@ -111,10 +171,14 @@ async fn path_escape_throws_a_js_error() {
         .await
         .unwrap();
     let s = res.value.as_str().unwrap();
-    assert!(s.starts_with("caught:"), "got {s}");
+    assert!(s.starts_with("caught:tool error:"), "got {s}");
     assert!(
         s.contains("escapes workspace root"),
         "escape message missing: {s}"
+    );
+    assert!(
+        !s.contains("Error converting from"),
+        "tool failure was mislabeled as value conversion: {s}"
     );
 }
 
