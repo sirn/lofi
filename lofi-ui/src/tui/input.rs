@@ -120,10 +120,10 @@ pub(super) fn handle_event(
             }
             app.history_nav.push(prompt.clone());
             // Lazily create the transcript file on the first persisted prompt.
-            if app.session.path.is_none() {
+            if app.session.cursor.is_none() {
                 if let Some(store) = &app.session.store {
-                    if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
-                        app.session.path = Some(p);
+                    if let Ok(path) = store.create(&app.session.cwd, &app.run_model()) {
+                        app.session.cursor = Some(store::SessionCursor::new(path, None));
                     }
                 }
             }
@@ -159,11 +159,11 @@ pub(super) fn handle_event(
             // (the event handler) for both live and resumed sessions.
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let history = Arc::clone(&app.history);
-            let session_path = app.session.path.clone();
-            let commit = session_path.as_ref().map(|p| SessionCommit {
-                path: p.clone(),
-                parent_hint: app.branch_hint.take(),
-            });
+            let commit = app
+                .session
+                .cursor
+                .clone()
+                .map(|cursor| SessionCommit { cursor });
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -293,10 +293,10 @@ pub(super) fn spawn_prompt(
 ) {
     let Some(agent) = agent else { return };
     // Lazily create the transcript file on the first persisted prompt.
-    if app.session.path.is_none() {
+    if app.session.cursor.is_none() {
         if let Some(store) = &app.session.store {
-            if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
-                app.session.path = Some(p);
+            if let Ok(path) = store.create(&app.session.cwd, &app.run_model()) {
+                app.session.cursor = Some(store::SessionCursor::new(path, None));
             }
         }
     }
@@ -312,11 +312,11 @@ pub(super) fn spawn_prompt(
     }
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
-    let session_path = app.session.path.clone();
-    let commit = session_path.as_ref().map(|p| SessionCommit {
-        path: p.clone(),
-        parent_hint: None,
-    });
+    let commit = app
+        .session
+        .cursor
+        .clone()
+        .map(|cursor| SessionCommit { cursor });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -362,13 +362,12 @@ pub(super) fn spawn_continue(
     let Some(agent) = agent else { return };
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
-    let session_path = app.session.path.clone();
-    // Chain off the active leaf (the Compaction marker compact_now just
-    // appended) — no branch_hint, so the recorder appends linearly.
-    let commit = session_path.map(|p| SessionCommit {
-        path: p,
-        parent_hint: None,
-    });
+    // Compaction and continuation share the same logical cursor.
+    let commit = app
+        .session
+        .cursor
+        .clone()
+        .map(|cursor| SessionCommit { cursor });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));

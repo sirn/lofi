@@ -342,7 +342,6 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::ThinkingEnd { .. }
                 | AgentEvent::ToolEnd { .. }
                 | AgentEvent::NativeToolStart { .. }
-                | AgentEvent::NativeToolStatus { .. }
                 | AgentEvent::NativeToolEnd { .. }
                 | AgentEvent::ToolInputDelta { .. }
                 // A storage signal (turn appended to the transcript); the

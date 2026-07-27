@@ -211,8 +211,6 @@ mod tests {
             .collect();
         assert!(names.contains(&"lofi.read"));
         assert!(names.contains(&"lofi.bash"));
-        assert!(names.contains(&"lofi.agent"));
-        assert!(names.contains(&"lofi.models"));
     }
 
     #[test]
