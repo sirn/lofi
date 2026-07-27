@@ -183,6 +183,13 @@ impl App {
                 .map(String::capacity)
                 .sum::<usize>();
         let index_bytes = self.turn_byte_ranges.capacity() * size_of::<Option<(u64, u64)>>()
+            + self.turn_event_offsets.capacity() * size_of::<Option<Vec<u64>>>()
+            + self
+                .turn_event_offsets
+                .iter()
+                .flatten()
+                .map(|offsets| offsets.capacity() * size_of::<u64>())
+                .sum::<usize>()
             + (self.frozen_heights.capacity() + self.frozen_heights_other_mode.capacity())
                 * size_of::<usize>();
         let estimated_total = history_bytes
@@ -243,7 +250,7 @@ impl DebugState {
     }
 
     fn write_sample(&mut self, app: &App, event: &str) -> std::io::Result<()> {
-        self.ensure_file(app.session.path.as_deref())?;
+        self.ensure_file(app.session.path())?;
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
@@ -268,8 +275,7 @@ impl DebugState {
         let history_messages = app.history.lock().map_or(0, |messages| messages.len());
         let transcript_bytes = app
             .session
-            .path
-            .as_ref()
+            .path()
             .and_then(|path| std::fs::metadata(path).ok())
             .map_or(0, |metadata| metadata.len());
         let context_tokens = app.status_usage.map_or(0, |usage| {
@@ -338,7 +344,7 @@ impl DebugState {
             "context": {
                 "run_active": app.run.is_some(),
                 "model": app.session_model(),
-                "session_file": app.session.path.as_ref().map(|path| path.display().to_string()),
+                "session_file": app.session.path().map(|path| path.display().to_string()),
                 "transcript_bytes": transcript_bytes,
                 "history_messages": history_messages,
                 "turns": app.turns.len(),

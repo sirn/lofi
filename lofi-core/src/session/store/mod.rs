@@ -99,6 +99,316 @@ fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Stable in-memory ID for a legacy event that had no persisted tree ID.
+/// Byte offsets are unique within one append-only transcript and remain
+/// identical across full-load and lightweight-index scans.
+fn legacy_event_id(offset: u64) -> String {
+    format!("legacy-{offset:016x}")
+}
+
+/// One consistent read snapshot of a cursor's selected lineage.
+///
+/// The index is already projected root-to-leaf. Callers never need to infer a
+/// head from physical JSONL order, and all cursor-sensitive resume/replay code
+/// consumes this shape.
+#[derive(Debug)]
+pub struct SessionSnapshot {
+    pub meta: SessionMeta,
+    pub index: Vec<EventIndex>,
+    pub file_size: u64,
+}
+
+/// A full-tree snapshot for branch selection. Unlike a lineage snapshot,
+/// this retains sibling nodes, but its selected head still comes exclusively
+/// from the cursor rather than physical file order.
+#[derive(Debug)]
+pub struct SessionTreeSnapshot {
+    pub meta: SessionMeta,
+    pub index: Vec<EventIndex>,
+    pub leaf_id: Option<String>,
+    pub file_size: u64,
+}
+
+/// A shared logical cursor for one append-only transcript.
+///
+/// Clones share the active leaf. Every durable append holds the cursor lock,
+/// writes one file-locked batch, persists the selected head, and advances the
+/// in-memory leaf before releasing it. Reads snapshot that same leaf. Physical
+/// EOF is consulted only once when opening a legacy transcript that has no
+/// durable cursor head yet.
+#[derive(Debug, Clone)]
+pub struct SessionCursor {
+    path: PathBuf,
+    leaf_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl SessionCursor {
+    /// Construct a cursor at a known logical leaf. `None` denotes the
+    /// explicit position before all roots, whether or not the file has events.
+    #[must_use]
+    pub fn new(path: PathBuf, leaf_id: Option<String>) -> Self {
+        Self {
+            path,
+            leaf_id: std::sync::Arc::new(std::sync::Mutex::new(
+                leaf_id.filter(|id| !id.is_empty()),
+            )),
+        }
+    }
+
+    /// Open an existing transcript at its durable selected head. Legacy files
+    /// without a cursor record fall back once to their physically last event.
+    ///
+    /// # Errors
+    /// Returns an error when the transcript cannot be indexed or its selected
+    /// head no longer exists.
+    pub fn open(path: PathBuf) -> Result<Self> {
+        let (_meta, index, _size) = load_index(&path)?;
+        let cursor_record = index
+            .iter()
+            .rev()
+            .find(|event| event.kind == IndexKind::Cursor);
+        let leaf = match cursor_record {
+            Some(event) => event.cursor_leaf.clone(),
+            None => index
+                .iter()
+                .rev()
+                .find(|event| event.kind != IndexKind::Cursor)
+                .map(|event| event.id.clone()),
+        };
+        if leaf.as_ref().is_some_and(|id| {
+            !index
+                .iter()
+                .any(|event| event.kind != IndexKind::Cursor && event.id == *id)
+        }) {
+            return Err(Error::State("session cursor head not found".to_string()));
+        }
+        Ok(Self::new(path, leaf))
+    }
+
+    /// Transcript path owned by this cursor.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Snapshot the current logical leaf.
+    #[must_use]
+    pub fn leaf_id(&self) -> Option<String> {
+        self.lock_leaf().clone()
+    }
+
+    /// Move the cursor to an explicit branch point selected by the user and
+    /// persist that selection before returning.
+    ///
+    /// # Errors
+    /// Returns an error when the selected event is absent or the cursor record
+    /// cannot be written durably.
+    pub fn branch_from(&self, id: String) -> Result<()> {
+        let next = (!id.is_empty()).then_some(id);
+        let mut leaf = self.lock_leaf();
+        persist_cursor(&self.path, next.as_deref(), true)?;
+        *leaf = next;
+        Ok(())
+    }
+
+    /// Atomically index the transcript and project it onto this cursor's
+    /// selected lineage.
+    ///
+    /// # Errors
+    /// Returns an error when the transcript cannot be indexed or the selected
+    /// head is absent/cyclic.
+    pub fn snapshot(&self) -> Result<SessionSnapshot> {
+        let leaf = self.lock_leaf();
+        let (meta, index, file_size) = load_index(&self.path)?;
+        let index = indexed_lineage(&index, leaf.as_deref())?;
+        Ok(SessionSnapshot {
+            meta,
+            index,
+            file_size,
+        })
+    }
+
+    /// Atomically index the full transcript tree together with this cursor's
+    /// selected head. Intended only for branch/tree UI.
+    ///
+    /// # Errors
+    /// Returns an error when indexing fails or the selected head is absent.
+    pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
+        let leaf = self.lock_leaf();
+        let (meta, index, file_size) = load_index(&self.path)?;
+        indexed_lineage(&index, leaf.as_deref())?;
+        Ok(SessionTreeSnapshot {
+            meta,
+            index,
+            leaf_id: leaf.clone(),
+            file_size,
+        })
+    }
+
+    /// Materialize this cursor's selected event lineage.
+    ///
+    /// # Errors
+    /// Propagates indexing and event parsing failures.
+    pub fn load_events(&self) -> Result<Vec<SessionEvent>> {
+        let leaf = self.lock_leaf();
+        let (_meta, index, _size) = load_index(&self.path)?;
+        load_indexed_path(&self.path, &index, leaf.as_deref())
+    }
+
+    /// Materialize only the selected lineage suffix needed by compaction.
+    ///
+    /// # Errors
+    /// Propagates indexing and event parsing failures.
+    pub fn load_compaction_events(&self) -> Result<Vec<SessionEvent>> {
+        let leaf = self.lock_leaf();
+        let (_meta, index, _size) = load_index(&self.path)?;
+        load_compaction_path(&self.path, &index, leaf.as_deref())
+    }
+
+    /// Append one event batch to this cursor's lineage and advance its leaf.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
+        let mut leaf = self.lock_leaf();
+        let (start, end, next) = append_cursor_events(&self.path, events, leaf.as_deref())?;
+        *leaf = next;
+        Ok((start, end))
+    }
+
+    /// Append a complete compaction checkpoint and advance to its marker.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn append_compaction(
+        &self,
+        kept_messages: &[Message],
+        summary: String,
+        summarized_range: [String; 2],
+        counts: CompactionCounts,
+    ) -> Result<(u64, u64)> {
+        let mut leaf = self.lock_leaf();
+        let (start, end, marker_id) = append_compaction_from(
+            &self.path,
+            kept_messages,
+            AppendParent::Explicit(leaf.as_deref()),
+            &summary,
+            &summarized_range,
+            counts,
+            true,
+        )?;
+        *leaf = Some(marker_id);
+        Ok((start, end))
+    }
+
+    fn lock_leaf(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.leaf_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn indexed_lineage(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
+    use std::collections::HashMap;
+    let tree: Vec<&EventIndex> = index
+        .iter()
+        .filter(|event| event.kind != IndexKind::Cursor)
+        .collect();
+    let by_id: HashMap<&str, usize> = tree
+        .iter()
+        .enumerate()
+        .map(|(i, event)| (event.id.as_str(), i))
+        .collect();
+    let mut current = leaf_id.and_then(|id| by_id.get(id).copied());
+    let mut selected = Vec::new();
+    while let Some(i) = current {
+        selected.push(i);
+        if selected.len() > tree.len() {
+            return Err(Error::State("cycle in session event lineage".to_string()));
+        }
+        current = tree[i]
+            .parent_id
+            .as_deref()
+            .and_then(|id| by_id.get(id).copied());
+    }
+    if leaf_id.is_some() && selected.is_empty() {
+        return Err(Error::State("session branch leaf not found".to_string()));
+    }
+    selected.reverse();
+    Ok(selected.into_iter().map(|i| tree[i].clone()).collect())
+}
+
+fn cursor_event(leaf_id: Option<&str>) -> SessionEvent {
+    SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::Cursor {
+            leaf_id: leaf_id.map(str::to_string),
+        },
+    }
+}
+
+fn persist_cursor(path: &Path, leaf_id: Option<&str>, validate: bool) -> Result<()> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock()?;
+    if validate
+        && leaf_id.is_some_and(|id| {
+            load_index(path).map_or(true, |(_, index, _)| {
+                !index
+                    .iter()
+                    .any(|event| event.kind != IndexKind::Cursor && event.id == id)
+            })
+        })
+    {
+        return Err(Error::State("session branch leaf not found".to_string()));
+    }
+    append_prepared_events(path, &[cursor_event(leaf_id)])?;
+    Ok(())
+}
+
+fn append_cursor_events(
+    path: &Path,
+    events: &mut [SessionEvent],
+    parent: Option<&str>,
+) -> Result<(u64, u64, Option<String>)> {
+    if events.is_empty() {
+        let len = std::fs::metadata(path).map_or(0, |m| m.len());
+        return Ok((len, len, parent.map(str::to_string)));
+    }
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock()?;
+    let mut next = parent.map(str::to_string);
+    for event in events.iter_mut() {
+        event.id = short_id();
+        if event.parent_id.is_none() {
+            event.parent_id.clone_from(&next);
+        }
+        next = Some(event.id.clone());
+    }
+    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
+    let head = cursor_event(next.as_deref());
+    match append_events_with_cursor(path, events, &head) {
+        Ok((_, end)) => Ok((byte_start, end, next)),
+        Err(error) => {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_len(byte_start));
+            Err(error)
+        }
+    }
+}
+
 /// Owns the sessions root directory and scopes all per-cwd listings/creates
 /// under it. Carrying the root explicitly (rather than re-resolving the state
 /// dir via an env var on every call) keeps tests parallel-safe and lets the
@@ -254,10 +564,8 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
     // Byte offset of each event's line in the file (parallel to `events`).
     let mut offsets = Vec::new();
     let mut i = 0usize;
-    // For v1 migration and defensively-malformed v2 files: assign ids to
-    // any event missing one and chain `parent_id` to the previous event
-    // (or `None` for the first), producing a linear chain that matches the
-    // pre-tree semantics.
+    // V1 had no event tree, so migrate it to one linear chain. V2
+    // `parent_id: null` is a meaningful root branch and must be preserved.
     let mut prev_id: Option<String> = None;
     loop {
         buf.clear();
@@ -274,10 +582,12 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
         let mut ev = parse_event(line).map_err(|e| {
             Error::State(format!("parse event {} in {}: {e}", i + 1, path.display()))
         })?;
-        if legacy_v1 || ev.id.is_empty() {
-            ev.id = short_id();
+        if matches!(ev.kind, SessionEventKind::Cursor { .. }) {
+            continue;
         }
-        if legacy_v1 || ev.parent_id.is_none() {
+        let migrated = legacy_v1 || ev.id.is_empty();
+        if migrated {
+            ev.id = legacy_event_id(line_start);
             ev.parent_id.clone_from(&prev_id);
         }
         prev_id = Some(ev.id.clone());
@@ -288,17 +598,33 @@ pub fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u6
     Ok((header.meta, events, offsets, pos))
 }
 
+/// Internal parent selection for a durable append.
+///
+/// Active session cursors always use `Explicit`, where `None` means root.
+/// The physical-EOF mode is retained only for low-level legacy callers.
+enum AppendParent<'a> {
+    Explicit(Option<&'a str>),
+    PhysicalEof,
+}
+
+impl AppendParent<'_> {
+    fn resolve(self, path: &Path) -> Result<Option<String>> {
+        match self {
+            Self::Explicit(parent) => Ok(parent.map(str::to_string)),
+            Self::PhysicalEof => last_event_id(path),
+        }
+    }
+}
+
 /// Append session events to a transcript file (one JSON line each). The
 /// file is synchronized before returning so a crash after the turn still has
 /// the data.
 ///
 /// Each event is stamped with a fresh `id` (any incoming `id` is
-/// overwritten) and chained to the previous one: the first event's
-/// `parent_id` is `parent_hint` when given, otherwise the file's current
-/// last event's id (so a continuation appends to the active leaf), or `None`
-/// if the file has no events yet (the root). `parent_hint` is how a branch
-/// is created — pass the entry id to branch from and the new turn becomes a
-/// sibling of the existing children.
+/// overwritten) and chained to the previous one. A supplied `parent_hint`
+/// selects an explicit branch parent; otherwise this low-level compatibility
+/// helper continues from physical EOF. Active apps use [`SessionCursor`],
+/// which always supplies its explicit logical parent instead.
 ///
 /// # Errors
 /// Returns [`Error::Io`] on open/write failure or [`Error::State`] on a
@@ -308,16 +634,32 @@ pub fn append_events(
     events: &mut [SessionEvent],
     parent_hint: Option<&str>,
 ) -> Result<(u64, u64)> {
+    let parent = parent_hint.map_or(AppendParent::PhysicalEof, |id| {
+        AppendParent::Explicit(Some(id))
+    });
+    append_events_from(path, events, parent)
+}
+
+fn append_events_from(
+    path: &Path,
+    events: &mut [SessionEvent],
+    parent: AppendParent<'_>,
+) -> Result<(u64, u64)> {
     if events.is_empty() {
         let len = std::fs::metadata(path).map_or(0, |m| m.len());
         return Ok((len, len));
     }
-    // Resolve the first event's parent: explicit hint (branch) > the file's
-    // current last event (linear continuation) > None (root).
-    let mut parent = match parent_hint {
-        Some(id) => Some(id.to_string()),
-        None => last_event_id(path)?,
-    };
+    // Serialize parent resolution and the complete batch append across
+    // processes. Logical branches may share a file, but their JSONL records
+    // must never physically interleave.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock()?;
+    let mut parent = parent.resolve(path)?;
     // Assign a fresh id to each event. `parent_id` is auto-filled only when
     // the event did not set one explicitly — the recorder uses an explicit
     // `parent_id` on a `TurnFailed` marker to branch it off the turn's
@@ -356,7 +698,30 @@ pub fn append_compaction(
     summary: String,
     summarized_range: [String; 2],
     counts: CompactionCounts,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, String)> {
+    let parent = parent_hint.map_or(AppendParent::PhysicalEof, |id| {
+        AppendParent::Explicit(Some(id))
+    });
+    append_compaction_from(
+        path,
+        kept_messages,
+        parent,
+        &summary,
+        &summarized_range,
+        counts,
+        false,
+    )
+}
+
+fn append_compaction_from(
+    path: &Path,
+    kept_messages: &[Message],
+    parent: AppendParent<'_>,
+    summary: &str,
+    summarized_range: &[String; 2],
+    counts: CompactionCounts,
+    persist_head: bool,
+) -> Result<(u64, u64, String)> {
     #[derive(Serialize)]
     struct MessageCheckpoint<'a> {
         id: &'a str,
@@ -383,11 +748,16 @@ pub fn append_compaction(
         kept: usize,
     }
 
-    let parent = match parent_hint {
-        Some("") => None,
-        Some(id) => Some(id.to_string()),
-        None => last_event_id(path)?,
-    };
+    // Keep the checkpoint batch contiguous with respect to every other lofi
+    // writer. This also makes the EOF fallback and append one transaction.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock()?;
+    let parent = parent.resolve(path)?;
     let ids: Vec<String> = (0..=kept_messages.len()).map(|_| short_id()).collect();
     let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
     let mut file = std::fs::OpenOptions::new()
@@ -420,12 +790,12 @@ pub fn append_compaction(
                 Some(&ids[marker_index - 1])
             },
             kind: "compaction",
-            summary: &summary,
+            summary,
             first_kept_entry_id: ids
                 .first()
                 .filter(|_| marker_index > 0)
                 .map_or("", String::as_str),
-            summarized_range: &summarized_range,
+            summarized_range,
             checkpointed_tail: true,
             summarized: counts.summarized,
             represented: counts.represented,
@@ -434,6 +804,11 @@ pub fn append_compaction(
         serde_json::to_writer(&mut file, &marker)
             .map_err(|e| Error::State(format!("json: {e}")))?;
         file.write_all(b"\n")?;
+        if persist_head {
+            serde_json::to_writer(&mut file, &cursor_event(Some(&ids[marker_index])))
+                .map_err(|e| Error::State(format!("json: {e}")))?;
+            file.write_all(b"\n")?;
+        }
         file.sync_data()?;
         Ok(())
     })();
@@ -442,7 +817,37 @@ pub fn append_compaction(
         return Err(error);
     }
     let byte_end = file.metadata()?.len();
-    Ok((byte_start, byte_end))
+    Ok((byte_start, byte_end, ids[kept_messages.len()].clone()))
+}
+
+fn append_events_with_cursor(
+    path: &Path,
+    events: &[SessionEvent],
+    cursor: &SessionEvent,
+) -> Result<(u64, u64)> {
+    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    for event in events.iter().chain(std::iter::once(cursor)) {
+        if let Err(error) = serde_json::to_writer(&mut file, event) {
+            let _ = file.set_len(byte_start);
+            return Err(Error::State(format!("json: {error}")));
+        }
+        if let Err(error) = file.write_all(
+            b"
+",
+        ) {
+            let _ = file.set_len(byte_start);
+            return Err(Error::Io(error));
+        }
+    }
+    if let Err(error) = file.sync_data() {
+        let _ = file.set_len(byte_start);
+        return Err(Error::Io(error));
+    }
+    Ok((byte_start, file.metadata()?.len()))
 }
 
 fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
@@ -499,7 +904,9 @@ pub fn last_event_id(path: &Path) -> Result<Option<String>> {
             continue;
         }
         if let Ok(ev) = parse_event(trimmed) {
-            last = Some(ev.id);
+            if !matches!(ev.kind, SessionEventKind::Cursor { .. }) {
+                last = Some(ev.id);
+            }
         }
     }
     Ok(last)
@@ -844,7 +1251,7 @@ mod tests {
         append_events(&path, &mut original, None).unwrap();
 
         let kept = [assistant("kept")];
-        append_compaction(
+        let (_, _, checkpoint_leaf) = append_compaction(
             &path,
             &kept,
             None,
@@ -874,6 +1281,7 @@ mod tests {
         assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
         assert_ne!(events[0].id, events[1].id);
         assert_ne!(events[1].id, events[2].id);
+        assert_eq!(checkpoint_leaf, events[2].id);
     }
 
     #[test]
@@ -903,6 +1311,129 @@ mod tests {
         assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
         assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
         assert!(!active_path_from_leaf(&events).contains(&1));
+    }
+
+    #[test]
+    fn cursor_owns_lineage_across_clones_and_compaction() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/cursor-lineage"), &"p/m".into())
+            .unwrap();
+        let cursor = SessionCursor::new(path.clone(), None);
+
+        let mut root = [ev(user("root"))];
+        cursor.append_events(&mut root).unwrap();
+        let root_id = root[0].id.clone();
+        assert_eq!(cursor.leaf_id().as_deref(), Some(root_id.as_str()));
+
+        let clone = cursor.clone();
+        let mut reply = [ev(assistant("reply"))];
+        clone.append_events(&mut reply).unwrap();
+        assert_eq!(cursor.leaf_id().as_deref(), Some(reply[0].id.as_str()));
+
+        cursor
+            .append_compaction(
+                &[assistant("kept")],
+                "summary".into(),
+                [root_id.clone(), reply[0].id.clone()],
+                CompactionCounts {
+                    summarized: 2,
+                    represented: 2,
+                    kept: 1,
+                },
+            )
+            .unwrap();
+        let marker_id = cursor.leaf_id().unwrap();
+        let (_, events, _, _) = load(&path).unwrap();
+        let marker = events.iter().find(|event| event.id == marker_id).unwrap();
+        assert!(matches!(marker.kind, SessionEventKind::Compaction { .. }));
+    }
+
+    #[test]
+    fn cursor_selection_survives_restart_and_beats_physical_eof() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/cursor-restart"), &"p/m".into())
+            .unwrap();
+        let cursor = SessionCursor::new(path.clone(), None);
+        let mut trunk = [ev(user("root")), ev(assistant("old leaf"))];
+        cursor.append_events(&mut trunk).unwrap();
+        let root_id = trunk[0].id.clone();
+        let old_leaf = trunk[1].id.clone();
+
+        cursor.branch_from(root_id.clone()).unwrap();
+        drop(cursor);
+
+        let resumed = SessionCursor::open(path.clone()).unwrap();
+        assert_eq!(resumed.leaf_id().as_deref(), Some(root_id.as_str()));
+        let snapshot = resumed.snapshot().unwrap();
+        assert_eq!(snapshot.index.len(), 1);
+        assert_eq!(snapshot.index[0].id, root_id);
+
+        let mut branch = [ev(user("new branch"))];
+        resumed.append_events(&mut branch).unwrap();
+        assert_eq!(branch[0].parent_id.as_deref(), Some(trunk[0].id.as_str()));
+        assert_ne!(branch[0].parent_id.as_deref(), Some(old_leaf.as_str()));
+
+        let reopened = SessionCursor::open(path).unwrap();
+        assert_eq!(reopened.leaf_id().as_deref(), Some(branch[0].id.as_str()));
+    }
+
+    #[test]
+    fn cursor_none_is_explicit_root_not_physical_eof() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/cursor-root"), &"p/m".into())
+            .unwrap();
+        let mut existing = [ev(user("existing"))];
+        append_events(&path, &mut existing, None).unwrap();
+
+        let cursor = SessionCursor::new(path.clone(), None);
+        let mut new_root = [ev(user("new root"))];
+        cursor.append_events(&mut new_root).unwrap();
+        assert!(new_root[0].parent_id.is_none());
+
+        let (_, index, _) = load_index(&path).unwrap();
+        let indexed_root = index
+            .iter()
+            .find(|event| event.id == new_root[0].id)
+            .unwrap();
+        assert!(indexed_root.parent_id.is_none());
+        assert!(load_compaction_path(&path, &index, None)
+            .unwrap()
+            .is_empty());
+        assert!(load_indexed_path(&path, &index, None).unwrap().is_empty());
+        let branch = load_indexed_path(&path, &index, Some(&new_root[0].id)).unwrap();
+        assert_eq!(branch.len(), 1);
+        assert_eq!(branch[0].id, new_root[0].id);
+    }
+
+    #[test]
+    fn cursor_compaction_none_is_explicit_root_not_physical_eof() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/cursor-compact-root"), &"p/m".into())
+            .unwrap();
+        let mut existing = [ev(user("existing"))];
+        append_events(&path, &mut existing, None).unwrap();
+
+        let cursor = SessionCursor::new(path.clone(), None);
+        cursor
+            .append_compaction(
+                &[assistant("kept")],
+                "summary".into(),
+                ["first".into(), "last".into()],
+                CompactionCounts {
+                    summarized: 1,
+                    represented: 1,
+                    kept: 1,
+                },
+            )
+            .unwrap();
+
+        let (_, events, _, _) = load(&path).unwrap();
+        assert!(events[1].parent_id.is_none());
+        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
     }
 
     #[test]
@@ -1124,6 +1655,12 @@ mod tests {
         let (_meta, events, _, _) = load(&path).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
+
+        let (_, index, _) = load_index(&path).unwrap();
+        assert_eq!(index[0].id, events[0].id);
+        let recovered = load_event_by_id(&path, &index[0].id).unwrap().unwrap();
+        assert_eq!(recovered.id, index[0].id);
+        assert!(matches!(&recovered.kind, SessionEventKind::Message(m) if m.role == Role::User));
     }
 
     #[test]

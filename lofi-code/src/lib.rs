@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::future::LocalBoxFuture;
 use rquickjs::async_with;
 use rquickjs::prelude::*;
 use rquickjs::{Array, AsyncContext, AsyncRuntime, Ctx, Function, IntoJs, Object, Promise, Value};
@@ -64,7 +63,7 @@ pub use tools::BashEnv;
 pub const EXEC_TOOL_NAME: &str = "exec";
 
 /// Description advertised for the code sandbox's LLM-facing tool.
-pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash), `lofi.models()` discovery, and a `lofi.agent(prompt, opts?)` subagent helper. Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
+pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash). Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
 
 /// JSON Schema for the code sandbox's tool input.
 #[must_use]
@@ -92,9 +91,7 @@ pub fn exec_tool_input_schema() -> serde_json::Value {
 /// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Maximum heap for one `QuickJS` runtime. Parent execs remain alive while
-/// awaited subagents run, so this bound is intentionally small: one parent plus
-/// three concurrent nested sandboxes can coexist without a 200+ MB heap budget.
+/// Maximum heap for one `QuickJS` runtime. This bound keeps each sandbox from dominating process memory.
 /// Tool payloads are capped far below this and large files stay in native Rust.
 const GUEST_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 /// Maximum native call-stack depth the interpreter may use. `QuickJS` checks
@@ -132,29 +129,6 @@ const JS_TO_JSON_MAX_NODES: usize = 10_000;
 /// node budget.
 const JS_TO_JSON_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-/// Pluggable subagent callback used by `lofi.agent`/`lofi.spawn`.
-///
-/// The real implementation is wired in `agent.rs`; the sandbox only needs a
-/// way to invoke one nested round-trip, so it carries an `Arc`'d async
-/// closure. The returned future is a [`LocalBoxFuture`] (not `Send`):
-/// `rquickjs`'s `AsyncRuntime` is `!Send` without the `parallel` feature, so
-/// the nested loop — which drives the code-mode sandbox — is inherently
-/// single-threaded and the closure future is `!Send`.
-pub type AgentFn = Arc<dyn Fn(AgentRequest) -> LocalBoxFuture<'static, Result<Json>> + Send + Sync>;
-
-/// Live lifecycle updates for one synchronous `lofi.agent()` call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentStatus {
-    /// The call is blocked behind the shared subagent concurrency limit.
-    Waiting,
-    /// The call acquired a slot and is now running.
-    Running,
-}
-
-/// Callback used by the nested-agent runtime to update its native-tool row.
-pub type AgentStatusFn = Arc<dyn Fn(AgentStatus) + Send + Sync>;
-/// Snapshot of the models available to nested agents.
-pub type ModelsFn = Arc<dyn Fn() -> Json + Send + Sync>;
 /// Optional `lofi.recall` implementation: a sync callback from the
 /// `lofi.recall` native tool into the engine that owns the session
 /// transcript. The callback reads the session file fresh and runs the
@@ -170,18 +144,6 @@ pub type RecallFn = Arc<
 /// the session file fresh, like `RecallFn`.
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// A request to a nested agent.
-#[derive(Clone)]
-pub struct AgentRequest {
-    /// The user prompt for the subagent.
-    pub prompt: String,
-    /// Optional caller-supplied options (model override, system prompt, ...).
-    pub opts: Option<Json>,
-    /// Live lifecycle callback for the native-tool renderer.
-    pub on_status: Option<AgentStatusFn>,
-}
-
-/// A native tool call observed inside the sandbox, forwarded to the UI so
 /// Async confirmation callback used by the shell policy.
 ///
 /// When `lofi.bash` hits an `ask` decision, the runtime calls this with
@@ -222,11 +184,6 @@ pub enum ToolEvent {
         name: String,
         args: String,
     },
-    /// A running tool changed lifecycle state without completing.
-    Status {
-        id: u64,
-        status: AgentStatus,
-    },
     End {
         id: u64,
         result: String,
@@ -234,8 +191,7 @@ pub enum ToolEvent {
     },
 }
 
-/// Per-call execution context: workspace root, named strings, and an optional
-/// subagent callback.
+/// Per-call execution context for sandbox tool execution.
 #[derive(Clone)]
 pub struct ExecCtx {
     /// Workspace root file operations are confined to.
@@ -245,10 +201,6 @@ pub struct ExecCtx {
     pub tmp_dir: PathBuf,
     /// Named strings exposed as the global `lofi_strings` object.
     pub strings: HashMap<String, String>,
-    /// Optional `lofi.agent` / `lofi.spawn` implementation.
-    pub agent: Option<AgentFn>,
-    /// Optional available-model catalog for `lofi.models()`.
-    pub models: Option<ModelsFn>,
     /// Optional `lofi.recall` implementation (session-history search).
     pub recall: Option<RecallFn>,
     /// Optional `lofi.result` implementation (elision recovery).
@@ -276,8 +228,6 @@ impl std::fmt::Debug for ExecCtx {
             .field("root", &self.root)
             .field("tmp_dir", &self.tmp_dir)
             .field("strings", &self.strings)
-            .field("agent", &self.agent.is_some())
-            .field("models", &self.models.is_some())
             .field("recall", &self.recall.is_some())
             .field("result", &self.result.is_some())
             .field("on_tool_event", &self.on_tool_event.is_some())
@@ -294,7 +244,7 @@ impl std::fmt::Debug for ExecCtx {
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
     /// Maximum *CPU time* (not wall-clock) for synchronous guest code.
-    /// Awaited tool calls (`lofi.bash`, `lofi.agent`, …) do not consume
+    /// Awaited tool calls such as `lofi.bash` do not consume
     /// this budget — only pure JS computation does. See [`exec`](fn.exec.html).
     pub timeout: Duration,
     /// Optional external cancellation flag. When set to `true`, the `QuickJS`
@@ -417,8 +367,7 @@ pub fn compile_ts(src: &str) -> Result<String> {
 ///   *abort*, breaking out of synchronous tight loops (`while (true) {}`)
 ///   that the cooperative `tokio` runtime cannot preempt.
 ///
-///   This means a long-running awaited tool — a subagent that takes hours,
-///   a slow `bash` command — does *not* consume the budget. Only pure
+///   This means a long-running awaited tool such as a slow `bash` command — does *not* consume the budget. Only pure
 ///   synchronous guest code does. Individual tools carry their own
 ///   timeouts; the exec-level CPU budget is a backstop for loops, not a
 ///   wall-clock deadline on the whole call.
@@ -502,8 +451,6 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         ctx.skills_dir.clone(),
     ));
     let strings = ctx.strings.clone();
-    let agent = ctx.agent.clone();
-    let models = ctx.models.clone();
     let recall = ctx.recall.clone();
     let result = ctx.result.clone();
     let skills_dir = ctx.skills_dir.clone();
@@ -511,7 +458,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 
     let outcome = async {
         async_with!(&actx => |ctx| {
-            install_globals(&ctx, &tools, &strings, agent, models, recall, result, skills_dir, &logs)
+            install_globals(&ctx, &tools, &strings, recall, result, skills_dir, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
                 .eval(js.as_str())
@@ -553,15 +500,13 @@ fn install_globals(
     ctx: &Ctx<'_>,
     tools: &Arc<BuiltinTools>,
     strings: &HashMap<String, String>,
-    agent: Option<AgentFn>,
-    models: Option<ModelsFn>,
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
     logs: &Arc<Mutex<String>>,
 ) -> rquickjs::Result<()> {
     let lofi = Object::new(ctx.clone())?;
-    bind_tools(ctx, &lofi, tools, agent, models, recall, result, skills_dir)?;
+    bind_tools(ctx, &lofi, tools, recall, result, skills_dir)?;
     // Expose the per-session tmp dir path so the model knows where bash
     // full-output logs live (and can reference them if needed beyond
     // `lofi.bash_read`, which takes a basename relative to this dir).
@@ -727,8 +672,6 @@ mod tests {
             root: root.to_path_buf(),
             tmp_dir,
             strings: HashMap::new(),
-            agent: None,
-            models: None,
             on_tool_event: None,
             recall: None,
             result: None,
@@ -898,8 +841,6 @@ mod tests {
             root: dir.path().to_path_buf(),
             tmp_dir: std::env::temp_dir().join("lofi-test"),
             strings,
-            agent: None,
-            models: None,
             on_tool_event: None,
             recall: None,
             result: None,

@@ -36,7 +36,7 @@ impl App {
             cost: 0.0,
             turn_cost: 0.0,
             turn_has_round_usage: false,
-            branch_hint: None,
+
             total_in: 0,
             total_out: 0,
             total_cache_read: 0,
@@ -54,7 +54,7 @@ impl App {
             should_quit: false,
             session: SessionState {
                 store: None,
-                path: None,
+                cursor: None,
                 cwd: PathBuf::new(),
             },
             picker: None,
@@ -95,6 +95,7 @@ impl App {
             frozen_heights: Vec::new(),
             frozen_heights_other_mode: Vec::new(),
             turn_byte_ranges: Vec::new(),
+            turn_event_offsets: Vec::new(),
             render_epoch: 0,
             frozen_epoch: 0,
             frozen_width: 0,
@@ -114,11 +115,15 @@ impl App {
     /// resuming from a selected entry in the tree picker) calls this with the
     /// target entry's id; the next run branches off that id as a sibling of
     /// its existing children instead of appending to the active leaf. The
-    /// hint is consumed by the run launcher, so a single gesture applies to a
-    /// single turn and a subsequent run without a gesture continues
-    /// linearly.
-    pub(super) fn branch_from(&mut self, id: String) {
-        self.branch_hint = Some(id);
+    /// The shared cursor advances after each durable append, so subsequent
+    /// turns continue linearly from the branch without any one-shot hint.
+    pub(super) fn branch_from(&mut self, id: String) -> Result<()> {
+        let cursor = self
+            .session
+            .cursor
+            .as_ref()
+            .ok_or_else(|| Error::State("session cursor missing".to_string()))?;
+        cursor.branch_from(id)
     }
 
     /// Apply one event while rebuilding a file-backed transcript. At each
@@ -367,16 +372,18 @@ impl App {
         );
     }
 
-    /// Push a turn, keeping `turn_byte_ranges` parallel to `turns`.
+    /// Push a turn, keeping its file-backing indexes parallel to `turns`.
     pub(super) fn push_turn(&mut self, turn: Turn) {
         self.turns.push(turn);
         self.turn_byte_ranges.push(None);
+        self.turn_event_offsets.push(None);
     }
 
-    /// Insert a turn at `idx`, keeping `turn_byte_ranges` parallel.
+    /// Insert a turn at `idx`, keeping its file-backing indexes parallel.
     pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {
         self.turns.insert(idx, turn);
         self.turn_byte_ranges.insert(idx, None);
+        self.turn_event_offsets.insert(idx, None);
     }
 
     /// Reconstruct a frozen turn's blocks. If the turn still holds its blocks
@@ -398,43 +405,55 @@ impl App {
             prompt,
             blocks: Vec::new(),
         };
-        let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
+        let Some(path) = self.session.path() else {
             return empty;
         };
-        let Some(path) = &self.session.path else {
-            return empty;
-        };
-        // Stream one event line at a time instead of allocating a buffer as
-        // large as the whole turn range. Historical turns can span several
-        // MiB (many tool rounds); the old range-wide Vec made the first draw's
-        // height pass leave an allocation matching the largest turn in the
-        // glibc heap even though the buffer was immediately freed.
-        use std::io::{BufRead, Read, Seek, SeekFrom};
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return empty;
-        };
-        if file.seek(SeekFrom::Start(start)).is_err() {
-            return empty;
-        }
-        let mut reader = std::io::BufReader::new(file.take(end - start));
-        let mut line = String::new();
-        let mut events = Vec::new();
+        let mut events =
+            if let Some(offsets) = self.turn_event_offsets.get(idx).and_then(Option::as_deref) {
+                // Indexed resume/tree turns can be non-contiguous in the physical
+                // append-only file. Load only their selected lineage events.
+                match store::load_events_at(path, offsets) {
+                    Ok(events) => events,
+                    Err(_) => return empty,
+                }
+            } else {
+                let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
+                    return empty;
+                };
+                // Stream one event line at a time instead of allocating a buffer
+                // as large as the whole turn range. Historical turns can span
+                // several MiB (many tool rounds).
+                use std::io::{BufRead, Read, Seek, SeekFrom};
+                let Ok(mut file) = std::fs::File::open(path) else {
+                    return empty;
+                };
+                if file.seek(SeekFrom::Start(start)).is_err() {
+                    return empty;
+                }
+                let mut reader = std::io::BufReader::new(file.take(end - start));
+                let mut line = String::new();
+                let mut events = Vec::new();
+                loop {
+                    line.clear();
+                    let Ok(read) = reader.read_line(&mut line) else {
+                        return empty;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    let raw = line.trim_end_matches(['\n', '\r']);
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    let Ok(event) = store::parse_event(raw) else {
+                        continue;
+                    };
+                    events.push(event);
+                }
+                events
+            };
         let mut exec_ids = std::collections::HashSet::new();
-        loop {
-            line.clear();
-            let Ok(read) = reader.read_line(&mut line) else {
-                return empty;
-            };
-            if read == 0 {
-                break;
-            }
-            let raw = line.trim_end_matches(['\n', '\r']);
-            if raw.is_empty() {
-                continue;
-            }
-            let Ok(mut event) = lofi_core::session::store::parse_event(raw) else {
-                continue;
-            };
+        for event in &mut events {
             // Successful exec results are not rendered at all in collapsed
             // mode (the nested native-tool rows already show the work). Track
             // exec call ids from assistant messages, then discard only their
@@ -466,7 +485,6 @@ impl App {
                     }
                 }
             }
-            events.push(event);
         }
         turns_from_session_events(&events)
             .into_iter()
@@ -517,8 +535,9 @@ impl App {
         view::blocks::render_turn_window(&cx, &turn, range)
     }
 
-    /// Sync the frozen-turn cache to the current `turns`. Frozen turns are all
-    /// but the last (the last is the live, mutable one rebuilt each frame).
+    /// Sync the frozen-turn cache to the current `turns`. Normally frozen turns
+    /// are all but the live mutable last one; an idle fully file-backed view can
+    /// freeze the final turn too.
     /// On a wholesale replacement (`bump_render_epoch`) the cache is dropped;
     /// otherwise newly-superseded turns are rendered once, their height
     /// recorded permanently in `frozen_heights`. Their temporary rendered lines
@@ -536,7 +555,19 @@ impl App {
             self.frozen_width = width;
         }
         let n = self.turns.len();
-        let target = n.saturating_sub(1);
+        // Normally the last turn is live (or retained in memory after resume),
+        // so only its prefix is frozen. /tree rollback deliberately drops the
+        // selected last turn's blocks too; when it is idle and file-backed,
+        // include it in the frozen set so production rendering materializes it
+        // through the bounded cache instead of treating an empty shell as live.
+        let target = if !self.run_active()
+            && self.turns.last().is_some_and(|turn| turn.blocks.is_empty())
+            && self.turn_byte_ranges.last().is_some_and(Option::is_some)
+        {
+            n
+        } else {
+            n.saturating_sub(1)
+        };
         while self.frozen_heights.len() < target {
             let idx = self.frozen_heights.len();
             let theme = self.theme;
@@ -680,11 +711,9 @@ impl App {
             self.notify(NotifyKind::Error, "could not update compacted history");
             return false;
         };
-        if let Some(path) = &self.session.path {
-            if let Err(error) = store::append_compaction(
-                path,
+        if let Some(cursor) = &self.session.cursor {
+            match cursor.append_compaction(
                 &c.kept_messages,
-                self.branch_hint.as_deref(),
                 c.summary.clone(),
                 c.summarized_range.clone().unwrap_or_default(),
                 store::CompactionCounts {
@@ -693,19 +722,19 @@ impl App {
                     kept: c.kept_count,
                 },
             ) {
-                drop(history);
-                self.notify(
-                    NotifyKind::Error,
-                    format!("could not persist compaction: {error}"),
-                );
-                return false;
+                Ok((_byte_start, _byte_end)) => {}
+                Err(error) => {
+                    drop(history);
+                    self.notify(
+                        NotifyKind::Error,
+                        format!("could not persist compaction: {error}"),
+                    );
+                    return false;
+                }
             }
         }
         *history = new_history;
         drop(history);
-        // The checkpoint marker is now the active leaf; subsequent turns
-        // append from it rather than reusing the rollback branch point.
-        self.branch_hint = None;
         // Render the marker. Attach to the last turn when one exists; push a
         // fresh turn otherwise (e.g. compaction invoked before any turn).
         if self.turns.is_empty() {
@@ -773,7 +802,7 @@ impl App {
             expand: Vec::new(),
         };
 
-        let outcome = if let Some(path) = &self.session.path {
+        let outcome = if let Some(path) = self.session.path() {
             lofi_core::recall::recall_file(path, &req)
         } else {
             let Some(events) = self.compaction_events() else {
@@ -852,10 +881,8 @@ impl App {
         let Some(events) = self.compaction_events() else {
             return usize::MAX;
         };
-        let path = store::active_path_from_leaf(&events);
-        // Find the last Compaction marker on the active path, then count
-        // assistant messages after it. When there is no compaction marker,
-        // return a large count so the cooldown is effectively disabled.
+        // compaction_events is already the cursor-selected lineage.
+        let path: Vec<usize> = (0..events.len()).collect();
         let last_compaction = path
             .iter()
             .rev()
@@ -867,53 +894,13 @@ impl App {
         count_assistant_after_compaction(&path, &events, last_compaction)
     }
 
-    /// Derive compaction-related state from the transcript's active path
-    /// after a resume or rollback. The transcript is the source of truth:
-    ///
-    /// - `compacted`: `true` when the active path ends with a `Compaction`
-    ///   marker and no `TurnEnd`/`TurnFailed`/`ContextPressure` follows it
-    ///   (i.e. we compacted but haven't run a new turn yet, so the context
-    ///   gauge has no real usage to show and should display `c`).
-    ///
-    /// - `prev_ctx_tokens` / `status_usage`: the last completed turn's
-    ///   prompt size, but only when that usage was measured after the latest
-    ///   compaction. A pre-compaction reading is stale even when partial
-    ///   continuation messages follow the marker.
-    pub(super) fn restore_compaction_state(&mut self, events: &[SessionEvent]) {
-        let path = store::active_path_from_leaf(events);
-        let mut last_compaction = None;
-        let mut last_usage = None;
-        for (pos, &i) in path.iter().enumerate() {
-            match &events[i].kind {
-                SessionEventKind::Compaction { .. } => last_compaction = Some(pos),
-                SessionEventKind::TurnEnd { usage, .. }
-                | SessionEventKind::TurnFailed { usage, .. } => last_usage = Some((pos, *usage)),
-                _ => {}
-            }
-        }
-        let usage_after_compaction = last_usage
-            .filter(|(pos, _)| last_compaction.is_none_or(|compact_pos| *pos > compact_pos))
-            .map(|(_, usage)| usage);
-        self.compacted = last_compaction.is_some() && usage_after_compaction.is_none();
-        // Rollback/resume does not itself compact. The first newly completed
-        // model round must be evaluated afresh so an old missed crossing does
-        // not suppress soft compaction for the rest of the session.
-        self.prev_ctx_tokens = None;
-        self.status_usage = usage_after_compaction;
-    }
-
     /// Gather the active-path events for compaction: load the transcript
     /// (so native tool records are available) when a session file exists,
     /// otherwise synthesize a linear event log from the in-memory history.
     /// Returns None when the history is empty.
     fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
-        if let Some(path) = &self.session.path {
-            // The transcript is append-only and can contain large abandoned
-            // branches. Build its tiny tree index first, then deserialize only
-            // the selected lineage instead of loading the entire file and
-            // cloning the branch out of it.
-            let (_meta, index, _size) = store::load_index(path).ok()?;
-            return store::load_compaction_path(path, &index, self.branch_hint.as_deref()).ok();
+        if let Some(cursor) = self.session.cursor.as_ref() {
+            return cursor.load_compaction_events().ok();
         }
         let msgs = self.history.lock().ok()?;
         if msgs.is_empty() {
@@ -935,10 +922,9 @@ impl App {
     }
 }
 
-/// Count assistant messages on the active path after the last
-/// Compaction marker. Shared by restore_compaction_state (resume) and
-/// messages_since_last_compact (cooldown) so the counting logic lives in
-/// one place. Returns 0 when there is no compaction marker.
+/// Count assistant messages on the active path after the last compaction
+/// marker. Shared by the hard-cap cooldown paths so the counting logic lives
+/// in one place. Returns 0 when there is no compaction marker.
 fn count_assistant_after_compaction(
     path: &[usize],
     events: &[SessionEvent],

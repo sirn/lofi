@@ -7,11 +7,11 @@
 //! the status strip shows the model, resolved thinking level, a context-usage
 //! gauge, and a spinner.
 //!
-//! Sessions: the transcript (`Vec<Message>`) is the source of truth, shared
-//! with the agent task via an `Arc<Mutex>`. After each turn the new messages
-//! are appended to a JSONL file (`lofi-core::session::store`);
-//! `--continue`/`--resume` load one up front and the `/resume` picker switches
-//! mid-run.
+//! Sessions: the append-only JSONL transcript and its shared logical cursor
+//! are durable state; an `Arc<Mutex<Vec<Message>>` holds the active agent
+//! context. The engine checkpoints each round through the cursor, while
+//! `--continue`/`--resume` rebuild only the indexed active lineage and the
+//! `/resume` picker can switch files mid-run.
 //!
 //! ## The `!Send` agent future
 //!
@@ -182,7 +182,6 @@ struct NativeTool {
     result: Option<String>,
     is_error: bool,
     done: bool,
-    waiting: bool,
 }
 
 /// A single tool call accumulated across ToolStart/ToolInput/ToolEnd.
@@ -278,18 +277,24 @@ pub(crate) struct Turn {
 #[derive(Debug, Clone)]
 struct SessionState {
     store: Option<SessionStore>,
-    /// Path to the open transcript file; None until the first prompt creates
-    /// one (fresh sessions) or after '/new'.
-    path: Option<PathBuf>,
+    /// Shared logical transcript cursor; absent until the first prompt creates
+    /// a fresh session or until a session is resumed.
+    cursor: Option<store::SessionCursor>,
     cwd: PathBuf,
+}
+
+impl SessionState {
+    fn path(&self) -> Option<&Path> {
+        self.cursor.as_ref().map(store::SessionCursor::path)
+    }
 }
 
 /// Resolved session handed to [`run`] by the binary.
 pub(crate) struct SessionConfig {
     store: Option<SessionStore>,
-    path: Option<PathBuf>,
-    /// Lightweight tree/offset index loaded on resume. Message and tool bodies
-    /// remain on disk and are parsed only for the active turn/history.
+    cursor: Option<store::SessionCursor>,
+    /// Selected-lineage index loaded through the cursor on resume. Message and
+    /// tool bodies remain on disk and are parsed only for active history.
     index: Vec<store::EventIndex>,
     file_size: u64,
     cwd: PathBuf,
@@ -300,7 +305,7 @@ impl SessionConfig {
     pub(crate) fn ephemeral(cwd: PathBuf) -> Self {
         Self {
             store: None,
-            path: None,
+            cursor: None,
             index: Vec::new(),
             file_size: 0,
             cwd,
@@ -311,7 +316,7 @@ impl SessionConfig {
     pub(crate) fn fresh(store: SessionStore, cwd: PathBuf) -> Self {
         Self {
             store: Some(store),
-            path: None,
+            cursor: None,
             index: Vec::new(),
             file_size: 0,
             cwd,
@@ -321,14 +326,14 @@ impl SessionConfig {
     /// Resume an existing transcript file.
     pub(crate) fn resumed(
         store: SessionStore,
-        path: PathBuf,
+        cursor: store::SessionCursor,
         index: Vec<store::EventIndex>,
         file_size: u64,
         cwd: PathBuf,
     ) -> Self {
         Self {
             store: Some(store),
-            path: Some(path),
+            cursor: Some(cursor),
             index,
             file_size,
             cwd,
@@ -340,9 +345,9 @@ impl SessionConfig {
     /// `None` for fresh/ephemeral sessions or sessions with no completed turn.
     #[must_use]
     pub(crate) fn last_run_model(&self) -> Option<RunModel> {
-        self.path
-            .as_deref()
-            .and_then(|p| last_run_model_from_index(p, &self.index))
+        self.cursor
+            .as_ref()
+            .and_then(|cursor| last_run_model_from_index(cursor.path(), &self.index))
     }
 }
 
@@ -472,7 +477,7 @@ struct SlashComplete {
 /// `turn_end` ("continue from after this turn") — so the user can roll the
 /// transcript back to any point, Pi-style. Confirming an entry rebuilds the
 /// visible turns and history from the rolled-back active path, sets the
-/// `branch_hint` so the next run chains off the chosen point, and (for
+/// the session cursor so the next run chains off the chosen point, and (for
 /// user-prompt entries) prefills the input with the original prompt text.
 /// Items are chronological; `selected` starts at the last entry.
 #[derive(Debug, Clone)]
@@ -588,7 +593,7 @@ impl Popover for SlashComplete {
 /// (empty for `turn_end` entries, since those continue rather than re-edit);
 /// `is_active` marks nodes on the active path — the conversation currently
 /// displayed in the transcript (root → active leaf). After a revert the
-/// active leaf is the branch point (via `branch_hint`), so rolled-back turns
+/// active leaf is the branch point (via the session cursor), so rolled-back turns
 /// appear as unhighlighted branches; after continuing, the new turns join
 /// the active path and are highlighted too.
 #[derive(Debug, Clone)]
@@ -681,6 +686,12 @@ pub(crate) struct App {
     /// from the file on demand so the UI's memory stays bounded by the
     /// viewport, not the session length.
     turn_byte_ranges: Vec<Option<(u64, u64)>>,
+    /// Exact event offsets for indexed resume/tree turns. A byte range is
+    /// sufficient for newly appended linear turns, but an old branch can have
+    /// sibling events physically interleaved between two lineage events.
+    /// Keeping these tiny offset lists lets lazy materialization select only
+    /// the logical lineage. Parallel to `turns`; `None` uses the byte range.
+    turn_event_offsets: Vec<Option<Vec<u64>>>,
     input: String,
     input_cursor: usize,
     history: Arc<Mutex<Vec<Message>>>,
@@ -721,11 +732,6 @@ pub(crate) struct App {
     /// when false (the resume path, which has no `RoundUsage` events),
     /// `TurnEnd` applies its bundled totals as before.
     turn_has_round_usage: bool,
-    /// Explicit branch point for the next run, set by a UI gesture (e.g.
-    /// resuming from a selected entry in the tree picker). Taken and cleared
-    /// when the run starts so a single gesture applies to a single turn;
-    /// `None` means append to the file's active leaf (linear continuation).
-    branch_hint: Option<String>,
     ctx_limit: u64,
     /// Compaction configuration (from `[compaction]`): the reserve hard cap
     /// plus the speculative `[compaction.auto]` soft caps.
@@ -866,16 +872,14 @@ pub(crate) struct App {
     last_turn_height: usize,
     /// Log viewport height at last render, for cursor-follow scrolling.
     log_view_h: usize,
-    /// Rendered-line cache for frozen turns (all but the live last one),
-    /// restricted to turns intersecting the viewport plus a one-turn margin.
-    /// Turns outside the cache are re-rendered on demand. The last turn is
-    /// rebuilt fresh each frame; earlier turns are immutable once a new turn
-    /// is pushed, so their height is stable and only their (heavy) styled
-    /// lines are evictable.
+    /// Rendered-line cache for frozen turns, restricted to turns intersecting
+    /// the viewport plus a one-turn margin. Turns outside the cache are
+    /// re-rendered on demand. Normally the mutable last turn is rebuilt fresh
+    /// each frame; an idle fully file-backed view may freeze it too.
     frozen_render: FrozenCache,
     /// Line count per frozen turn (all of them), so the viewport can be
     /// located and `total` computed without fetching rendered lines. Synced
-    /// to `turns.len()-1` for the active verbose mode.
+    /// to the file-backed prefix (which may be all turns) for the active mode.
     frozen_heights: Vec<usize>,
     /// Height index for the inactive verbose mode. `/verbose` swaps this
     /// with `frozen_heights`, avoiding a full transcript reparse when
@@ -1007,7 +1011,7 @@ async fn run_loop(
 ) -> Result<()> {
     let SessionConfig {
         store,
-        path,
+        cursor,
         index,
         file_size,
         cwd,
@@ -1018,8 +1022,8 @@ async fn run_loop(
     let edit = compaction.edit.clone();
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.model_choices = model_choices;
-    app.session = SessionState { store, path, cwd };
-    if let Some(path) = app.session.path.clone() {
+    app.session = SessionState { store, cursor, cwd };
+    if let Some(path) = app.session.path().map(Path::to_path_buf) {
         let messages = history_from_index(&path, &index, &edit)?;
         if let Ok(mut history) = app.history.lock() {
             *history = messages;

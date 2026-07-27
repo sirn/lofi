@@ -9,8 +9,8 @@ use super::*;
 /// labels on demand via [`store::load_event_at`]. This keeps `/tree` fast
 /// on large sessions: the full [`store::load`] is avoided entirely.
 ///
-/// The active path (root → `leaf_id`, or the file's last event when
-/// `leaf_id` is `None`) is the trunk — rendered flat. Only actual branches
+/// The active path (root → `leaf_id`) is the trunk — rendered flat.
+/// `None` means the cursor is explicitly before every root event.
 /// (non-active sibling turns) create indentation, so the common case is two
 /// levels deep regardless of conversation length.
 ///
@@ -51,20 +51,9 @@ pub(super) fn build_tree_entries(
             }
         }
     }
-    let active_path: Vec<usize> = match leaf_id {
-        Some(id) if !id.is_empty() => active_path_from_index(indices, &by_id, id),
-        // `leaf_id` is `None` (normal linear continuation) or `Some("")`
-        // (rolled back to before the root prompt). For `None`, walk from
-        // the file's last event. For `Some("")`, the active path is
-        // empty — the trunk loop below renders nothing, and we instead
-        // treat the root events as branch roots so the whole tree is
-        // visible (nothing highlighted).
-        None => indices
-            .last()
-            .map(|ix| active_path_from_index(indices, &by_id, &ix.id))
-            .unwrap_or_default(),
-        Some(_) => Vec::new(),
-    };
+    let active_path: Vec<usize> = leaf_id
+        .filter(|id| !id.is_empty())
+        .map_or_else(Vec::new, |id| active_path_from_index(indices, &by_id, id));
     let active_set: std::collections::HashSet<usize> = active_path.iter().copied().collect();
     // Context-edited kept-tail copies are durable model checkpoints, not
     // additional branch nodes. Hide the copy span immediately preceding each
@@ -408,6 +397,7 @@ fn push_tree_entry(
         store::IndexKind::AssistantMessage
         | store::IndexKind::SystemMessage
         | store::IndexKind::NativeTool
+        | store::IndexKind::Cursor
         | store::IndexKind::Other => return,
     };
     out.push(TreeEntry {

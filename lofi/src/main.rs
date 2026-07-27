@@ -1,10 +1,7 @@
 //! lofi process entry point.
 
-// The TUI and QuickJS sandbox already run on a LocalSet. A current-thread
-// runtime also prevents parallel subagents from distributing their large
-// transient allocation working sets across many runtime workers. Network and
-// process I/O remain async; explicit spawn_blocking work still uses Tokio's
-// blocking pool.
+// The TUI and QuickJS sandbox run on a LocalSet. Network and process I/O
+// remain async; explicit spawn_blocking work still uses Tokio.s blocking pool.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // The TUI owns the alternate screen, so tracing stays opt-in to avoid

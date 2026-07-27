@@ -35,8 +35,10 @@ pub fn recall_file(path: &Path, req: &RecallRequest) -> RecallOutcome {
 }
 
 fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> {
-    let (_meta, index, _size) = store::load_index(path)?;
-    let scope = resolve_scope(path, &index, &req.scope)?;
+    let cursor = store::SessionCursor::open(path.to_path_buf())?;
+    let snapshot = cursor.tree_snapshot()?;
+    let index = snapshot.index;
+    let scope = resolve_scope(path, &index, snapshot.leaf_id.as_deref(), &req.scope)?;
     let selected: Vec<(u64, usize)> = index
         .iter()
         .scan(0usize, |global, event| {
@@ -374,6 +376,7 @@ fn is_message(kind: store::IndexKind) -> bool {
 fn resolve_scope(
     path: &Path,
     index: &[store::EventIndex],
+    leaf_id: Option<&str>,
     scope: &RecallScope,
 ) -> Result<FileScope> {
     if matches!(scope, RecallScope::All) {
@@ -384,7 +387,7 @@ fn resolve_scope(
         .enumerate()
         .map(|(i, event)| (event.id.as_str(), i))
         .collect();
-    let mut current = index.len().checked_sub(1);
+    let mut current = leaf_id.and_then(|id| by_id.get(id).copied());
     let mut lineage = Vec::new();
     while let Some(i) = current {
         lineage.push(i);

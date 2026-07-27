@@ -12,8 +12,6 @@ v1 ships:
 - **Code mode** with a TypeScript → JavaScript (swc strip) → QuickJS runtime.
 - Built-in sandbox bindings: `lofi.read`, `lofi.write`, `lofi.edit`, `lofi.bash`,
   `lofi.ls`, `lofi.find`, `lofi.grep`.
-- **Subagents** via `lofi.agent(prompt, opts?)` — a nested agent loop with no
-  iteration cap (bounded by per-call timeouts).
 - **Streaming provider transports** for OpenAI Chat Completions, OpenAI
   Responses, and Anthropic Messages (API-key auth only).
 - **Remote model discovery** — a provider can fetch its model list from a
@@ -212,9 +210,6 @@ default_model = "openai/gpt-4o"  # optional; "provider/id" or bare id
 [agent]                          # optional; global defaults
 thinking_level = "medium"        # optional
 thinking_levels = ["low", "medium", "high", "xhigh"]  # optional
-
-[agent.subagents]                # optional
-max_concurrent = 3               # default; 0 = unlimited
 
 [providers.<name>]
 base_url = "..."                 # host root; optional (defaults per api_type)
@@ -419,8 +414,6 @@ global `lofi` object:
 - `lofi.edit({ path, old, new })` → `{ ok: true }` (errors if `old` is missing
   or appears more than once)
 - `lofi.bash({ cmd, timeoutMs? })` → `{ ok, output, code, command, directory, signal, duration_ms, status }` (`status` is `"exited"`, `"signaled"`, or `"timeout"`); output keeps the last 20 lines / 4 KB and links to the full pageable log when truncated
-- `lofi.models()` → `{ ok, models: [{ id, name, thinking, supportsImage, contextWindow }] }`
-- `lofi.agent(prompt, opts?)` → final text; options include `model`, `thinking`, `system`, and `structured`
 
 File tools canonicalize paths against the workspace root and reject escapes.
 `bash` runs with `cwd` = workspace root. `print(...)` buffers into the tool
@@ -467,4 +460,4 @@ assertions stay readable.
 lofi builds on ideas from several earlier projects:
 
 - **[pi-fabric](https://github.com/monotykamary/pi-fabric)** — for the full code mode concept that inspired lofi's single-tool `exec` approach.
-- **[pi](https://github.com/earendil-works/pi)** — for the agent loop architecture that shaped lofi's run loop and subagent design.
+- **[pi](https://github.com/earendil-works/pi)** — for the agent loop architecture that shaped lofi's run loop design.

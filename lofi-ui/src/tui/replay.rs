@@ -182,7 +182,6 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                             nt.result = Some("cancelled because parent exec failed".to_string());
                             nt.is_error = true;
                             nt.done = true;
-                            nt.waiting = false;
                         }
                     }
                 }
@@ -206,19 +205,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     result: None,
                     is_error: false,
                     done: false,
-                    waiting: false,
                 });
-            }
-        }
-        AgentEvent::NativeToolStatus {
-            parent,
-            id,
-            waiting,
-        } => {
-            if let Some(t) = tool_mut(&mut turn.blocks, &parent) {
-                if let Some(nt) = t.native.iter_mut().find(|n| n.id == id) {
-                    nt.waiting = waiting;
-                }
             }
         }
         AgentEvent::NativeToolEnd {
@@ -232,7 +219,6 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     nt.result = Some(result);
                     nt.is_error = is_error;
                     nt.done = true;
-                    nt.waiting = false;
                 }
             }
         }
@@ -325,6 +311,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
                 thinking_timing.push(*elapsed_ms);
             }
+            SessionEventKind::Cursor { .. } => {}
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent
                     .entry(rec.parent.as_str())
@@ -516,6 +503,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
                     usage: *usage,
                 });
             }
+            SessionEventKind::Cursor { .. } => {}
         }
     }
 }

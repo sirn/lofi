@@ -11,15 +11,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
-use lofi_code::{
-    compile_ts, exec, AgentFn, AgentRequest, AgentStatus, BashEnv, ExecCtx, ExecOptions, ToolEvent,
-};
+use lofi_code::{compile_ts, exec, BashEnv, ExecCtx, ExecOptions, ToolEvent};
 use serde_json::{json, Value};
 
-/// Build an `ExecCtx` rooted at `root` with no named strings and a stub
-/// `agent` callback that errors if invoked (the tests never call it).
+/// Build an `ExecCtx` rooted at `root` with no named strings.
 fn ctx(root: &Path) -> ExecCtx {
     let tmp_dir = std::env::temp_dir().join("lofi-test");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -27,8 +23,6 @@ fn ctx(root: &Path) -> ExecCtx {
         root: root.to_path_buf(),
         tmp_dir,
         strings: HashMap::new(),
-        agent: None,
-        models: None,
         on_tool_event: None,
         recall: None,
         result: None,
@@ -164,8 +158,6 @@ async fn strings_exposed_as_lofi_strings() {
         root: dir.path().to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-test"),
         strings,
-        agent: None,
-        models: None,
         on_tool_event: None,
         recall: None,
         result: None,
@@ -241,99 +233,6 @@ async fn exec_tmp_dir_exposed() {
 }
 
 #[tokio::test]
-async fn models_call_returns_catalog() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut cx = ctx(dir.path());
-    cx.models = Some(Arc::new(|| {
-        serde_json::json!({
-            "ok": true,
-            "models": [{"id": "p/m", "thinking": ["low", "high"]}]
-        })
-    }));
-    let res = exec("return lofi.models();", &cx, &ExecOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(res.value["models"][0]["id"], "p/m");
-    assert_eq!(res.value["models"][0]["thinking"][1], "high");
-}
-
-#[tokio::test]
-async fn agent_call_emits_tool_events() {
-    use std::sync::{Arc, Mutex};
-    let dir = tempfile::tempdir().unwrap();
-    let events: Arc<Mutex<Vec<ToolEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let cb = {
-        let events = events.clone();
-        Arc::new(move |ev: ToolEvent| events.lock().unwrap().push(ev))
-            as Arc<dyn Fn(ToolEvent) + Send + Sync>
-    };
-    let agent: AgentFn = Arc::new(|req: AgentRequest| {
-        Box::pin(async move {
-            if let Some(on_status) = req.on_status {
-                on_status(AgentStatus::Waiting);
-                on_status(AgentStatus::Running);
-            }
-            Ok(serde_json::json!({
-                "text": "subagent reply",
-                "model": "p/m",
-                "thinking": "off",
-                "rounds": 1,
-                "usage": {},
-                "cost": 0.0,
-                "durationMs": 1,
-            }))
-        })
-    });
-    let cx = ExecCtx {
-        root: dir.path().to_path_buf(),
-        tmp_dir: std::env::temp_dir().join("lofi-test"),
-        strings: HashMap::new(),
-        agent: Some(agent),
-        models: None,
-        on_tool_event: Some(cb),
-        recall: None,
-        result: None,
-        bash_env: BashEnv::default(),
-        shell_policy: lofi_code::policy::defaults::resolve(
-            &lofi_types::ShellPolicyConfig::default(),
-        ),
-        confirm: None,
-        auto_mode: None,
-        skills_dir: None,
-    };
-    let src = "const text = await lofi.agent('do stuff'); \
-               const rich = await lofi.agent('do stuff', { model: 'p/m', thinking: 'high', structured: true }); \
-               return { text, rich };";
-    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
-    assert_eq!(res.value["text"], "subagent reply");
-    assert_eq!(res.value["rich"]["text"], "subagent reply");
-    assert_eq!(res.value["rich"]["model"], "p/m");
-    let evs = events.lock().unwrap();
-    let has = |name: &str| {
-        evs.iter()
-            .any(|e| matches!(e, ToolEvent::Start { name: n, .. } if n == name))
-            && evs.iter().any(|e| matches!(e, ToolEvent::End { .. }))
-    };
-    assert!(has("agent"), "missing agent tool events: {evs:?}");
-    let statuses = evs
-        .iter()
-        .filter_map(|event| match event {
-            ToolEvent::Status { status, .. } => Some(*status),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        statuses,
-        vec![
-            AgentStatus::Waiting,
-            AgentStatus::Running,
-            AgentStatus::Waiting,
-            AgentStatus::Running,
-        ]
-    );
-}
-
-#[tokio::test]
 async fn write_and_edit_emit_written_content_as_result() {
     use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
@@ -347,8 +246,6 @@ async fn write_and_edit_emit_written_content_as_result() {
         root: dir.path().to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-test"),
         strings: HashMap::new(),
-        agent: None,
-        models: None,
         on_tool_event: Some(cb),
         recall: None,
         result: None,

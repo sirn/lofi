@@ -3,12 +3,11 @@
 //! Drives a multi-turn conversation with a model, streaming [`AgentEvent`]s to
 //! callers and dispatching the single LLM-facing tool — `exec` — into the
 //! code-mode sandbox ([`lofi_code`]). The agent owns the resolved provider,
-//! the selected model, the workspace root, and the system prompt; subagents
-//! reuse the same shape via the [`crate::subagent::RoundTrip`] impl.
+//! the selected model, workspace root, system prompt, and tool policy.
 //!
 //! ## No iteration cap (v1)
 //!
-//! Neither [`Agent::run`] nor subagent runs impose an iteration cap. Provider
+//! [`Agent::run`] does not impose an iteration cap. Provider
 //! streams use [`DEFAULT_STREAM_IDLE_TIMEOUT`] so productive long reasoning
 //! is not cut off, while each `exec` call inherits
 //! [`lofi_code::DEFAULT_GUEST_TIMEOUT`] as a CPU-time budget. A synchronous
@@ -21,7 +20,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::future::LocalBoxFuture;
 use futures::StreamExt;
 use lofi_types::{
     ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, StreamingEvent, ThinkingLevel,
@@ -33,17 +31,12 @@ use crate::config_loader::load_config_or_default;
 use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
-use crate::subagent::{self, RoundTrip, SubagentCtx, SubagentOptions, SubagentRound};
 use lofi_code::policy::ResolvedPolicy;
-use lofi_code::{exec, AgentFn, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
+use lofi_code::{exec, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_providers::ir::chat::ToolSchema;
 use lofi_providers::ir::codec::MessageAssembler;
 use lofi_providers::{open, Provider};
-
-type SubagentModelResolver =
-    Arc<dyn Fn(&str, Option<ThinkingLevel>) -> Result<(Box<dyn Provider>, Model)> + Send + Sync>;
-type SubagentModelCatalog = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 use lofi_types::BashConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::oneshot;
@@ -106,21 +99,12 @@ const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 /// Fixed per-event charge added to the round byte budget to cover
 /// Vec/enum/dispatch overhead not captured by owned-string lengths.
 const PER_EVENT_OVERHEAD: usize = 64;
-/// Where to durably commit a completed turn: the transcript path (and an
-/// optional branch point). Passed into [`Agent::run_continuation`] so the
-/// engine — which owns the timers and cost counter — is the sole writer of
-/// the session log. The turn-end marker's model identity comes from the
-/// agent's own resolved model, not from here.
+/// Shared logical cursor used to durably commit a completed turn. Passed into
+/// [`Agent::run_continuation`] so the engine — which owns timers and cost — is
+/// the sole turn writer while compaction advances the same cursor.
 #[derive(Debug, Clone)]
 pub struct SessionCommit {
-    /// Path to the session `.jsonl` file.
-    pub path: PathBuf,
-    /// The entry id to branch this turn from. `None` appends to the file's
-    /// current active leaf (linear continuation); `Some(id)` starts a new
-    /// branch as a sibling of `id`'s existing children — used when the user
-    /// resumes from a selected entry in the tree picker rather than the
-    /// active leaf.
-    pub parent_hint: Option<String>,
+    pub cursor: crate::session::store::SessionCursor,
 }
 
 /// Lock a mutex, recovering from poison by taking the guard anyway. The
@@ -232,8 +216,7 @@ impl TurnStats {
 
 /// The agent: a provider, a model, a workspace root, and a system prompt.
 ///
-/// Cheaply cloneable (the provider is held in an `Arc`) so a subagent callback
-/// can capture a copy and run a nested loop without borrowing.
+/// Cheaply cloneable because the provider is held in an `Arc`.
 #[derive(Clone)]
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -268,13 +251,6 @@ pub struct Agent {
     /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
     /// skill files from here and from `<root>/.lofi/skills/`.
     skills_dir: Option<PathBuf>,
-    /// Throttle for concurrent subagents: when set, `lofi.agent()` calls
-    /// acquire a permit before running. `None` means no limit.
-    subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    /// Resolve validated per-call model/thinking overrides for subagents.
-    subagent_model_resolver: Option<SubagentModelResolver>,
-    /// Discoverable model catalog exposed to sandbox code as `lofi.models()`.
-    subagent_model_catalog: Option<SubagentModelCatalog>,
 }
 
 impl Agent {
@@ -309,9 +285,6 @@ impl Agent {
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
             skills_dir: None,
-            subagent_semaphore: None,
-            subagent_model_resolver: None,
-            subagent_model_catalog: None,
         }
     }
 
@@ -338,9 +311,6 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
-            subagent_semaphore: self.subagent_semaphore.clone(),
-            subagent_model_resolver: self.subagent_model_resolver.clone(),
-            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -366,9 +336,6 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
-            subagent_semaphore: self.subagent_semaphore.clone(),
-            subagent_model_resolver: self.subagent_model_resolver.clone(),
-            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -391,9 +358,6 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir,
-            subagent_semaphore: self.subagent_semaphore.clone(),
-            subagent_model_resolver: self.subagent_model_resolver.clone(),
-            subagent_model_catalog: self.subagent_model_catalog.clone(),
         }
     }
 
@@ -417,34 +381,6 @@ impl Agent {
     pub fn with_auto_mode(&self, auto_mode: lofi_code::AutoModeFn) -> Self {
         Self {
             auto_mode: Some(auto_mode),
-            ..self.clone()
-        }
-    }
-
-    /// Set the subagent concurrency limit. When non-zero, at most that many
-    /// `lofi.agent()` calls run at once; the rest wait for a permit.
-    #[must_use]
-    pub fn with_subagent_limit(&self, max: usize) -> Self {
-        Self {
-            subagent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(max))),
-            ..self.clone()
-        }
-    }
-
-    /// Set the validated model resolver used by per-call subagent overrides.
-    #[must_use]
-    pub(crate) fn with_subagent_model_resolver(&self, resolver: SubagentModelResolver) -> Self {
-        Self {
-            subagent_model_resolver: Some(resolver),
-            ..self.clone()
-        }
-    }
-
-    /// Set the catalog exposed through `lofi.models()`.
-    #[must_use]
-    pub(crate) fn with_subagent_model_catalog(&self, catalog: SubagentModelCatalog) -> Self {
-        Self {
-            subagent_model_catalog: Some(catalog),
             ..self.clone()
         }
     }
@@ -509,16 +445,6 @@ impl Agent {
     #[must_use]
     pub fn max_output_tokens(&self) -> Option<u64> {
         self.max_output_tokens
-    }
-}
-
-/// [`Agent`] is a [`RoundTrip`]: one `run_once` per call, used by subagents.
-impl RoundTrip for Agent {
-    fn round_trip<'a>(
-        &'a self,
-        messages: &'a mut Vec<Message>,
-    ) -> LocalBoxFuture<'a, Result<SubagentRound>> {
-        Box::pin(self.run_subagent_once(messages))
     }
 }
 

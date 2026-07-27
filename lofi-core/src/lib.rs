@@ -1,6 +1,6 @@
 //! `lofi-core`: the agent domain layer.
 //!
-//! Owns the agent loop, subagent orchestration, model registry, config
+//! Owns the agent loop, model registry, config
 //! loading, and session/state bookkeeping. The provider transports live in
 //! [`lofi_providers`] and the code-mode sandbox in [`lofi_code`]; this crate
 //! coordinates them as a Service Layer. Presentation (TUI + `--print`) lives
@@ -19,7 +19,6 @@ pub mod recall;
 pub mod retry;
 pub mod session;
 pub mod state;
-pub mod subagent;
 
 pub use agent::{
     build_agent, exec_input_code_and_label, exec_result_display, rebuild_agent, select_model,
