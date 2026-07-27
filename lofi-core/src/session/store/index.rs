@@ -10,7 +10,9 @@ use lofi_error::{Error, Result};
 use lofi_types::SessionEvent;
 use serde::Deserialize;
 
-use super::{parse_event, short_id, Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION};
+use super::{
+    legacy_event_id, parse_event, Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION,
+};
 /// Lightweight per-event index entry: just enough to build the event tree
 /// structure (id, `parent_id`, offset) and identify tree-node kinds, without
 /// deserializing message content. Used by `/tree` to avoid a full `load`.
@@ -21,6 +23,10 @@ pub struct EventIndex {
     /// Byte offset of this event's line in the file — for random-access
     /// label loading via [`load_event_at`].
     pub offset: u64,
+    /// Byte offset immediately after this event line. Keeping the exact line
+    /// end lets file-backed branch replay stop at the selected lineage event
+    /// instead of reading later sibling branches from the append-only file.
+    pub end_offset: u64,
     pub kind: IndexKind,
 }
 
@@ -122,10 +128,9 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             .map_err(|e| Error::State(format!("parse index event in {}: {e}", path.display())))?;
         let mut id = skel.id;
         let mut parent_id = skel.parent_id;
-        if legacy_v1 || id.is_empty() {
-            id = short_id();
-        }
-        if legacy_v1 || parent_id.is_none() {
+        let migrated = legacy_v1 || id.is_empty();
+        if migrated {
+            id = legacy_event_id(line_start);
             parent_id.clone_from(&prev_id);
         }
         let role_kind = |role: Option<&str>| -> IndexKind {
@@ -150,6 +155,7 @@ pub fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
             id,
             parent_id,
             offset: line_start,
+            end_offset: pos,
             kind,
         });
     }
@@ -170,41 +176,31 @@ pub fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
         .ok_or_else(|| Error::State(format!("no event at offset {offset} in {}", path.display())))
 }
 
-/// Find and parse one event by id in a streaming file pass. The lightweight
-/// skeleton skips message blocks for non-matching lines, so recovering one
-/// elided result never deserializes the rest of a large transcript.
+/// Find and parse one event by id without deserializing unrelated message
+/// bodies. Resolution goes through the lightweight index so deterministic
+/// IDs synthesized for legacy records work exactly like persisted v2 IDs.
+///
+/// # Errors
+/// Returns an error when the transcript cannot be indexed or the selected
+/// event cannot be read or parsed.
 pub fn load_event_by_id(path: &Path, id: &str) -> Result<Option<SessionEvent>> {
-    use std::io::BufRead;
-
-    let file = std::fs::File::open(path)?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    let mut first = true;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(None);
-        }
-        let raw = line.trim_end_matches(['\n', '\r']);
-        if raw.is_empty() {
-            continue;
-        }
-        if first {
-            first = false;
-            continue;
-        }
-        let skeleton: EventSkeleton = serde_json::from_str(raw).map_err(|error| {
-            Error::State(format!("parse event id in {}: {error}", path.display()))
-        })?;
-        if skeleton.id == id {
-            return super::parse_event(raw).map(Some);
-        }
-    }
+    let (_meta, index, _size) = load_index(path)?;
+    let Some(entry) = index.iter().find(|entry| entry.id == id) else {
+        return Ok(None);
+    };
+    let mut event = load_event_at(path, entry.offset)?;
+    event.id.clone_from(&entry.id);
+    event.parent_id.clone_from(&entry.parent_id);
+    Ok(Some(event))
 }
 
 /// Visit selected raw event lines while retaining at most one line at a time.
 /// Offsets must be in ascending order. This is used by transcript-wide tools
 /// that need multiple streaming passes without materializing every event.
+///
+/// # Errors
+/// Returns an error when the transcript or an offset cannot be read, or when
+/// the visitor rejects a selected line.
 pub fn visit_event_lines(
     path: &Path,
     offsets: &[u64],
@@ -230,6 +226,10 @@ pub fn visit_event_lines(
 /// Parse selected event lines in one file pass. Offsets must be in ascending
 /// order. This is used by resume to materialize only the active branch, one
 /// turn at a time, without ever constructing the full transcript in memory.
+///
+/// # Errors
+/// Returns an error when the transcript or an offset cannot be read, or when
+/// a selected event cannot be parsed.
 pub fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     use std::io::{BufRead, Seek, SeekFrom};
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -252,6 +252,11 @@ pub fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>>
 /// Materialize only the lineage suffix needed by compaction. Once a
 /// compaction marker exists, everything before its checkpointed kept tail is
 /// represented by the marker summary and must not be deserialized again.
+/// A `None` leaf is the explicit root cursor and therefore yields no events.
+///
+/// # Errors
+/// Returns an error when the requested leaf is absent, the lineage is cyclic,
+/// or an indexed event cannot be read or parsed.
 pub fn load_compaction_path(
     path: &Path,
     index: &[EventIndex],
@@ -267,10 +272,7 @@ pub fn load_compaction_path(
         .enumerate()
         .map(|(i, event)| (event.id.as_str(), i))
         .collect();
-    let mut current = match leaf_id {
-        Some(id) => by_id.get(id).copied(),
-        None => Some(index.len() - 1),
-    };
+    let mut current = leaf_id.and_then(|id| by_id.get(id).copied());
     let mut lineage = Vec::new();
     while let Some(i) = current {
         lineage.push(i);
@@ -313,13 +315,17 @@ pub fn load_compaction_path(
             };
         }
     }
-    let offsets: Vec<u64> = lineage[start..].iter().map(|&i| index[i].offset).collect();
-    load_events_at(path, &offsets)
+    load_index_entries(path, index, &lineage[start..])
 }
 
 /// Materialize only one indexed lineage from a session file. The lightweight
 /// index owns the tree shape; large event bodies are parsed only for nodes on
-/// the selected path, avoiding a full transcript-sized allocation.
+/// the selected path, avoiding a full transcript-sized allocation. A `None`
+/// leaf is the explicit root cursor and therefore yields no events.
+///
+/// # Errors
+/// Returns an error when the requested leaf is absent, the lineage is cyclic,
+/// or an indexed event cannot be read or parsed.
 pub fn load_indexed_path(
     path: &Path,
     index: &[EventIndex],
@@ -335,10 +341,7 @@ pub fn load_indexed_path(
         .enumerate()
         .map(|(i, event)| (event.id.as_str(), i))
         .collect();
-    let mut current = match leaf_id {
-        Some(id) => by_id.get(id).copied(),
-        None => Some(index.len() - 1),
-    };
+    let mut current = leaf_id.and_then(|id| by_id.get(id).copied());
     let mut lineage = Vec::new();
     while let Some(i) = current {
         lineage.push(i);
@@ -354,6 +357,19 @@ pub fn load_indexed_path(
         return Err(Error::State("session branch leaf not found".to_string()));
     }
     lineage.reverse();
-    let offsets: Vec<u64> = lineage.iter().map(|&i| index[i].offset).collect();
-    load_events_at(path, &offsets)
+    load_index_entries(path, index, &lineage)
+}
+
+fn load_index_entries(
+    path: &Path,
+    index: &[EventIndex],
+    selected: &[usize],
+) -> Result<Vec<SessionEvent>> {
+    let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
+    let mut events = load_events_at(path, &offsets)?;
+    for (event, &i) in events.iter_mut().zip(selected) {
+        event.id.clone_from(&index[i].id);
+        event.parent_id.clone_from(&index[i].parent_id);
+    }
+    Ok(events)
 }

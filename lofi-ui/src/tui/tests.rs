@@ -104,56 +104,6 @@ fn native_tool_events_nest_under_their_exec() {
     assert!(!nt.is_error);
 }
 
-/// The native tool header shows a parenthetical line-range suffix for `read`
-/// and a `(took Ns)` suffix for `bash`, derived from the structured result.
-#[test]
-fn subagent_waiting_state_is_rendered() {
-    use crate::tui::view::blocks::render_turn_lines;
-    use crate::tui::view::component::Cx;
-    let a = app();
-    let turn = Turn {
-        prompt: String::new(),
-        blocks: vec![Block::Tool(ToolCall {
-            id: "e1".to_string(),
-            name: "exec".to_string(),
-            input: String::new(),
-            label: None,
-            native: vec![NativeTool {
-                id: 0,
-                name: "agent".to_string(),
-                args: "inspect".to_string(),
-                result: None,
-                is_error: false,
-                done: false,
-                waiting: true,
-            }],
-            result: None,
-            is_error: false,
-            done: false,
-            elapsed: None,
-        })],
-    };
-    let cx = Cx {
-        app: &a,
-        theme: crate::tui::theme::Theme::default(),
-        width: 100,
-        active_turn: true,
-    };
-    let lines = render_turn_lines(&cx, &turn);
-    let text = lines
-        .iter()
-        .map(|line| {
-            line.line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("Tool agent inspect (waiting)"), "{text}");
-}
-
 #[test]
 fn rich_header_suffix_for_read_and_bash() {
     use crate::tui::view::blocks::render_turn_lines;
@@ -183,7 +133,6 @@ fn rich_header_suffix_for_read_and_bash() {
                     ),
                     is_error: false,
                     done: true,
-                    waiting: false,
                 },
                 NativeTool {
                     id: 1,
@@ -201,7 +150,6 @@ fn rich_header_suffix_for_read_and_bash() {
                     ),
                     is_error: false,
                     done: true,
-                    waiting: false,
                 },
             ],
             result: Some("{\"value\":null}".to_string()),
@@ -2009,7 +1957,7 @@ fn slash_clear_help_session_resume_new() {
 
     assert!(a.slash_command("/new"));
     assert!(a.turns.is_empty());
-    assert!(a.session.path.is_none());
+    assert!(a.session.cursor.is_none());
     // Footer stats reset with the session.
     assert!(a.status_usage.is_none());
     assert_eq!(a.cost, 0.0);
@@ -2041,7 +1989,10 @@ fn session_info_opens_modal() {
 #[test]
 fn session_info_modal_shows_id_when_path_set() {
     let mut a = app();
-    a.session.path = Some(std::path::PathBuf::from("/tmp/sessions/abc123.jsonl"));
+    a.session.cursor = Some(store::SessionCursor::new(
+        std::path::PathBuf::from("/tmp/sessions/abc123.jsonl"),
+        None,
+    ));
     assert!(a.slash_command("/session"));
     let info = a.info.as_ref().expect("modal opened");
     let body: String = info
@@ -2459,14 +2410,14 @@ fn slash_complete_single_item_tab_accepts() {
 #[test]
 fn tree_no_session_pushes_error() {
     let mut a = app();
-    // No session.path set — ephemeral. /tree notifies on the rule line
+    // No session cursor set — ephemeral. /tree notifies on the rule line
     // and leaves no overlay.
     assert!(a.slash_command("/tree"));
     assert!(a.tree_picker.is_none());
     let (msg, kind) = a.notify_badge().expect("/tree notified");
     assert_eq!(kind, NotifyKind::Error);
     assert!(msg.contains("no session file"));
-    assert!(a.branch_hint.is_none());
+    assert!(a.session.cursor.is_none());
 }
 
 #[test]
@@ -2535,9 +2486,11 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // Read back the ids so the test can assert against them.
     let (_meta, events, _o, _s) = store::load(&path).unwrap();
     let turn_end1_id = events[2].id.clone();
+    let selected_leaf = turn_end1_id.clone();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
@@ -2557,10 +2510,138 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // prefilled with "second", and the branch hint is turn_end1's id.
     assert!(a.tree_picker.is_none());
     assert_eq!(a.input, "second");
-    assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
-    // One visible turn (turn 1); turn 2 is rolled back out of view.
+    assert_eq!(
+        a.session
+            .cursor
+            .as_ref()
+            .and_then(store::SessionCursor::leaf_id),
+        Some(turn_end1_id)
+    );
+    // One visible turn (turn 1); turn 2 is rolled back out of view. The
+    // selected lineage stays file-backed: /tree must not retain a second copy
+    // of historical response/tool bodies in the display turns.
     assert_eq!(a.turns.len(), 1);
+    assert!(a.turns[0].blocks.is_empty());
     assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+
+    // The final selected turn ends at its lineage event, not physical EOF.
+    // Otherwise lazy materialization would read the rolled-back second turn
+    // and display sibling/future content after selecting an earlier branch.
+    let session_path = a.session.path().unwrap();
+    let (_meta, index, file_size) = store::load_index(session_path).unwrap();
+    let selected_end = index
+        .iter()
+        .find(|event| event.id == selected_leaf)
+        .unwrap()
+        .end_offset;
+    assert_eq!(
+        a.turn_byte_ranges,
+        vec![Some((index[0].offset, selected_end))]
+    );
+    assert!(selected_end < file_size);
+    let materialized = a.materialize_turn(0);
+    assert!(materialized
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Text(text) if text == "hello")));
+    assert!(!materialized
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Text(text) if text == "world")));
+}
+
+#[test]
+fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
+    use lofi_core::session::store::SessionStore;
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = SessionStore::new(dir.path().join("s"));
+    let path = session_store
+        .create(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let turn_end = || SessionEventKind::TurnEnd {
+        model: "m".into(),
+        elapsed_ms: 1,
+        cost: 0.0,
+        usage: Usage::default(),
+    };
+    let wrap = |kind| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind,
+    };
+
+    // Branch A is appended before branch B, so one physical byte range for
+    // the selected B lineage would contain all of sibling A.
+    let mut root = [
+        wrap(msg(user("root"))),
+        wrap(msg(assistant("shared"))),
+        wrap(turn_end()),
+    ];
+    store::append_events(&path, &mut root, None).unwrap();
+    let root_end = root[2].id.clone();
+    let mut branch_a = [
+        wrap(msg(user("branch a"))),
+        wrap(msg(assistant("SIBLING MUST NOT LEAK"))),
+        wrap(turn_end()),
+    ];
+    store::append_events(&path, &mut branch_a, Some(&root_end)).unwrap();
+    let mut branch_b = [
+        wrap(msg(user("branch b"))),
+        wrap(msg(assistant("chosen"))),
+        wrap(turn_end()),
+    ];
+    store::append_events(&path, &mut branch_b, Some(&root_end)).unwrap();
+    let branch_b_end = branch_b[2].id.clone();
+
+    let mut a = app();
+    a.session.cursor = Some(store::SessionCursor::new(path, Some(branch_b_end.clone())));
+    a.session.cwd = std::path::PathBuf::from("/x");
+    assert!(a.slash_command("/tree"));
+    let selected = a
+        .tree_picker
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|entry| entry.branch_point == branch_b_end)
+        .unwrap();
+    a.tree_picker.as_mut().unwrap().selected = selected;
+    a.tree_picker_confirm();
+
+    assert_eq!(a.turns.len(), 2);
+    assert!(a.turns.iter().all(|turn| turn.blocks.is_empty()));
+    let shared = a.materialize_turn(0);
+    let chosen = a.materialize_turn(1);
+    let text = |turn: &Turn| {
+        turn.blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(text(&shared), "shared");
+    assert_eq!(text(&chosen), "chosen");
+    assert!(!text(&shared).contains("SIBLING MUST NOT LEAK"));
+
+    // Production rendering must use the same file-backed selected lineage.
+    // In particular, the selected final turn is frozen too after /tree; it is
+    // not an empty live shell and no physically interleaved sibling can leak.
+    use ratatui::backend::TestBackend;
+    let mut term = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    assert_eq!(a.frozen_heights.len(), a.turns.len());
+    let buf = term.backend().buffer();
+    let screen = (0..20)
+        .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("shared"), "{screen}");
+    assert!(screen.contains("chosen"), "{screen}");
+    assert!(!screen.contains("SIBLING MUST NOT LEAK"), "{screen}");
 }
 
 #[test]
@@ -2637,7 +2718,8 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     let turn_end1_id = events[2].id.clone();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
@@ -2658,7 +2740,13 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     a.tree_picker_confirm();
     // Rolled back to before the compact: only turn 1's messages remain.
     assert!(a.tree_picker.is_none());
-    assert_eq!(a.branch_hint.as_deref(), Some(turn_end1_id.as_str()));
+    assert_eq!(
+        a.session
+            .cursor
+            .as_ref()
+            .and_then(store::SessionCursor::leaf_id),
+        Some(turn_end1_id)
+    );
     assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
     assert_eq!(a.turns.len(), 1);
 }
@@ -2705,7 +2793,8 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
     .unwrap();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().unwrap();
@@ -2786,7 +2875,8 @@ fn modal_tab_cycles_with_wraparound() {
         .collect();
     store::append_events(&path, &mut batch, None).unwrap();
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let len = a.tree_picker.as_ref().unwrap().entries.len();
@@ -2818,7 +2908,7 @@ fn modal_tab_cycles_with_wraparound() {
 #[test]
 fn tree_revert_to_root_then_reopens() {
     // Reverting to the first user prompt (root, no parent) sets
-    // branch_hint to "" — the active path is empty. Reopening /tree
+    // The cursor moves to the root branch point. Reopening /tree
     // must still show every turn as an unhighlighted branch, not
     // "no branch points in this session yet".
     use lofi_core::session::store::SessionStore;
@@ -2881,16 +2971,21 @@ fn tree_revert_to_root_then_reopens() {
     store::append_events(&path, &mut batch, None).unwrap();
 
     let mut a = app();
-    a.session.path = Some(path.clone());
+    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
     a.session.cwd = std::path::PathBuf::from("/x");
     // First /tree: select the root user prompt (entry 0) and revert.
     // Its branch_point is its parent (the system message), so the
     // active path becomes just the system message — the transcript is
-    // empty (no visible turns) but branch_hint is the system id.
+    // empty (no visible turns) but the cursor leaf is the system id.
     assert!(a.slash_command("/tree"));
     a.tree_picker.as_mut().unwrap().selected = 0;
     a.tree_picker_confirm();
-    assert!(a.branch_hint.is_some());
+    assert!(a
+        .session
+        .cursor
+        .as_ref()
+        .and_then(store::SessionCursor::leaf_id)
+        .is_some());
     assert_eq!(a.turns.len(), 0); // rolled back to before any user turn
     assert_eq!(a.input, "first");
     // Reopen /tree: all four nodes must appear, none active.
@@ -2962,7 +3057,8 @@ fn tree_shows_tool_result_nodes() {
     let tool_result_id = events[2].id.clone();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
@@ -3076,7 +3172,8 @@ fn tree_exec_label_shows_native_tools() {
     store::append_events(&path, &mut batch, None).unwrap();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let leaf = store::last_event_id(&path).unwrap();
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
@@ -3151,7 +3248,9 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
     std::fs::write(&path, format!("{header}{}\n", lines.join("\n"))).unwrap();
 
     let mut a = app();
-    a.session.path = Some(path);
+    let (_, index, _) = store::load_index(&path).unwrap();
+    let leaf = index.last().map(|event| event.id.clone());
+    a.session.cursor = Some(store::SessionCursor::new(path, leaf));
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
@@ -3705,7 +3804,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
     let checkpoint = last_event_id(&path).unwrap().unwrap();
 
     // Second (failed) turn: messages + TurnFailed marker, all chained
-    // linearly off the checkpoint (parent_hint = checkpoint), mirroring
+    // linearly off the checkpoint cursor, mirroring
     // the recorder's flush(Failed) which does NOT branch the marker.
     let mut t2_events: Vec<SessionEvent> = [
         SessionEventKind::Message(user("oops")),
@@ -5616,7 +5715,10 @@ fn resumed_compaction_restores_summarized_message_count() {
     let (_meta, index, _size) = store::load_index(&path).unwrap();
     let mut a = app();
     a.compaction.auto.max_context_tokens = Some(100_000);
-    a.session.path = Some(path.clone());
+    a.session.cursor = Some(store::SessionCursor::new(
+        path.clone(),
+        active_index_leaf(&index),
+    ));
     *a.history.lock().unwrap() = history_from_index(&path, &index, &a.compaction.edit).unwrap();
     restore_compaction_from_index(&mut a, &path, &index);
 
@@ -5650,6 +5752,106 @@ fn resumed_compaction_restores_summarized_message_count() {
         })
         .unwrap();
     assert_eq!(marker, (2, 7));
+}
+
+#[test]
+fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
+    // Regression: resume snapshots branch A as its logical cursor. Another
+    // writer then appends branch B to the same physical JSONL file before the
+    // resumed app compacts. Compaction must read and checkpoint A, not infer
+    // its thread from physical EOF (which now belongs to B).
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = store::SessionStore::new(dir.path().join("sessions"));
+    let path = session_store
+        .create(
+            std::path::Path::new("/tmp/resume-branch-compact"),
+            &"p/m".into(),
+        )
+        .unwrap();
+
+    let mut branch_a: Vec<SessionEvent> = (0..4)
+        .flat_map(|i| {
+            [
+                SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: msg(user(&format!("branch A prompt {i}"))),
+                },
+                SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: msg(assistant(&format!("branch A reply {i}"))),
+                },
+            ]
+        })
+        .collect();
+    store::append_events(&path, &mut branch_a, None).unwrap();
+    let branch_a_leaf = branch_a.last().unwrap().id.clone();
+
+    // This is the resume boundary: reconstructed history and future commits
+    // are tied to the same explicit leaf.
+    let (_meta, resumed_index, _size) = store::load_index(&path).unwrap();
+    let mut a = app();
+    a.session.cursor = Some(store::SessionCursor::new(
+        path.clone(),
+        active_index_leaf(&resumed_index),
+    ));
+    *a.history.lock().unwrap() =
+        history_from_index(&path, &resumed_index, &a.compaction.edit).unwrap();
+
+    // A stale/concurrent process writes a sibling after resume, making B the
+    // physical EOF without changing this app's logical cursor.
+    let root = branch_a[0].id.clone();
+    let mut branch_b = [
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(user("WRONG SIBLING PROMPT")),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: msg(assistant("WRONG SIBLING REPLY")),
+        },
+    ];
+    store::append_events(&path, &mut branch_b, Some(&root)).unwrap();
+    let branch_b_leaf = branch_b[1].id.clone();
+    assert_eq!(
+        store::last_event_id(&path).unwrap(),
+        Some(branch_b_leaf.clone())
+    );
+
+    assert!(a.compact_now(), "branch A has enough history to compact");
+    let marker_leaf = a
+        .session
+        .cursor
+        .as_ref()
+        .and_then(store::SessionCursor::leaf_id)
+        .expect("compaction advances the resumed cursor");
+    let (_meta, events, _offsets, _size) = store::load(&path).unwrap();
+    let marker_index = events
+        .iter()
+        .position(|event| event.id == marker_leaf)
+        .expect("cursor points at persisted compaction marker");
+    let lineage = store::active_path(&events, &marker_leaf);
+
+    assert!(matches!(
+        events[marker_index].kind,
+        SessionEventKind::Compaction { .. }
+    ));
+    assert!(
+        lineage.iter().any(|&i| events[i].id == branch_a_leaf),
+        "compaction must descend from the branch captured by resume"
+    );
+    assert!(
+        lineage.iter().all(|&i| events[i].id != branch_b_leaf),
+        "later physical-EOF sibling must not leak into resumed compaction"
+    );
+    let SessionEventKind::Compaction { summary, .. } = &events[marker_index].kind else {
+        unreachable!()
+    };
+    assert!(summary.contains("branch A prompt"));
+    assert!(!summary.contains("WRONG SIBLING"));
 }
 
 #[test]

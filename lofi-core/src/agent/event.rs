@@ -86,12 +86,6 @@ pub enum AgentEvent {
         name: String,
         args: String,
     },
-    /// A native subagent call changed lifecycle state while still pending.
-    NativeToolStatus {
-        parent: String,
-        id: u64,
-        waiting: bool,
-    },
     /// A native tool call inside an `exec` block has finished.
     NativeToolEnd {
         parent: String,

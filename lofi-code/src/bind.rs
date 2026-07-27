@@ -1,6 +1,6 @@
 //! Binding of the builtin tools onto the guest `lofi` object.
 //!
-//! `bind_tools` mounts the file/shell/agent methods as native `QuickJS`
+//! `bind_tools` mounts the file and shell methods as native `QuickJS`
 //! functions; `tool_result` translates a tool `Result` into a
 //! `rquickjs::Result<JsonV>` so tool errors surface as thrown JS `Error`s.
 
@@ -14,15 +14,11 @@ pub(super) fn bind_tools<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
-    agent: Option<AgentFn>,
-    models: Option<ModelsFn>,
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
-    bind_agent_tool(ctx, lofi, tools, agent)?;
-    bind_models_tool(ctx, lofi, models)?;
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
@@ -255,154 +251,6 @@ fn bind_file_tools<'js>(
         )?,
     )?;
 
-    Ok(())
-}
-
-/// Bind `lofi.models()`, the discoverable nested-agent model catalog.
-fn bind_models_tool<'js>(
-    ctx: &Ctx<'js>,
-    lofi: &Object<'js>,
-    models: Option<ModelsFn>,
-) -> rquickjs::Result<()> {
-    lofi.set(
-        "models",
-        Function::new(ctx.clone(), move || -> rquickjs::Result<JsonV> {
-            let value = models.as_ref().map_or_else(
-                || json!({"ok": false, "error": "models() is not available in this context"}),
-                |catalog| catalog(),
-            );
-            Ok(JsonV(value))
-        })?,
-    )
-}
-
-/// Compact native-tool preview for a completed subagent. The full text is
-/// still returned to the caller; this avoids storing a duplicate JSON-escaped
-/// copy of a potentially long response in the UI/transcript.
-fn subagent_preview(value: &Json) -> String {
-    let text = value.get("text").and_then(Json::as_str).unwrap_or("");
-    let model = value
-        .get("model")
-        .and_then(Json::as_str)
-        .unwrap_or("unknown");
-    let thinking = value
-        .get("thinking")
-        .and_then(Json::as_str)
-        .unwrap_or("off");
-    let rounds = value.get("rounds").and_then(Json::as_u64).unwrap_or(0);
-    let duration = value.get("durationMs").and_then(Json::as_u64).unwrap_or(0);
-    let cost = value.get("cost").and_then(Json::as_f64).unwrap_or(0.0);
-    let mut preview = text.lines().take(3).collect::<Vec<_>>().join("\n");
-    if preview.chars().count() > 1_000 {
-        preview = preview.chars().take(1_000).collect();
-    }
-    let truncated = text.lines().count() > 3 || text.chars().count() > preview.chars().count();
-    if truncated {
-        preview.push_str("\n…");
-    }
-    json!({
-        "text": preview,
-        "model": model,
-        "thinking": thinking,
-        "rounds": rounds,
-        "durationMs": duration,
-        "cost": cost,
-        "truncated": truncated,
-    })
-    .to_string()
-}
-
-/// Bind `agent` / `spawn`.
-fn bind_agent_tool<'js>(
-    ctx: &Ctx<'js>,
-    lofi: &Object<'js>,
-    tools: &Arc<BuiltinTools>,
-    agent: Option<AgentFn>,
-) -> rquickjs::Result<()> {
-    let tools = tools.clone();
-    lofi.set(
-        "agent",
-        Function::new(
-            ctx.clone(),
-            Async(move |prompt: String, opts: Opt<Value>| {
-                let agent = agent.clone();
-                let tools = tools.clone();
-                let opts_json = opts.0.map(|v| js_to_json(&v)).filter(|v| !v.is_null());
-                let structured = opts_json
-                    .as_ref()
-                    .and_then(|o| o.get("structured"))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                async move {
-                    // Surface the subagent call as a native tool event so the
-                    // UI can render it (with a preview of its result) under
-                    // the parent exec block, just like read/bash.
-                    let id = tools.next_tool_id();
-                    tools.emit(ToolEvent::Start {
-                        id,
-                        name: "agent".to_string(),
-                        args: cap_first_line(&prompt, 120),
-                    });
-                    let Some(agent) = agent else {
-                        let msg = "agent() is not available in this context".to_string();
-                        tools.emit(ToolEvent::End {
-                            id,
-                            result: msg.clone(),
-                            is_error: true,
-                        });
-                        return Err(rquickjs::Error::IntoJs {
-                            from: "lofi",
-                            to: "value",
-                            message: Some(msg),
-                        });
-                    };
-                    let status_tools = tools.clone();
-                    let on_status: AgentStatusFn = Arc::new(move |status| {
-                        status_tools.emit(ToolEvent::Status { id, status });
-                    });
-                    let req = AgentRequest {
-                        prompt,
-                        opts: opts_json,
-                        on_status: Some(on_status),
-                    };
-                    match agent(req).await {
-                        Ok(value) => {
-                            // The native row gets a compact, human-oriented result;
-                            // structured accounting remains available to guest code.
-                            let result = subagent_preview(&value);
-                            let returned = if structured {
-                                value
-                            } else {
-                                value
-                                    .get("text")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map_or(value.clone(), |text| json!(text))
-                            };
-                            tools.emit(ToolEvent::End {
-                                id,
-                                result,
-                                is_error: false,
-                            });
-                            Ok(JsonV(returned))
-                        }
-                        Err(e) => {
-                            let msg = e.to_string();
-                            tools.emit(ToolEvent::End {
-                                id,
-                                result: msg.clone(),
-                                is_error: true,
-                            });
-                            Err(rquickjs::Error::IntoJs {
-                                from: "lofi",
-                                to: "value",
-                                message: Some(msg),
-                            })
-                        }
-                    }
-                }
-            }),
-        )?,
-    )?;
     Ok(())
 }
 
