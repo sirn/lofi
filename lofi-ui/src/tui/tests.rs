@@ -6208,3 +6208,67 @@ fn resume_does_not_restore_usage_measured_before_latest_compaction() {
     assert!(!a.settled_usage_fresh);
     assert!(a.compacted);
 }
+
+#[test]
+fn working_status_is_replaced_in_place_by_done_status() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn screen_rows(term: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = term.backend().buffer();
+        let area = buf.area;
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "show the status transition".to_string(),
+    });
+    a.apply_event(AgentEvent::Text(
+        (0..40)
+            .map(|i| format!("finished response line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    a.run = Some(0);
+    a.run_start = Some(Instant::now());
+    // The producer sends TurnEnd before dropping the event channel. This is
+    // the intermediate state that previously rendered Done in the log while
+    // Working still occupied separate footer rows.
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 1_500,
+        cost: 0.0,
+        usage: Usage::default(),
+    });
+
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let active = screen_rows(&term);
+    let working_y = active
+        .iter()
+        .position(|row| row.contains("Working for"))
+        .expect("working status row");
+    assert!(
+        active.iter().all(|row| !row.contains("Done in")),
+        "terminal status must stay buffered until settlement: {active:#?}"
+    );
+
+    a.run_finished();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let settled = screen_rows(&term);
+    let done_y = settled
+        .iter()
+        .position(|row| row.contains("Done in 1.5s with openai/gpt-4o"))
+        .expect("done status row");
+    assert_eq!(
+        done_y, working_y,
+        "Done should replace Working on the same physical row"
+    );
+}

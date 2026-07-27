@@ -1888,6 +1888,15 @@ struct TurnEnd {
 
 impl Component for TurnEnd {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        // The terminal event arrives just before the run channel closes. Keep
+        // it buffered for that intermediate frame while the working row still
+        // owns the completion-status position. Once the run settles, the log
+        // viewport grows by two rows (working + spacer), and this component's
+        // leading stack gap plus status row occupy those exact rows. The final
+        // status therefore replaces `Working for …` in place.
+        if cx.active_turn {
+            return Vec::new();
+        }
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
         vec![prim::render(
@@ -1922,6 +1931,11 @@ struct TurnFailed {
 
 impl Component for TurnFailed {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        // Match the successful terminal transition: reveal the buffered
+        // failure only after the working row has been removed.
+        if cx.active_turn {
+            return Vec::new();
+        }
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
         let mut out = vec![prim::render(
