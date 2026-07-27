@@ -22,7 +22,7 @@ Full docs for every API (including `recall`, `result`, `skills`, `tmp_dir`, and 
 
 - `lofi.docs()` — list all entries.
 - `lofi.docs("lofi.bash")` — full docs for one API.
-- `lofi.docs_search("write file")` — keyword search.
+- `lofi.docsSearch("write file")` — keyword search.
 
 ## Truncated results
 

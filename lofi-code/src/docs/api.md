@@ -174,7 +174,7 @@ Get the API reference index or a specific entry.
 **Returns (with name):** `{ ok, name, content }` — the full markdown text for
 that entry, or `{ ok: false, error }` if not found.
 
-## lofi.docs_search(query)
+## lofi.docsSearch(query)
 
 Search the API reference by keyword.
 
