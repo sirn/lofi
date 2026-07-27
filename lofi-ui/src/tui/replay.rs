@@ -182,7 +182,6 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                             nt.result = Some("cancelled because parent exec failed".to_string());
                             nt.is_error = true;
                             nt.done = true;
-                            nt.waiting = false;
                         }
                     }
                 }
@@ -206,19 +205,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     result: None,
                     is_error: false,
                     done: false,
-                    waiting: false,
                 });
-            }
-        }
-        AgentEvent::NativeToolStatus {
-            parent,
-            id,
-            waiting,
-        } => {
-            if let Some(t) = tool_mut(&mut turn.blocks, &parent) {
-                if let Some(nt) = t.native.iter_mut().find(|n| n.id == id) {
-                    nt.waiting = waiting;
-                }
             }
         }
         AgentEvent::NativeToolEnd {
@@ -232,7 +219,6 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     nt.result = Some(result);
                     nt.is_error = is_error;
                     nt.done = true;
-                    nt.waiting = false;
                 }
             }
         }
@@ -281,6 +267,15 @@ pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
     turns
 }
 
+/// Build turns from events already selected by the cursor index. Their order
+/// is authoritative even when checkpoint-copy nodes were removed and the
+/// remaining partial slice is therefore not a self-contained parent chain.
+pub(super) fn turns_from_selected_session_events(events: &[SessionEvent]) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = Vec::new();
+    replay_selected_session_events(events, |ev| apply_event_to_turns(&mut turns, ev));
+    turns
+}
+
 /// Reconstruct a faithful [`AgentEvent`] stream from a transcript event log,
 /// emitting each event immediately so resume never retains a second full
 /// transcript representation. The resume and live paths still share one
@@ -298,13 +293,29 @@ pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
 /// result inline via `AgentEvent::ToolEnd`, so the replay adapter defers each
 /// `ToolEnd` until the matching tool-result message arrives — keeping
 /// `apply_event`'s assumption that `ToolEnd` carries the result.
-#[allow(clippy::too_many_lines)]
-pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMut(AgentEvent)) {
-    use std::collections::HashMap as Map;
+pub(super) fn replay_session_events(events: &[SessionEvent], emit: impl FnMut(AgentEvent)) {
     let visible: Vec<&SessionEvent> = visible_event_indices(events)
         .into_iter()
         .map(|i| &events[i])
         .collect();
+    replay_visible_events(&visible, emit);
+}
+
+/// Replay events whose lineage and checkpoint-copy filtering was already
+/// established by a SessionCursor index. Re-running active-path discovery on
+/// one partial turn can lose its prompt when a compaction marker points to a
+/// deliberately omitted checkpoint-copy parent.
+pub(super) fn replay_selected_session_events(
+    events: &[SessionEvent],
+    emit: impl FnMut(AgentEvent),
+) {
+    let visible: Vec<&SessionEvent> = events.iter().collect();
+    replay_visible_events(&visible, emit);
+}
+
+#[allow(clippy::too_many_lines)]
+fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEvent)) {
+    use std::collections::HashMap as Map;
 
     // These indexes borrow the durable events. Cloning native records here
     // used to duplicate every captured tool result during resume (several MiB
@@ -314,7 +325,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
     // Thinking-block durations in emission order, matched positionally to
     // assistant `Thinking` blocks as they are replayed.
     let mut thinking_timing: Vec<u64> = Vec::new();
-    for ev in &visible {
+    for &ev in visible {
         match &ev.kind {
             SessionEventKind::ToolTiming {
                 tool_call_id,
@@ -325,6 +336,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
                 thinking_timing.push(*elapsed_ms);
             }
+            SessionEventKind::Cursor { .. } => {}
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent
                     .entry(rec.parent.as_str())
@@ -335,7 +347,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
         }
     }
     let mut thinking_idx = 0usize;
-    for ev in &visible {
+    for &ev in visible {
         match &ev.kind {
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
@@ -516,10 +528,12 @@ pub(super) fn replay_session_events(events: &[SessionEvent], mut emit: impl FnMu
                     usage: *usage,
                 });
             }
+            SessionEventKind::Cursor { .. } => {}
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn messages_from_events(
     events: &[SessionEvent],
     _edit: &lofi_types::EditConfig,

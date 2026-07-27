@@ -241,18 +241,21 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         None
     };
-    // Sync the frozen-turn cache (all turns but the last) before reading it.
+    // Sync the frozen-turn height index before reading it. Normally this is
+    // every turn but the live last one; idle file-backed views may index all.
     app.ensure_frozen(w);
     let theme = app.theme;
     let n_turns = app.turns.len();
+    let frozen_turns = app.frozen_heights.len();
+    let has_live_turn = frozen_turns < n_turns;
     let running = app.run_active();
 
     // Measure the live last turn without materializing its styled rows. Tool
     // bodies can be enormous in /verbose; only the viewport window is built
-    // below after the scroll offset is known.
-    let last_h = if n_turns == 0 {
-        0
-    } else {
+    // below after the scroll offset is known. Idle /tree rollbacks may instead
+    // make every turn file-backed, in which case the final turn is included in
+    // `frozen_heights` and there is no separate live turn.
+    let last_h = if has_live_turn {
         let cx = component::Cx {
             app,
             theme,
@@ -260,6 +263,8 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             active_turn: running,
         };
         blocks::render_turn_height(&cx, &app.turns[n_turns - 1])
+    } else {
+        0
     };
 
     // Total line count mirrors `render_turns`: per-turn lines plus a blank
@@ -294,9 +299,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         // Resize re-seating needs content offsets across the whole live turn.
         // This is an exceptional path; steady-state rendering remains
         // viewport-local.
-        let last_lines = if n_turns == 0 {
-            Vec::new()
-        } else {
+        let last_lines = if has_live_turn {
             let cx = component::Cx {
                 app,
                 theme,
@@ -304,6 +307,8 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 active_turn: running,
             };
             blocks::render_turn_lines(&cx, &app.turns[n_turns - 1])
+        } else {
+            Vec::new()
         };
         if let Some(anchor) = nav_anchor {
             app.reseat_nav_cursor(anchor, &last_lines, w);
@@ -388,7 +393,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     break;
                 }
             }
-            if i < n_turns - 1 {
+            if i < frozen_turns {
                 let h = app.frozen_heights[i];
                 if pos + h <= off {
                     // Entirely above the viewport; advance without fetching.

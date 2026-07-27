@@ -14,7 +14,7 @@
 //! Two entry points share this engine: the user-typed `/recall` slash
 //! command and the model-callable `lofi.recall(...)` native tool. Both read
 //! the session transcript (the App passes its in-memory events; the native
-//! tool re-reads the file from the session path threaded into `ExecCtx`).
+//! tool reads the full tree through the shared `SessionCursor` in `ExecCtx`).
 //! The full transcript is lossless on disk, so recall sees messages the
 //! live history no longer carries after a compact.
 
@@ -30,7 +30,7 @@ use crate::session::store;
 pub use lofi_types::recall::{CompactionTarget, RecallOutcome, RecallRequest, RecallScope};
 
 mod file;
-pub use file::recall_file;
+pub use file::recall_cursor;
 
 /// Entries per search-results page. Matches VCC's `PAGE_SIZE`.
 const PAGE_SIZE: usize = 5;

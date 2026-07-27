@@ -228,7 +228,7 @@ impl App {
         let t = self.theme;
         let mut lines: Vec<Line<'static>> = vec![info_section(t, "Session")];
         #[allow(clippy::single_match_else)]
-        match &self.session.path {
+        match self.session.path() {
             Some(p) => {
                 let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
                 lines.push(info_kv(t, "id", id));
@@ -266,14 +266,15 @@ impl App {
     }
 
     /// '/new': drop the transcript and start a fresh session file on the next
-    /// prompt. The store is retained; only the path/name/log are reset.
+    /// prompt. The store is retained; the cursor, history, and log are reset.
     pub(super) fn start_new_session(&mut self) {
         if let Ok(mut m) = self.history.lock() {
             m.clear();
         }
         self.turns.clear();
         self.turn_byte_ranges.clear();
-        self.session.path = None;
+        self.turn_event_offsets.clear();
+        self.session.cursor = None;
         self.pinned = true;
         self.top_line = 0;
         // Reset the footer usage/cost stats so a fresh session doesn't
@@ -313,25 +314,29 @@ impl App {
         let Some(entry) = entry else {
             return;
         };
-        match store::load_index(&entry.path) {
-            Ok((_meta, index, file_size)) => {
-                let loaded = history_from_index(&entry.path, &index, &self.compaction.edit)
-                    .and_then(|messages| {
+        match store::SessionCursor::open_snapshot(entry.path.clone()) {
+            Ok((cursor, snapshot)) => {
+                let index = snapshot.index;
+                let file_size = snapshot.file_size;
+                let loaded = history_from_index(&cursor, &index, &self.compaction.edit).and_then(
+                    |messages| {
                         if let Ok(mut history) = self.history.lock() {
                             *history = messages;
                         }
                         self.turns.clear();
                         self.turn_byte_ranges.clear();
+                        self.turn_event_offsets.clear();
                         self.cost = 0.0;
                         self.total_in = 0;
                         self.total_out = 0;
                         self.total_cache_read = 0;
                         self.total_cache_write = 0;
                         self.reset_compaction_gauges();
-                        replay_indexed_session(self, &entry.path, &index, file_size)?;
-                        restore_compaction_from_index(self, &entry.path, &index);
+                        replay_indexed_session(self, &cursor, &index, file_size)?;
+                        restore_compaction_from_index(self, &cursor, &index);
                         Ok(())
-                    });
+                    },
+                );
                 if let Err(e) = loaded {
                     self.push_turn(Turn {
                         prompt: "/resume".to_string(),
@@ -346,7 +351,7 @@ impl App {
                     }
                 }
                 if !self.model_choices.is_empty() {
-                    if let Some(m) = last_run_model_from_index(&entry.path, &index) {
+                    if let Some(m) = last_run_model_from_index(&cursor, &index) {
                         let restored = format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str());
                         let current = format!("{}:{}", self.model_label, self.thinking.as_str());
                         if restored != current {
@@ -355,7 +360,7 @@ impl App {
                     }
                 }
                 self.bump_render_epoch();
-                self.session.path = Some(entry.path);
+                self.session.cursor = Some(cursor);
                 self.pinned = true;
                 self.top_line = 0;
             }
@@ -492,27 +497,26 @@ impl App {
     /// '/tree': open the branch-picker overlay over the active session's
     /// event log. Lists every user-prompt event (the natural branch points)
     /// with its preview. Confirmed entry feeds the prompt text back into the
-    /// input (for editing) and sets the branch hint so the next run starts as
-    /// a sibling of that prompt rather than appending to the active leaf.
+    /// input (for editing) and moves the shared cursor so the next run starts
+    /// as a sibling of that prompt rather than appending to the active leaf.
     pub(super) fn open_tree_picker(&mut self) {
-        let Some(path) = &self.session.path else {
+        // Full-tree index plus the selected head are snapshotted together by
+        // the cursor. Labels are still loaded lazily through that cursor.
+        let Some(cursor) = self.session.cursor.as_ref() else {
             self.notify(
                 NotifyKind::Error,
                 "no session file (ephemeral or --no-session)",
             );
             return;
         };
-        // Lightweight index scan (id + parent_id + kind only — no
-        // ContentBlock deserialization) so /tree stays fast on large
-        // sessions. Labels are loaded on demand by offset.
-        let indices = match store::load_index(path) {
-            Ok((_meta, indices, _size)) => indices,
+        let snapshot = match cursor.tree_snapshot() {
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
                 return;
             }
         };
-        let entries = build_tree_entries(&indices, self.branch_hint.as_deref(), path);
+        let entries = build_tree_entries(&snapshot.index, snapshot.leaf_id.as_deref(), cursor);
         if entries.is_empty() {
             self.notify(NotifyKind::Info, "no branch points in this session yet");
             return;
@@ -522,7 +526,7 @@ impl App {
     }
 
     /// Confirm the hovered entry: roll the transcript back to the chosen
-    /// branch point, set the branch hint so the next run chains off it, and
+    /// branch point, move the shared cursor so the next run chains off it, and
     /// (for "edit and resend" entries) load the original prompt into the
     /// input box. The visual rollback replaces the old "branch ready" badge —
     /// the user sees the conversation up to the branch point immediately.
@@ -530,25 +534,36 @@ impl App {
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
-        let Some(path) = self.session.path.clone() else {
+        // Persist the selected head first, then rebuild exclusively from a
+        // cursor snapshot. If replay fails, restore both the durable head and
+        // the previous view from the old cursor snapshot.
+        let Some(cursor) = self.session.cursor.clone() else {
             return;
         };
-        // Reload only the selected lineage. Loading the whole append-only
-        // transcript here made a branch rollback deserialize every sibling and
-        // every compacted-away tool result, even though rollback immediately
-        // discarded all but root -> branch_point.
-        let events = store::load_index(&path).and_then(|(_meta, index, _size)| {
-            store::load_indexed_path(&path, &index, Some(&entry.branch_point))
+        let old_leaf = cursor.leaf_id();
+        if let Err(e) = cursor.branch_from(entry.branch_point.clone()) {
+            self.notify(NotifyKind::Error, format!("persist session cursor: {e}"));
+            return;
+        }
+        let loaded = cursor.snapshot().and_then(|snapshot| {
+            self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
         });
-        let events = match events {
-            Ok(events) => events,
-            Err(e) => {
-                self.notify(NotifyKind::Error, format!("load session for /tree: {e}"));
-                return;
-            }
-        };
-        self.rollback_to(&events, &entry.branch_point);
-        self.branch_from(entry.branch_point);
+        if let Err(e) = loaded {
+            let restored = cursor
+                .branch_from(old_leaf.clone().unwrap_or_default())
+                .and_then(|()| cursor.snapshot())
+                .and_then(|snapshot| {
+                    self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
+                });
+            let suffix = restored.err().map_or(String::new(), |restore| {
+                format!("; restore failed: {restore}")
+            });
+            self.notify(
+                NotifyKind::Error,
+                format!("load session for /tree: {e}{suffix}"),
+            );
+            return;
+        }
         if !entry.prefill.is_empty() {
             self.input = entry.prefill;
             self.input_cursor = self.input.len();
@@ -902,34 +917,41 @@ impl App {
         }
     }
 
-    /// Rebuild the visible turns and the agent's message history from the
-    /// active path root → `leaf_id` (inclusive), discarding everything after
-    /// that point from the in-memory view. Cost/usage are reset and
-    /// re-accumulated from the replayed `turn_end` events. Byte ranges are
-    /// dropped: after a rollback the visible turns are rendered from
-    /// in-memory blocks, not the file-backed frozen-turn cache (the cache is
-    /// invalidated by `bump_render_epoch`). The on-disk file is untouched —
-    /// the rolled-back branches remain and are reachable via `/tree` again.
-    pub(super) fn rollback_to(&mut self, events: &[SessionEvent], leaf_id: &str) {
-        let path = store::active_path(events, leaf_id);
-        let rolled_back: Vec<SessionEvent> = path.iter().map(|&i| events[i].clone()).collect();
-        let messages = messages_from_events(&rolled_back, &self.compaction.edit);
-        if let Ok(mut m) = self.history.lock() {
-            *m = messages;
+    /// Rebuild a selected /tree lineage with the same bounded, file-backed
+    /// representation as /resume. Historical turn bodies are parsed only one
+    /// turn at a time and dropped as soon as the next turn begins; their exact
+    /// byte ranges remain available for viewport materialization.
+    fn rollback_indexed(
+        &mut self,
+        cursor: &store::SessionCursor,
+        index: &[store::EventIndex],
+        file_size: u64,
+    ) -> Result<()> {
+        let messages = history_from_index(cursor, index, &self.compaction.edit)?;
+        if let Ok(mut history) = self.history.lock() {
+            *history = messages;
         }
-        self.turns = Vec::new();
-        self.turn_byte_ranges = Vec::new();
+        self.turns.clear();
+        self.turn_byte_ranges.clear();
+        self.turn_event_offsets.clear();
         self.cost = 0.0;
         self.total_in = 0;
         self.total_out = 0;
         self.total_cache_read = 0;
         self.total_cache_write = 0;
         self.reset_compaction_gauges();
-        replay_session_events(&rolled_back, |ev| self.apply_event(ev));
-        self.restore_compaction_state(&rolled_back);
+        replay_indexed_session(self, cursor, index, file_size)?;
+        restore_compaction_from_index(self, cursor, index);
+        // Rollback leaves no live run. Unlike resume, even the selected final
+        // turn is immutable and file-backed, so retaining its potentially huge
+        // blocks would recreate the RSS spike this path is meant to prevent.
+        for turn in &mut self.turns {
+            turn.blocks.clear();
+        }
         self.bump_render_epoch();
         self.pinned = true;
         self.top_line = 0;
+        Ok(())
     }
 
     /// Post a transient slash-command notification on the rule line's left

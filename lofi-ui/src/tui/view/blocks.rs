@@ -1653,7 +1653,7 @@ impl ExecBlockBranch<'_> {
     fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
         let w = cx.width;
-        let working = !self.nt.done && !self.nt.waiting && cx.active_turn;
+        let working = !self.nt.done && cx.active_turn;
         let mut out = RenderWindow::new(range);
         let exec_cont = if self.is_last { "  " } else { "│ " };
 
@@ -1669,9 +1669,7 @@ impl ExecBlockBranch<'_> {
                 Style::new().fg(t.subtle),
             ));
         }
-        if self.nt.waiting {
-            content.push(Span::styled(" (waiting)", Style::new().fg(t.warn)));
-        } else if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
+        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
             content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
         }
         let header_deco = vec![
@@ -1680,11 +1678,7 @@ impl ExecBlockBranch<'_> {
                 if self.is_last { "└ " } else { "├ " },
                 Style::new().fg(t.subtle),
             ),
-            if self.nt.waiting {
-                Span::styled("○ ", Style::new().fg(t.warn))
-            } else {
-                prim::status_icon(t, working, self.nt.is_error, cx.spinner())
-            },
+            prim::status_icon(t, working, self.nt.is_error, cx.spinner()),
         ];
         let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
         let cont_deco = vec![
@@ -2052,7 +2046,6 @@ mod tests {
             result: Some(raw.clone()),
             is_error: true,
             done: true,
-            waiting: false,
         };
         assert_eq!(native_body(&tool).lines, vec!["command not found"]);
         assert_eq!(tool.result.as_deref(), Some(raw.as_str()));

@@ -120,26 +120,17 @@ pub(super) fn handle_event(
             }
             app.history_nav.push(prompt.clone());
             // Lazily create the transcript file on the first persisted prompt.
-            if app.session.path.is_none() {
+            if app.session.cursor.is_none() {
                 if let Some(store) = &app.session.store {
-                    if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
-                        app.session.path = Some(p);
+                    if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
+                        app.session.cursor = Some(cursor);
                     }
                 }
             }
-            // Freeze the previous turn: if it was committed to the
-            // transcript (has a byte range), its blocks are now file-backed
-            // (see `materialize_turn`) — drop them so memory stays bounded.
-            // UI-only turns (slash commands) have no byte range and keep blocks.
-            let prev = app.turns.len();
-            if prev > 0
-                && app
-                    .turn_byte_ranges
-                    .get(prev - 1)
-                    .is_some_and(Option::is_some)
-            {
-                app.turns[prev - 1].blocks.clear();
-            }
+            // Keep the completed turn intact until the engine's TurnStart
+            // arrives. TurnStart freezes it and pushes the new prompt in one
+            // event-handler call, so an intervening redraw cannot expose an
+            // old prompt with its assistant response temporarily removed.
             let Some(agent) = agent else {
                 // No model configured: there is no agent to emit `TurnStart`,
                 // so push the turn manually and surface the hint on it.
@@ -159,11 +150,11 @@ pub(super) fn handle_event(
             // (the event handler) for both live and resumed sessions.
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let history = Arc::clone(&app.history);
-            let session_path = app.session.path.clone();
-            let commit = session_path.as_ref().map(|p| SessionCommit {
-                path: p.clone(),
-                parent_hint: app.branch_hint.take(),
-            });
+            let commit = app
+                .session
+                .cursor
+                .clone()
+                .map(|cursor| SessionCommit { cursor });
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -293,30 +284,23 @@ pub(super) fn spawn_prompt(
 ) {
     let Some(agent) = agent else { return };
     // Lazily create the transcript file on the first persisted prompt.
-    if app.session.path.is_none() {
+    if app.session.cursor.is_none() {
         if let Some(store) = &app.session.store {
-            if let Ok(p) = store.create(&app.session.cwd, &app.run_model()) {
-                app.session.path = Some(p);
+            if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
+                app.session.cursor = Some(cursor);
             }
         }
     }
-    // Freeze the previous turn.
-    let prev = app.turns.len();
-    if prev > 0
-        && app
-            .turn_byte_ranges
-            .get(prev - 1)
-            .is_some_and(Option::is_some)
-    {
-        app.turns[prev - 1].blocks.clear();
-    }
+    // Keep the completed turn intact until TurnStart atomically freezes it
+    // and appends this queued prompt. Clearing here permits a redraw between
+    // those operations and makes the transcript appear to jump backward.
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
-    let session_path = app.session.path.clone();
-    let commit = session_path.as_ref().map(|p| SessionCommit {
-        path: p.clone(),
-        parent_hint: None,
-    });
+    let commit = app
+        .session
+        .cursor
+        .clone()
+        .map(|cursor| SessionCommit { cursor });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -362,13 +346,12 @@ pub(super) fn spawn_continue(
     let Some(agent) = agent else { return };
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
-    let session_path = app.session.path.clone();
-    // Chain off the active leaf (the Compaction marker compact_now just
-    // appended) — no branch_hint, so the recorder appends linearly.
-    let commit = session_path.map(|p| SessionCommit {
-        path: p,
-        parent_hint: None,
-    });
+    // Compaction and continuation share the same logical cursor.
+    let commit = app
+        .session
+        .cursor
+        .clone()
+        .map(|cursor| SessionCommit { cursor });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));

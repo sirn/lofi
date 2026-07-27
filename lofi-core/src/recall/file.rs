@@ -1,9 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
 use lofi_error::Result;
 use lofi_types::{NativeToolRecord, SessionEventKind};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     filter_stopwords, format_recall_output, format_search_output, looks_like_regex,
@@ -24,19 +22,24 @@ struct NativeSidecar {
     args: String,
 }
 
-/// Run recall over an on-disk transcript while retaining only one parsed
-/// event at a time plus clipped entries / search statistics.
+/// Run recall over an on-disk transcript through its shared logical cursor,
+/// retaining only one parsed event at a time plus clipped entries / search
+/// statistics.
 #[must_use]
-pub fn recall_file(path: &Path, req: &RecallRequest) -> RecallOutcome {
-    recall_file_inner(path, req).unwrap_or_else(|_| RecallOutcome {
+pub fn recall_cursor(cursor: &store::SessionCursor, req: &RecallRequest) -> RecallOutcome {
+    recall_cursor_inner(cursor, req).unwrap_or_else(|_| RecallOutcome {
         text: "recall: session file unreadable.".to_string(),
         status: "error".to_string(),
     })
 }
 
-fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> {
-    let (_meta, index, _size) = store::load_index(path)?;
-    let scope = resolve_scope(path, &index, &req.scope)?;
+fn recall_cursor_inner(
+    cursor: &store::SessionCursor,
+    req: &RecallRequest,
+) -> Result<RecallOutcome> {
+    let snapshot = cursor.tree_snapshot()?;
+    let index = snapshot.index;
+    let scope = resolve_scope(cursor, &index, snapshot.leaf_id.as_deref(), &req.scope)?;
     let selected: Vec<(u64, usize)> = index
         .iter()
         .scan(0usize, |global, event| {
@@ -49,7 +52,7 @@ fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> 
                 scope
                     .allowed
                     .as_ref()
-                    .is_none_or(|ids| ids.contains(&event.id))
+                    .is_none_or(|ids| ids.contains(&event.id.to_event_id()))
                     .then_some((event.offset, index)),
             )
         })
@@ -69,14 +72,12 @@ fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> 
             scope
                 .allowed
                 .as_ref()
-                .is_none_or(|ids| ids.contains(&event.id))
+                .is_none_or(|ids| ids.contains(&event.id.to_event_id()))
         })
         .map(|event| event.offset)
         .collect();
     let mut native_records = Vec::with_capacity(native_offsets.len());
-    store::visit_event_lines(path, &native_offsets, |line| {
-        let sidecar: NativeSidecar = serde_json::from_str(line)
-            .map_err(|error| lofi_error::Error::State(format!("parse native sidecar: {error}")))?;
+    cursor.visit_event_values::<NativeSidecar>(&native_offsets, |sidecar| {
         native_records.push(NativeToolRecord {
             parent: sidecar.parent,
             call_id: 0,
@@ -97,8 +98,7 @@ fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> 
 
     let mut entries = Vec::with_capacity(offsets.len());
     let mut position = 0usize;
-    store::visit_event_lines(path, &offsets, |line| {
-        let event = store::parse_event(line)?;
+    cursor.visit_events(&offsets, |event| {
         if let SessionEventKind::Message(message) = event.kind {
             entries.push(render_message(
                 &message,
@@ -125,11 +125,11 @@ fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> 
                 status: format!("{} entries", recent.len()),
             });
         }
-        return expand(path, &offsets, &globals, req, &native_by_parent);
+        return expand(cursor, &offsets, &globals, req, &native_by_parent);
     }
 
     search(
-        path,
+        cursor,
         &offsets,
         &globals,
         &entries,
@@ -140,7 +140,7 @@ fn recall_file_inner(path: &Path, req: &RecallRequest) -> Result<RecallOutcome> 
 }
 
 fn expand(
-    path: &Path,
+    cursor: &store::SessionCursor,
     offsets: &[u64],
     globals: &[usize],
     req: &RecallRequest,
@@ -149,8 +149,7 @@ fn expand(
     let wanted: HashSet<usize> = req.expand.iter().copied().collect();
     let mut expanded = HashMap::new();
     let mut position = 0usize;
-    store::visit_event_lines(path, offsets, |line| {
-        let event = store::parse_event(line)?;
+    cursor.visit_events(offsets, |event| {
         if let SessionEventKind::Message(message) = event.kind {
             let global = globals[position];
             if wanted.contains(&global) {
@@ -195,7 +194,7 @@ fn expand(
 
 #[allow(clippy::too_many_lines)]
 fn search(
-    path: &Path,
+    cursor: &store::SessionCursor,
     offsets: &[u64],
     globals: &[usize],
     entries: &[RecallEntry],
@@ -208,8 +207,7 @@ fn search(
         let pattern = safe_regex(raw_query);
         let mut hits = Vec::new();
         let mut position = 0usize;
-        store::visit_event_lines(path, offsets, |line| {
-            let event = store::parse_event(line)?;
+        cursor.visit_events(offsets, |event| {
             if let SessionEventKind::Message(message) = event.kind {
                 if hits.len() < MAX_SEARCH_RESULTS
                     && message_matches(&message, |text| pattern.is_match(text))
@@ -237,8 +235,7 @@ fn search(
                 .collect();
             let mut lengths = Vec::with_capacity(offsets.len());
             let mut df = vec![0usize; terms.len()];
-            store::visit_event_lines(path, offsets, |line| {
-                let event = store::parse_event(line)?;
+            cursor.visit_events(offsets, |event| {
                 if let SessionEventKind::Message(message) = event.kind {
                     lengths.push(message_word_count(&message));
                     for (i, pattern) in patterns.iter().enumerate() {
@@ -262,8 +259,7 @@ fn search(
             .unwrap();
             let mut scored = Vec::new();
             let mut position = 0usize;
-            store::visit_event_lines(path, offsets, |line| {
-                let event = store::parse_event(line)?;
+            cursor.visit_events(offsets, |event| {
                 if let SessionEventKind::Message(message) = event.kind {
                     let mut match_count = 0;
                     let mut score = 0.0;
@@ -343,7 +339,7 @@ fn search(
             let Some(&position) = positions.get(&hit.entry.index) else {
                 continue;
             };
-            let event = store::load_event_at(path, offsets[position])?;
+            let event = cursor.event_at(offsets[position])?;
             if let SessionEventKind::Message(message) = event.kind {
                 hit.entry = render_message(&message, hit.entry.index, true, native_by_parent);
                 hit.snippet = Some(hit.entry.summary.clone());
@@ -372,31 +368,33 @@ fn is_message(kind: store::IndexKind) -> bool {
 }
 
 fn resolve_scope(
-    path: &Path,
+    cursor: &store::SessionCursor,
     index: &[store::EventIndex],
+    leaf_id: Option<&str>,
     scope: &RecallScope,
 ) -> Result<FileScope> {
     if matches!(scope, RecallScope::All) {
         return Ok(FileScope::default());
     }
-    let by_id: HashMap<&str, usize> = index
+    let by_id: HashMap<&store::IndexId, usize> = index
         .iter()
         .enumerate()
-        .map(|(i, event)| (event.id.as_str(), i))
+        .map(|(i, event)| (&event.id, i))
         .collect();
-    let mut current = index.len().checked_sub(1);
+    let leaf = leaf_id.map(|id| store::IndexId::parse(id.to_string()));
+    let mut current = leaf.as_ref().and_then(|id| by_id.get(id).copied());
     let mut lineage = Vec::new();
     while let Some(i) = current {
         lineage.push(i);
         current = index[i]
             .parent_id
-            .as_deref()
+            .as_ref()
             .and_then(|id| by_id.get(id).copied());
     }
     lineage.reverse();
     if matches!(scope, RecallScope::Lineage) {
         return Ok(FileScope {
-            allowed: Some(lineage.iter().map(|&i| index[i].id.clone()).collect()),
+            allowed: Some(lineage.iter().map(|&i| index[i].id.to_event_id()).collect()),
         });
     }
     let compactions: Vec<usize> = lineage
@@ -413,28 +411,28 @@ fn resolve_scope(
     };
     let Some(selected) = selected else {
         return Ok(FileScope {
-            allowed: Some(lineage.iter().map(|&i| index[i].id.clone()).collect()),
+            allowed: Some(lineage.iter().map(|&i| index[i].id.to_event_id()).collect()),
         });
     };
-    let marker = store::load_event_at(path, index[selected].offset)?;
+    let marker = cursor.event_at(index[selected].offset)?;
     let SessionEventKind::Compaction {
         summarized_range, ..
     } = marker.kind
     else {
         unreachable!()
     };
-    let lineage_ids: HashSet<&str> = lineage.iter().map(|&i| index[i].id.as_str()).collect();
+    let lineage_ids: HashSet<&store::IndexId> = lineage.iter().map(|&i| &index[i].id).collect();
     let first = index
         .iter()
-        .position(|event| event.id == summarized_range[0]);
+        .position(|event| event.id.matches(&summarized_range[0]));
     let last = index
         .iter()
-        .position(|event| event.id == summarized_range[1]);
+        .position(|event| event.id.matches(&summarized_range[1]));
     let allowed = match (first, last) {
         (Some(first), Some(last)) if first <= last => index[first..=last]
             .iter()
-            .filter(|event| lineage_ids.contains(event.id.as_str()))
-            .map(|event| event.id.clone())
+            .filter(|event| lineage_ids.contains(&event.id))
+            .map(|event| event.id.to_event_id())
             .collect(),
         _ => HashSet::new(),
     };
@@ -493,8 +491,9 @@ mod tests {
             message("c", Some("b"), Role::User, "leaf"),
         ];
         let file = transcript(&events);
-        let outcome = recall_file(
-            file.path(),
+        let cursor = store::SessionCursor::open(file.path().to_path_buf()).unwrap();
+        let outcome = recall_cursor(
+            &cursor,
             &RecallRequest {
                 query: Some("needle".to_string()),
                 scope: RecallScope::Lineage,
@@ -510,8 +509,9 @@ mod tests {
     fn file_expand_reads_full_selected_message() {
         let long = "x".repeat(500);
         let file = transcript(&[message("a", None, Role::User, &long)]);
-        let outcome = recall_file(
-            file.path(),
+        let cursor = store::SessionCursor::open(file.path().to_path_buf()).unwrap();
+        let outcome = recall_cursor(
+            &cursor,
             &RecallRequest {
                 scope: RecallScope::All,
                 expand: vec![0],

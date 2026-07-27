@@ -3,18 +3,15 @@ use super::*;
 
 fn active_index_path(index: &[store::EventIndex]) -> Vec<usize> {
     use std::collections::HashMap;
-    let by_id: HashMap<&str, usize> = index
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.id.as_str(), i))
-        .collect();
+    let by_id: HashMap<&store::IndexId, usize> =
+        index.iter().enumerate().map(|(i, e)| (&e.id, i)).collect();
     let mut out = Vec::new();
     let mut cur = index.len().checked_sub(1);
     while let Some(i) = cur {
         out.push(i);
         cur = index[i]
             .parent_id
-            .as_deref()
+            .as_ref()
             .and_then(|id| by_id.get(id).copied());
         if out.len() > index.len() {
             return Vec::new();
@@ -24,7 +21,10 @@ fn active_index_path(index: &[store::EventIndex]) -> Vec<usize> {
     out
 }
 
-pub(super) fn visible_index_path(path: &Path, index: &[store::EventIndex]) -> Result<Vec<usize>> {
+pub(super) fn visible_index_path(
+    cursor: &store::SessionCursor,
+    index: &[store::EventIndex],
+) -> Result<Vec<usize>> {
     use std::collections::HashSet;
     let active = active_index_path(index);
     let mut hidden = HashSet::new();
@@ -32,7 +32,7 @@ pub(super) fn visible_index_path(path: &Path, index: &[store::EventIndex]) -> Re
         if index[i].kind != store::IndexKind::Compaction {
             continue;
         }
-        let ev = store::load_event_at(path, index[i].offset)?;
+        let ev = cursor.event_at(index[i].offset)?;
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             checkpointed_tail: true,
@@ -41,7 +41,7 @@ pub(super) fn visible_index_path(path: &Path, index: &[store::EventIndex]) -> Re
         {
             if let Some(start) = active[..pos]
                 .iter()
-                .position(|&j| index[j].id == first_kept_entry_id)
+                .position(|&j| index[j].id.matches(&first_kept_entry_id))
             {
                 hidden.extend(active[start..pos].iter().copied());
             }
@@ -51,7 +51,7 @@ pub(super) fn visible_index_path(path: &Path, index: &[store::EventIndex]) -> Re
 }
 
 pub(super) fn history_from_index(
-    path: &Path,
+    cursor: &store::SessionCursor,
     index: &[store::EventIndex],
     edit: &lofi_types::EditConfig,
 ) -> Result<Vec<Message>> {
@@ -61,7 +61,7 @@ pub(super) fn history_from_index(
         if index[i].kind != store::IndexKind::Compaction {
             continue;
         }
-        let ev = store::load_event_at(path, index[i].offset)?;
+        let ev = cursor.event_at(index[i].offset)?;
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             ..
@@ -72,51 +72,102 @@ pub(super) fn history_from_index(
             } else {
                 active[..pos]
                     .iter()
-                    .position(|&j| index[j].id == *first_kept_entry_id)
+                    .position(|&j| index[j].id.matches(first_kept_entry_id))
                     .unwrap_or(pos)
             };
             break;
         }
     }
-    let offsets: Vec<u64> = active[start..].iter().map(|&i| index[i].offset).collect();
-    let events = store::load_events_at(path, &offsets)?;
-    Ok(messages_from_events(&events, edit))
+    let offsets: Vec<u64> = active[start..]
+        .iter()
+        .rev()
+        .map(|&i| index[i].offset)
+        .collect();
+    messages_from_cursor(cursor, &offsets, edit)
+}
+
+/// Rebuild provider history from leaf-first offsets while holding at most one
+/// complete transcript event at a time. Resume previously loaded the whole
+/// post-compaction range into a Vec before reducing it, so large historical
+/// tool results created a startup allocation peak that glibc retained even
+/// after the final compact history was small.
+fn messages_from_cursor(
+    cursor: &store::SessionCursor,
+    leaf_first_offsets: &[u64],
+    _edit: &lofi_types::EditConfig,
+) -> Result<Vec<Message>> {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let mut summary_msg = None;
+    cursor.visit_events(leaf_first_offsets, |event| {
+        match event.kind {
+            SessionEventKind::Compaction { summary, .. } => {
+                if !summary.is_empty() {
+                    summary_msg = Some(Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text { text: summary }],
+                    });
+                }
+            }
+            SessionEventKind::TurnFailed { .. } => skipping = true,
+            SessionEventKind::TurnEnd { .. } => skipping = false,
+            SessionEventKind::Message(message) if !skipping => out.push(message),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    out.reverse();
+    if let Some(summary) = summary_msg {
+        out.insert(0, summary);
+    }
+    Ok(out)
 }
 
 pub(super) fn replay_indexed_session(
     app: &mut App,
-    path: &Path,
+    cursor: &store::SessionCursor,
     index: &[store::EventIndex],
     file_size: u64,
 ) -> Result<()> {
-    let visible = visible_index_path(path, index)?;
+    let visible = visible_index_path(cursor, index)?;
     let starts: Vec<usize> = visible
         .iter()
         .enumerate()
         .filter_map(|(p, &i)| (index[i].kind == store::IndexKind::UserPrompt).then_some(p))
         .collect();
     app.turn_byte_ranges.clear();
+    app.turn_event_offsets.clear();
     for (turn, &start_pos) in starts.iter().enumerate() {
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         let offsets: Vec<u64> = visible[start_pos..end_pos]
             .iter()
             .map(|&i| index[i].offset)
             .collect();
-        let events = store::load_events_at(path, &offsets)?;
-        replay_session_events(&events, |ev| app.apply_file_backed_replay_event(ev));
+        let events = cursor.events_at(&offsets)?;
+        replay_selected_session_events(&events, |ev| {
+            app.apply_file_backed_replay_event(ev);
+        });
         let start = index[visible[start_pos]].offset;
+        // Physical EOF is correct only when this index represents the file's
+        // final appended leaf. A /tree rollback passes a projected lineage;
+        // its final turn must stop after that lineage's last event or an
+        // on-demand materialization would absorb later sibling branches.
+        let lineage_end = visible.last().map_or(file_size, |&i| index[i].end_offset);
         let end = starts
             .get(turn + 1)
-            .map_or(file_size, |&p| index[visible[p]].offset);
+            .map_or(lineage_end, |&p| index[visible[p]].offset);
         if let Some(range) = app.turn_byte_ranges.last_mut() {
             *range = Some((start, end));
+        }
+        if let Some(selected) = app.turn_event_offsets.last_mut() {
+            *selected = Some(offsets);
         }
     }
     Ok(())
 }
 
 pub(super) fn last_run_model_from_index(
-    path: &Path,
+    cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) -> Option<RunModel> {
     for &i in active_index_path(index).iter().rev() {
@@ -126,7 +177,7 @@ pub(super) fn last_run_model_from_index(
         ) {
             continue;
         }
-        match store::load_event_at(path, index[i].offset).ok()?.kind {
+        match cursor.event_at(index[i].offset).ok()?.kind {
             SessionEventKind::TurnEnd { model, .. }
             | SessionEventKind::TurnFailed { model, .. } => return Some(model),
             _ => {}
@@ -137,7 +188,7 @@ pub(super) fn last_run_model_from_index(
 
 pub(super) fn restore_compaction_from_index(
     app: &mut App,
-    path: &Path,
+    cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) {
     let active = active_index_path(index);
@@ -147,7 +198,7 @@ pub(super) fn restore_compaction_from_index(
         match index[i].kind {
             store::IndexKind::Compaction => last_compaction_pos = Some(pos),
             store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => {
-                if let Ok(ev) = store::load_event_at(path, index[i].offset) {
+                if let Ok(ev) = cursor.event_at(index[i].offset) {
                     match ev.kind {
                         SessionEventKind::TurnEnd { usage, .. }
                         | SessionEventKind::TurnFailed { usage, .. } => {

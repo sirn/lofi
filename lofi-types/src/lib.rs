@@ -416,6 +416,14 @@ pub enum SessionEventKind {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
+    /// Durable selection of the transcript's logical head. This record is
+    /// metadata, not part of the conversation tree: append and branch
+    /// operations write it in the same file-locked transaction as the state
+    /// change so restart never has to infer a cursor from physical EOF.
+    Cursor {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_id: Option<String>,
+    },
     /// An offline compaction marker: `summary` replaces the summarized
     /// prefix (everything older than `first_kept_entry_id` on the active
     /// path) and is injected as a single user message at the head of the
@@ -1072,45 +1080,6 @@ pub struct AgentConfig {
     /// applies).
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
-    /// Subagent concurrency settings (`[agent.subagents]`).
-    #[serde(default)]
-    pub subagents: SubagentConfig,
-}
-
-/// Subagent settings (`[agent.subagents]`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubagentConfig {
-    /// Maximum number of subagents (`lofi.agent()` calls) that may run
-    /// concurrently. Defaults to `3`; set to `0` to disable throttling.
-    /// Excess calls wait for a slot before starting.
-    #[serde(default = "default_subagent_max_concurrent")]
-    pub max_concurrent: usize,
-}
-
-const fn default_subagent_max_concurrent() -> usize {
-    3
-}
-
-impl Default for SubagentConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent: default_subagent_max_concurrent(),
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod subagent_config_tests {
-    use super::SubagentConfig;
-
-    #[test]
-    fn default_concurrency_is_three() {
-        assert_eq!(SubagentConfig::default().max_concurrent, 3);
-        let parsed: SubagentConfig =
-            serde_json::from_str("{}").expect("empty subagent config parses");
-        assert_eq!(parsed.max_concurrent, 3);
-    }
 }
 
 /// Compaction settings.

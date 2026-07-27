@@ -298,17 +298,13 @@ impl App {
         }
         let intra = cursor.saturating_sub(self.turn_start_line(k));
         let last = k + 1 == n;
-        // Old-width lines: the frozen cache (exact — rendered with
-        // `active_turn = false`) when present, else a re-render at the old
-        // width. The last turn is never frozen, so it always re-renders with
-        // the live `active_turn` to match the previous frame.
-        //
-        // The anchor is the position's exact content-char offset — the line's
-        // cumulative content start plus the column mapped into the content —
-        // so both the line and column can be re-seated onto the same character
-        // after the re-wrap (an absolute line index or a line-start offset
-        // alone would drift the cell).
-        let char_pos = if last {
+        let live = last && self.frozen_heights.len() < n;
+        // Old-width lines: use the frozen cache (rendered with
+        // `active_turn = false`) whenever this turn is file-backed. Normally
+        // only the prefix is frozen, but an idle /tree rollback may freeze the
+        // selected final turn too. Only a genuinely live final turn renders
+        // with the current active state.
+        let char_pos = if live {
             let v = self.render_turn_at(k, self.frozen_width, self.run_active());
             cursor_char_pos(&v, intra, col)
         } else if let Some(v) = self.frozen_render.get(k) {
@@ -346,11 +342,11 @@ impl App {
         if k >= n {
             return None;
         }
-        let last = k + 1 == n;
+        let live = k + 1 == n && self.frozen_heights.len() < n;
         // Find the (new-width) line containing `char_pos` and the display
         // column that lands on that character, so the cell stays on the same
         // content char instead of drifting to the new line's start.
-        let seated = if last {
+        let seated = if live {
             reseat_at(last_lines, char_pos)
         } else if let Some(v) = self.frozen_render.get(k) {
             reseat_at(v, char_pos)
@@ -402,11 +398,11 @@ impl App {
         }
         let mut start = 0usize;
         for j in 0..i.min(n) {
-            let h = if j + 1 < n {
-                self.frozen_heights.get(j).copied().unwrap_or(0)
-            } else {
-                self.last_turn_height
-            };
+            let h = self
+                .frozen_heights
+                .get(j)
+                .copied()
+                .unwrap_or(self.last_turn_height);
             start += h + 1;
         }
         start
@@ -726,6 +722,7 @@ impl App {
     pub(super) fn clear_log(&mut self) {
         self.turns.clear();
         self.turn_byte_ranges.clear();
+        self.turn_event_offsets.clear();
         self.pinned = true;
         self.top_line = 0;
         self.bump_render_epoch();

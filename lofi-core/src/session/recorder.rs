@@ -79,12 +79,8 @@ pub struct TurnSummary {
 /// both a normal `TurnEnd` and an error path.
 #[derive(Debug)]
 pub struct SessionRecorder {
-    path: std::path::PathBuf,
+    cursor: store::SessionCursor,
     model: RunModel,
-    /// The entry id to branch this turn from. `None` appends to the file's
-    /// current active leaf (linear continuation); `Some(id)` starts a new
-    /// branch as a sibling of `id`'s existing children.
-    parent_hint: Option<String>,
     flushed: bool,
     message_count: usize,
     native_tool_count: usize,
@@ -95,34 +91,13 @@ pub struct SessionRecorder {
 }
 
 impl SessionRecorder {
-    /// Wrap a transcript path + the raw model identity used for the
-    /// `SessionEvent::TurnEnd` marker. The turn appends to the file's active
-    /// leaf (no branching).
+    /// Wrap a shared transcript cursor + the raw model identity used for the
+    /// `SessionEvent::TurnEnd` marker.
     #[must_use]
-    pub fn new(path: std::path::PathBuf, model: RunModel) -> Self {
+    pub fn new(cursor: store::SessionCursor, model: RunModel) -> Self {
         Self {
-            path,
+            cursor,
             model,
-            parent_hint: None,
-            flushed: false,
-            message_count: 0,
-            native_tool_count: 0,
-            thinking_timing_count: 0,
-            tool_timing_ids: HashSet::new(),
-            byte_start: None,
-            byte_end: None,
-        }
-    }
-
-    /// Like [`new`](Self::new) but branches the turn off `parent_hint` instead
-    /// of appending to the active leaf. Used by the agent when the user
-    /// resumes from a selected entry in the tree picker.
-    #[must_use]
-    pub fn with_parent(path: std::path::PathBuf, model: RunModel, parent_hint: String) -> Self {
-        Self {
-            path,
-            model,
-            parent_hint: Some(parent_hint),
             flushed: false,
             message_count: 0,
             native_tool_count: 0,
@@ -243,18 +218,7 @@ impl SessionRecorder {
         if events.is_empty() {
             return Ok(None);
         }
-        let parent_hint = self.parent_hint.take();
-        let (start, end) =
-            match store::append_events(&self.path, &mut events, parent_hint.as_deref()) {
-                Ok(range) => range,
-                Err(error) => {
-                    // Do not advance cursors or consume the explicit branch
-                    // point: a later checkpoint/final flush retries the
-                    // complete unwritten suffix from the same parent.
-                    self.parent_hint = parent_hint;
-                    return Err(error);
-                }
-            };
+        let (start, end) = self.cursor.append_events(&mut events)?;
         self.message_count = messages.len();
         self.native_tool_count = summary.native_tools.len();
         self.thinking_timing_count = summary.thinking_elapsed.len();
@@ -272,7 +236,7 @@ impl SessionRecorder {
     /// The transcript path this recorder writes to.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.path
+        self.cursor.path()
     }
 }
 
@@ -325,7 +289,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        let mut rec = SessionRecorder::new(path.clone(), "m".into());
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let messages = vec![
             user_msg("go"),
             Message {
@@ -354,7 +319,7 @@ mod tests {
             .flush(&messages, &TurnOutcome::Finished, &summary(100))
             .unwrap()
             .is_none());
-        let (_meta, events, _offsets, _size) = store::load(&path).unwrap();
+        let events = cursor.load_tree_events().unwrap();
         // Expected order: 3 messages, native tool, tool timing, thinking
         // timing, turn end.
         let mut i = 0;
@@ -418,7 +383,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        let mut rec = SessionRecorder::new(path.clone(), "m".into());
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let mut first_summary = summary(10);
         first_summary.native_tools.clear();
         first_summary.thinking_elapsed.clear();
@@ -429,7 +395,8 @@ mod tests {
             .checkpoint(&first, &first_summary)
             .unwrap()
             .expect("first round persisted");
-        let (_, checkpoint_events, _, checkpoint_size) = store::load(&path).unwrap();
+        let checkpoint_events = cursor.load_tree_events().unwrap();
+        let checkpoint_size = std::fs::metadata(&path).unwrap().len();
         assert_eq!(
             checkpoint_events
                 .iter()
@@ -452,7 +419,8 @@ mod tests {
             .flush(&all, &TurnOutcome::Finished, &final_summary)
             .unwrap()
             .expect("final suffix persisted");
-        let (_, events, _, file_size) = store::load(&path).unwrap();
+        let events = cursor.load_tree_events().unwrap();
+        let file_size = std::fs::metadata(&path).unwrap().len();
         assert_eq!(full_range, (first_range.0, file_size));
         assert_eq!(
             events
@@ -477,15 +445,64 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_writer_cannot_steal_later_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut first = SessionRecorder::new(cursor.clone(), "m".into());
+        let mut clean = summary(10);
+        clean.native_tools.clear();
+        clean.thinking_elapsed.clear();
+        clean.tool_elapsed.clear();
+        first
+            .checkpoint(&[user_msg("first"), assistant_text("round one")], &clean)
+            .unwrap();
+        let first_leaf = cursor.leaf_id().unwrap();
+
+        // Simulate another resumed process appending a sibling after our
+        // checkpoint, making its event physical EOF.
+        let mut sibling = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(user_msg("sibling")),
+        }];
+        store::append_events(&path, &mut sibling, None).unwrap();
+
+        first
+            .flush(
+                &[
+                    user_msg("first"),
+                    assistant_text("round one"),
+                    assistant_text("round two"),
+                ],
+                &TurnOutcome::Finished,
+                &clean,
+            )
+            .unwrap();
+        let final_leaf = cursor.leaf_id().unwrap();
+        let events = cursor.load_tree_events().unwrap();
+        let final_path = store::active_path(&events, &final_leaf);
+
+        assert!(final_path.iter().any(|&i| events[i].id == first_leaf));
+        assert!(
+            !final_path.iter().any(|&i| events[i].id == sibling[0].id),
+            "later checkpoint must follow the recorder leaf, not physical EOF"
+        );
+    }
+
+    #[test]
     fn flush_without_turn_end_when_unfinished() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        let mut rec = SessionRecorder::new(path.clone(), "m".into());
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let messages = vec![user_msg("go"), assistant_text("hi")];
         rec.flush(&messages, &TurnOutcome::Cancelled, &summary(50))
             .unwrap();
-        let (_meta, events, _, _) = store::load(&path).unwrap();
+        let events = cursor.load_tree_events().unwrap();
         assert!(!events
             .iter()
             .any(|e| matches!(e.kind, SessionEventKind::TurnEnd { .. })));
@@ -496,7 +513,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        let mut rec = SessionRecorder::new(path.clone(), "m".into());
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let empty = TurnSummary {
             elapsed_ms: 0,
             cost: 0.0,
@@ -507,7 +525,7 @@ mod tests {
         };
         let range = rec.flush(&[], &TurnOutcome::Cancelled, &empty).unwrap();
         assert!(range.is_none());
-        let (_meta, events, _, _) = store::load(&path).unwrap();
+        let events = cursor.load_tree_events().unwrap();
         assert!(events.is_empty());
     }
 
@@ -516,8 +534,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        // First turn: a completed user -> assistant exchange.
-        let mut rec1 = SessionRecorder::new(path.clone(), "m".into());
+        // Both turns share one cursor, which advances after the first flush.
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec1 = SessionRecorder::new(cursor.clone(), "m".into());
         rec1.flush(
             &[user_msg("first"), assistant_text("reply")],
             &TurnOutcome::Finished,
@@ -536,7 +555,7 @@ mod tests {
         // linearly off the first turn's TurnEnd (same shape as a successful
         // turn), so the failed turn's content stays on the active path and
         // remains visible on resume.
-        let mut rec2 = SessionRecorder::new(path.clone(), "m".into());
+        let mut rec2 = SessionRecorder::new(cursor.clone(), "m".into());
         rec2.flush(
             &[user_msg("second"), assistant_text("partial")],
             &TurnOutcome::Failed("boom".into()),
@@ -553,7 +572,7 @@ mod tests {
             },
         )
         .unwrap();
-        let (_meta, events, _, _) = store::load(&path).unwrap();
+        let events = cursor.load_tree_events().unwrap();
         // The TurnFailed marker's parent is the failed turn's last message,
         // NOT the checkpoint — so the failed turn's content is on the active
         // path (visible) and messages_from_events skips it via the boundary.

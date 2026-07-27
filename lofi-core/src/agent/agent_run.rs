@@ -116,25 +116,21 @@ impl Agent {
         // Keep one recorder alive across the whole multi-round turn. Each
         // completed round checkpoints its new messages/timings immediately;
         // final flush only appends the remaining suffix and terminal marker.
-        let mut recorder = commit.map(|commit| match commit.parent_hint.as_deref() {
-            Some(id) => {
-                SessionRecorder::with_parent(commit.path.clone(), self.run_model(), id.to_string())
-            }
-            None => SessionRecorder::new(commit.path.clone(), self.run_model()),
-        });
+        let mut recorder =
+            commit.map(|commit| SessionRecorder::new(commit.cursor.clone(), self.run_model()));
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
         let recall: Option<RecallFn> = commit.map(|c| {
-            let path = c.path.clone();
+            let cursor = c.cursor.clone();
             Arc::new(move |req: &lofi_types::recall::RecallRequest| {
-                crate::recall::recall_file(&path, req)
+                crate::recall::recall_cursor(&cursor, req)
             }) as RecallFn
         });
         let result: Option<ResultFn> = commit.map(|c| {
-            let path = c.path.clone();
+            let cursor = c.cursor.clone();
             Arc::new(move |id: &str| -> String {
-                match crate::session::store::load_event_by_id(&path, id) {
+                match cursor.event_by_id(id) {
                     Ok(Some(event)) => match event.kind {
                         lofi_types::SessionEventKind::Message(message) => {
                             crate::context_edit::recover_message_content(&message).unwrap_or_else(|| {
@@ -404,30 +400,13 @@ impl Agent {
     ///
     /// Returns `Ok(true)` when the assistant turn had no tool calls (the loop
     /// should stop), or `Ok(false)` when a tool was invoked and the loop
-    /// should continue. This is the primitive subagents call via
-    /// [`RoundTrip`]; it emits no events.
+    /// should continue. It emits no events.
     ///
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
         self.run_once_inner(messages, None, None, None, None, None)
             .await
-    }
-
-    /// Run one nested-agent round while retaining its usage and cost.
-    pub(super) async fn run_subagent_once(
-        &self,
-        messages: &mut Vec<Message>,
-    ) -> Result<SubagentRound> {
-        let mut stats = TurnStats::new();
-        let finished = self
-            .run_once_inner(messages, None, Some(&mut stats), None, None, None)
-            .await?;
-        Ok(SubagentRound {
-            finished,
-            usage: stats.usage,
-            cost: stats.cost,
-        })
     }
 
     /// Shared core of [`run_once`] with an optional event sender.
@@ -705,7 +684,6 @@ impl Agent {
         result: Option<ResultFn>,
         cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<Vec<ContentBlock>> {
-        let agent_fn = self.make_agent_fn();
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
         // callback inside the sandbox, so they can't `await` on the bounded
@@ -820,13 +798,6 @@ impl Agent {
                             args,
                         });
                     }
-                    ToolEvent::Status { id, status } => {
-                        let _ = native_tx.send(AgentEvent::NativeToolStatus {
-                            parent: event_parent.clone(),
-                            id,
-                            waiting: status == lofi_code::AgentStatus::Waiting,
-                        });
-                    }
                     ToolEvent::End {
                         id,
                         result,
@@ -888,11 +859,6 @@ impl Agent {
                 root: self.root.clone(),
                 tmp_dir: self.tmp_dir.clone(),
                 strings,
-                agent: Some(agent_fn.clone()),
-                models: self
-                    .subagent_model_catalog
-                    .clone()
-                    .map(|catalog| catalog as lofi_code::ModelsFn),
                 recall: recall.clone(),
                 result: result.clone(),
                 on_tool_event: Some(on_tool_event),
@@ -978,115 +944,5 @@ impl Agent {
             });
         }
         Ok(results)
-    }
-
-    /// Build the `lofi.agent` / `lofi.spawn` callback used by [`ExecCtx`].
-    ///
-    /// The closure clones the agent (cheap — `Arc` provider) and runs
-    /// [`subagent::run`] with a fresh nested loop reusing the same provider,
-    /// model, and workspace root. The subagent's final assistant text becomes
-    /// the `lofi.agent()` return value inside the sandbox.
-    pub(super) fn make_agent_fn(&self) -> AgentFn {
-        let self_clone = self.clone();
-        let sem = self.subagent_semaphore.clone();
-        let model_resolver = self.subagent_model_resolver.clone();
-        Arc::new(move |req: lofi_code::AgentRequest| {
-            let mut agent = self_clone.clone();
-            let sem = sem.clone();
-            let model_resolver = model_resolver.clone();
-            Box::pin(async move {
-                let opts_json = req.opts.as_ref();
-                if opts_json.is_some_and(|opts| !opts.is_object()) {
-                    return Err(Error::Config("subagent options must be an object".into()));
-                }
-                let system = match opts_json.and_then(|o| o.get("system")) {
-                    Some(value) => value
-                        .as_str()
-                        .ok_or_else(|| Error::Config("subagent `system` must be a string".into()))?
-                        .to_string(),
-                    None => agent.system_prompt.clone(),
-                };
-                let model = opts_json
-                    .and_then(|o| o.get("model"))
-                    .map(|value| {
-                        value.as_str().ok_or_else(|| {
-                            Error::Config("subagent `model` must be a string".into())
-                        })
-                    })
-                    .transpose()?;
-                let thinking = opts_json
-                    .and_then(|o| o.get("thinking"))
-                    .map(|value| {
-                        value.as_str().ok_or_else(|| {
-                            Error::Config("subagent `thinking` must be a string".into())
-                        })
-                    })
-                    .transpose()?
-                    .map(|level| {
-                        ThinkingLevel::parse(level).ok_or_else(|| {
-                            Error::Config(format!(
-                                "unknown subagent thinking level `{level}` \
-                                 (expected off|low|medium|high|xhigh)"
-                            ))
-                        })
-                    })
-                    .transpose()?;
-                if let Some(query) = model {
-                    let resolver = model_resolver.as_ref().ok_or_else(|| {
-                        Error::Config("subagent model override is unavailable".into())
-                    })?;
-                    let (provider, selected) = resolver(query, thinking)?;
-                    agent = agent.with_model(provider, selected);
-                } else if let Some(level) = thinking {
-                    let query = format!("{}/{}", agent.model.provider, agent.model.id);
-                    let resolver = model_resolver.as_ref().ok_or_else(|| {
-                        Error::Config("subagent thinking override is unavailable".into())
-                    })?;
-                    let (provider, selected) = resolver(&query, Some(level))?;
-                    agent = agent.with_model(provider, selected);
-                }
-
-                // Report semaphore contention explicitly. `try_acquire_owned`
-                // distinguishes a queued call from one that can begin now.
-                let _permit = match &sem {
-                    Some(s) => match s.clone().try_acquire_owned() {
-                        Ok(permit) => Some(permit),
-                        Err(tokio::sync::TryAcquireError::NoPermits) => {
-                            if let Some(on_status) = &req.on_status {
-                                on_status(lofi_code::AgentStatus::Waiting);
-                            }
-                            let permit = s.clone().acquire_owned().await.map_err(|_| {
-                                Error::Sandbox("subagent concurrency limiter closed".into())
-                            })?;
-                            if let Some(on_status) = &req.on_status {
-                                on_status(lofi_code::AgentStatus::Running);
-                            }
-                            Some(permit)
-                        }
-                        Err(tokio::sync::TryAcquireError::Closed) => {
-                            return Err(Error::Sandbox(
-                                "subagent concurrency limiter closed".into(),
-                            ));
-                        }
-                    },
-                    None => None,
-                };
-                let opts = SubagentOptions { system };
-                let parent = SubagentCtx {
-                    root: agent.root.clone(),
-                    strings: HashMap::new(),
-                };
-                let result = subagent::run(&parent, &agent, &req.prompt, &opts).await?;
-                Ok(serde_json::json!({
-                    "text": result.text,
-                    "model": format!("{}/{}", agent.model.provider, agent.model.id),
-                    "thinking": agent.model.thinking.as_str(),
-                    "rounds": result.rounds,
-                    "usage": result.usage,
-                    "cost": result.cost,
-                    "durationMs": result.duration_ms,
-                }))
-            })
-        })
     }
 }
