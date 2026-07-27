@@ -396,6 +396,39 @@ async fn subagent_callback_honors_model_and_thinking_override() {
 }
 
 #[tokio::test]
+async fn subagent_inherits_parent_model_when_no_override() {
+    let dir = tempdir().unwrap();
+    let mut parent_model = model();
+    parent_model.provider = "parent-prov".into();
+    parent_model.id = "parent-model".into();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::TextDelta("reply".to_string()),
+            StreamingEvent::Done(Usage::default()),
+        ]],
+        dir.path(),
+    )
+    .with_subagent_model_resolver(Arc::new(|_query, _thinking| {
+        panic!("resolver should not be called when no model override is given");
+    }));
+    // Override the model to a distinct parent value so we can verify inheritance.
+    let agent = Agent {
+        model: parent_model,
+        ..agent
+    };
+    let callback = agent.make_agent_fn();
+    let value = callback(lofi_code::AgentRequest {
+        prompt: "go".into(),
+        opts: None,
+        on_status: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(value["text"], "reply");
+    assert_eq!(value["model"], "parent-prov/parent-model");
+}
+
+#[tokio::test]
 async fn run_once_stops_at_done_without_polling_stream_again() {
     // A protocol terminal event is sufficient even when the transport keeps
     // the connection open. This is the Responses/subagent hang regression.

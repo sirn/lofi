@@ -274,6 +274,7 @@ impl App {
         self.turns.clear();
         self.turn_byte_ranges.clear();
         self.session.path = None;
+        self.branch_hint = None;
         self.pinned = true;
         self.top_line = 0;
         // Reset the footer usage/cost stats so a fresh session doesn't
@@ -330,6 +331,7 @@ impl App {
                         self.reset_compaction_gauges();
                         replay_indexed_session(self, &entry.path, &index, file_size)?;
                         restore_compaction_from_index(self, &entry.path, &index);
+                        self.branch_hint = active_index_leaf(&index);
                         Ok(())
                     });
                 if let Err(e) = loaded {

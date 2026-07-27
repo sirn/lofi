@@ -115,11 +115,9 @@ const PER_EVENT_OVERHEAD: usize = 64;
 pub struct SessionCommit {
     /// Path to the session `.jsonl` file.
     pub path: PathBuf,
-    /// The entry id to branch this turn from. `None` appends to the file's
-    /// current active leaf (linear continuation); `Some(id)` starts a new
-    /// branch as a sibling of `id`'s existing children — used when the user
-    /// resumes from a selected entry in the tree picker rather than the
-    /// active leaf.
+    /// Logical parent for this turn. Existing sessions pass their app-local
+    /// active leaf explicitly so another process's physical EOF cannot steal
+    /// the lineage. `None` is reserved for a genuinely empty session root.
     pub parent_hint: Option<String>,
 }
 

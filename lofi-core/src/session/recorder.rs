@@ -81,9 +81,10 @@ pub struct TurnSummary {
 pub struct SessionRecorder {
     path: std::path::PathBuf,
     model: RunModel,
-    /// The entry id to branch this turn from. `None` appends to the file's
-    /// current active leaf (linear continuation); `Some(id)` starts a new
-    /// branch as a sibling of `id`'s existing children.
+    /// The logical parent for the next checkpoint. After each successful
+    /// append this advances to that batch's final event, so an interleaved
+    /// writer can never make a later checkpoint jump to physical file EOF.
+    /// `None` is used only for the first event in a genuinely empty session.
     parent_hint: Option<String>,
     flushed: bool,
     message_count: usize,
@@ -96,8 +97,8 @@ pub struct SessionRecorder {
 
 impl SessionRecorder {
     /// Wrap a transcript path + the raw model identity used for the
-    /// `SessionEvent::TurnEnd` marker. The turn appends to the file's active
-    /// leaf (no branching).
+    /// `SessionEvent::TurnEnd` marker. Intended for a genuinely empty session;
+    /// existing sessions should use [`with_parent`](Self::with_parent).
     #[must_use]
     pub fn new(path: std::path::PathBuf, model: RunModel) -> Self {
         Self {
@@ -255,6 +256,10 @@ impl SessionRecorder {
                     return Err(error);
                 }
             };
+        // Keep following this recorder's own logical lineage. Falling back to
+        // `last_event_id` on the next checkpoint would let another process's
+        // interleaved append steal the turn.
+        self.parent_hint = events.last().map(|event| event.id.clone());
         self.message_count = messages.len();
         self.native_tool_count = summary.native_tools.len();
         self.thinking_timing_count = summary.thinking_elapsed.len();
@@ -267,6 +272,12 @@ impl SessionRecorder {
         } else {
             Ok(None)
         }
+    }
+
+    /// The logical leaf produced by the latest successful checkpoint.
+    #[must_use]
+    pub fn leaf_id(&self) -> Option<&str> {
+        self.parent_hint.as_deref()
     }
 
     /// The transcript path this recorder writes to.
@@ -474,6 +485,53 @@ mod tests {
             events.last().map(|event| &event.kind),
             Some(SessionEventKind::TurnEnd { .. })
         ));
+    }
+
+    #[test]
+    fn interleaved_writer_cannot_steal_later_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+
+        let mut first = SessionRecorder::new(path.clone(), "m".into());
+        let mut clean = summary(10);
+        clean.native_tools.clear();
+        clean.thinking_elapsed.clear();
+        clean.tool_elapsed.clear();
+        first
+            .checkpoint(&[user_msg("first"), assistant_text("round one")], &clean)
+            .unwrap();
+        let first_leaf = first.leaf_id().unwrap().to_string();
+
+        // Simulate another resumed process appending a sibling after our
+        // checkpoint, making its event physical EOF.
+        let mut sibling = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(user_msg("sibling")),
+        }];
+        store::append_events(&path, &mut sibling, None).unwrap();
+
+        first
+            .flush(
+                &[
+                    user_msg("first"),
+                    assistant_text("round one"),
+                    assistant_text("round two"),
+                ],
+                &TurnOutcome::Finished,
+                &clean,
+            )
+            .unwrap();
+        let final_leaf = first.leaf_id().unwrap().to_string();
+        let (_, events, _, _) = store::load(&path).unwrap();
+        let final_path = store::active_path(&events, &final_leaf);
+
+        assert!(final_path.iter().any(|&i| events[i].id == first_leaf));
+        assert!(
+            !final_path.iter().any(|&i| events[i].id == sibling[0].id),
+            "later checkpoint must follow the recorder leaf, not physical EOF"
+        );
     }
 
     #[test]

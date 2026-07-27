@@ -355,12 +355,15 @@ impl Agent {
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
-                    let _ = tx
-                        .send(AgentEvent::TurnCommitted {
-                            byte_start,
-                            byte_end,
-                        })
-                        .await;
+                    if let Some(leaf_id) = recorder.leaf_id() {
+                        let _ = tx
+                            .send(AgentEvent::TurnCommitted {
+                                byte_start,
+                                byte_end,
+                                leaf_id: leaf_id.to_string(),
+                            })
+                            .await;
+                    }
                 }
                 _ => {}
             }
@@ -1031,6 +1034,10 @@ impl Agent {
                         })
                     })
                     .transpose()?;
+                // When neither model nor thinking is overridden, the agent
+                // clone retains the parent session's model — the subagent
+                // inherits it rather than defaulting to the first discovered
+                // model from the registry.
                 if let Some(query) = model {
                     let resolver = model_resolver.as_ref().ok_or_else(|| {
                         Error::Config("subagent model override is unavailable".into())

@@ -162,7 +162,7 @@ pub(super) fn handle_event(
             let session_path = app.session.path.clone();
             let commit = session_path.as_ref().map(|p| SessionCommit {
                 path: p.clone(),
-                parent_hint: app.branch_hint.take(),
+                parent_hint: app.branch_hint.clone(),
             });
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
@@ -315,7 +315,7 @@ pub(super) fn spawn_prompt(
     let session_path = app.session.path.clone();
     let commit = session_path.as_ref().map(|p| SessionCommit {
         path: p.clone(),
-        parent_hint: None,
+        parent_hint: app.branch_hint.clone(),
     });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
@@ -363,11 +363,11 @@ pub(super) fn spawn_continue(
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
     let session_path = app.session.path.clone();
-    // Chain off the active leaf (the Compaction marker compact_now just
-    // appended) — no branch_hint, so the recorder appends linearly.
+    // Chain off this app instance's logical leaf (normally the compaction
+    // marker just appended), never whichever sibling is physical EOF.
     let commit = session_path.map(|p| SessionCommit {
         path: p,
-        parent_hint: None,
+        parent_hint: app.branch_hint.clone(),
     });
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
