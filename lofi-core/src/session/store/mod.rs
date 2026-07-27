@@ -312,6 +312,16 @@ pub fn append_events(
         let len = std::fs::metadata(path).map_or(0, |m| m.len());
         return Ok((len, len));
     }
+    // Serialize the parent lookup and complete batch append across processes.
+    // Logical branches may share a file, but their JSONL records must never
+    // physically interleave and an implicit parent must be read under the
+    // same lock as its write.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    lock.lock()?;
     // Resolve the first event's parent: explicit hint (branch) > the file's
     // current last event (linear continuation) > None (root).
     let mut parent = match parent_hint {
@@ -356,7 +366,7 @@ pub fn append_compaction(
     summary: String,
     summarized_range: [String; 2],
     counts: CompactionCounts,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, String)> {
     #[derive(Serialize)]
     struct MessageCheckpoint<'a> {
         id: &'a str,
@@ -383,6 +393,14 @@ pub fn append_compaction(
         kept: usize,
     }
 
+    // Keep the checkpoint batch contiguous with respect to every other lofi
+    // writer. This also makes the EOF fallback and append one transaction.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    lock.lock()?;
     let parent = match parent_hint {
         Some("") => None,
         Some(id) => Some(id.to_string()),
@@ -442,7 +460,7 @@ pub fn append_compaction(
         return Err(error);
     }
     let byte_end = file.metadata()?.len();
-    Ok((byte_start, byte_end))
+    Ok((byte_start, byte_end, ids[kept_messages.len()].clone()))
 }
 
 fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
@@ -844,7 +862,7 @@ mod tests {
         append_events(&path, &mut original, None).unwrap();
 
         let kept = [assistant("kept")];
-        append_compaction(
+        let (_, _, checkpoint_leaf) = append_compaction(
             &path,
             &kept,
             None,
@@ -874,6 +892,7 @@ mod tests {
         assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
         assert_ne!(events[0].id, events[1].id);
         assert_ne!(events[1].id, events[2].id);
+        assert_eq!(checkpoint_leaf, events[2].id);
     }
 
     #[test]

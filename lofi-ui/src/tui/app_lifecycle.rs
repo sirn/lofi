@@ -190,7 +190,9 @@ impl App {
             AgentEvent::TurnCommitted {
                 byte_start,
                 byte_end,
+                leaf_id,
             } => {
+                self.branch_hint = Some(leaf_id);
                 // The just-finished turn is now durably in the transcript
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
@@ -681,7 +683,7 @@ impl App {
             return false;
         };
         if let Some(path) = &self.session.path {
-            if let Err(error) = store::append_compaction(
+            match store::append_compaction(
                 path,
                 &c.kept_messages,
                 self.branch_hint.as_deref(),
@@ -693,19 +695,24 @@ impl App {
                     kept: c.kept_count,
                 },
             ) {
-                drop(history);
-                self.notify(
-                    NotifyKind::Error,
-                    format!("could not persist compaction: {error}"),
-                );
-                return false;
+                Ok((_byte_start, _byte_end, leaf_id)) => {
+                    self.branch_hint = Some(leaf_id);
+                }
+                Err(error) => {
+                    drop(history);
+                    self.notify(
+                        NotifyKind::Error,
+                        format!("could not persist compaction: {error}"),
+                    );
+                    return false;
+                }
             }
         }
         *history = new_history;
         drop(history);
-        // The checkpoint marker is now the active leaf; subsequent turns
-        // append from it rather than reusing the rollback branch point.
-        self.branch_hint = None;
+        // `append_compaction` advanced `branch_hint` to the checkpoint marker,
+        // so subsequent turns remain on this logical lineage even if another
+        // process appends a sibling before the next run.
         // Render the marker. Attach to the last turn when one exists; push a
         // fresh turn otherwise (e.g. compaction invoked before any turn).
         if self.turns.is_empty() {

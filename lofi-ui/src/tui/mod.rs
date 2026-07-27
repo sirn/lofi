@@ -721,10 +721,10 @@ pub(crate) struct App {
     /// when false (the resume path, which has no `RoundUsage` events),
     /// `TurnEnd` applies its bundled totals as before.
     turn_has_round_usage: bool,
-    /// Explicit branch point for the next run, set by a UI gesture (e.g.
-    /// resuming from a selected entry in the tree picker). Taken and cleared
-    /// when the run starts so a single gesture applies to a single turn;
-    /// `None` means append to the file's active leaf (linear continuation).
+    /// Logical active leaf for this app instance. A tree gesture replaces it
+    /// with the selected branch point; each durable turn/compaction advances
+    /// it to the newly written leaf. Never infer this from physical file EOF:
+    /// another process may append a sibling branch to the same transcript.
     branch_hint: Option<String>,
     ctx_limit: u64,
     /// Compaction configuration (from `[compaction]`): the reserve hard cap
@@ -1026,6 +1026,7 @@ async fn run_loop(
         }
         replay_indexed_session(&mut app, &path, &index, file_size)?;
         restore_compaction_from_index(&mut app, &path, &index);
+        app.branch_hint = active_index_leaf(&index);
     }
     // Freeze every turn except the last: its blocks are backed by the
     // transcript file (see `materialize_turn`), so drop them to keep memory

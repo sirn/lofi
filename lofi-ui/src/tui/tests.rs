@@ -1723,13 +1723,16 @@ fn turn_committed_extends_existing_range_across_silent_continuation() {
     a.apply_event(AgentEvent::TurnCommitted {
         byte_start: 100,
         byte_end: 200,
+        leaf_id: "first".into(),
     });
     a.apply_event(AgentEvent::TurnContinue);
     a.apply_event(AgentEvent::TurnCommitted {
         byte_start: 250,
         byte_end: 300,
+        leaf_id: "second".into(),
     });
     assert_eq!(a.turn_byte_ranges, vec![Some((100, 300))]);
+    assert_eq!(a.branch_hint.as_deref(), Some("second"));
 }
 
 #[test]

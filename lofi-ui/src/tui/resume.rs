@@ -1,6 +1,10 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
+pub(super) fn active_index_leaf(index: &[store::EventIndex]) -> Option<String> {
+    index.last().map(|event| event.id.clone())
+}
+
 fn active_index_path(index: &[store::EventIndex]) -> Vec<usize> {
     use std::collections::HashMap;
     let by_id: HashMap<&str, usize> = index
