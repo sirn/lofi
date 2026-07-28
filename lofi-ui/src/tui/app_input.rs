@@ -236,10 +236,6 @@ impl App {
         self.history_idx = None;
     }
 
-    /// Up arrow / `Ctrl+P`: move to the previous line, or — when already on
-    /// the first line — jump to its start, and once at the very first cell
-    /// recall the previous history entry. Mirrors zsh `up-line-or-history`
-    /// with a start-of-line intermediate step.
     pub(super) fn cursor_up(&mut self) {
         let (row, col) = self.cursor_row_col();
         if row > 0 {
@@ -251,8 +247,6 @@ impl App {
         }
     }
 
-    /// Down arrow / `Ctrl+N`: the symmetric counterpart — next line, then end
-    /// of the last line, then recall the next history entry.
     pub(super) fn cursor_down(&mut self) {
         let (row, _col) = self.cursor_row_col();
         let last_row = self.input.matches('\n').count();
@@ -275,8 +269,6 @@ impl App {
         if let Some(rl) = self.log_vis.get(rel).and_then(|v| v.raw.as_ref()) {
             if rl.map.len() >= 2 {
                 let end = *rl.map.last()?;
-                // On the first visual row (hard_break), include leading
-                // whitespace (indentation, list nesting) from source start.
                 if rl.hard_break && end > 0 {
                     return Some(rl.source[..end].to_string());
                 }

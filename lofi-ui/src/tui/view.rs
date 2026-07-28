@@ -46,11 +46,8 @@ pub(crate) use prim::HStack;
 /// [`VStack::spacer`], so adjacent components are joined unless the caller
 /// deliberately inserts blank space between them.
 enum VRegion {
-    /// Fixed-height region; a height of 0 means the region is absent.
     Fixed(u16),
-    /// Flexible region that fills the space left by the fixed regions.
     Fill,
-    /// Explicit blank space between components.
     Spacer(u16),
 }
 
@@ -74,8 +71,6 @@ impl VStack {
         self.regions.push(VRegion::Spacer(h));
     }
 
-    /// Split `area` into one rect per region. Spacer regions are cleared and
-    /// return `None`; zero-height fixed regions likewise remain absent.
     fn split(&self, f: &mut Frame, area: Rect) -> Vec<Option<Rect>> {
         let constraints = self.regions.iter().map(|region| match region {
             VRegion::Fixed(h) | VRegion::Spacer(h) => Constraint::Length(*h),
@@ -104,10 +99,6 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     // Keep the prompt cursor on screen within its capped height.
     app.sync_input_scroll(area.width.saturating_sub(3) as usize, input_lines);
 
-    // The footer: a mode-badge line on the default background, then the
-    // panel — a leading blank, the prompt, a blank, and the usage line —
-    // on panel_bg with the `▌` gutter. The VStack gap supplies the blank
-    // row above the mode line.
     let footer_h = input_h.saturating_add(4);
     let running = u16::from(app.run_active());
     let mut vs = VStack::new();
@@ -241,8 +232,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         None
     };
-    // Sync the frozen-turn height index before reading it. Normally this is
-    // every turn but the live last one; idle file-backed views may index all.
     app.ensure_frozen(w);
     let theme = app.theme;
     let n_turns = app.turns.len();
@@ -267,9 +256,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         0
     };
 
-    // Total line count mirrors `render_turns`: per-turn lines plus a blank
-    // between turns (no trailing blank — the separator below the log is
-    // owned by the working/input layout).
     let frozen_total: usize = app.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
     let mut total: usize = frozen_total + last_h;
@@ -429,8 +415,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     };
                     let lines =
                         blocks::render_turn_window(&cx, &app.turns[n_turns - 1], start..stop);
-                    // The returned slice starts at this global row, not at
-                    // the turn's first row.
                     pos = turn_start + start;
                     feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
                 }
@@ -442,7 +426,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.log_vis = visv;
 
-    // Highlight the active mouse selection over the visible window only.
     if let Some(sel) = &app.sel {
         let (sl, sc) = sel.start;
         let (el, ec) = sel.end;
@@ -494,9 +477,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 cstart
             };
-            // Lines with any spans keep their decoration (gutter, rails, line
-            // numbers); only truly empty lines (rblank separators) are built
-            // from scratch. This preserves a line number whose body is empty.
             if vis[rel].spans.is_empty() {
                 // Truly blank separator: indent + cursor cell, then a line-bg
                 // fill in NAV (SELECT leaves the rest plain).
@@ -555,9 +535,6 @@ fn draw_scrollbar(
     prim::render_scrollbar(f, gutter, off, visible, total, t.subtle, t.muted);
 }
 
-/// One-line working indicator above the prompt, shown only while a run is
-/// active. Retry progress belongs to the notification area, so this line
-/// remains stable throughout backoff and subsequent attempts.
 fn render_working(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let frame = SPINNER[app.spinner_frame() % SPINNER.len()];
@@ -630,18 +607,11 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The footer block: a mode-badge line, the prompt, a blank, and a usage
-/// line (the last three on the panel background), stacked without gaps.
 fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     let t = app.theme;
     let w = area.width;
-    // Row 0: the mode/notification line on the default background — no
-    // gutter, no panel. It sits above the panel as a separate strip.
     render_mode_line(f, Rect::new(area.x, area.y, w, 1), app);
 
-    // The panel below: a leading blank, the prompt, a blank, and the stats,
-    // all on panel_bg. A continuous user rail spans every panel row, including
-    // those vertical gutters and the usage row.
     let panel = Rect::new(
         area.x,
         area.y.saturating_add(1),
@@ -650,8 +620,6 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
-    // A leading `!` (including `!!`) switches the prompt rail to the shell
-    // accent immediately, making bash mode visible before submission.
     let bar = if !active {
         t.subtle
     } else if app.input.starts_with('!') {
@@ -678,7 +646,6 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(inner);
-    // chunks[0] is the leading blank (panel_bg and rail already painted).
     app.input_rect = prim::scroll_area(chunks[1]).content;
     render_input(f, chunks[1], app);
     render_info(f, chunks[3], app);
@@ -697,7 +664,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     let chip = format!(" {label} ");
     let bold = Modifier::BOLD;
 
-    // Right: optional ` VERBOSE ` tag and the mode chip.
     let mut right: Vec<Span<'static>> = Vec::new();
     if app.verbose {
         right.push(Span::styled(
@@ -711,7 +677,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     ));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
-    // Left: one notification badge (quit > yank > notify), else nothing.
     let mut left: Vec<Span<'static>> = Vec::new();
     if let Some(badge) = app.quit_badge() {
         left.push(Span::styled(
@@ -724,15 +689,11 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
         ));
     } else if let Some(retry) = app.retry_badge() {
-        // Retry progress is live status, not transcript content. It remains
-        // visible until RetryEnd clears it after a successful request (or
-        // final failure).
         left.push(Span::styled(
             format!(" {retry} "),
             Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(queue) = app.queue_badge() {
-        // Persistent queue badge (does not expire like transient badges).
         left.push(Span::styled(
             format!(" {queue} "),
             Style::new().fg(t.fg).bg(t.muted).add_modifier(bold),
@@ -743,8 +704,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             NotifyKind::Warn => t.warn,
             NotifyKind::Error => t.error,
         };
-        // Reserve room for the 2-cell left padding, the right side, and the
-        // badge's wrapping spaces.
         let avail = w
             .saturating_sub(2)
             .saturating_sub(right_w)
@@ -775,8 +734,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         ))),
         area,
     );
-    // Left badges sit at the 2-cell inset; only as wide as their content so
-    // the rule is not overwritten.
     let left_w: usize = left.iter().map(|s| prim::width(s.content.as_ref())).sum();
     if left_w > 0 {
         let lrect = Rect::new(
@@ -787,7 +744,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         );
         f.render_widget(Paragraph::new(Line::from(left)), lrect);
     }
-    // Right chip flush to the right edge.
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
     let rrect = Rect::new(
         area.x
@@ -799,7 +755,6 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(right)), rrect);
 }
 
-/// Full-width diagnostics bar shown as its own bottom-level `VStack` region.
 fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
     if let Some(line) = app.debug_memory_line() {
         f.render_widget(
@@ -809,8 +764,6 @@ fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Gray usage line below the prompt: `  ↑in ↓out · ctx: used/limit` on the
-/// left, `$cost` on the right.
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
     let left = app.render_footer_left(w).spans;

@@ -41,7 +41,6 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Shell-policy permission dialog: navigate actions, then explicitly confirm.
     if app.handle_confirm_key(k) {
         return;
     }
@@ -60,7 +59,6 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Navigate / Select carry their own keymaps.
     if app.mode != Mode::Input {
         app.last_kill_was_kill = false;
         match app.mode {
@@ -71,10 +69,7 @@ pub(super) fn handle_event(
         return;
     }
 
-    // --- Input mode ---
-    // Any key press clears an active mouse selection (tmux-style).
     app.sel = None;
-    // Capture before reset so consecutive `C-k` appends to the kill ring.
     let append_kill = app.last_kill_was_kill;
     app.last_kill_was_kill = false;
 
@@ -83,15 +78,11 @@ pub(super) fn handle_event(
         app.refresh_slash_complete();
         return;
     }
-    // Ctrl+J is a newline in readline / Emacs; treat it like Alt+Enter.
     if k.code == KeyCode::Char('j') && k.modifiers.contains(KeyModifiers::CONTROL) {
         app.insert_newline();
         app.refresh_slash_complete();
         return;
     }
-    // Slash-command autocomplete popover intercepts navigation/accept/dismiss
-    // keys while active. Typing and other edits fall through to the normal
-    // Input handlers and re-filter the popover via `refresh_slash_complete`.
     if app.handle_popover_key(k) {
         return;
     }
@@ -101,8 +92,6 @@ pub(super) fn handle_event(
             app.input_cursor = 0;
             app.history_idx = None;
             app.slash_complete = None;
-            // Slash commands run immediately even while the agent is busy;
-            // shell commands and real prompts are serialized in the same queue.
             if app.slash_command(&prompt) {
                 return;
             }
@@ -128,8 +117,6 @@ pub(super) fn handle_event(
             // event-handler call, so an intervening redraw cannot expose an
             // old prompt with its assistant response temporarily removed.
             let Some(agent) = agent else {
-                // No model configured: there is no agent to emit `TurnStart`,
-                // so push the turn manually and surface the hint on it.
                 app.push_turn(Turn {
                     prompt: prompt.clone(),
                     blocks: Vec::new(),
@@ -149,7 +136,6 @@ pub(super) fn handle_event(
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
         KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => {
-            // Alt+Up: restore the last queued prompt (LIFO) into the input.
             if let Some(prompt) = app.prompt_queue.pop() {
                 app.input = prompt;
                 app.input_cursor = app.input.len();
@@ -165,7 +151,6 @@ pub(super) fn handle_event(
         KeyCode::Esc => app.clear_input(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
-        // Emacs / readline navigation.
         KeyCode::Char('a') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_line_start(),
         KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_line_end(),
         KeyCode::Char('b') if k.modifiers.contains(KeyModifiers::CONTROL) => app.move_left(),
@@ -207,9 +192,6 @@ pub(super) fn handle_event(
         }
         _ => {}
     }
-    // Re-filter the autocomplete popover after any input edit. Commands that
-    // `return` early (newline, autocomplete accept/dismiss) call
-    // `refresh_slash_complete` themselves or clear the popover directly.
     app.refresh_slash_complete();
 }
 
@@ -488,8 +470,6 @@ pub(super) fn handle_ctrl_c(
     }
 }
 
-/// Vim-style word/WORD motion. `big` distinguishes `w`/`b`/`e` (words are
-/// runs of word-chars or punctuation) from `W`/`B`/`E` (runs of non-space).
 #[derive(Clone, Copy)]
 pub(super) enum WordMotion {
     NextStart { big: bool },
@@ -593,8 +573,6 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
     }
 }
 
-/// Select keymap: movement extends the selection, y/Enter yanks it,
-/// Tab/Esc drops the selection and returns to Navigate.
 pub(super) fn handle_select_key(k: &KeyEvent, app: &mut App) {
     if k.modifiers.contains(KeyModifiers::CONTROL) {
         return;
@@ -671,7 +649,6 @@ pub(super) fn log_cell(app: &App, row: u16, column: u16) -> (usize, usize) {
     let rel_y = row.saturating_sub(app.log_rect.y) as usize;
     let rel_x = column.saturating_sub(app.log_rect.x) as usize;
     let line_idx = app.log_off.saturating_add(rel_y);
-    // `log_vis` is the visible window only (window-relative); index by `rel_y`.
     let line = app.log_vis.get(rel_y);
     let col = line.map_or(rel_x, |vl| {
         let s = &vl.rendered;
