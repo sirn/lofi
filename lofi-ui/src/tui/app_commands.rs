@@ -2,6 +2,14 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+enum ModalSlot {
+    Picker,
+    Tree,
+    Model,
+    Thinking,
+}
+
 impl App {
     pub(super) fn toggle_verbose(&mut self) {
         // Record the current state before invalidating/rendering, then schedule
@@ -1013,28 +1021,27 @@ impl App {
         true
     }
 
+    fn active_modal_slot(&self) -> Option<ModalSlot> {
+        if self.picker.is_some() {
+            Some(ModalSlot::Picker)
+        } else if self.tree_picker.is_some() {
+            Some(ModalSlot::Tree)
+        } else if self.model_picker.is_some() {
+            Some(ModalSlot::Model)
+        } else if self.thinking_picker.is_some() {
+            Some(ModalSlot::Thinking)
+        } else {
+            None
+        }
+    }
+
     /// Unified key dispatch for list-style modal overlays (`/resume` and
     /// `/tree`). `↑/↓` or `j`/`k` or `Ctrl+N`/`Ctrl+P` move the selection
     /// (clamped); `Tab`/`Shift+Tab` cycle with wrap-around; `Enter`
     /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
     /// key (so the caller skips normal Input-mode processing).
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
-        /// Which overlay slot is active, for per-slot confirm/cancel.
-        enum Slot {
-            Picker,
-            Tree,
-            Model,
-            Thinking,
-        }
-        let slot = if self.picker.is_some() {
-            Slot::Picker
-        } else if self.tree_picker.is_some() {
-            Slot::Tree
-        } else if self.model_picker.is_some() {
-            Slot::Model
-        } else if self.thinking_picker.is_some() {
-            Slot::Thinking
-        } else {
+        let Some(slot) = self.active_modal_slot() else {
             return false;
         };
         let len = self.active_modal_mut().map_or(0, |m| m.len());
@@ -1048,55 +1055,55 @@ impl App {
         // navigation.
         match k.code {
             KeyCode::Enter => match slot {
-                Slot::Picker => {
+                ModalSlot::Picker => {
                     if let Some(picker) = self.picker.take() {
                         self.picker_confirm_inner(picker);
                     }
                 }
-                Slot::Tree => {
+                ModalSlot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
                         self.tree_picker_confirm_inner(&picker);
                     }
                 }
-                Slot::Model => self.model_picker_confirm(),
-                Slot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Model => self.model_picker_confirm(),
+                ModalSlot::Thinking => self.thinking_picker_confirm(),
             },
             // With a single entry, Tab/Shift+Tab confirm outright instead of
             // cycling (a no-op) — same as pressing Enter.
             KeyCode::Tab | KeyCode::BackTab if len == 1 => match slot {
-                Slot::Picker => {
+                ModalSlot::Picker => {
                     if let Some(picker) = self.picker.take() {
                         self.picker_confirm_inner(picker);
                     }
                 }
-                Slot::Tree => {
+                ModalSlot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
                         self.tree_picker_confirm_inner(&picker);
                     }
                 }
-                Slot::Model => self.model_picker_confirm(),
-                Slot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Model => self.model_picker_confirm(),
+                ModalSlot::Thinking => self.thinking_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
-                Slot::Picker => {
+                ModalSlot::Picker => {
                     self.picker = None;
                     self.picker_generation.fetch_add(1, Ordering::Relaxed);
                 }
-                Slot::Tree => {
+                ModalSlot::Tree => {
                     self.tree_picker = None;
                     self.tree_picker_index = None;
                     self.tree_picker_pending.clear();
                     self.picker_generation.fetch_add(1, Ordering::Relaxed);
                 }
-                Slot::Model => self.model_picker = None,
-                Slot::Thinking => self.thinking_picker = None,
+                ModalSlot::Model => self.model_picker = None,
+                ModalSlot::Thinking => self.thinking_picker = None,
             },
             _ => {}
         }
-        if (matches!(slot, Slot::Picker) && self.picker.is_none())
-            || (matches!(slot, Slot::Tree) && self.tree_picker.is_none())
-            || (matches!(slot, Slot::Model) && self.model_picker.is_none())
-            || (matches!(slot, Slot::Thinking) && self.thinking_picker.is_none())
+        if (matches!(slot, ModalSlot::Picker) && self.picker.is_none())
+            || (matches!(slot, ModalSlot::Tree) && self.tree_picker.is_none())
+            || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
+            || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
         {
             // Confirm/cancel consumed the overlay; nothing left to navigate.
             return true;
