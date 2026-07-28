@@ -190,6 +190,35 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
                     message: m.clone(),
                 });
             }
+            SessionEventKind::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration_ms,
+                truncated,
+                cancelled,
+                exclude_from_context,
+            } if !skipping && !exclude_from_context => {
+                let result = crate::UserBashResult::from_session(
+                    command.clone(),
+                    output.clone(),
+                    *exit_code,
+                    *signal,
+                    *duration_ms,
+                    *truncated,
+                    *cancelled,
+                );
+                live.push(LiveMessage {
+                    event_id: events[i].id.clone(),
+                    message: Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text {
+                            text: result.context_text(),
+                        }],
+                    },
+                });
+            }
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent
                     .entry(rec.parent.clone())

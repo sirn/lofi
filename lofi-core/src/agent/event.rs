@@ -21,6 +21,19 @@ pub enum AgentEvent {
     /// new turn (no "You:" line); it appends blocks to the current turn.
     /// Mirrors [`TurnStart`](Self::TurnStart) for a continuation.
     TurnContinue,
+    /// A completed direct user shell command. This never starts an agent
+    /// turn; the TUI renders it as a standalone shell block and the session
+    /// replayer reconstructs it from `SessionEventKind::UserBash`.
+    UserBash {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        duration_ms: u64,
+        truncated: bool,
+        cancelled: bool,
+        exclude_from_context: bool,
+    },
     /// A chunk of assistant text.
     Text(String),
     /// A chunk of the model's reasoning / chain-of-thought trace. Surfaced

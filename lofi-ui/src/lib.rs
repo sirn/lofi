@@ -346,8 +346,9 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::NativeToolStart { .. }
                 | AgentEvent::NativeToolEnd { .. }
                 | AgentEvent::ToolInputDelta { .. }
-                // A storage signal (turn appended to the transcript); the
-                // `--print` pipe has no use for it.
+                // Storage signals (round/turn appended to the transcript);
+                // the `--print` pipe has no use for them.
+                | AgentEvent::TurnCheckpoint { .. }
                 | AgentEvent::TurnCommitted { .. }
                 // Per-round usage is a status signal for the TUI; the pipe
                 // has no use for it (the final `TurnEnd` ends the run).
@@ -366,7 +367,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::ContextPressure { .. }
                 // Compaction is a TUI-only marker; never produced in
                 // --print mode.
-                | AgentEvent::Compaction { .. } => Ok(()),
+                | AgentEvent::Compaction { .. }
+                | AgentEvent::UserBash { .. } => Ok(()),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),

@@ -147,6 +147,7 @@ impl App {
                 }
             }
             self.push_turn(Turn {
+                joined: false,
                 prompt,
                 blocks: Vec::new(),
             });
@@ -189,25 +190,106 @@ impl App {
                 }
                 return;
             }
+            AgentEvent::TurnCheckpoint {
+                byte_start,
+                byte_end,
+            } => {
+                // The completed round is durable. Turn it into a file-backed
+                // fragment now and continue streaming into a joined fragment,
+                // so a single 100+ round agent turn does not retain every
+                // prior tool body in the UI.
+                let preserved_markers = self
+                    .turns
+                    .last_mut()
+                    .map(|turn| {
+                        let mut markers = Vec::new();
+                        turn.blocks.retain(|block| {
+                            if matches!(block, Block::Compaction { .. }) {
+                                markers.push(block.clone());
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        markers
+                    })
+                    .unwrap_or_default();
+                if preserved_markers.is_empty() {
+                    if let Some(range) = self.turn_byte_ranges.last_mut() {
+                        *range = Some((byte_start, byte_end));
+                    }
+                    if let Some(turn) = self.turns.last_mut() {
+                        turn.blocks.clear();
+                    }
+                } else {
+                    // A hard-cap compaction marker was inserted between two
+                    // recorder runs and is not part of this recorder's byte
+                    // range. Keep that tiny marker in its own fragment, then
+                    // file-back the completed continuation round.
+                    if let Some(turn) = self.turns.last_mut() {
+                        turn.blocks = preserved_markers;
+                    }
+                    self.push_turn(Turn {
+                        joined: true,
+                        prompt: String::new(),
+                        blocks: Vec::new(),
+                    });
+                    if let Some(range) = self.turn_byte_ranges.last_mut() {
+                        *range = Some((byte_start, byte_end));
+                    }
+                }
+                self.push_turn(Turn {
+                    joined: true,
+                    prompt: String::new(),
+                    blocks: Vec::new(),
+                });
+                return;
+            }
             AgentEvent::TurnCommitted {
                 byte_start,
                 byte_end,
             } => {
-                // The just-finished turn is now durably in the transcript
-                // file over this byte range. Record it so the turn becomes
-                // file-backed when the next prompt freezes it.
-                if let Some(r) = self.turn_byte_ranges.last_mut() {
-                    // A hard-cap compaction silently continues the same
-                    // visible turn in a second agent run. Preserve the first
-                    // run's committed prefix instead of replacing it with the
-                    // continuation-only range; otherwise the next prompt
-                    // freezes the turn, clears its in-memory blocks, and can
-                    // only reload the continuation suffix (which has no user
-                    // turn start), making the transcript appear to vanish.
-                    *r = Some(match *r {
-                        Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
-                        None => (byte_start, byte_end),
+                // The still-live suffix is now durable. Earlier round
+                // checkpoints already became separate joined fragments, so
+                // this range belongs only to the current fragment.
+                //
+                // A hard-cap compaction is persisted between recorder runs.
+                // If the continuation finishes in one terminal provider round
+                // there is no TurnCheckpoint to separate that marker from the
+                // response. Keep the tiny marker resident in its own fragment
+                // and put the durable response in a joined file-backed one.
+                let split = self.turns.last_mut().and_then(|turn| {
+                    let has_marker = turn
+                        .blocks
+                        .iter()
+                        .any(|block| matches!(block, Block::Compaction { .. }));
+                    let has_response = turn
+                        .blocks
+                        .iter()
+                        .any(|block| !matches!(block, Block::Compaction { .. }));
+                    if !has_marker || !has_response {
+                        return None;
+                    }
+                    let mut response = Vec::new();
+                    turn.blocks.retain(|block| {
+                        if matches!(block, Block::Compaction { .. }) {
+                            true
+                        } else {
+                            response.push(block.clone());
+                            false
+                        }
                     });
+                    Some(response)
+                });
+                if let Some(blocks) = split {
+                    self.push_turn(Turn {
+                        joined: true,
+                        prompt: String::new(),
+                        blocks,
+                    });
+                }
+                if let Some(r) = self.turn_byte_ranges.last_mut() {
+                    *r = Some((byte_start, byte_end));
                 }
                 return;
             }
@@ -400,6 +482,7 @@ impl App {
             .map(|t| t.prompt.clone())
             .unwrap_or_default();
         let empty = Turn {
+            joined: false,
             prompt,
             blocks: Vec::new(),
         };
@@ -462,11 +545,28 @@ impl App {
                 }
             }
         }
-        let turns = if selected_offsets.is_some() {
-            turns_from_selected_session_events(&events)
+        // Incremental checkpoint fragments after the first contain no user
+        // prompt, so seed their builder with an empty joined turn; ordinary
+        // transcript turns still create themselves from TurnStart.
+        let joined = self.turns.get(idx).is_some_and(|turn| turn.joined);
+        let mut turns = if joined {
+            vec![Turn {
+                joined: true,
+                prompt: String::new(),
+                blocks: Vec::new(),
+            }]
         } else {
-            turns_from_session_events(&events)
+            Vec::new()
         };
+        if selected_offsets.is_some() {
+            replay_selected_session_events(&events, |event| {
+                apply_event_to_turns(&mut turns, event);
+            });
+        } else {
+            replay_session_events(&events, |event| {
+                apply_event_to_turns(&mut turns, event);
+            });
+        }
         turns.into_iter().next().unwrap_or(empty)
     }
 
@@ -596,7 +696,9 @@ impl App {
             if turn_end > off && pos < end {
                 visible = Some(visible.map_or((idx, idx), |(first, _)| (first, idx)));
             }
-            pos = turn_end.saturating_add(1); // separator before next turn
+            pos = turn_end.saturating_add(usize::from(
+                self.turns.get(idx + 1).is_some_and(|turn| !turn.joined),
+            ));
         }
         // At the bottom the viewport may contain only the live last turn. Keep
         // its nearest frozen neighbor as the scroll-up margin.
@@ -712,6 +814,7 @@ impl App {
         // fresh turn otherwise (e.g. compaction invoked before any turn).
         if self.turns.is_empty() {
             self.push_turn(Turn {
+                joined: false,
                 prompt: String::new(),
                 blocks: vec![Block::Compaction {
                     summarized: c.summarized_count,
@@ -796,6 +899,7 @@ impl App {
             rest
         );
         self.push_turn(Turn {
+            joined: false,
             prompt,
             blocks: vec![Block::Text(outcome.text)],
         });

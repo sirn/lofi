@@ -403,7 +403,7 @@ impl App {
                 .get(j)
                 .copied()
                 .unwrap_or(self.last_turn_height);
-            start += h + 1;
+            start += h + usize::from(self.turns.get(j + 1).is_some_and(|turn| !turn.joined));
         }
         start
     }

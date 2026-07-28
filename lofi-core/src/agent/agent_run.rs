@@ -199,7 +199,10 @@ impl Agent {
                     // retaining the entire long turn only in memory.
                     if let Some(recorder) = recorder.as_mut() {
                         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                        recorder.checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?;
+                        recorder.checkpoint(
+                            &messages[prev_len..],
+                            &stats.summary(elapsed_ms),
+                        )?;
                     }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
