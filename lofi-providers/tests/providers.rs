@@ -1,12 +1,3 @@
-//! Integration tests for the provider HTTP transports.
-//!
-//! Each of the three APIs is exercised against a `mockito` SSE server: a
-//! canned stream is mapped to the expected [`lofi_types::StreamingEvent`]
-//! sequence, and [`lofi_providers::ir::assemble_message`] is checked against the
-//! final assembled [`lofi_types::Message`]. The canned bodies match the wire
-//! shapes the `ir` mappers expect (see `ir/openai_completions.rs`,
-//! `ir/openai_responses.rs`, `ir/anthropic_messages.rs`).
-
 #![allow(clippy::unwrap_used)]
 
 use futures::StreamExt;
@@ -26,10 +17,6 @@ fn user_msg() -> Message {
     }
 }
 
-/// A minimal model entry tagged with `api` and a full endpoint `base_url`
-/// matching the path the mock server registers. In production the registry
-/// resolves this from the provider's `base_url` + api-type mapping `path`;
-/// tests set it directly so the mock path is explicit.
 fn model_for(api: Api, base_url: &str) -> Model {
     let path = match api {
         Api::OpenAiCompletions => "/v1/chat/completions",
@@ -55,11 +42,6 @@ fn model_for(api: Api, base_url: &str) -> Model {
     }
 }
 
-/// Build a `ProviderConfig` pointed at `base_url` with a dummy key. The
-/// provider's default `api` is set directly, and the provider's `base_url`
-/// is the mock server root; per-model endpoint URLs are not set on the
-/// model, so the provider POSTs to `base_url` verbatim and the mock
-/// registers the full endpoint path.
 fn cfg(api: Api, base_url: String) -> ProviderConfig {
     ProviderConfig {
         api_type: Some(api),
@@ -204,9 +186,6 @@ async fn openai_responses_maps_canned_stream() {
 
 #[tokio::test]
 async fn anthropic_messages_maps_canned_stream() {
-    // Anthropic SSE blocks carry an `event:` line. The sequence below mixes a
-    // tool_use block with a text delta and an input-json delta, exercising
-    // the start/delta/stop lifecycle plus the terminal `message_delta` usage.
     let body = concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\"}\n\n",

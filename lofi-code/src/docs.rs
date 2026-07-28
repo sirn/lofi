@@ -60,8 +60,6 @@ fn extract_name(header: &str) -> String {
     }
 }
 
-/// All parsed entries, each as (canonical name, header line, summary).
-///
 /// Exposed so other modules (e.g. the compaction hook) can use the docs
 /// registry as the single source of truth for tool names and descriptions
 /// instead of maintaining a parallel hard-coded table.

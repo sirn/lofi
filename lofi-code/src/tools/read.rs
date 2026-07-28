@@ -4,11 +4,6 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Read a file under the root as a UTF-8 string.
-    ///
-    /// `offset` is a 1-indexed line to start from; `limit` caps the number of
-    /// lines returned. Output is head-truncated to 50 KB / 2000 lines.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] if the path escapes the root, exceeds the file
     /// size limit, cannot be read, or `offset` is beyond the end of the file.

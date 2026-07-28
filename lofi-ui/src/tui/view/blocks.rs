@@ -1390,7 +1390,6 @@ fn encoded_json_line_count(encoded: &str) -> usize {
     breaks.saturating_add(1).saturating_sub(trailing).max(1)
 }
 
-/// Decode one logical line at a time, and only across the requested range.
 fn for_each_encoded_json_line(
     encoded: &str,
     range: std::ops::Range<usize>,
@@ -1859,7 +1858,6 @@ impl Component for TurnEnd {
 /// error is wrapped below it, indented and word-broken with a wide-char
 /// fallback. Mirrors [`TurnEnd`] but signals the turn did not complete;
 /// the turn's partial content precedes it on the same branch.
-///
 /// When the error is empty the failure was already surfaced as a fatal `✗`
 /// line (see [`ErrorLine`]) earlier in the turn, so nothing is repeated
 /// below the header. The builder drops the text in that case rather than

@@ -1,10 +1,3 @@
-//! `OpenAI` Chat Completions HTTP transport.
-//!
-//! Thin layer over [`crate::ir`]: the request body comes from
-//! [`build_request`](crate::ir::chat::build_request), and each SSE `data:`
-//! JSON is mapped by [`map_openai_chat_event`]. SSE byte-stream decoding is
-//! shared via [`super::sse`].
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -20,12 +13,6 @@ use crate::ir::openai_completions::{map_openai_chat_event, ChatMapperState};
 use crate::sse::{map_sse_response, SseMapper};
 use lofi_error::{Error, Result};
 
-/// `OpenAI` Chat Completions transport.
-///
-/// The provider POSTs to `model.base_url` verbatim — the full endpoint URL
-/// (e.g. `https://api.openai.com/v1/chat/completions`) is resolved at config
-/// load time from the provider's `base_url` joined with the api-type mapping's
-/// `path`. No path suffix is appended here.
 pub(crate) struct OpenAiCompletionsProvider {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
@@ -57,8 +44,6 @@ impl super::Provider for OpenAiCompletionsProvider {
     }
 }
 
-/// Mapper that parses each Chat Completions `data:` JSON and forwards it to
-/// [`map_openai_chat_event`].
 #[derive(Default)]
 struct OpenAiChatMapper {
     state: ChatMapperState,
@@ -66,10 +51,6 @@ struct OpenAiChatMapper {
 
 impl SseMapper for OpenAiChatMapper {
     fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
-        // Chat Completions has no `event:` field; only the data payload is
-        // interesting. `event.data` is already the stripped payload, so parse
-        // it directly as JSON (re-running `parse_sse_lines` here would find
-        // no `data:` prefixes and drop every event).
         let v: Value = serde_json::from_str(&event.data)
             .map_err(|e| Error::Provider(format!("malformed SSE data: {e}")))?;
         map_openai_chat_event(&v, &mut self.state)

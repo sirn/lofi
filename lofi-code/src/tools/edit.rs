@@ -4,8 +4,6 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Replace the single occurrence of `old` with `new` in `path`.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] if `path` escapes the root, if `old` is absent,
     /// or if `old` occurs more than once (an ambiguous edit).

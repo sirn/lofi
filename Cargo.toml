@@ -46,7 +46,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "=2.5.0", features = ["serde"] }
 
-# TUI.
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"

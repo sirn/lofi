@@ -1,21 +1,3 @@
-//! Skill discovery and reading.
-//!
-//! Skills are directories containing a `SKILL.md` file that provide reusable
-//! instructions or domain knowledge the agent can load on demand. Two sources
-//! are scanned:
-//!
-//! - **Global** — `<skills_dir>/<name>/SKILL.md` (the `<config_dir>/skills/`
-//!   directory).
-//! - **Per-workspace** — `<root>/.lofi/skills/<name>/SKILL.md` (checked into
-//!   the repo for project-specific skills).
-//!
-//! Skill names are the directory path relative to the skills root, so
-//! `skills/git-workflow/SKILL.md` → `git-workflow` and
-//! `skills/git-workflow/rebase/SKILL.md` → `git-workflow/rebase`. When both
-//! sources define the same name, the per-workspace version wins (it is more
-//! specific). The description is the first non-heading non-empty line of
-//! `SKILL.md`.
-//!
 //! Symlinks are followed — skill directories or `SKILL.md` files may be
 //! symlinks (e.g. referencing nix store paths). The walk is bounded by depth
 //! and visited-entry limits to prevent infinite loops.
@@ -42,12 +24,8 @@ impl BuiltinTools {
         Ok(json!({ "ok": true, "skills": entries }))
     }
 
-    /// Read a single skill's `SKILL.md` by name. When both sources define the
-    /// same name, the per-workspace version is returned.
-    ///
     /// The name may contain `/` as a namespace separator (e.g.
     /// `git-workflow/rebase`). `..` and absolute paths are rejected.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] if the skill is not found or the file cannot
     /// be read.
@@ -440,7 +418,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
         let real = tempdir().unwrap();
-        // Create a real skill directory, then symlink it into skills/.
         std::fs::write(real.path().join(SKILL_FILE), "Symlinked skill.\n").unwrap();
         std::os::unix::fs::symlink(real.path(), skills.path().join("linked")).unwrap();
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))

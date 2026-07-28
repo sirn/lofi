@@ -1,5 +1,3 @@
-//! Child-process environment policy for the `bash` native tool.
-//!
 //! The default is *deny*: a `bash` child starts from a minimal baseline
 //! (`PATH`, `HOME`, locale, …) so inherited credentials never reach a
 //! model-run shell. [`BashEnv`] holds the resolved policy (baseline +
@@ -58,9 +56,6 @@ mod tests {
         assert_eq!(s, "token=[redacted] and [redacted]");
     }
 
-    /// End-to-end: `apply()` injects an approved secret into the child env so a
-    /// command can use it, and `redact()` scrubs the value from the captured
-    /// output so it never reaches the model. Runs a real `sh -c printenv`.
     #[tokio::test]
     async fn apply_injects_and_redact_scrubs_real_sh_output() {
         let secret = "shh-topsecret-value";

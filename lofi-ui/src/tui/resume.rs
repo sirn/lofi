@@ -64,9 +64,6 @@ pub(super) fn history_from_index(
     messages_from_cursor(cursor, &offsets, edit)
 }
 
-/// Rebuild provider history from leaf-first offsets while holding at most one
-/// complete transcript event at a time, avoiding a second transcript-sized
-/// allocation during resume.
 fn messages_from_cursor(
     cursor: &store::SessionCursor,
     leaf_first_offsets: &[u64],

@@ -15,7 +15,6 @@ regex = { workspace = true }
 globset = { workspace = true }
 nix = { workspace = true }
 
-# TypeScript sandbox.
 rquickjs = { workspace = true }
 swc_common = { workspace = true }
 swc_ecma_ast = { workspace = true }
