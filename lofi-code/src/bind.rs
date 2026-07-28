@@ -1,10 +1,3 @@
-//! Binding of the builtin tools onto the guest `lofi` object.
-//!
-//! `bind_tools` mounts the file and shell methods as native `QuickJS`
-//! functions; `tool_result` translates a tool `Result` into a
-//! `ToolOutput`; its `IntoJs` implementation resolves JSON values and throws
-//! genuine JavaScript `Error`s for tool failures.
-
 use super::convert::js_to_json;
 #[allow(clippy::wildcard_imports)]
 use super::*;
