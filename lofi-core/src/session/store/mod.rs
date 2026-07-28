@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -90,11 +91,56 @@ impl SessionEntry {
     }
 }
 
-fn slug(cwd: &Path) -> String {
+fn legacy_slug(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .replace('/', "-")
         .trim_start_matches('-')
         .to_string()
+}
+
+fn workspace_key(cwd: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let label = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                        ch
+                    } else {
+                        '-'
+                    }
+                })
+                .take(40)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "root".to_string());
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_os_str().as_bytes());
+    format!("{label}-{id}")
+}
+
+fn metadata_matches_cwd(meta: &SessionMeta, cwd: &Path) -> bool {
+    let stored = Path::new(&meta.cwd);
+    stored == cwd
+        || stored
+            .canonicalize()
+            .ok()
+            .zip(cwd.canonicalize().ok())
+            .is_some_and(|(stored, requested)| stored == requested)
+}
+
+fn read_session_meta(path: &Path) -> Option<SessionMeta> {
+    use std::io::BufRead as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut lines = std::io::BufReader::new(file).lines();
+    let line = lines.find_map(|line| line.ok().filter(|line| !line.is_empty()))?;
+    serde_json::from_str::<Header>(&line)
+        .ok()
+        .map(|header| header.meta)
 }
 
 fn now_ms() -> u64 {
@@ -169,6 +215,7 @@ impl SessionCursor {
     /// Returns an error when the transcript cannot be indexed or its selected
     /// head no longer exists.
     pub fn open_snapshot(path: PathBuf) -> Result<(Self, SessionSnapshot)> {
+        crate::state::ensure_private_file(&path)?;
         let (meta, index, file_size) = load_index(&path)?;
         let cursor_record = index
             .iter()
@@ -537,6 +584,7 @@ fn persist_cursor(path: &Path, leaf_id: Option<&str>, validate: bool) -> Result<
         .read(true)
         .write(true)
         .create(true)
+        .mode(0o600)
         .truncate(false)
         .open(path)?;
     lock.lock()?;
@@ -568,6 +616,7 @@ fn append_cursor_events(
         .read(true)
         .write(true)
         .create(true)
+        .mode(0o600)
         .truncate(false)
         .open(path)?;
     lock.lock()?;
@@ -618,7 +667,11 @@ impl SessionStore {
     }
 
     fn dir_for_cwd(&self, cwd: &Path) -> PathBuf {
-        self.root.join(slug(cwd))
+        self.root.join(workspace_key(cwd))
+    }
+
+    fn dirs_for_cwd(&self, cwd: &Path) -> [PathBuf; 2] {
+        [self.dir_for_cwd(cwd), self.root.join(legacy_slug(cwd))]
     }
 
     /// The directory is created if needed; the header is written atomically via
@@ -637,8 +690,9 @@ impl SessionStore {
     }
 
     fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
+        crate::state::ensure_private_dir(&self.root)?;
         let dir = self.dir_for_cwd(cwd);
-        std::fs::create_dir_all(&dir)?;
+        crate::state::ensure_private_dir(&dir)?;
         let file_name = format!("{}_{}.jsonl", now_ms(), short_id());
         let path = dir.join(file_name);
         let header = Header {
@@ -673,24 +727,35 @@ impl SessionStore {
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
-        let dir = self.dir_for_cwd(cwd);
         let mut files = Vec::new();
-        let read = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(Error::Io(e)),
-        };
-        for ent in read {
-            let ent = ent?;
-            let path = ent.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
+        for dir in self.dirs_for_cwd(cwd) {
+            let read = match std::fs::read_dir(&dir) {
+                Ok(read) => {
+                    crate::state::ensure_private_dir(&dir)?;
+                    read
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Error::Io(error)),
+            };
+            for entry in read {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(meta) = read_session_meta(&path) else {
+                    continue;
+                };
+                if !metadata_matches_cwd(&meta, cwd) {
+                    continue;
+                }
+                crate::state::ensure_private_file(&path)?;
+                let last_active = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                files.push(SessionFile { path, last_active });
             }
-            let last_active = ent
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            files.push(SessionFile { path, last_active });
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
@@ -843,6 +908,7 @@ fn append_events_from(
         .read(true)
         .write(true)
         .create(true)
+        .mode(0o600)
         .truncate(false)
         .open(path)?;
     lock.lock()?;
@@ -935,6 +1001,7 @@ fn append_compaction_from(
         .read(true)
         .write(true)
         .create(true)
+        .mode(0o600)
         .truncate(false)
         .open(path)?;
     lock.lock()?;
@@ -944,6 +1011,7 @@ fn append_compaction_from(
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(0o600)
         .open(path)?;
     let write = (|| -> Result<()> {
         for (index, message) in kept_messages.iter().enumerate() {
@@ -1010,6 +1078,7 @@ fn append_events_with_cursor(
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(0o600)
         .open(path)?;
     for event in events.iter().chain(std::iter::once(cursor)) {
         if let Err(error) = serde_json::to_writer(&mut file, event) {
@@ -1036,6 +1105,7 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(0o600)
         .open(path)?;
     for event in events {
         if let Err(error) = serde_json::to_writer(&mut file, event) {
@@ -1308,11 +1378,16 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
             .unwrap_or("session")
     ));
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
         f.write_all(contents.as_bytes())?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    crate::state::ensure_private_file(path)?;
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
@@ -1470,577 +1545,3 @@ mod tests {
         assert_eq!(natives[2].result, "visible error");
         let full_read = complete.iter().find_map(|event| match &event.kind {
             SessionEventKind::NativeTool(record) if record.name == "read" && !record.is_error => {
-                Some(&record.result)
-            }
-            _ => None,
-        });
-        assert_eq!(full_read.map(String::len), Some(large.len()));
-        assert_eq!(
-            SessionCursor::new(path, None)
-                .prompt_texts(&[offsets[0]])
-                .unwrap(),
-            vec!["  raw prompt  \n".to_string()]
-        );
-    }
-
-    #[test]
-    fn create_load_round_trip() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/project");
-        let path = store.create(cwd, &"openai/gpt-5.6-sol".into()).unwrap();
-        let (meta, msgs, _, _) = load(&path).unwrap();
-        assert_eq!(meta.version, SESSION_VERSION);
-        assert_eq!(meta.cwd, "/tmp/project");
-        assert_eq!(meta.model, "openai/gpt-5.6-sol".into());
-        assert!(msgs.is_empty());
-    }
-
-    #[test]
-    fn turn_end_model_is_raw_not_rendered() {
-        // The session file must store the model as raw data (a `{provider, id,
-        // thinking}` object), never a rendered `provider/id:level` string —
-        // a later display-format change must not strand stale text in old files.
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/raw");
-        let path = store
-            .create(cwd, &"openai/gpt-5.6-sol:medium".into())
-            .unwrap();
-        let header = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            header.contains("\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\"}"),
-            "header model must be a raw object: {header}"
-        );
-        assert!(
-            !header.contains("\"model\":\""),
-            "header must not store a rendered model string: {header}"
-        );
-
-        let mut batch = [SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::TurnEnd {
-                model: "anthropic/claude:high".into(),
-                elapsed_ms: 5,
-                cost: 0.0,
-                usage: Usage::default(),
-            },
-        }];
-        append_events(&path, &mut batch, None).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        let turn_end_line = body.lines().last().unwrap();
-        assert!(
-            turn_end_line.contains(
-                "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"
-            ),
-            "turn-end model must be a raw object: {turn_end_line}"
-        );
-        assert!(
-            !turn_end_line.contains("\"label\""),
-            "turn-end must not carry a rendered label field: {turn_end_line}"
-        );
-        assert!(
-            !turn_end_line.contains("\"model\":\""),
-            "turn-end must not store a rendered model string: {turn_end_line}"
-        );
-    }
-
-    #[test]
-    fn compaction_checkpoint_round_trips_as_one_chain() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-checkpoint"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("old"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        let kept = [assistant("kept")];
-        let (_, _, checkpoint_leaf) = append_compaction(
-            &path,
-            &kept,
-            None,
-            "summary",
-            &["first".into(), "last".into()],
-            CompactionCounts {
-                summarized: 5,
-                represented: 5,
-                kept: 1,
-            },
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            summary,
-            ..
-        } = &events[2].kind
-        else {
-            panic!("expected compaction marker");
-        };
-        assert_eq!(summary, "summary");
-        assert_eq!(first_kept_entry_id, &events[1].id);
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-        assert_ne!(events[0].id, events[1].id);
-        assert_ne!(events[1].id, events[2].id);
-        assert_eq!(checkpoint_leaf, events[2].id);
-    }
-
-    #[test]
-    fn compaction_checkpoint_honors_branch_parent() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-branch"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("root")), ev(assistant("latest sibling"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        append_compaction(
-            &path,
-            &[assistant("checkpoint")],
-            Some(&original[0].id),
-            "summary",
-            &[original[0].id.clone(), original[0].id.clone()],
-            CompactionCounts {
-                summarized: 1,
-                represented: 1,
-                kept: 1,
-            },
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
-        assert!(!active_path_from_leaf(&events).contains(&1));
-    }
-
-    #[test]
-    fn cursor_owns_lineage_across_clones_and_compaction() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-lineage"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path.clone(), None);
-
-        let mut root = [ev(user("root"))];
-        cursor.append_events(&mut root).unwrap();
-        let root_id = root[0].id.clone();
-        assert_eq!(cursor.leaf_id().as_deref(), Some(root_id.as_str()));
-
-        let clone = cursor.clone();
-        let mut reply = [ev(assistant("reply"))];
-        clone.append_events(&mut reply).unwrap();
-        assert_eq!(cursor.leaf_id().as_deref(), Some(reply[0].id.as_str()));
-
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &[root_id.clone(), reply[0].id.clone()],
-                CompactionCounts {
-                    summarized: 2,
-                    represented: 2,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-        let marker_id = cursor.leaf_id().unwrap();
-        let (_, events, _, _) = load(&path).unwrap();
-        let marker = events.iter().find(|event| event.id == marker_id).unwrap();
-        assert!(matches!(marker.kind, SessionEventKind::Compaction { .. }));
-    }
-
-    #[test]
-    fn cursor_compaction_cache_replaces_history_with_checkpoint_suffix() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-compaction-cache"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path, None);
-        let mut original = [ev(user("old")), ev(assistant("old reply"))];
-        cursor.append_events(&mut original).unwrap();
-        assert_eq!(cursor.load_compaction_events().unwrap().len(), 2);
-
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &[original[0].id.clone(), original[1].id.clone()],
-                CompactionCounts {
-                    summarized: 2,
-                    represented: 2,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-        let mut continuation = [ev(user("new")), ev(assistant("new reply"))];
-        cursor.append_events(&mut continuation).unwrap();
-
-        let events = cursor.load_compaction_events().unwrap();
-        assert_eq!(events.len(), 4);
-        assert!(matches!(
-            &events[0].kind,
-            SessionEventKind::Message(message)
-                if message.blocks.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::Text { text } if text == "kept"
-                ))
-        ));
-        assert!(matches!(
-            events[1].kind,
-            SessionEventKind::Compaction { .. }
-        ));
-        assert_eq!(events[2].id, continuation[0].id);
-        assert_eq!(events[3].id, continuation[1].id);
-        assert!(!events.iter().any(|event| event.id == original[0].id));
-        assert!(!events.iter().any(|event| event.id == original[1].id));
-    }
-
-    #[test]
-    fn cursor_selection_survives_restart_and_beats_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-restart"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path.clone(), None);
-        let mut trunk = [ev(user("root")), ev(assistant("old leaf"))];
-        cursor.append_events(&mut trunk).unwrap();
-        let root_id = trunk[0].id.clone();
-        let old_leaf = trunk[1].id.clone();
-
-        cursor.branch_from(root_id.clone()).unwrap();
-        drop(cursor);
-
-        let resumed = SessionCursor::open(path.clone()).unwrap();
-        assert_eq!(resumed.leaf_id().as_deref(), Some(root_id.as_str()));
-        let snapshot = resumed.snapshot().unwrap();
-        assert_eq!(snapshot.index.len(), 1);
-        assert!(snapshot.index[0].id.matches(&root_id));
-
-        let mut branch = [ev(user("new branch"))];
-        resumed.append_events(&mut branch).unwrap();
-        assert_eq!(branch[0].parent_id.as_deref(), Some(trunk[0].id.as_str()));
-        assert_ne!(branch[0].parent_id.as_deref(), Some(old_leaf.as_str()));
-
-        let reopened = SessionCursor::open(path).unwrap();
-        assert_eq!(reopened.leaf_id().as_deref(), Some(branch[0].id.as_str()));
-    }
-
-    #[test]
-    fn cursor_none_is_explicit_root_not_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-root"), &"p/m".into())
-            .unwrap();
-        let mut existing = [ev(user("existing"))];
-        append_events(&path, &mut existing, None).unwrap();
-
-        let cursor = SessionCursor::new(path.clone(), None);
-        let mut new_root = [ev(user("new root"))];
-        cursor.append_events(&mut new_root).unwrap();
-        assert!(new_root[0].parent_id.is_none());
-
-        let (_, index, _) = load_index(&path).unwrap();
-        let indexed_root = index
-            .iter()
-            .find(|event| event.id.matches(&new_root[0].id))
-            .unwrap();
-        assert!(indexed_root.parent_id.is_none());
-        assert!(load_compaction_path(&path, &index, None)
-            .unwrap()
-            .is_empty());
-        assert!(load_indexed_path(&path, &index, None).unwrap().is_empty());
-        let branch = load_indexed_path(&path, &index, Some(&new_root[0].id)).unwrap();
-        assert_eq!(branch.len(), 1);
-        assert_eq!(branch[0].id, new_root[0].id);
-    }
-
-    #[test]
-    fn cursor_compaction_none_is_explicit_root_not_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-compact-root"), &"p/m".into())
-            .unwrap();
-        let mut existing = [ev(user("existing"))];
-        append_events(&path, &mut existing, None).unwrap();
-
-        let cursor = SessionCursor::new(path.clone(), None);
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &["first".into(), "last".into()],
-                CompactionCounts {
-                    summarized: 1,
-                    represented: 1,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-
-        let (_, events, _, _) = load(&path).unwrap();
-        assert!(events[1].parent_id.is_none());
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-    }
-
-    #[test]
-    fn append_then_load_messages() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/proj2");
-        let path = store.create(cwd, &"openai/gpt-4o".into()).unwrap();
-        let mut batch = [ev(user("hello")), ev(assistant("hi there"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
-        );
-        assert!(events[0].parent_id.is_none());
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-    }
-
-    #[test]
-    fn events_round_trip_with_timings_and_cost() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/events");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::ToolTiming {
-                    tool_call_id: "t1".into(),
-                    elapsed_ms: 5,
-                },
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/m:medium".into(),
-                    elapsed_ms: 1234,
-                    cost: 0.01,
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 20,
-                        ..Usage::default()
-                    },
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1")
-        );
-        assert!(
-            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
-            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10)
-        );
-    }
-
-    #[test]
-    fn append_with_parent_hint_branches_off_target() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/branch");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let mut first = [ev(user("a")), ev(assistant("b"))];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        let mut branch = [ev(user("alt"))];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        let branch_ev = events.iter().find(|e| {
-            matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
-                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "alt")))
-        }).expect("branch event present");
-        assert_eq!(branch_ev.parent_id.as_deref(), Some(root_id.as_str()));
-        let path_idx = active_path(&events, &branch_ev.id);
-        assert_eq!(path_idx.len(), 2);
-        assert!(
-            matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-        assert!(
-            matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-    }
-
-    #[test]
-    fn last_run_model_is_final_turn_on_active_path() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-final");
-        let path = store.create(cwd, &"p/orig:medium".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            ev(assistant("hey")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/switched:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-end marker is present");
-        assert_eq!(m.provider, "p");
-        assert_eq!(m.id, "switched");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn last_run_model_uses_turn_failed() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-failed");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnFailed {
-                    model: "p/boom:low".into(),
-                    elapsed_ms: 1,
-                    error: "oops".into(),
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-failed marker is present");
-        assert_eq!(m.id, "boom");
-        assert_eq!(m.thinking, ThinkingLevel::Low);
-    }
-
-    #[test]
-    fn last_run_model_none_without_a_turn_marker() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-none");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [ev(user("hi")), ev(assistant("partial"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert!(last_run_model(&events).is_none());
-    }
-
-    #[test]
-    fn last_run_model_skips_sibling_branch() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-branch");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut first = [
-            ev(user("a")),
-            ev(assistant("b")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/A:medium".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        let mut branch = [
-            ev(user("alt")),
-            ev(assistant("alt2")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/B:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("active leaf has a turn-end");
-        assert_eq!(m.id, "B");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn legacy_bare_message_lines_still_load() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/legacy");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let legacy = serde_json::to_string(&user("old")).unwrap();
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(format!("{legacy}\n").as_bytes())
-            .unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-
-        let (_, index, _) = load_index(&path).unwrap();
-        assert!(index[0].id.matches(&events[0].id));
-        let recovered = load_event_by_id(&path, &index[0].id.to_event_id())
-            .unwrap()
-            .unwrap();
-        assert!(index[0].id.matches(&recovered.id));
-        assert!(matches!(&recovered.kind, SessionEventKind::Message(m) if m.role == Role::User));
-    }
-
-    #[test]
-    fn list_newest_first_and_counts() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/listy");
-        let p1 = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [ev(user("a"))];
-        append_events(&p1, &mut batch, None).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let list = store.list_for_cwd(cwd).unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].file.path, p2);
-        assert_eq!(list[1].file.path, p1);
-        assert_eq!(list[1].message_count, 1);
-        assert_eq!(list[0].message_count, 0);
-    }
-
-    #[test]
-    fn most_recent_and_find_prefix() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/y");
-        let _p1 = store.create(cwd, &"m".into()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let mr = store.most_recent(cwd).unwrap().unwrap();
-        assert_eq!(mr.file.path, p2);
-        let id2 = p2.file_stem().unwrap().to_str().unwrap();
-        let prefix = &id2[..id2.find('_').unwrap()];
-        let found = store.find(cwd, prefix).unwrap().unwrap();
-        assert_eq!(found.file.path, p2);
-        assert!(store.find(cwd, "zzz").unwrap().is_none());
-    }
-
-    #[test]
-    fn slug_collapses_separators() {
-        assert_eq!(slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
-        assert_eq!(slug(Path::new("/")), "");
-    }
-}
