@@ -524,7 +524,7 @@ mod tests {
     impl SseMapper for DoneMapper {
         fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
             if event.data == "done" {
-                Ok(vec![StreamingEvent::Done(Default::default())])
+                Ok(vec![StreamingEvent::Done(lofi_types::Usage::default())])
             } else {
                 Ok(Vec::new())
             }
@@ -537,7 +537,7 @@ mod tests {
     impl SseMapper for DeferredDoneMapper {
         fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
             if event.data == "done" {
-                Ok(vec![StreamingEvent::Done(Default::default())])
+                Ok(vec![StreamingEvent::Done(lofi_types::Usage::default())])
             } else {
                 Ok(Vec::new())
             }
