@@ -1,39 +1,19 @@
-//! Shared SSE line reader and `StreamingEvent` accumulator.
-//!
-//! The SSE wire format groups events into blocks terminated by a blank line.
-//! Within a block, `event:` sets the type and `data:` lines carry the payload
-//! (multiple `data:` lines are joined with `\n`). This module parses that
-//! format into [`SseEvent`]s without touching HTTP — the providers layer feeds
-//! raw body text or line streams here.
-//!
-//! [`assemble_message`] folds a sequence of [`StreamingEvent`]s back into a
-//! single assistant [`Message`], which is how a streamed turn is collapsed into
-//! the conversation log.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use lofi_types::{ContentBlock, Message, Role, StreamingEvent};
 use serde_json::Value;
 
-/// A single parsed SSE event block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
     pub event: Option<String>,
     pub data: String,
 }
 
-/// Parse an SSE body into [`SseEvent`]s.
-///
-/// Splits on blank lines, accumulating `event:`/`data:` lines within each
-/// block. Comment lines and unrecognized fields are ignored. A trailing block
-/// without a final blank line is still emitted.
 #[must_use]
 pub fn parse_sse(body: &str) -> Vec<SseEvent> {
     parse_sse_lines(body.lines())
 }
 
-/// Parse an SSE stream from a line iterator. See [`parse_sse`].
-///
 /// A block with no `data:` line is skipped: the mappers decode the `data:`
 /// payload as JSON, so an event-only block (e.g. a keep-alive) would otherwise
 /// abort the stream with a parse error.
@@ -74,16 +54,11 @@ pub fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent
     out
 }
 
-/// Recognize the `OpenAI` stream-termination sentinel `data: [DONE]`.
 #[must_use]
 pub fn is_done_marker(data: &str) -> bool {
     data.trim() == "[DONE]"
 }
 
-/// Incrementally folds streaming events into an assistant message.
-///
-/// The builder retains only assembled content and in-flight tool JSON, rather
-/// than every delta that produced it.
 #[derive(Default)]
 pub struct MessageAssembler {
     order: Vec<Slot>,
@@ -351,9 +326,6 @@ mod tests {
 
     #[test]
     fn preserves_thinking_before_tool_order() {
-        // Anthropic streams a thinking block before the tool_use it grounds;
-        // the assembled message must keep that order and attach the
-        // signature to the thinking block, not group thinking last.
         let events = [
             StreamingEvent::ThinkingDelta("let me think".to_string()),
             StreamingEvent::ThinkingSignature("sig_abc".to_string()),

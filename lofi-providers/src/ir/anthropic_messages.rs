@@ -1,10 +1,3 @@
-//! Anthropic Messages request-body builder + SSE-event mapper.
-//!
-//! Anthropic SSE blocks carry an `event:` line (`message_start`,
-//! `content_block_start`, `content_block_delta`, `content_block_stop`,
-//! `message_delta`, `message_stop`) and a JSON `data:` payload. The providers
-//! layer parses the SSE stream and passes `(event, data)` here.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use std::collections::HashMap;
@@ -16,17 +9,10 @@ use super::block::to_anthropic_request_parts;
 use super::chat::ToolSchema;
 use lofi_error::{Error, Result};
 
-/// Build the `POST /v1/messages` body for a streaming turn.
-///
-/// `max_tokens` defaults to `4096` when the model doesn't specify one — the
-/// Anthropic API requires it.
 #[must_use]
 pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
     let (system, mut msgs) = to_anthropic_request_parts(messages);
     add_conversation_cache_breakpoint(&mut msgs);
-    // Anthropic requires `max_tokens` and requires it to exceed the thinking
-    // budget when thinking is enabled. Default to 4096, then bump to leave
-    // room for the reasoning budget + a response allowance.
     let mut max_tokens = model.max_tokens.unwrap_or(4096);
     let mut req = json!({
         "model": model.id,
@@ -42,9 +28,6 @@ pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[Too
         req["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
     }
     if let Some(sys) = system {
-        // Anthropic accepts the system prompt as content blocks. Mark its
-        // stable tail so instructions and skills can be reused independently
-        // of the changing conversation that follows.
         req["system"] = json!([{
             "type": "text",
             "text": sys,
@@ -62,9 +45,6 @@ pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[Too
                 })
             })
             .collect();
-        // Tool definitions precede the system prompt in Anthropic's cache
-        // hierarchy. A breakpoint on the final definition keeps the complete
-        // tool set reusable without annotating every tool.
         if let Some(last) = tools_arr.last_mut() {
             last["cache_control"] = ephemeral_cache_control();
         }
@@ -77,8 +57,6 @@ fn ephemeral_cache_control() -> Value {
     json!({ "type": "ephemeral" })
 }
 
-/// Put a rolling cache breakpoint on the final user message.
-///
 /// Anthropic caches the full request prefix through a marked block, so the
 /// next tool round can read the previous round and write only its appended
 /// suffix. Restrict this to block types documented for user content; in
@@ -108,9 +86,6 @@ fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
-/// Map a thinking level to an Anthropic `thinking.budget_tokens` value.
-/// `Off` returns `None` (thinking disabled — the field is omitted); the other
-/// levels scale the reasoning budget the API allocates.
 fn anthropic_budget(level: ThinkingLevel) -> Option<u64> {
     match level {
         ThinkingLevel::Off => None,
@@ -121,8 +96,6 @@ fn anthropic_budget(level: ThinkingLevel) -> Option<u64> {
     }
 }
 
-/// State accumulated across Anthropic events.
-///
 /// Tool-use blocks are correlated by the block `index`; the real tool `id`
 /// arrives in `content_block_start`, so we map `index -> id` for later
 /// `input_json_delta` and `content_block_stop` events. Usage is assembled
@@ -135,10 +108,7 @@ pub struct AnthropicMapperState {
     pub(crate) saw_stop: bool,
 }
 
-/// Map a single Anthropic SSE event to zero or more [`StreamingEvent`]s.
-///
 /// # Errors
-///
 /// Returns [`Error::Provider`] for an `error` event so a provider-reported
 /// failure fails the round trip.
 pub fn map_anthropic_event(
@@ -247,8 +217,6 @@ fn map_content_block_delta(
             }
         }
         Some("signature_delta") => {
-            // The signature must be replayed on tool-use turns; capture it
-            // onto the thinking block via assemble_message.
             if let Some(sig) = delta
                 .and_then(|d| d.get("signature"))
                 .and_then(Value::as_str)
@@ -280,7 +248,6 @@ fn merge_message_delta_usage(data: &Value, state: &mut AnthropicMapperState) {
     }
 }
 
-/// Extract [`Usage`] from an Anthropic `usage` object.
 fn usage_from_anthropic(v: &Value) -> Usage {
     Usage {
         input_tokens: v

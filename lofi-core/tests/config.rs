@@ -46,8 +46,6 @@ api_key = "sk-literal"
     assert_eq!(p.api_key.as_deref(), Some("sk-literal"));
 }
 
-/// A missing env var (whether via `env_name` or `$VAR`) leaves the provider
-/// keyless rather than erroring, so a fresh checkout with no keys starts up.
 #[tokio::test]
 async fn load_config_missing_env_leaves_keyless() {
     let dir = tempfile::tempdir().unwrap();

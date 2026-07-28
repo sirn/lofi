@@ -542,7 +542,6 @@ mod tests {
         use std::os::unix::fs::symlink;
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("real.txt"), "payload").unwrap();
-        // A valid in-workspace leaf symlink is followed by read.
         symlink("real.txt", tools.root().join("link.txt")).unwrap();
         let v = tools.read("link.txt", None, None).await.unwrap();
         assert_eq!(v["content"], json!("payload"));
@@ -554,8 +553,6 @@ mod tests {
         use std::os::unix::fs::symlink;
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("real.txt"), "payload").unwrap();
-        // Write and edit must still reject leaf symlinks (no-follow) to
-        // prevent writing through a link to an unexpected target.
         symlink("real.txt", tools.root().join("link.txt")).unwrap();
         let err = tools
             .write(json!({ "path": "link.txt", "text": "x" }))
@@ -716,8 +713,6 @@ mod tests {
 
     #[tokio::test]
     async fn bash_timeout_kills_process_group() {
-        // A background child that outlives the timed-out shell must be killed
-        // with the process group, not orphaned to write its marker afterward.
         let (_dir, tools) = tools();
         let marker = tools.root().join("late_marker");
         let cmd = format!("(sleep 1; echo x > {}) & wait", marker.display());

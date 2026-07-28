@@ -70,18 +70,6 @@ pub fn blank() -> Line<'static> {
     Line::default()
 }
 
-/// A rendered log line paired with the char range of its selectable
-/// *content* within [`Self::line`]. Decoration (gutter, rails, line numbers,
-/// branch glyphs, status icons) sits before `content.0`; trailing padding
-/// sits after `content.1`. Selection — both the highlight and the copied
-/// text — is clamped to `content`, so it covers exactly the meaningful text
-/// and never the surrounding decoration, while content's own leading spaces
-/// (indentation) are preserved.
-/// Raw markdown source backing a rendered line, for clipboard yank.
-/// Present only for lines derived from a markdown source (assistant text,
-/// code fences, user messages); `None` for decoration (borders, blanks,
-/// tool glyphs) where the rendered text is the canonical form.
-///
 /// `map` translates a *content-relative* display position (0 = before the
 /// first selectable content char, `len` = after the last) to a byte offset
 /// within `source`. Markdown markers stripped during rendering (the
@@ -143,10 +131,6 @@ fn char_count(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
-/// A stashed *visible* log line: the rendered plain text, selectable
-/// content char range, and optional raw markdown source for yank.
-/// Populated at render time from [`RenderLine`] so mouse selection and
-/// cursor tracking can map screen coords back to text without re-rendering.
 pub struct VisLine {
     pub rendered: String,
     pub content: (usize, usize),
@@ -536,12 +520,6 @@ pub fn scroll_area(area: Rect) -> ScrollArea {
     }
 }
 
-/// A 1-cell-wide vertical scrollbar drawn in a dedicated `gutter`.
-/// `position` is the top visible row, `visible` the viewport height, and
-/// `total` the full row count. The thumb is sized proportional to
-/// `visible/total` and positioned by `position`; nothing is drawn when
-/// everything fits.
-///
 /// The thumb uses the heavy box-drawing `┃` over a light `│` track — a
 /// thin, calm indicator rather than a solid block.
 pub fn render_scrollbar(

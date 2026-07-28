@@ -1,11 +1,8 @@
-//! Shell command tokenizer.
-//!
 //! Parses a bash command string into a structured token stream: words,
 //! operators (`|`, `||`, `&&`, `;`, `&`), redirects (`>`, `>>`, `<`, `<<`,
 //! `<<<`), and groups (subshells `()`, command substitution `$()`,
 //! backticks). Variable expansions (`$VAR`, `${VAR}`) are consumed as word
 //! fragments so the agent cannot sneak forbidden values past rules.
-//!
 //! Fails closed: a parse error (unclosed quote, unmatched paren, …) returns
 //! `Err`, and the caller treats that as an `ask` decision.
 
@@ -294,7 +291,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read until the matching closing paren, tracking nesting.
     fn read_balanced(&mut self, close: u8) -> (String, bool) {
         let mut depth = 1;
         let mut inner = String::new();

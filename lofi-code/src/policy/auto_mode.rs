@@ -39,8 +39,6 @@ pub struct AutoModeDecision {
     pub reason: String,
 }
 
-/// Parse the LLM response text into a decision.
-///
 /// Accepts a bare JSON object or a fenced code block containing JSON.
 /// Returns `None` when the response cannot be parsed, so the caller falls
 /// back to the confirmation flow.

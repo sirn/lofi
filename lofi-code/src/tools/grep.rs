@@ -6,12 +6,6 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Grep files under `path` (default root, recursive) for `pattern`.
-    ///
-    /// `pattern` is either a string or an object `{ regex, ic?, ctx? }`.
-    /// Results contain full matching and context lines. The result is complete
-    /// or the call errors when an output or traversal ceiling is exceeded.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or when
     /// a safety ceiling is exceeded.

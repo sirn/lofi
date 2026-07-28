@@ -1,8 +1,3 @@
-//! `OpenAI` Chat Completions request-body builder + SSE-event mapper.
-//!
-//! Pure translation only: the providers layer POSTs the body produced here and
-//! feeds each parsed SSE `data:` JSON into [`map_openai_chat_event`].
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
@@ -67,8 +62,6 @@ fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
-/// State accumulated across Chat Completions chunks for tool-call correlation.
-///
 /// `OpenAI` identifies each streaming tool call by a stable `index`; the call
 /// `id` arrives only on the first delta for that index. We map `index -> id`
 /// so later argument deltas (which carry `index` but not `id`) are emitted
@@ -80,17 +73,12 @@ pub struct ChatMapperState {
     index_to_id: std::collections::HashMap<u64, String>,
 }
 
-/// Map a single Chat Completions stream chunk to zero or more
-/// [`StreamingEvent`]s.
-///
 /// Handles `choices[0].delta.content` (text), `choices[0].delta.tool_calls`
 /// (start + input deltas, possibly several per chunk and across calls), and
 /// the terminal `usage` chunk. A chunk may carry both a tool *start* and its
 /// first *arguments* in the same delta, so all `tool_calls` entries are
 /// accumulated rather than returning at the first one.
-///
 /// # Errors
-///
 /// Returns [`Error::Provider`] when a chunk carries a top-level `error`
 /// object, so an in-stream provider error fails the round trip instead of
 /// ending as a silent partial turn.
@@ -192,11 +180,6 @@ pub fn map_openai_chat_event(
 }
 
 fn usage_from_openai_chat(v: &Value) -> Usage {
-    // Chat Completions reports `prompt_tokens` as the full prompt (cached +
-    // non-cached) and the cached slice separately in `prompt_tokens_details`.
-    // Store the non-cached portion in `input_tokens` so `input + cache_read`
-    // reconstructs the prompt without double-counting (input_tokens is the
-    // Anthropic-style normalization where `input` is the cache miss).
     let prompt = v
         .get("prompt_tokens")
         .and_then(serde_json::Value::as_u64)

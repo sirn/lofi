@@ -1,6 +1,4 @@
-/// Default line budget for truncated tool output.
 pub const DEFAULT_MAX_LINES: usize = 2000;
-/// Default byte budget for truncated tool output (50 KB).
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
@@ -14,12 +12,6 @@ pub struct Truncated {
     pub output_bytes: usize,
 }
 
-/// Truncate from the head (keep first N lines/bytes). Suitable for `read`,
-/// `grep`, `ls`, `find` where the beginning of the output is most useful.
-///
-/// Whichever limit is hit first wins. Never returns a partial line (except
-/// when the first line alone exceeds the byte budget, in which case the line
-/// is cut at the byte boundary and `[...]` is appended).
 #[must_use]
 pub fn truncate_head(content: &str) -> Truncated {
     truncate_head_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
@@ -67,9 +59,6 @@ pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> 
     }
 }
 
-/// Truncate from the tail (keep last N lines/bytes). Suitable for `bash`
-/// where errors and final results are at the end. May return a partial first
-/// line if a single line exceeds the byte budget.
 #[must_use]
 pub fn truncate_tail(content: &str) -> Truncated {
     truncate_tail_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
@@ -92,7 +81,6 @@ pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> 
         };
     }
 
-    // Walk backward, accumulating complete lines until we hit a limit.
     let mut out: Vec<&str> = Vec::with_capacity(max_lines.min(total_lines));
     let mut out_bytes = 0usize;
     for line in lines.iter().rev() {

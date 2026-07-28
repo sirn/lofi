@@ -35,7 +35,6 @@ struct Cli {
     policy_explain: Option<String>,
 }
 
-///
 /// # Errors
 /// Returns command parsing, configuration, I/O, or agent startup failures.
 pub async fn run_cli() -> anyhow::Result<()> {
@@ -173,7 +172,6 @@ fn print_docs_search(query: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Format a wall-clock millisecond timestamp as UTC `YYYY-MM-DD HH:MM`.
 #[allow(clippy::many_single_char_names)] // mirrors Howard Hinnant's civil calendar algorithm
 fn format_ts(ms: u64) -> String {
     let secs = ms / 1000;

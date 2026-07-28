@@ -3,13 +3,9 @@
 use super::*;
 
 impl Agent {
-    /// Run the interactive loop for a single user prompt, streaming events to
-    /// `tx` until the assistant finishes a turn with no tool calls.
-    ///
     /// Builds the initial `system` + `user` message history, then drives
     /// [`Self::run_once`] in a loop. If the receiver is dropped (the channel
     /// closes), the run exits gracefully.
-    ///
     /// # Errors
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution failures that cannot be surfaced as a `ToolResult`.
@@ -45,26 +41,17 @@ impl Agent {
         }
     }
 
-    /// Run one user turn appended to an existing conversation history.
-    ///
     /// Unlike [`run`](Self::run), the message history is owned by the caller
     /// (e.g. the interactive TUI) so follow-up prompts keep the full prior
     /// context — assistant turns, tool calls, and tool results — instead of
     /// starting fresh each time. The first call seeds the system prompt.
-    ///
     /// The engine owns the turn timer, per-tool timers, and cost counter. On
     /// normal completion it emits a single [`AgentEvent::TurnEnd`] summarizing
     /// the turn and, when `commit` is given, appends the turn's messages plus
     /// timing/cost events to the transcript — making the engine the
     /// sole writer of the session log so a resumed session reconstructs
     /// identically to the live one.
-    ///
     /// # Errors
-    ///
-    /// Propagates [`Error`] from provider streaming, timeouts, or tool
-    /// execution.
-    // The continuation loop threads mutable round state (usage, byte budget,
-    // event log) through one async dispatch; helpers would fan it out.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
@@ -346,10 +333,8 @@ impl Agent {
     /// hard-cap check remains active, so a continued run that crosses the
     /// hard cap again triggers another `ContextPressure` (gated by the UI's
     /// `min_messages_between_hard_compacts` cooldown).
-    ///
     /// `user_prompt` is unused (the continuation appends no user message);
     /// it exists only so this can reuse [`run_continuation`].
-    ///
     /// # Errors
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution (via [`run_continuation`]).
@@ -365,14 +350,6 @@ impl Agent {
             .await
     }
 
-    /// A single provider round-trip: stream one assistant turn, append it to
-    /// `messages`, execute any tool calls, and append a `user`-role message
-    /// carrying the `ToolResult` blocks.
-    ///
-    /// Returns `Ok(true)` when the assistant turn had no tool calls (the loop
-    /// should stop), or `Ok(false)` when a tool was invoked and the loop
-    /// should continue. It emits no events.
-    ///
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
@@ -380,8 +357,6 @@ impl Agent {
             .await
     }
 
-    /// Shared core of [`run_once`] with an optional event sender.
-    ///
     /// Events are emitted via an awaited [`Sender::send`] so a slow receiver
     /// applies backpressure without dropping events; the outer
     /// [`run`](Self::run) loop checks `tx.is_closed()` to exit when the

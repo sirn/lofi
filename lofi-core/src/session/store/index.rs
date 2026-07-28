@@ -1,7 +1,3 @@
-//! Lightweight session-file index: scan an event log for just the tree
-//! shape (ids, parent ids, kinds, byte offsets) without deserializing
-//! message content, and random-access a single event by offset.
-//!
 //! Used by the `/tree` picker to avoid a full [`super::load`].
 
 use std::path::Path;
@@ -208,14 +204,7 @@ where
     }
 }
 
-/// Lightweight scan: reads the session file and extracts only `id`,
-/// `parent_id`, and the kind discriminant per event, skipping all
-/// `ContentBlock` deserialization. This is much cheaper than [`load`] for
-/// tree-structure purposes (the `/tree` picker only needs the shape, not
-/// message content).
-///
 /// # Errors
-///
 /// Returns the underlying IO error if the session file cannot be read or
 /// an event line cannot be parsed.
 fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
@@ -332,11 +321,7 @@ pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<
     Ok(indices)
 }
 
-/// Parse a single event at a known byte offset. Used for lazy label loading
-/// after [`load_index`] has built the tree structure.
-///
 /// # Errors
-///
 /// Returns the underlying IO error if the session file cannot be read or the
 /// event at `offset` cannot be parsed.
 pub(super) fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
@@ -346,10 +331,6 @@ pub(super) fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
         .ok_or_else(|| Error::State(format!("no event at offset {offset} in {}", path.display())))
 }
 
-/// Find and parse one event by id without deserializing unrelated message
-/// bodies. Resolution goes through the lightweight index so deterministic
-/// IDs synthesized for legacy records work exactly like persisted v2 IDs.
-///
 /// # Errors
 /// Returns an error when the transcript cannot be indexed or the selected
 /// event cannot be read or parsed.
@@ -368,7 +349,6 @@ pub(super) fn load_event_by_id(path: &Path, id: &str) -> Result<Option<SessionEv
 /// Unknown JSON fields are skipped directly from the buffered file stream, so
 /// a projection does not allocate a complete backing line merely because an
 /// unrelated field (such as a native-tool result) is huge.
-///
 /// # Errors
 /// Returns an error when the transcript/offset cannot be read, projected JSON
 /// is invalid, or the visitor rejects a value.
@@ -561,7 +541,6 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
 /// Parse selected event values in one file pass. Offsets must be in ascending
 /// order. Values are deserialized directly from the file, so peak memory is
 /// the returned event payload rather than payload plus a complete JSON line.
-///
 /// # Errors
 /// Returns an error when the transcript/offset cannot be read or a selected
 /// event cannot be parsed.
@@ -625,7 +604,6 @@ pub(super) fn compaction_index_suffix(
 /// compaction marker exists, everything before its checkpointed kept tail is
 /// represented by the marker summary and must not be deserialized again.
 /// A `None` leaf is the explicit root cursor and therefore yields no events.
-///
 /// # Errors
 /// Returns an error when the requested leaf is absent, the lineage is cyclic,
 /// or an indexed event cannot be read or parsed.
@@ -688,11 +666,6 @@ pub(super) fn load_compaction_path(
     load_index_entries(path, index, &lineage[start..])
 }
 
-/// Materialize only one indexed lineage from a session file. The lightweight
-/// index owns the tree shape; large event bodies are parsed only for nodes on
-/// the selected path, avoiding a full transcript-sized allocation. A `None`
-/// leaf is the explicit root cursor and therefore yields no events.
-///
 /// # Errors
 /// Returns an error when the requested leaf is absent, the lineage is cyclic,
 /// or an indexed event cannot be read or parsed.
