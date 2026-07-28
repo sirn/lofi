@@ -154,11 +154,7 @@ pub(super) fn handle_event(
             // (the event handler) for both live and resumed sessions.
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let history = Arc::clone(&app.history);
-            let commit = app
-                .session
-                .cursor
-                .clone()
-                .map(|cursor| SessionCommit { cursor });
+            let cursor = app.session.cursor.clone();
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -174,7 +170,7 @@ pub(super) fn handle_event(
                         &mut messages,
                         prompt,
                         tx,
-                        commit.as_ref(),
+                        cursor.as_ref(),
                         false,
                         Some(cancel_clone),
                         Some(preempt_clone),
@@ -444,11 +440,7 @@ pub(super) fn spawn_prompt(
     // those operations and makes the transcript appear to jump backward.
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
-    let commit = app
-        .session
-        .cursor
-        .clone()
-        .map(|cursor| SessionCommit { cursor });
+    let cursor = app.session.cursor.clone();
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -462,7 +454,7 @@ pub(super) fn spawn_prompt(
                 &mut messages,
                 prompt,
                 tx,
-                commit.as_ref(),
+                cursor.as_ref(),
                 false,
                 Some(cancel_clone),
                 Some(preempt_clone),
@@ -496,11 +488,7 @@ pub(super) fn spawn_continue(
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = Arc::clone(&app.history);
     // Compaction and continuation share the same logical cursor.
-    let commit = app
-        .session
-        .cursor
-        .clone()
-        .map(|cursor| SessionCommit { cursor });
+    let cursor = app.session.cursor.clone();
     let agent_clone = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -513,7 +501,7 @@ pub(super) fn spawn_continue(
             .run_continue(
                 &mut messages,
                 tx,
-                commit.as_ref(),
+                cursor.as_ref(),
                 Some(cancel_clone),
                 Some(preempt_clone),
             )

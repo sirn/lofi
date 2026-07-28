@@ -85,7 +85,7 @@ use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
 use crate::tui::view::HStack;
-use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions, SessionCommit};
+use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions};
 use lofi_error::{Error, Result};
 
 /// Retained model registry + config so `/model` can rebuild the agent

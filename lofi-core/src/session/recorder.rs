@@ -73,7 +73,7 @@ pub struct TurnSummary {
 
 /// Writes one turn's durable [`SessionEvent`]s to the transcript.
 ///
-/// Construct one per persisted turn (when a `SessionCommit` is available)
+/// Construct one per persisted turn when a session cursor is available
 /// and call [`flush`](Self::flush) once when the turn is done. `flush` is
 /// idempotent — a second call writes nothing — so it is safe to call after
 /// both a normal `TurnEnd` and an error path.
