@@ -93,7 +93,7 @@ impl App {
     }
 
     /// Retry badge for the mode line. Unlike ordinary notifications, this is
-    /// lifecycle-bound and remains visible until RetryEnd clears it.
+    /// lifecycle-bound and remains visible until `RetryEnd` clears it.
     pub(crate) fn retry_badge(&self) -> Option<String> {
         self.retry
             .as_ref()

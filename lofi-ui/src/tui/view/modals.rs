@@ -206,7 +206,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     let total = picker.entries.len();
     let title = " Resume a session ";
     let help = " ↑/↓ navigate  enter resume  esc close ";
-    let desired_rows = total.max(1).min(12);
+    let desired_rows = total.clamp(1, 12);
     let desired_frame_h = u16::try_from(desired_rows + 4).unwrap_or(16);
 
     // Size from only the selected viewport. Progressive enrichment of an old
@@ -646,7 +646,7 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         " Roll back to a turn "
     };
     let help = " ↑/↓ navigate  enter restore  esc close ";
-    let desired_rows = total.max(1).min(20);
+    let desired_rows = total.clamp(1, 20);
     let preliminary_start = picker
         .selected
         .saturating_sub(desired_rows.saturating_sub(1))
@@ -720,6 +720,8 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
 /// / Deny are real selectable buttons. Only Enter or an action key resolves
 /// the request; unrelated keys leave it open.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    const MAX_COMMAND_ROWS: usize = 12;
+
     use ratatui::layout::Alignment;
     let t = app.theme;
     let Some(req) = app.pending_confirms.first() else {
@@ -762,7 +764,6 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // Keep the dialog compact even on a tall terminal. The command panel is
     // a viewport rather than a truncation point, so every wrapped row remains
     // reachable with the scrolling keys.
-    const MAX_COMMAND_ROWS: usize = 12;
     let explanation_rows = explanation_lines.len().max(1);
     let non_command_rows = explanation_rows + 9;
     let available_command_rows = area
@@ -771,8 +772,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .max(1) as usize;
     let command_rows = cmd_lines
         .len()
-        .max(1)
-        .min(MAX_COMMAND_ROWS)
+        .clamp(1, MAX_COMMAND_ROWS)
         .min(available_command_rows);
     let desired_frame_h = u16::try_from(command_rows + non_command_rows).unwrap_or(u16::MAX);
     let popup = centered_modal(area, w, desired_frame_h);
