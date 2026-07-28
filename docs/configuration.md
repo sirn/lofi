@@ -223,12 +223,13 @@ o1 = { reasoning = true, thinking_levels = ["low", "medium", "high"] }
 api_type = "anthropic-messages"
 api_key = "$ANTHROPIC_API_KEY"
 
-[providers.anthropic.headers]
-anthropic-beta = "prompt-caching-2024-07-31"
-
 [providers.anthropic.models]
 "claude-opus-4" = { name = "Claude Opus 4", reasoning = true, max_tokens = 4096 }
 ```
+
+Lofi automatically adds ephemeral prompt-cache breakpoints to Anthropic
+requests at the tool definitions, system prompt, and latest user message. No
+cache header or per-message configuration is required.
 
 ### Unauthenticated local provider example
 
