@@ -346,8 +346,9 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::NativeToolStart { .. }
                 | AgentEvent::NativeToolEnd { .. }
                 | AgentEvent::ToolInputDelta { .. }
-                // A storage signal (turn appended to the transcript); the
-                // `--print` pipe has no use for it.
+                // Storage signals (round/turn appended to the transcript);
+                // the `--print` pipe has no use for them.
+                | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
                 // Per-round usage is a status signal for the TUI; the pipe
                 // has no use for it (the final `TurnEnd` ends the run).

@@ -199,7 +199,22 @@ impl Agent {
                     // retaining the entire long turn only in memory.
                     if let Some(recorder) = recorder.as_mut() {
                         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                        recorder.checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?;
+                        if let Some((byte_start, byte_end)) = recorder
+                            .checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?
+                        {
+                            // Storage watermark only. The live builder keeps
+                            // the same prompt, turn, and blocks; collapsed mode
+                            // may now release successful outer-exec payloads
+                            // that are recoverable from this durable range.
+                            if !tx.is_closed() {
+                                let _ = tx
+                                    .send(AgentEvent::RoundCommitted {
+                                        byte_start,
+                                        byte_end,
+                                    })
+                                    .await;
+                            }
+                        }
                     }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched

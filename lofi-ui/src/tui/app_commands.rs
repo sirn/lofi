@@ -11,6 +11,11 @@ impl App {
         // the toggle from unrelated work since the previous debug sample.
         self.debug_sample("verbose");
         self.verbose = !self.verbose;
+        if self.verbose {
+            self.restore_last_committed_exec_results();
+        } else {
+            self.release_last_committed_exec_results();
+        }
         // Frozen styled rows are mode-specific, but retain and swap the tiny
         // per-mode height indexes so toggling back does not reparse every turn.
         // The state itself surfaces as the `[VERBOSE]` tag on the rule line
