@@ -749,6 +749,10 @@ fn section(title: &str, items: &[String]) -> String {
 /// direction (most recent 3), dropping the middle to avoid evicting the
 /// original goal on long sessions.
 fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
+    const HEAD: usize = 2;
+    const TAIL: usize = 3;
+    const MAX: usize = 8;
+
     let prompts: Vec<&str> = blocks
         .iter()
         .filter_map(|b| {
@@ -762,9 +766,6 @@ fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
     if prompts.is_empty() {
         return Vec::new();
     }
-    const HEAD: usize = 2; // original intent
-    const TAIL: usize = 3; // current direction
-    const MAX: usize = 8;
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let n = prompts.len();
@@ -962,20 +963,16 @@ fn extract_commit_message(cmd: &str) -> Option<String> {
 
 /// First short git hash in a bash result string.
 fn first_hash(text: &str) -> Option<String> {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r"\b[0-9a-f]{7,12}\b").unwrap());
-    re.find(text).map(|m| m.as_str().to_string())
+    text.split(|c: char| !c.is_ascii_hexdigit())
+        .find(|word| (7..=12).contains(&word.len()))
+        .map(str::to_string)
 }
 
 /// The blocker regex. Compiled once and cached for the process lifetime.
-fn blocker_regex() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(BLOCKER_RE)
-            .or_else(|_| regex::Regex::new("$^"))
-            .or_else(|_| regex::Regex::new("."))
-            .unwrap()
-    })
+fn blocker_regex() -> Option<&'static regex::Regex> {
+    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(BLOCKER_RE).ok())
+        .as_ref()
 }
 
 /// Outstanding Context: errors and blockers from the recent tail (last ~25
@@ -1022,7 +1019,7 @@ fn extract_outstanding(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>
             }
             CompactBlock::Assistant { text } | CompactBlock::User { text } => {
                 for line in non_empty_lines(text) {
-                    if line.len() < 15 || !blocker.is_match(&line) {
+                    if line.len() < 15 || !blocker.is_some_and(|regex| regex.is_match(&line)) {
                         continue;
                     }
                     let s = clip(&line, 150);
@@ -1056,6 +1053,7 @@ const MAX_SUMMARY_TOKENS: usize = 4_000;
 
 /// Build the compressed per-turn transcript: [user]/[assistant] sections
 /// with clipped text and one-liner tool actions.
+#[allow(clippy::too_many_lines)]
 fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
     let compress = |text: &str, max: usize| -> String {
         for hook in hooks {
@@ -1393,7 +1391,7 @@ fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     };
     let parse_lines = |text: &str| -> Vec<String> {
         text.split('\n')
-            .map(|l| l.trim())
+            .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with('['))
             .map(|l| l.strip_prefix("- ").unwrap_or(l).to_string())
             .collect()
