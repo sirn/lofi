@@ -243,13 +243,11 @@ impl App {
         let t = self.theme;
         let mut lines: Vec<Line<'static>> = vec![info_section(t, "Session")];
         #[allow(clippy::single_match_else)]
-        match self.session.path() {
-            Some(p) => {
-                let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-                lines.push(info_kv(t, "id", id));
-                lines.push(info_kv(t, "file", &p.display().to_string()));
-                let size = std::fs::metadata(p).map_or(0, |m| m.len());
-                lines.push(info_kv(t, "size", &format_bytes(size)));
+        match self.session.cursor.as_ref() {
+            Some(cursor) => {
+                lines.push(info_kv(t, "id", &cursor.id()));
+                lines.push(info_kv(t, "file", &cursor.path().display().to_string()));
+                lines.push(info_kv(t, "size", &format_bytes(cursor.len())));
             }
             None => {
                 lines.push(info_kv(t, "id", "(none)"));
@@ -336,7 +334,7 @@ impl App {
                             if generation_clock.load(Ordering::Relaxed) != generation {
                                 return;
                             }
-                            if let Some(preview) = store::SessionStore::quick_preview(file) {
+                            if let Some(preview) = file.quick_preview() {
                                 if tx
                                     .send(PickerLoad::ResumePreviews {
                                         generation,
@@ -352,7 +350,7 @@ impl App {
                             if generation_clock.load(Ordering::Relaxed) != generation {
                                 return;
                             }
-                            let Some(entry) = store::SessionStore::inspect_file(file) else {
+                            let Some(entry) = file.inspect() else {
                                 continue;
                             };
                             if tx
@@ -368,8 +366,8 @@ impl App {
                     });
                 } else if let Some(picker) = self.picker.as_mut() {
                     for row in &mut picker.entries {
-                        row.preview = store::SessionStore::quick_preview(&row.file);
-                        row.details = store::SessionStore::inspect_file(&row.file);
+                        row.preview = row.file.quick_preview();
+                        row.details = row.file.inspect();
                     }
                 }
             }
@@ -475,7 +473,7 @@ impl App {
         let Some(entry) = entry else {
             return;
         };
-        match store::SessionCursor::open_snapshot(entry.file.path.clone()) {
+        match entry.file.open_snapshot() {
             Ok((cursor, snapshot)) => {
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;

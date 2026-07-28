@@ -59,15 +59,44 @@ struct Header {
 /// metadata is indexed.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
-    pub path: PathBuf,
-    pub last_active: std::time::SystemTime,
+    path: PathBuf,
+    last_active: std::time::SystemTime,
+}
+
+impl SessionFile {
+    /// Wall-clock time of the file's last modification.
+    #[must_use]
+    pub fn last_active(&self) -> std::time::SystemTime {
+        self.last_active
+    }
+
+    /// Read a bounded provisional preview without exposing the transcript path.
+    #[must_use]
+    pub fn quick_preview(&self) -> Option<String> {
+        quick_entry_preview(&self.path)
+    }
+
+    /// Enrich this discovered file with selected-lineage metadata.
+    #[must_use]
+    pub fn inspect(&self) -> Option<SessionEntry> {
+        parse_entry(&self.path, self.last_active)
+    }
+
+    /// Open this transcript and return its selected-lineage snapshot in the
+    /// same index pass.
+    ///
+    /// # Errors
+    /// Propagates transcript indexing and validation failures.
+    pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
+        SessionCursor::open_snapshot(self.path.clone())
+    }
 }
 
 /// A discoverable session on disk: its metadata, file path, and message count.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
     pub meta: SessionMeta,
-    pub path: PathBuf,
+    file: SessionFile,
     /// Number of message lines (excluding the header).
     pub message_count: usize,
     /// Wall-clock time of the file's last modification (last activity).
@@ -81,11 +110,20 @@ impl SessionEntry {
     /// The session id — the file stem (`<ms>_<id>`), used by `--resume <id>`.
     #[must_use]
     pub fn id(&self) -> String {
-        self.path
+        self.file
+            .path
             .file_stem()
             .and_then(|s| s.to_str())
             .map(ToString::to_string)
             .unwrap_or_default()
+    }
+
+    /// Open this session and return its selected-lineage snapshot in one pass.
+    ///
+    /// # Errors
+    /// Propagates transcript indexing and validation failures.
+    pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
+        self.file.open_snapshot()
     }
 }
 
@@ -180,30 +218,7 @@ impl SessionCursor {
     /// Returns an error when the transcript cannot be indexed or its selected
     /// head no longer exists.
     pub fn open(path: PathBuf) -> Result<Self> {
-        let (_meta, index, _size) = load_index(&path)?;
-        let cursor_record = index
-            .iter()
-            .rev()
-            .find(|event| event.kind == IndexKind::Cursor);
-        let leaf = match cursor_record {
-            Some(event) => event.cursor_leaf.as_ref().map(IndexId::to_event_id),
-            None => index
-                .iter()
-                .rev()
-                .find(|event| event.kind != IndexKind::Cursor)
-                .map(|event| event.id.to_event_id()),
-        };
-        if leaf.as_ref().is_some_and(|id| {
-            !index
-                .iter()
-                .any(|event| event.kind != IndexKind::Cursor && event.id.matches(id))
-        }) {
-            return Err(Error::State("session cursor head not found".to_string()));
-        }
-        let index = indexed_lineage(index, leaf.as_deref())?;
-        let cursor = Self::new(path, leaf);
-        *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &index)?);
-        Ok(cursor)
+        Self::open_snapshot(path).map(|(cursor, _snapshot)| cursor)
     }
 
     /// Open an existing transcript and return its selected-lineage snapshot
@@ -245,6 +260,29 @@ impl SessionCursor {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Current transcript length in bytes. Keeping metadata access on the
+    /// cursor lets callers remain independent of the storage backend.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        std::fs::metadata(&self.path).map_or(0, |metadata| metadata.len())
+    }
+
+    /// Whether the transcript currently contains no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Stable session id derived from the store-owned transcript name.
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToString::to_string)
+            .unwrap_or_default()
     }
 
     /// Snapshot the current logical leaf.
@@ -742,7 +780,7 @@ impl SessionStore {
     pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
         let mut entries = Vec::new();
         for file in self.list_files_for_cwd(cwd)? {
-            if let Some(entry) = Self::inspect_file(&file) {
+            if let Some(entry) = file.inspect() {
                 entries.push(entry);
             }
         }
@@ -773,20 +811,6 @@ impl SessionStore {
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
-    }
-
-    /// Read a provisional latest-message preview from a bounded window at
-    /// physical EOF. This is intentionally independent of logical cursor
-    /// projection: the exact enrichment may later correct it after a rollback.
-    #[must_use]
-    pub fn quick_preview(file: &SessionFile) -> Option<String> {
-        quick_entry_preview(&file.path)
-    }
-
-    /// Enrich one cheaply discovered session file for picker display.
-    #[must_use]
-    pub fn inspect_file(file: &SessionFile) -> Option<SessionEntry> {
-        parse_entry(&file.path, file.last_active)
     }
 
     /// The most recent session for `cwd`, or `None` if none exist.
@@ -1441,7 +1465,10 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     }
     Some(SessionEntry {
         meta,
-        path: path.to_path_buf(),
+        file: SessionFile {
+            path: path.to_path_buf(),
+            last_active,
+        },
         message_count,
         last_active,
         last_message,
@@ -2181,8 +2208,8 @@ mod tests {
         assert_eq!(list.len(), 2);
         // p2 was created after p1 was last written, so p2 is most recently
         // active and should be listed first.
-        assert_eq!(list[0].path, p2);
-        assert_eq!(list[1].path, p1);
+        assert_eq!(list[0].file.path, p2);
+        assert_eq!(list[1].file.path, p1);
         assert_eq!(list[1].message_count, 1);
         assert_eq!(list[0].message_count, 0);
     }
@@ -2195,11 +2222,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let p2 = store.create(cwd, &"m".into()).unwrap();
         let mr = store.most_recent(cwd).unwrap().unwrap();
-        assert_eq!(mr.path, p2);
+        assert_eq!(mr.file.path, p2);
         let id2 = p2.file_stem().unwrap().to_str().unwrap();
         let prefix = &id2[..id2.find('_').unwrap()];
         let found = store.find(cwd, prefix).unwrap().unwrap();
-        assert_eq!(found.path, p2);
+        assert_eq!(found.file.path, p2);
         assert!(store.find(cwd, "zzz").unwrap().is_none());
     }
 

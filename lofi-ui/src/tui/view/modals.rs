@@ -224,7 +224,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
             row.preview
                 .clone()
                 .unwrap_or_else(|| "loading…".to_string()),
-            relative_age(row.file.last_active),
+            relative_age(row.file.last_active()),
         ),
     };
     let content_w = picker.entries
