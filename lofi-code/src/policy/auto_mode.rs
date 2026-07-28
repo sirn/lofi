@@ -1,17 +1,3 @@
-//! Auto-mode: LLM-based pre-approval of shell-policy `ask` decisions.
-//!
-//! When a command evaluates to `ask` (or unmatched `default`), the auto-mode
-//! callback sends the command to a small LLM with a safety-evaluation prompt.
-//! If the model returns `{"decision":"allow"}`, the command runs without
-//! prompting the user. Any other response, a timeout, or a failure falls back
-//! to the normal confirmation flow (user dialog or block in headless mode).
-//!
-//! The prompt is intentionally minimal: it gives the model the command, the
-//! workspace cwd, and asks for a JSON decision. The model is instructed to
-//! `allow` safe, non-destructive commands and `ask` for anything that could
-//! modify the filesystem in unexpected ways, access the network, or escalate
-//! privileges.
-
 const AUTO_MODE_PROMPT: &str = r#"You are a shell-command safety evaluator for a coding agent.
 The agent is working in the following directory: {CWD}
 

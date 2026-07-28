@@ -1,10 +1,3 @@
-//! Shared output truncation for the sandbox tools: a line limit and a byte
-//! limit, whichever is hit first.
-//! Head truncation keeps the first N lines/bytes (for `read`/`grep`/`ls`/
-//! `find` where the top of the output is most useful); tail truncation keeps
-//! the last N lines/bytes (for `bash` where errors and final results are at
-//! the end).
-
 /// Default line budget for truncated tool output.
 pub const DEFAULT_MAX_LINES: usize = 2000;
 /// Default byte budget for truncated tool output (50 KB).

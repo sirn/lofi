@@ -1,10 +1,3 @@
-//! API reference content and search for the `lofi` guest surface.
-//!
-//! The full reference is embedded at compile time from `docs/api.md`.
-//! [`docs_index`] returns a compact name/summary list; [`docs_entry`] returns
-//! the full text for one entry; [`docs_search`] does keyword search with name
-//! matches weighted above body matches.
-
 struct DocEntry {
     name: String,
     header: String,
