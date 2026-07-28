@@ -363,6 +363,99 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
 }
 
 #[test]
+fn user_bash_renders_as_shell_tree_with_exit_status() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![Block::UserBash {
+            command: "ps".to_string(),
+            output: "PID TTY\n42 pts/3".to_string(),
+            exit_code: Some(0),
+            signal: None,
+            duration: Duration::from_millis(1_100),
+            truncated: false,
+            cancelled: false,
+            exclude_from_context: false,
+        }],
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let rendered: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "  $ ps",
+            "  │ PID TTY",
+            "  │ 42 pts/3",
+            "  └ ✓ Exit 0, took 1.1s",
+        ]
+    );
+    assert_eq!(lines[0].line.spans[1].content, "$ ");
+    assert_eq!(lines[0].line.spans[1].style.fg, Some(a.theme.success));
+    assert_eq!(lines[0].line.spans[2].style.fg, Some(a.theme.fg));
+    assert_eq!(lines[1].line.spans[1].style.fg, Some(a.theme.subtle));
+    assert_eq!(lines[3].line.spans[2].style.fg, Some(a.theme.success));
+}
+
+#[test]
+fn user_bash_nonzero_exit_is_visible_and_error_colored() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: String::new(),
+        blocks: vec![Block::UserBash {
+            command: "false".to_string(),
+            output: "failed".to_string(),
+            exit_code: Some(7),
+            signal: None,
+            duration: Duration::from_millis(900),
+            truncated: false,
+            cancelled: false,
+            exclude_from_context: false,
+        }],
+    });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let status: String = lines[2]
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    assert_eq!(status, "  └ ✗ Exit 7, took 0.9s");
+    assert_eq!(lines[0].line.spans[1].style.fg, Some(a.theme.success));
+    assert_eq!(lines[0].line.spans[2].style.fg, Some(a.theme.fg));
+    assert_eq!(lines[1].line.spans[2].style.fg, Some(a.theme.error));
+    assert_eq!(lines[2].line.spans[2].style.fg, Some(a.theme.error));
+}
+
+#[test]
 fn render_tree_smoke() {
     use crate::tui::view::blocks::render_turns;
     let mut a = app();

@@ -1886,42 +1886,55 @@ impl Component for UserBashLine<'_> {
         let t = cx.theme;
         let failed =
             self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0);
-        let color = if failed {
-            t.error
-        } else if self.exclude_from_context {
-            t.subtle
-        } else {
-            t.info
-        };
-        let mut out = vec![prim::rline(
-            vec![Span::raw("  "), Span::styled("$ ", Style::new().fg(color))],
-            vec![Span::styled(
-                self.command.to_string(),
-                Style::new().fg(color),
-            )],
-        )];
+        let status_color = if failed { t.error } else { t.success };
+        let command_style = Style::new().fg(t.fg);
+        let mut out = Vec::new();
+
+        // Shell prompt: only `$` carries the shell green. The command itself
+        // remains ordinary transcript text, including on a failed command.
+        let command_avail = cx.width.saturating_sub(4);
+        for (i, seg) in prim::wrap_pre(self.command, command_avail)
+            .into_iter()
+            .enumerate()
+        {
+            let prompt = if i == 0 {
+                Span::styled("$ ", Style::new().fg(t.success))
+            } else {
+                Span::raw("  ")
+            };
+            out.push(prim::rline(
+                vec![Span::raw("  "), prompt],
+                vec![Span::styled(seg, command_style)],
+            ));
+        }
+
+        // Match Exec output: a subtle tree rail on every row, muted output on
+        // success, and error-colored output on failure. Collapsed mode keeps
+        // the same three-logical-line preview as tool results.
         let lines: Vec<&str> = self.output.trim_end_matches('\n').split('\n').collect();
         let limit = if cx.app.verbose {
             lines.len()
         } else {
             PREVIEW_LINES
         };
+        let rail = vec![
+            Span::raw("  "),
+            Span::styled("│ ", Style::new().fg(t.subtle)),
+        ];
         if !self.output.is_empty() {
+            let body_style = Style::new().fg(if failed { t.error } else { t.muted });
             for raw in lines.iter().take(limit) {
                 for seg in prim::wrap_pre(raw, cx.width.saturating_sub(4)) {
                     out.push(prim::rline(
-                        vec![Span::raw("    ")],
-                        vec![Span::styled(
-                            seg,
-                            Style::new().fg(if failed { t.error } else { t.muted }),
-                        )],
+                        rail.clone(),
+                        vec![Span::styled(seg, body_style)],
                     ));
                 }
             }
             let hidden = lines.len().saturating_sub(limit);
             if hidden > 0 {
                 out.push(prim::rline(
-                    vec![Span::raw("    ")],
+                    rail,
                     vec![Span::styled(
                         format!("… ({hidden} lines hidden)"),
                         Style::new().fg(t.subtle),
@@ -1929,16 +1942,15 @@ impl Component for UserBashLine<'_> {
                 ));
             }
         }
+
         let mut status = if self.cancelled {
-            "cancelled".to_string()
-        } else if let Some(code) = self.exit_code.filter(|code| *code != 0) {
-            format!("exit {code}")
+            "Cancelled".to_string()
         } else if let Some(signal) = self.signal {
-            format!("signal {signal}")
+            format!("Signal {signal}")
         } else {
-            "done".to_string()
+            format!("Exit {}", self.exit_code.unwrap_or(0))
         };
-        status.push_str(&format!(" in {}", prim::fmt_duration(self.duration)));
+        status.push_str(&format!(", took {}", prim::fmt_duration(self.duration)));
         if self.truncated {
             status.push_str(" · truncated");
         }
@@ -1946,8 +1958,15 @@ impl Component for UserBashLine<'_> {
             status.push_str(" · not in context");
         }
         out.push(prim::rline(
-            vec![Span::raw("  ")],
-            vec![Span::styled(status, Style::new().fg(color))],
+            vec![
+                Span::raw("  "),
+                Span::styled("└ ", Style::new().fg(t.subtle)),
+                Span::styled(
+                    if failed { "✗ " } else { "✓ " },
+                    Style::new().fg(status_color),
+                ),
+            ],
+            vec![Span::styled(status, Style::new().fg(t.fg))],
         ));
         out
     }
