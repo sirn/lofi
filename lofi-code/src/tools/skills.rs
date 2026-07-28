@@ -25,28 +25,15 @@ use super::*;
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
-/// Maximum number of skill directories scanned across both sources.
 const MAX_SKILLS: usize = 500;
-/// Maximum directory walk depth for skill discovery.
 const MAX_WALK_DEPTH: usize = 8;
-/// Maximum directory entries visited during skill discovery.
 const MAX_WALK_VISITED: usize = 10_000;
-/// The marker file name identifying a skill directory.
 const SKILL_FILE: &str = "SKILL.md";
 /// Maximum size of a skill file; reads are bounded so a large or linked
 /// `SKILL.md` cannot exhaust host memory outside `QuickJS`'s limit.
 const MAX_SKILL_FILE_BYTES: usize = 1024 * 1024;
 
 impl BuiltinTools {
-    /// List available skills from the global and per-workspace directories.
-    ///
-    /// Each entry is `{ name, description, source }` where `source` is
-    /// `"global"` or `"workspace"`. When both sources define the same name,
-    /// only the workspace entry is returned. The result is sorted by name.
-    ///
-    /// # Errors
-    /// Returns [`Error::Tool`] if the number of skills exceeds
-    /// [`MAX_SKILLS`] or the walk exceeds [`MAX_WALK_VISITED`].
     #[allow(clippy::unused_async)]
     pub async fn skills(&self) -> Result<Value> {
         let entries = self.scan_skills()?;
@@ -68,19 +55,15 @@ impl BuiltinTools {
         Self::read_skill_file(&path, name, SKILL_FILE, source)
     }
 
-    /// Resolve a skill name to its `SKILL.md` path and source.
-    /// Workspace wins over global on name collision.
     fn resolve_skill_path(&self, name: &str) -> Result<(PathBuf, &'static str)> {
         validate_skill_name(name)?;
 
-        // Check per-workspace first (more specific).
         let ws_skills = self.root.join(".lofi").join("skills");
         let ws_path = ws_skills.join(name).join(SKILL_FILE);
         if ws_path.is_file() {
             return Ok((ws_path, "workspace"));
         }
 
-        // Then global.
         if let Some(dir) = &self.skills_dir {
             let g_path = dir.join(name).join(SKILL_FILE);
             if g_path.is_file() {
@@ -91,18 +74,14 @@ impl BuiltinTools {
         Err(Error::Tool(format!("skill `{name}` not found")))
     }
 
-    /// Scan both skill directories and collect sorted, de-duplicated entries.
     fn scan_skills(&self) -> Result<Vec<Value>> {
-        // name → (description, source)
         let mut map: std::collections::BTreeMap<String, (String, String, String)> =
             std::collections::BTreeMap::new();
 
-        // Global skills.
         if let Some(dir) = &self.skills_dir {
             Self::walk_skills(dir, "global", &mut map)?;
         }
 
-        // Per-workspace skills (override global on name collision).
         let ws_skills = self.root.join(".lofi").join("skills");
         Self::walk_skills(&ws_skills, "workspace", &mut map)?;
 
@@ -125,10 +104,6 @@ impl BuiltinTools {
             .collect())
     }
 
-    /// Recursively walk `dir` for `<sub>/SKILL.md` files, inserting into `map`.
-    /// The skill name is the directory path relative to `dir`. Symlinks are
-    /// followed. The walk is bounded by [`MAX_WALK_DEPTH`] and
-    /// [`MAX_WALK_VISITED`].
     fn walk_skills(
         dir: &Path,
         source: &str,
@@ -138,8 +113,6 @@ impl BuiltinTools {
         Self::walk_skills_inner(dir, dir, source, map, 0, &mut visited)
     }
 
-    /// Recursive inner walk. `root` is the skills root for computing relative
-    /// names; `dir` is the current directory being scanned.
     fn walk_skills_inner(
         dir: &Path,
         root: &Path,
@@ -178,8 +151,6 @@ impl BuiltinTools {
             if !path.is_dir() {
                 continue;
             }
-            // Check if this directory is a skill (contains SKILL.md).
-            // Symlinks to SKILL.md or to the directory itself are followed.
             let skill_file = path.join(SKILL_FILE);
             if skill_file.is_file() {
                 let name = path
@@ -194,13 +165,11 @@ impl BuiltinTools {
                     map.insert(name, (desc, source.to_string(), dir_path));
                 }
             }
-            // Recurse into subdirectories for nested skills.
             Self::walk_skills_inner(&path, root, source, map, depth + 1, visited)?;
         }
         Ok(())
     }
 
-    /// Read a file within a skill directory and return the structured result.
     fn read_skill_file(path: &Path, name: &str, file: &str, source: &str) -> Result<Value> {
         let content = read_bounded(path, MAX_SKILL_FILE_BYTES)
             .map_err(|e| Error::Tool(format!("skill `{name}`: {e}")))?;
@@ -216,8 +185,6 @@ impl BuiltinTools {
     }
 }
 
-/// Validate a skill name: non-empty, no `..`, no leading `/`, no backslash.
-/// `/` is allowed as a namespace separator.
 fn validate_skill_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Tool("skill: name must not be empty".into()));
@@ -225,7 +192,6 @@ fn validate_skill_name(name: &str) -> Result<()> {
     if name.starts_with('/') || name.contains('\\') {
         return Err(Error::Tool(format!("skill: invalid name `{name}`")));
     }
-    // Reject any `..` component.
     for component in name.split('/') {
         if component == ".." {
             return Err(Error::Tool(format!("skill: invalid name `{name}`")));
@@ -234,9 +200,6 @@ fn validate_skill_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extract the first non-heading, non-empty line from a markdown file as
-/// the skill description. Falls back to the parent directory name when the
-/// file is empty or all headings.
 fn read_description(path: &Path) -> Option<String> {
     let content = read_bounded(path, MAX_SKILL_FILE_BYTES).ok()?;
     for line in content.lines() {
@@ -244,13 +207,11 @@ fn read_description(path: &Path) -> Option<String> {
         if trimmed.is_empty() {
             continue;
         }
-        // Skip markdown headings and front-matter delimiters.
         if trimmed.starts_with('#') || trimmed == "---" {
             continue;
         }
         return Some(trimmed.to_string());
     }
-    // Fall back to the parent directory name.
     path.parent()
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
@@ -297,7 +258,6 @@ mod tests {
         )
     }
 
-    /// Create a skill directory with `SKILL.md`.
     fn make_skill(root: &Path, name: &str, content: &str) {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -547,10 +507,8 @@ mod tests {
     async fn skills_ignores_non_skill_md() {
         let dir = tempdir().unwrap();
         let skills = tempdir().unwrap();
-        // A directory with a random .md file (not SKILL.md) should be ignored.
         std::fs::create_dir_all(skills.path().join("foo")).unwrap();
         std::fs::write(skills.path().join("foo").join("README.md"), "not a skill\n").unwrap();
-        // But a directory with SKILL.md is found.
         make_skill(skills.path(), "bar", "a real skill\n");
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
             .skills()

@@ -1,35 +1,16 @@
-//! Compaction hook for lofi-code.
-//!
-//! This hook implements all lofi-code-specific knowledge that the compaction
-//! system in lofi-core needs: tool API descriptions, file-change tracking,
-//! commit extraction, and tool-result compression. By routing through the
-//! `CompactionHook` trait, lofi-core remains agnostic of lofi-code's tool
-//! vocabulary and result formats.
-
 use std::collections::HashSet;
 
 use lofi_types::{CompactBlock, CompactionHook, SummarySection};
 
 use crate::docs;
 
-// ── tool vocabulary ───────────────────────────────────────────────────────
-
-/// Categorize a native tool name by its file-system effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileEffect {
-    /// Creates or overwrites a file.
     Create,
-    /// Modifies an existing file in place.
     Modify,
-    /// Reads file contents.
     Read,
 }
 
-/// Look up the file-system effect of a native tool from the docs registry.
-///
-/// Tools whose docs summary mentions "write" or "create" are classified as
-/// `Create`; "edit" or "replace" as `Modify`; "read" or "list" or "search"
-/// as `Read`. Unknown tools return `None`.
 fn file_effect(tool_name: &str) -> Option<FileEffect> {
     let entries = docs::entries();
     let entry = entries
@@ -47,11 +28,6 @@ fn file_effect(tool_name: &str) -> Option<FileEffect> {
     }
 }
 
-/// A short description for a tool, looked up from the docs registry.
-///
-/// Returns the docs header line (e.g. `lofi.read(path, opts?)`) prefixed
-/// with a dash. Falls back to `lofi.{name}({args})` when the tool is not
-/// in the registry.
 fn tool_description(name: &str, args: &str) -> String {
     let entries = docs::entries();
     if let Some((_, header, summary)) = entries
@@ -64,9 +40,6 @@ fn tool_description(name: &str, args: &str) -> String {
     }
 }
 
-// ── the hook ──────────────────────────────────────────────────────────────
-
-/// The compaction hook for lofi-code.
 #[derive(Default)]
 pub struct CodeCompactionHook;
 
@@ -75,7 +48,6 @@ impl CompactionHook for CodeCompactionHook {
         let mut seen: HashSet<String> = HashSet::new();
         let mut items: Vec<String> = Vec::new();
 
-        // The exec tool itself is always used (it's the only LLM-facing tool).
         items.push(
             "exec({code, strings?, display?}) — the TypeScript sandbox tool. Call lofi.* methods inside it."
                 .to_string(),
@@ -131,7 +103,6 @@ impl CompactionHook for CodeCompactionHook {
             }
         }
 
-        // Files that were both created and later modified are just Modified.
         for p in &modified {
             created.remove(p);
         }
@@ -196,19 +167,16 @@ impl CompactionHook for CodeCompactionHook {
             return Some(String::new());
         }
 
-        // Single-line results: just clip.
         if !trimmed.contains('\n') {
             return Some(clip(trimmed, max));
         }
 
-        // Try JSON parsing for structured tool output (bash results, etc.).
         if trimmed.starts_with('{') {
             if let Some(summary) = compress_json_result(trimmed, max) {
                 return Some(summary);
             }
         }
 
-        // For multi-line text, take up to 3 non-empty lines and join with " | ".
         let lines: Vec<&str> = trimmed
             .lines()
             .map(str::trim)
@@ -232,8 +200,6 @@ impl CompactionHook for CodeCompactionHook {
         }
     }
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────
 
 /// Clip text to max chars on a word boundary.
 fn clip(text: &str, max: usize) -> String {
@@ -266,7 +232,6 @@ fn clip(text: &str, max: usize) -> String {
     text[..cut].trim_end().to_string()
 }
 
-/// Extract the -m "message" (or -m 'message') from a git commit command.
 fn extract_commit_message(cmd: &str) -> Option<String> {
     let m = cmd.find("-m")?;
     let rest = cmd[m + 2..].trim_start();

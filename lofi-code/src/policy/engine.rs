@@ -1,25 +1,15 @@
-//! Policy matching and multi-phase evaluation.
-//!
-//! Matches extracted commands against allow/ask/deny rules, evaluates
-//! redirects and heredocs as separate phases, and combines the results
-//! with `deny > ask > allow > default` precedence. Fails closed to
-//! `ask` on parse errors or unmatched commands.
-
 use lofi_types::{CommandEntry, HeredocPolicy, MatchMode, PolicyAction, RedirectPolicy};
 
 use super::extract::{extract_commands, CommandSource, ExtractedCommand, WrapperRuleMap};
 use super::token::tokenize;
 
-/// Decision returned by the policy engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub action: PolicyAction,
     pub reason: String,
-    /// Which command triggered the decision (for diagnostics).
     pub matched_command: Option<String>,
 }
 
-/// The resolved policy ready for evaluation — defaults merged with custom rules.
 #[derive(Debug, Clone)]
 pub struct ResolvedPolicy {
     pub allow: Vec<CommandEntry>,
@@ -35,7 +25,6 @@ pub struct ResolvedPolicy {
 }
 
 impl ResolvedPolicy {
-    /// Evaluate a command string against this policy.
     #[must_use]
     pub fn evaluate(&self, command: &str) -> Decision {
         let tokens = match tokenize(command) {
@@ -58,33 +47,26 @@ impl ResolvedPolicy {
             };
         }
 
-        // Phase 1: commands
         let cmd_decision = self.evaluate_commands(&cmds);
         if cmd_decision.action == PolicyAction::Deny {
             return cmd_decision;
         }
 
-        // Phase 2: redirects
         let redir_decision = self.evaluate_redirects(&cmds);
         if redir_decision.action == PolicyAction::Deny {
             return redir_decision;
         }
 
-        // Phase 3: heredocs
         let here_decision = self.evaluate_heredocs(&cmds);
         if here_decision.action == PolicyAction::Deny {
             return here_decision;
         }
 
-        // Combine: deny > ask > allow > default
-        // Phase priority: commands > redirects > heredocs
         let winner = [&cmd_decision, &redir_decision, &here_decision]
             .into_iter()
             .max_by_key(|d| action_rank(d.action))
             .unwrap_or(&cmd_decision);
 
-        // If no phase triggered (all default), fail closed to ask.
-        // YOLO mode allows anything that isn't explicitly denied.
         let action = if winner.action == PolicyAction::Allow
             || (self.yolo && winner.action != PolicyAction::Deny)
         {
@@ -136,7 +118,6 @@ impl ResolvedPolicy {
                     matched = Some(cmd.full_text.clone());
                 }
             } else if ask_match.is_none() {
-                // Unmatched command
                 if cmd.source == CommandSource::Direct {
                     saw_direct_unmatched = true;
                 }
@@ -159,19 +140,15 @@ impl ResolvedPolicy {
         for cmd in cmds {
             for (op, target) in &cmd.redirects {
                 let base = op.trim_start_matches(|c: char| c.is_ascii_digit());
-                // Input redirects are always allowed
                 if matches!(base, "<" | "<<" | "<<-" | "<<<") {
                     continue;
                 }
-                // FD duplication
                 if op.ends_with('&') && self.redirects.allow_fd_dup {
                     continue;
                 }
-                // Safe targets
                 if self.redirects.safe_targets.iter().any(|t| t == target) {
                     continue;
                 }
-                // Output redirect to non-safe target
                 if self.redirects.action != PolicyAction::Allow {
                     return Decision {
                         action: self.redirects.action,
@@ -211,7 +188,6 @@ impl ResolvedPolicy {
     }
 }
 
-/// Priority: deny(3) > ask(2) > allow(1). Used for phase comparison.
 fn action_rank(a: PolicyAction) -> u8 {
     match a {
         PolicyAction::Allow => 1,
@@ -220,7 +196,6 @@ fn action_rank(a: PolicyAction) -> u8 {
     }
 }
 
-/// Match a command against a policy entry.
 fn match_entry(cmd: &ExtractedCommand, entry: &CommandEntry) -> bool {
     match entry.mode {
         MatchMode::Exact => cmd.full_text.trim().eq_ignore_ascii_case(&entry.match_str),
@@ -394,7 +369,6 @@ mod tests {
     #[test]
     fn pipeline_both_checked() {
         let p = policy_for(ShellPolicyMode::WorkspaceWrite);
-        // ls is allowed, rm is ask → ask
         let d = p.evaluate("ls | rm -rf /tmp");
         assert_eq!(d.action, PolicyAction::Ask);
     }

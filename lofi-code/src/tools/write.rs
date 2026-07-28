@@ -4,10 +4,6 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Write `text` to `path`, creating parent directories as needed.
-    ///
-    /// # Errors
-    /// Returns [`Error::Tool`] if `path` escapes the root or the write fails.
     #[allow(clippy::unused_async)]
     pub async fn write(&self, args: Value) -> Result<Value> {
         let path = args
@@ -20,7 +16,6 @@ impl BuiltinTools {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("write: missing 'text'".into()))?
             .to_owned();
-        // Echo the written text back so the renderer can display it.
         let content = text.clone();
         reject_symlink_leaf(&self.root, &path, &format!("write {path}"))?;
         let resolved = resolve_under(&self.root, &path)?;

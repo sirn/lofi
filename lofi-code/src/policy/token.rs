@@ -9,34 +9,21 @@
 //! Fails closed: a parse error (unclosed quote, unmatched paren, …) returns
 //! `Err`, and the caller treats that as an `ask` decision.
 
-/// Kind of nested group token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupKind {
-    /// `( … )` — subshell.
     Subshell,
-    /// `$( … )` — command substitution.
     Substitution,
-    /// `` ` … ` `` — backtick substitution.
     Backtick,
 }
 
-/// One parsed token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
-    /// A word (may include concatenated quoted segments).
     Word(String),
-    /// A control operator: `|`, `||`, `&&`, `;`, `&`.
     Operator(String),
-    /// A redirect: `{ op, target }`.
     Redirect { op: String, target: String },
-    /// A nested group (subshell, substitution, or backtick).
     Group { tokens: Vec<Token>, kind: GroupKind },
 }
 
-/// Tokenize a shell command string.
-///
-/// # Errors
-/// Returns `Err(String)` on syntax errors.
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut p = Parser::new(input);
     p.parse()?;
@@ -380,11 +367,6 @@ impl<'a> Parser<'a> {
         if rch != b'<' && rch != b'>' {
             return false;
         }
-        // Process substitution: <(cmd) or >(cmd). Tokenize the inner
-        // command as a substitution group so the policy engine evaluates
-        // it. Without this, <( hangs the tokenizer (the redirect guard
-        // returns false, read_word breaks on '<' without advancing, and
-        // the main loop spins forever).
         if self.peek_from(ri, 1) == b'(' {
             let saved = self.pos;
             self.pos = ri + 2;
@@ -404,7 +386,6 @@ impl<'a> Parser<'a> {
             }
             return true;
         }
-        // Here-string: <<<
         if rch == b'<' && self.peek_from(ri, 1) == b'<' && self.peek_from(ri, 2) == b'<' {
             self.pos = ri + 3;
             let target = self.read_redirect_target();
@@ -414,7 +395,6 @@ impl<'a> Parser<'a> {
             });
             return true;
         }
-        // Heredoc: << or <<-
         if rch == b'<' && self.peek_from(ri, 1) == b'<' && self.peek_from(ri, 2) != b'<' {
             self.pos = ri + 2;
             let mut strip = false;
@@ -435,7 +415,6 @@ impl<'a> Parser<'a> {
             self.pending_heredocs.push((delim, strip));
             return true;
         }
-        // Output: > or >>
         if rch == b'>' {
             self.pos = ri + 1;
             let mut op = format!("{fd_prefix}>");
@@ -460,7 +439,6 @@ impl<'a> Parser<'a> {
             self.tokens.push(Token::Redirect { op, target });
             return true;
         }
-        // Input: <
         if rch == b'<' && self.peek_from(ri, 1) != b'(' {
             self.pos = ri + 1;
             let target = self.read_redirect_target();
@@ -737,8 +715,6 @@ mod tests {
 
     #[test]
     fn quoted_cmd_substitution_produces_group() {
-        // "$(sudo rm -rf /)" inside double quotes must emit a Group
-        // token so the policy engine can analyze the inner command.
         let t = tokenize("echo \"$(sudo rm -rf /)\"").unwrap();
         assert!(t.iter().any(|tk| matches!(
             tk,

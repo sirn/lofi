@@ -5,24 +5,15 @@
 //! the full text for one entry; [`docs_search`] does keyword search with name
 //! matches weighted above body matches.
 
-/// One entry in the API reference, parsed from a `##` section.
 struct DocEntry {
-    /// The canonical name, e.g. `lofi.read` (first dotted token of the
-    /// header, without arguments or parentheses).
     name: String,
-    /// The full header line after `## `.
     header: String,
-    /// The body text (everything after the header line and its blank line).
     body: String,
-    /// The first paragraph of the body, used as a one-line summary.
     summary: String,
 }
 
-/// The raw embedded markdown.
 pub const DOCS_MD: &str = include_str!("docs/api.md");
 
-/// Parse the embedded markdown into entries. Each `## ` heading starts a new
-/// entry. The preamble (text before the first `## `) is skipped.
 fn parse_entries() -> Vec<DocEntry> {
     let mut entries = Vec::new();
     let mut current_name = String::new();
@@ -54,8 +45,6 @@ fn parse_entries() -> Vec<DocEntry> {
     entries
 }
 
-/// Build a [`DocEntry`], extracting the summary from the first non-empty,
-/// non-heading body paragraph.
 fn finish_entry(name: String, header: String, body: String) -> DocEntry {
     let summary = body
         .lines()
@@ -70,10 +59,6 @@ fn finish_entry(name: String, header: String, body: String) -> DocEntry {
     }
 }
 
-/// Extract the canonical name from a header line.
-///
-/// `lofi.read(path, opts?)` → `lofi.read`, `Truncated results and filtering`
-/// → `Truncated results and filtering`.
 fn extract_name(header: &str) -> String {
     if let Some(paren) = header.find('(') {
         header[..paren].trim().to_string()
@@ -95,7 +80,6 @@ pub fn entries() -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Compact index of all entries: `[{ name, summary }]`.
 #[must_use]
 pub fn docs_index() -> serde_json::Value {
     let entries = parse_entries();
@@ -111,8 +95,6 @@ pub fn docs_index() -> serde_json::Value {
     serde_json::json!({ "ok": true, "entries": arr })
 }
 
-/// Full text for one entry, looked up by canonical name (case-insensitive).
-/// Returns `{ ok: true, name, content }` or `{ ok: false, error }`.
 #[must_use]
 pub fn docs_entry(name: &str) -> serde_json::Value {
     let entries = parse_entries();
@@ -133,9 +115,6 @@ pub fn docs_entry(name: &str) -> serde_json::Value {
     })
 }
 
-/// Keyword search across entry names and bodies. Name matches score 3x
-/// header matches score 2x body matches. Results are sorted by score
-/// descending and limited to the top 10.
 #[must_use]
 pub fn docs_search(query: &str) -> serde_json::Value {
     let entries = parse_entries();
@@ -204,7 +183,6 @@ mod tests {
         let idx = docs_index();
         let entries = idx["entries"].as_array().unwrap();
         assert!(!entries.is_empty(), "index should not be empty");
-        // Core APIs should be present.
         let names: Vec<&str> = entries
             .iter()
             .map(|e| e["name"].as_str().unwrap())
@@ -241,7 +219,6 @@ mod tests {
         let res = docs_search("bash");
         let results = res["results"].as_array().unwrap();
         assert!(!results.is_empty());
-        // lofi.bash should be the top hit.
         assert_eq!(results[0]["name"], "lofi.bash");
     }
 
@@ -265,8 +242,6 @@ mod tests {
 
     #[test]
     fn search_multi_term_scores_higher() {
-        // "read file" should match lofi.read (both terms in name/body) and
-        // lofi.write ("file" in body), but lofi.read should score higher.
         let res = docs_search("read file");
         let results = res["results"].as_array().unwrap();
         assert!(!results.is_empty());
@@ -275,7 +250,6 @@ mod tests {
 
     #[test]
     fn search_limited_to_ten() {
-        // A very common term should not return more than 10 results.
         let res = docs_search("lofi");
         let results = res["results"].as_array().unwrap();
         assert!(results.len() <= 10);

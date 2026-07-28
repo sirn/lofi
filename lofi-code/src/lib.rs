@@ -60,13 +60,10 @@ pub mod tools;
 use crate::tools::BuiltinTools;
 pub use tools::BashEnv;
 
-/// Name of the code sandbox's LLM-facing tool.
 pub const EXEC_TOOL_NAME: &str = "exec";
 
-/// Description advertised for the code sandbox's LLM-facing tool.
 pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash). Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
 
-/// JSON Schema for the code sandbox's tool input.
 #[must_use]
 pub fn exec_tool_input_schema() -> serde_json::Value {
     serde_json::json!({
@@ -92,8 +89,6 @@ pub fn exec_tool_input_schema() -> serde_json::Value {
 /// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Maximum heap for one `QuickJS` runtime. This bound keeps each sandbox from dominating process memory.
-/// Tool payloads are capped far below this and large files stay in native Rust.
 const GUEST_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 /// Maximum native call-stack depth the interpreter may use. `QuickJS` checks
 /// this at function-entry granularity, so a deeply recursive guest aborts
@@ -119,7 +114,6 @@ const SUSPEND_THRESHOLD: Duration = Duration::from_millis(1);
 /// exception as a resolved (not rejected) promise.
 const SANDBOX_ERROR_KEY: &str = "__lofi_sandbox_error__";
 
-/// Cap on buffered `print` output retained for the result.
 const MAX_LOG_BYTES: usize = 1024 * 1024;
 /// Depth and node caps for converting a guest value to `JSON`, guarding against
 /// self-referential or pathologically nested structures.
@@ -138,35 +132,19 @@ pub type RecallFn = Arc<
     dyn Fn(&lofi_types::recall::RecallRequest) -> lofi_types::recall::RecallOutcome + Send + Sync,
 >;
 
-/// Optional `lofi.result` implementation: a sync callback that recovers the
-/// original, pre-elision content of one message event by id. The inverse of
-/// compaction's tiered-retention elision — the model re-expands a stubbed
-/// tool result or tool-call by passing the event id the stub names. Reads
-/// the session file fresh, like `RecallFn`.
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// Why a shell-policy confirmation is being requested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {
-    /// The shell policy requires direct user confirmation.
     Policy,
-    /// Auto-mode is still evaluating the command. The UI may display elapsed
-    /// time while allowing the user to override the pending evaluation.
     AutoEvaluating { started_at: std::time::Instant },
-    /// Auto-mode completed and explicitly requested confirmation.
     AutoAsk { reason: String },
-    /// Auto-mode could not produce a decision (timeout, provider failure, or
-    /// malformed response), so the user must decide.
     AutoFailed { reason: String },
 }
 
-/// A shell-policy confirmation request shared with the UI.
 #[derive(Debug, Clone)]
 pub struct ConfirmPrompt {
-    /// Command awaiting confirmation.
     pub command: String,
-    /// Current reason for confirmation. Auto-mode updates this in place when
-    /// a pending evaluation resolves to `ask` or fails.
     pub reason: Arc<std::sync::Mutex<ConfirmReason>>,
     /// True while this prompt can still accept a user response. Auto-mode
     /// clears it when an approval or override wins the race, allowing the UI
@@ -174,11 +152,6 @@ pub struct ConfirmPrompt {
     pub active: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Async confirmation callback used by the shell policy.
-///
-/// The runtime passes a shared prompt and awaits the boolean response
-/// (`true` = allow, `false` = deny). When `None` (headless mode), an
-/// `ask` decision blocks the command.
 pub type ConfirmFn = Arc<
     dyn Fn(
             ConfirmPrompt,
@@ -187,22 +160,13 @@ pub type ConfirmFn = Arc<
         + Sync,
 >;
 
-/// Result of an auto-mode command evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoModeOutcome {
-    /// The command is safe to run without confirmation.
     Allow { reason: String },
-    /// The evaluator requires a user decision.
     Ask { reason: String },
-    /// The evaluator timed out, failed, or returned an invalid response.
     Failed { reason: String },
 }
 
-/// Async auto-mode callback used by the shell policy.
-///
-/// The configured timeout remains an upper bound for this future. The shell
-/// tool races it against a short UI grace period and, once shown, the user's
-/// override response.
 pub type AutoModeFn = Arc<
     dyn Fn(
             String,
@@ -212,8 +176,6 @@ pub type AutoModeFn = Arc<
         + Sync,
 >;
 
-/// each `lofi.bash` / `lofi.read` / ... can be rendered as its own line
-/// under the parent `exec` block. `id` is a per-exec counter.
 #[derive(Debug, Clone)]
 pub enum ToolEvent {
     Start {
@@ -228,34 +190,18 @@ pub enum ToolEvent {
     },
 }
 
-/// Per-call execution context for sandbox tool execution.
 #[derive(Clone)]
 pub struct ExecCtx {
-    /// Workspace root file operations are confined to.
     pub root: PathBuf,
-    /// Per-session tmp directory for bash full-output logs and other
-    /// agent-produced artifacts. `lofi.bash_read` is rooted here.
     pub tmp_dir: PathBuf,
-    /// Named strings exposed as the global `lofi_strings` object.
     pub strings: HashMap<String, String>,
-    /// Optional `lofi.recall` implementation (session-history search).
     pub recall: Option<RecallFn>,
-    /// Optional `lofi.result` implementation (elision recovery).
     pub result: Option<ResultFn>,
     pub on_tool_event: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
-    /// Resolved `bash` child-env policy + output-redaction set.
     pub bash_env: BashEnv,
-    /// Resolved shell policy for `lofi.bash` command evaluation.
     pub shell_policy: crate::policy::ResolvedPolicy,
-    /// Async confirmation callback for shell-policy `ask` decisions.
-    /// When `None` (headless), `ask` blocks the command.
     pub confirm: Option<ConfirmFn>,
-    /// Async auto-mode callback for shell-policy `ask` decisions.
-    /// When `None` (auto-mode disabled), `ask` goes directly to `confirm`.
     pub auto_mode: Option<AutoModeFn>,
-    /// Optional skills directory (`<config_dir>/skills`). When set,
-    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
-    /// skill files from here and from `<root>/.lofi/skills/`.
     pub skills_dir: Option<PathBuf>,
 }
 
@@ -277,7 +223,6 @@ impl std::fmt::Debug for ExecCtx {
     }
 }
 
-/// Per-call options.
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
     /// Maximum *CPU time* (not wall-clock) for synchronous guest code.
@@ -302,21 +247,14 @@ impl Default for ExecOptions {
     }
 }
 
-/// The outcome of a single `exec` call.
 #[derive(Debug, Clone)]
 pub struct ExecResult {
     /// The value the guest IIFE resolved to (`null` if it resolved to
     /// `undefined` or produced no `return`).
     pub value: Json,
-    /// Buffered `print(...)` output, joined and newline-terminated.
     pub logs: String,
 }
 
-/// Owned JSON result passed from a native future into `QuickJS`.
-///
-/// Returning a raw `rquickjs::Value` from a spawned tool future confuses
-/// rquickjs 0.9's promise bookkeeping and leaks the value at shutdown. This
-/// owned wrapper delays conversion until rquickjs is resolving the promise.
 struct JsonV(Json);
 
 impl<'js> IntoJs<'js> for JsonV {
@@ -325,13 +263,6 @@ impl<'js> IntoJs<'js> for JsonV {
     }
 }
 
-/// Outcome of a native tool future.
-///
-/// This is deliberately not `rquickjs::Result<JsonV>`. rquickjs's generic
-/// `Result<T>` conversion describes every `Err` as a Rust-to-JavaScript
-/// conversion failure. Tool failures are domain errors, so convert them into
-/// genuine JavaScript `Error` exceptions without the misleading
-/// `Error converting from 'lofi' into js 'value'` prefix.
 enum ToolOutput {
     Value(Json),
     Error(String),
@@ -346,10 +277,6 @@ impl<'js> IntoJs<'js> for ToolOutput {
     }
 }
 
-/// Render a span as a user-relative `line:col` (1-based). The async-IIFE
-/// wrapper prepends one line before the user's source, so the user's first
-/// line is wrapped-line 2; subtract one to report user-relative lines so a
-/// malformed escape points where the user wrote it.
 fn span_loc(cm: &SourceMap, span: Span) -> String {
     let loc = cm.lookup_char_pos(span.lo());
     let line = loc.line.saturating_sub(1).max(1);
@@ -357,15 +284,6 @@ fn span_loc(cm: &SourceMap, span: Span) -> String {
     format!("{line}:{col}")
 }
 
-/// Compile a TypeScript snippet to a runnable JS string.
-///
-/// The user body is wrapped in `(async () => { try { <body> } catch ... })()`
-/// so top-level `await`/`return` work and uncaught exceptions surface as a
-/// structured result. Types are stripped with swc's TypeScript strip pass
-/// (no type-checking).
-///
-/// # Errors
-/// Returns [`Error::Sandbox`] on a parse or codegen failure.
 pub fn compile_ts(src: &str) -> Result<String> {
     let wrapped = format!(
         "(async () => {{ try {{\n{src}\n}} catch (e) {{ return {{ {SANDBOX_ERROR_KEY}: (e && e.message) ? e.message : String(e) }}; }} }})()"
@@ -388,10 +306,6 @@ pub fn compile_ts(src: &str) -> Result<String> {
             ))
         })?;
         if let Some(e) = parser.take_errors().into_iter().next() {
-            // Non-fatal recovered errors: report the first as a sandbox error
-            // so typos don't silently produce wrong code. Include the
-            // user-relative source location so a malformed escape or token
-            // points at its line and column.
             return Err(Error::Sandbox(format!(
                 "parse error: {} at {}",
                 e.kind().msg(),
@@ -560,7 +474,6 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     }
 }
 
-/// Install the `lofi` object, `print`, and the `lofi_strings` global.
 #[allow(clippy::too_many_arguments)]
 fn install_globals(
     ctx: &Ctx<'_>,
@@ -573,9 +486,6 @@ fn install_globals(
 ) -> rquickjs::Result<()> {
     let lofi = Object::new(ctx.clone())?;
     bind_tools(ctx, &lofi, tools, recall, result, skills_dir)?;
-    // Expose the per-session tmp dir path so the model knows where bash
-    // full-output logs live (and can reference them if needed beyond
-    // `lofi.bash_read`, which takes a basename relative to this dir).
     lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
     ctx.globals().set("lofi", lofi)?;
 
@@ -653,7 +563,6 @@ fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
     (offset, limit)
 }
 
-/// First line of `s`, truncated to `cap` visible chars with an ellipsis.
 fn cap_first_line(s: &str, cap: usize) -> String {
     let line = s.split('\n').next().unwrap_or("");
     let mut chars = line.chars();
@@ -670,7 +579,6 @@ fn cap_first_line(s: &str, cap: usize) -> String {
     out
 }
 
-/// Short label for a native tool's arguments, shown after the tool name.
 fn native_args_label(name: &str, v: &serde_json::Value) -> String {
     let pick = |key: &str| {
         v.get(key)
@@ -695,10 +603,6 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
 fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
     match res {
         Ok(v) => {
-            // Tools like `bash` return `Ok(json!({"ok": false, ...}))` for
-            // policy denials, non-zero exits, and timeouts — these are
-            // errors from the UI's perspective even though the JSON is
-            // successfully delivered to the model.
             let is_error = v
                 .get("ok")
                 .and_then(serde_json::Value::as_bool)
@@ -828,8 +732,6 @@ mod tests {
     #[tokio::test]
     async fn exec_uncaught_error_surfaces_as_sandbox_error() {
         let dir = tempdir().unwrap();
-        // The IIFE wrapper catches uncaught exceptions and returns the
-        // sentinel object; `exec` rewrites that into Error::Sandbox.
         let src = "await lofi.read('../escape'); return 'ok';";
         let err = exec(src, &ctx(dir.path()), &ExecOptions::default())
             .await
@@ -940,8 +842,6 @@ mod tests {
 
     #[test]
     fn compile_ts_malformed_escape_reports_location() {
-        // `\u{GG}` is not valid hex; the error must carry the user-relative
-        // source location (line 1) so a malformed escape points where it is.
         let err = compile_ts(r#"return "\u{GG}";"#).unwrap_err();
         let msg = match err {
             Error::Sandbox(m) => m,
@@ -956,8 +856,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_unicode_escapes_round_trip() {
-        // `\uXXXX`, `\u{...}` (non-BMP), and a UTF-16 surrogate pair all
-        // decode to the same code point and survive parse → codegen → eval.
         let dir = tempdir().unwrap();
         let cases: &[(&str, &str)] = &[
             ("return \"\\u00E9\";", "é"),
@@ -974,8 +872,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_escaped_unicode_in_tool_arg() {
-        // An escape inside a tool argument string is decoded before the arg
-        // reaches the tool, so `echo \u00E9` echoes é.
         let dir = tempdir().unwrap();
         let src = r#"const r = await lofi.bash({ cmd: "echo \u00E9" }); return r.output.trim();"#;
         let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
@@ -983,8 +879,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.value, json!("é"));
     }
-
-    // ── Interrupt handler: deadlines & cancellation ──
 
     #[tokio::test]
     async fn exec_sync_infinite_loop_times_out() {
@@ -1007,9 +901,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_cpu_heavy_loop_times_out() {
-        // A CPU-bound loop that does real work each iteration must also be
-        // interrupted — the handler fires on interpreter ticks, not just
-        // idle loops.
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),

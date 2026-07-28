@@ -5,16 +5,12 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Create a fresh per-session tmp directory under the system temp dir.
-/// Called when no explicit tmp dir is provided.
 pub(super) fn default_tmp_dir() -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("lofi-session-{nanos:016x}"));
-    // Best-effort: if creation fails, fall back to the system temp dir itself
-    // so bash log writes still succeed somewhere.
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -58,12 +54,6 @@ pub(super) fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> 
     result
 }
 
-/// Resolve `p` against `root`, rejecting escapes.
-///
-/// If the target exists, it is canonicalized directly. If not (the common
-/// `write` case where the leaf does not yet exist), the parent is
-/// canonicalized and the leaf filename is re-joined. The result must start
-/// with `root` or the call fails as a path-escape.
 pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
     use std::path::Component;
     // Reject any component that could escape the root lexically — parent
@@ -86,7 +76,6 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
     } else {
         root.join(p)
     };
-    // Fast path: the target exists, so canonicalize directly.
     if let Ok(c) = joined.canonicalize() {
         if !c.starts_with(root) {
             return Err(Error::Tool(format!("path escapes workspace root: {p}")));
@@ -140,13 +129,10 @@ pub(super) fn resolve_for_read(
     extra_roots: &[PathBuf],
     p: &str,
 ) -> Result<PathBuf> {
-    // Relative or empty: resolve under primary root (workspace).
     if p.is_empty() || !Path::new(p).is_absolute() {
         return resolve_under(primary_root, p);
     }
 
-    // Absolute path: canonicalize (walking up to existing ancestor for
-    // non-existent tails) then check against all allowed roots.
     let path = Path::new(p);
     let resolved = if path.exists() {
         path.canonicalize()
@@ -262,8 +248,6 @@ fn walk_files_capped_inner(
         }
         *visited += 1;
         let entry = entry?;
-        // Follow symlinks via std::fs::metadata (DirEntry::metadata does
-        // not follow symlinks on Unix). Broken symlinks are skipped.
         let ft = match std::fs::metadata(entry.path()) {
             Ok(m) => m.file_type(),
             Err(_) => continue,
@@ -293,7 +277,6 @@ fn walk_files_capped_inner(
     Ok(false)
 }
 
-/// Reason a capped filesystem walk stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WalkLimit {
     Complete,
@@ -401,7 +384,6 @@ fn find_walk_inner(
     Ok(WalkLimit::Complete)
 }
 
-/// Parse the `grep` pattern argument into (regex, ignore-case, context).
 pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize)> {
     match pattern {
         Value::String(s) => Ok((s, false, 0)),
