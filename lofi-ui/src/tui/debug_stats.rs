@@ -482,7 +482,11 @@ fn mapping_bucket<'a>(breakdown: &'a mut MappingBreakdown, path: &str) -> &'a mu
         &mut breakdown.kernel
     } else if path.is_empty() {
         &mut breakdown.anonymous
-    } else if path.ends_with(".so") || path.contains(".so.") {
+    } else if std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("so"))
+        || path.contains(".so.")
+    {
         &mut breakdown.shared_libraries
     } else if path.starts_with('/') {
         &mut breakdown.other_files
