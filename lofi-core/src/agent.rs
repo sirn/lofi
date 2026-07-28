@@ -105,14 +105,6 @@ const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 /// Fixed per-event charge added to the round byte budget to cover
 /// Vec/enum/dispatch overhead not captured by owned-string lengths.
 const PER_EVENT_OVERHEAD: usize = 64;
-/// Shared logical cursor used to durably commit a completed turn. Passed into
-/// [`Agent::run_continuation`] so the engine — which owns timers and cost — is
-/// the sole turn writer while compaction advances the same cursor.
-#[derive(Debug, Clone)]
-pub struct SessionCommit {
-    pub cursor: crate::session::store::SessionCursor,
-}
-
 /// Lock a mutex, recovering from poison by taking the guard anyway. The
 /// native-tool capture callbacks run single-threaded within an `exec`, so
 /// poison is not expected in practice; this keeps the calls `unwrap`-free
