@@ -1,0 +1,187 @@
+    Checking lofi-ui v0.1.0 (/home/sirn/Dev/src/git.sr.ht/~sirn/lofi/lofi-ui)
+error: this function has too many lines (105/100)
+    --> lofi-ui/src/tui/app_commands.rs:1021:5
+     |
+1021 |     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_lines
+     = note: `-D clippy::too-many-lines` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::too_many_lines)]`
+
+error: this function has too many lines (112/100)
+   --> lofi-ui/src/tui/debug_stats.rs:252:5
+    |
+252 |     fn write_sample(&mut self, app: &App, event: &str) -> std::io::Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_lines
+
+error: this function has too many lines (108/100)
+   --> lofi-ui/src/tui/tree.rs:128:1
+    |
+128 | / fn build_tree_entries_inner(
+129 | |     indices: &[store::EventIndex],
+130 | |     leaf_id: Option<&str>,
+131 | |     cursor: &store::SessionCursor,
+...   |
+134 | |     hydrate_only: Option<&std::collections::HashSet<usize>>,
+135 | | ) -> Vec<TreeEntry> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_lines
+
+error: this function has too many lines (138/100)
+   --> lofi-ui/src/tui/tree.rs:456:1
+    |
+456 | / fn push_tree_entry(
+457 | |     ctx: &TreeCtx,
+458 | |     idx: usize,
+459 | |     prefix: &str,
+460 | |     is_active: bool,
+461 | |     out: &mut Vec<TreeEntry>,
+462 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_lines
+
+error: unnecessary boolean `not` operation
+   --> lofi-ui/src/tui/tree.rs:470:42
+    |
+470 |       let (label, prefill, branch_point) = if !ctx.hydrate {
+    |  __________________________________________^
+471 | |         let label = match ix.kind {
+472 | |             store::IndexKind::UserPrompt => "user: loading…",
+473 | |             store::IndexKind::ToolResult => "tool: loading…",
+...   |
+589 | |     };
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#if_not_else
+    = note: `-D clippy::if-not-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::if_not_else)]`
+help: try
+    |
+470 ~     let (label, prefill, branch_point) = if ctx.hydrate {
+471 +         match ix.kind {
+472 +             store::IndexKind::UserPrompt => {
+473 +                 let prompt = load_prompt_text(ctx.cursor, ix.offset);
+474 +                 (
+475 +                     format!("user: {}", one_line(&prompt)),
+476 +                     if ctx.retain_prefill {
+477 +                         prompt
+478 +                     } else {
+479 +                         String::new()
+480 +                     },
+481 +                     ix.parent_id
+482 +                         .as_ref()
+483 +                         .map(store::IndexId::to_event_id)
+484 +                         .unwrap_or_default(),
+485 +                 )
+486 +             }
+487 +             store::IndexKind::ToolResult => {
+488 +                 let (name, tool_use_id, content, is_error) =
+489 +                     load_tool_result(idx, ctx.indices, ctx.by_id, ctx.cursor);
+490 +                 let marker = if is_error { "\u{2717} " } else { "" };
+491 +                 let label = if name == "exec" {
+492 +                     let mut tools = ctx.native_tools.borrow().get(&tool_use_id).cloned();
+493 +                     if tools.is_none() && ctx.lazy_native_tools {
+494 +                         let loaded = load_native_tools_for_turn(ctx, idx, &tool_use_id);
+495 +                         ctx.native_tools
+496 +                             .borrow_mut()
+497 +                             .insert(tool_use_id.clone(), loaded.clone());
+498 +                         tools = Some(loaded);
+499 +                     }
+500 +                     if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+501 +                         let summary = tools
+502 +                             .iter()
+503 +                             .map(|(name, args)| format!("{name} {args}"))
+504 +                             .collect::<Vec<_>>()
+505 +                             .join(", ");
+506 +                         format!("exec: {marker}{}", one_line(&summary))
+507 +                     } else {
+508 +                         format!("exec: {marker}{}", one_line(&content))
+509 +                     }
+510 +                 } else {
+511 +                     format!("tool: {marker}{name}: {}", one_line(&content))
+512 +                 };
+513 +                 (label, String::new(), ix.id.to_event_id())
+514 +             }
+515 +             store::IndexKind::TurnEnd => {
+516 +                 let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
+517 +                 (
+518 +                     format!(
+519 +                         "agent: {}",
+520 +                         if preview.is_empty() {
+521 +                             "(turn end)".to_string()
+522 +                         } else {
+523 +                             preview
+524 +                         }
+525 +                     ),
+526 +                     String::new(),
+527 +                     ix.id.to_event_id(),
+528 +                 )
+529 +             }
+530 +             store::IndexKind::TurnFailed => {
+531 +                 let error = load_failed_error(ctx.cursor, ix.offset);
+532 +                 (
+533 +                     format!("agent: {} (failed)", one_line(&error)),
+534 +                     String::new(),
+535 +                     ix.id.to_event_id(),
+536 +                 )
+537 +             }
+538 +             store::IndexKind::Compaction => {
+539 +                 let (summarized, kept, checkpointed, first_kept) =
+540 +                     load_compaction_details(ctx.cursor, ix.offset);
+541 +                 let branch_point = if checkpointed && !first_kept.is_empty() {
+542 +                     ctx.by_id
+543 +                         .get(&store::IndexId::parse(first_kept))
+544 +                         .and_then(|&i| {
+545 +                             ctx.indices[i]
+546 +                                 .parent_id
+547 +                                 .as_ref()
+548 +                                 .map(store::IndexId::to_event_id)
+549 +                         })
+550 +                         .unwrap_or_default()
+551 +                 } else {
+552 +                     ix.parent_id
+553 +                         .as_ref()
+554 +                         .map(store::IndexId::to_event_id)
+555 +                         .unwrap_or_default()
+556 +                 };
+557 +                 (
+558 ~                     format!("compact: Compacted {summarized} messages · kept {kept}"),
+559 +                     String::new(),
+560 +                     branch_point,
+561 +                 )
+562 +             }
+563 +             store::IndexKind::UserBash
+564 +             | store::IndexKind::AssistantMessage
+565 +             | store::IndexKind::SystemMessage
+566 +             | store::IndexKind::NativeTool
+567 +             | store::IndexKind::Cursor
+568 +             | store::IndexKind::Other => return,
+569 +         }
+570 +     } else {
+571 +         let label = match ix.kind {
+572 ~             store::IndexKind::UserPrompt => "user: loading…",
+573 ~             store::IndexKind::ToolResult => "tool: loading…",
+574 ~             store::IndexKind::TurnEnd => "agent: loading…",
+575 ~             store::IndexKind::TurnFailed => "agent: loading… (failed)",
+576 ~             store::IndexKind::Compaction => "compact: loading…",
+577 +             _ => return,
+578 +         }
+579 +         .to_string();
+580 +         let branch_point = match ix.kind {
+581 +             store::IndexKind::UserPrompt | store::IndexKind::Compaction => ix
+582 +                 .parent_id
+583 +                 .as_ref()
+584 +                 .map(store::IndexId::to_event_id)
+585 +                 .unwrap_or_default(),
+586 +             _ => ix.id.to_event_id(),
+587 +         };
+588 +         (label, String::new(), branch_point)
+589 ~     };
+    |
+
+error: could not compile `lofi-ui` (lib) due to 5 previous errors
