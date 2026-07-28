@@ -184,6 +184,7 @@ fn rich_header_suffix_for_read_and_bash() {
                 },
             ],
             result: Some("{\"value\":null}".to_string()),
+            result_committed: false,
             is_error: false,
             done: true,
             elapsed: None,
@@ -1784,6 +1785,125 @@ fn tool_input_and_end_land_under_matching_id() {
     assert!(t1.done);
     assert_eq!(t2.result.as_deref(), Some("r2"));
     assert!(t2.done);
+}
+
+#[test]
+fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("round-commit.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"p/m\"}\n",
+    )
+    .unwrap();
+    let cursor = store::SessionCursor::new(path, None);
+    let durable_result = "{\"value\":\"durable outer result\"}";
+    let mut events = vec![
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(user("go")),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    id: "e1".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({ "code": "return 1" }),
+                }],
+            }),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "e1".into(),
+                    content: durable_result.into(),
+                    is_error: false,
+                }],
+            }),
+        },
+    ];
+    let (start, end) = cursor.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    a.session.cursor = Some(cursor);
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::Thinking("still visible thought".into()));
+    a.apply_event(AgentEvent::Text("still visible text".into()));
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".into(),
+        name: "exec".into(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "e1".into(),
+        code: "return 1".into(),
+        label: None,
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".into(),
+        id: 0,
+        name: "bash".into(),
+        args: "printf native".into(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".into(),
+        id: 0,
+        result: "native result stays resident".into(),
+        is_error: false,
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "e1".into(),
+        result: durable_result.into(),
+        is_error: false,
+        elapsed_ms: 1,
+    });
+    let block_count = a.turns[0].blocks.len();
+
+    a.apply_event(AgentEvent::RoundCommitted {
+        byte_start: start,
+        byte_end: end,
+    });
+
+    assert_eq!(a.turns[0].prompt, "go");
+    assert_eq!(a.turns[0].blocks.len(), block_count);
+    assert!(
+        matches!(&a.turns[0].blocks[0], Block::Thinking(thinking) if thinking.text == "still visible thought")
+    );
+    assert!(matches!(&a.turns[0].blocks[1], Block::Text(text) if text == "still visible text"));
+    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
+        panic!("exec block preserved")
+    };
+    assert!(tool.result_committed);
+    assert!(
+        tool.result.is_none(),
+        "collapsed hidden duplicate is released"
+    );
+    assert_eq!(
+        tool.native[0].result.as_deref(),
+        Some("native result stays resident")
+    );
+
+    a.toggle_verbose();
+    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
+        panic!("exec block preserved")
+    };
+    assert_eq!(tool.result.as_deref(), Some(durable_result));
+    assert_eq!(a.turns[0].prompt, "go");
+    assert_eq!(a.turns[0].blocks.len(), block_count);
+
+    a.toggle_verbose();
+    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
+        panic!("exec block preserved")
+    };
+    assert!(tool.result.is_none());
 }
 
 #[test]

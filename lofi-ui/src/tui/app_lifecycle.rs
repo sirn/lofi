@@ -189,6 +189,30 @@ impl App {
                 }
                 return;
             }
+            AgentEvent::RoundCommitted {
+                byte_start,
+                byte_end,
+            } => {
+                // Storage watermark only: retain the exact same turn/prompt/
+                // block tree. Successful outer-exec results are hidden in
+                // collapsed mode, so once durable they can be released; the
+                // range lets /verbose restore them without touching any other
+                // block or waiting for the turn to finish.
+                self.merge_last_turn_range(byte_start, byte_end);
+                if let Some(turn) = self.turns.last_mut() {
+                    for block in &mut turn.blocks {
+                        if let Block::Tool(tool) = block {
+                            if tool.name == "exec" && tool.done && !tool.is_error {
+                                tool.result_committed = true;
+                                if !self.verbose {
+                                    tool.result = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             AgentEvent::TurnCommitted {
                 byte_start,
                 byte_end,
@@ -196,19 +220,7 @@ impl App {
                 // The just-finished turn is now durably in the transcript
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
-                if let Some(r) = self.turn_byte_ranges.last_mut() {
-                    // A hard-cap compaction silently continues the same
-                    // visible turn in a second agent run. Preserve the first
-                    // run's committed prefix instead of replacing it with the
-                    // continuation-only range; otherwise the next prompt
-                    // freezes the turn, clears its in-memory blocks, and can
-                    // only reload the continuation suffix (which has no user
-                    // turn start), making the transcript appear to vanish.
-                    *r = Some(match *r {
-                        Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
-                        None => (byte_start, byte_end),
-                    });
-                }
+                self.merge_last_turn_range(byte_start, byte_end);
                 return;
             }
             AgentEvent::RoundUsage { cost, usage } => {
@@ -368,6 +380,74 @@ impl App {
             &mut self.frozen_heights,
             &mut self.frozen_heights_other_mode,
         );
+    }
+
+    /// Extend the durable byte range of the current visible turn. Round
+    /// checkpoints and the terminal flush can arrive separately (including
+    /// across a hard-cap continuation), so ranges are merged monotonically.
+    fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
+        if let Some(range) = self.turn_byte_ranges.last_mut() {
+            *range = Some(match *range {
+                Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
+                None => (byte_start, byte_end),
+            });
+        }
+    }
+
+    /// Restore successful outer-exec results released after a round
+    /// checkpoint. This reads only the current turn's durable range and fills
+    /// only matching result slots; it never rebuilds or replaces the turn.
+    pub(super) fn restore_last_committed_exec_results(&mut self) {
+        let Some((start, end)) = self.turn_byte_ranges.last().copied().flatten() else {
+            return;
+        };
+        let Some(cursor) = self.session.cursor.as_ref() else {
+            return;
+        };
+        let Ok(events) = cursor.events_in_range(start, end) else {
+            return;
+        };
+        let mut results = std::collections::HashMap::new();
+        for event in events {
+            if let SessionEventKind::Message(message) = event.kind {
+                for block in message.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error: false,
+                    } = block
+                    {
+                        results.insert(tool_use_id, content);
+                    }
+                }
+            }
+        }
+        let Some(turn) = self.turns.last_mut() else {
+            return;
+        };
+        for block in &mut turn.blocks {
+            if let Block::Tool(tool) = block {
+                if tool.name == "exec" && tool.result_committed && tool.result.is_none() {
+                    if let Some(result) = results.remove(&tool.id) {
+                        tool.result = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Release restored outer-exec results when returning to collapsed mode.
+    pub(super) fn release_last_committed_exec_results(&mut self) {
+        let Some(turn) = self.turns.last_mut() else {
+            return;
+        };
+        for block in &mut turn.blocks {
+            if let Block::Tool(tool) = block {
+                if tool.name == "exec" && tool.result_committed && !tool.is_error {
+                    tool.result = None;
+                }
+            }
+        }
     }
 
     /// Push a turn, keeping its file-backing indexes parallel to `turns`.

@@ -197,6 +197,9 @@ struct ToolCall {
     label: Option<String>,
     native: Vec<NativeTool>,
     result: Option<String>,
+    /// The successful outer-exec result is durable and can be released while
+    /// collapsed. /verbose restores it from the current turn's byte range.
+    result_committed: bool,
     is_error: bool,
     done: bool,
     /// Set when the call completes (engine-stamped duration).
