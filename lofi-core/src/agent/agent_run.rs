@@ -95,12 +95,6 @@ impl Agent {
                     blocks: vec![ContentBlock::Text { text: user_prompt }],
                 });
             }
-            // Previously a `checkpoint = messages.len()` was captured here so a
-            // cancel/receiver-drop could `messages.truncate(checkpoint)` and roll
-            // back the partial turn. Failed and cancelled turns are now recorded
-            // as branches (see `TurnOutcome`), so the caller's history is left in
-            // place for the recorder to write — the active-path walk on resume
-            // handles excluding the failed content from the agent's context.
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {
@@ -113,9 +107,6 @@ impl Agent {
             }
         }
         let mut stats = TurnStats::new();
-        // Keep one recorder alive across the whole multi-round turn. Each
-        // completed round checkpoints its new messages/timings immediately;
-        // final flush only appends the remaining suffix and terminal marker.
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
         // `lofi.recall` streams the on-disk transcript through a lightweight
@@ -168,10 +159,6 @@ impl Agent {
                     cancel.as_ref(),
                 )
                 .await;
-            // Retry budgets are per provider request, not per whole user
-            // turn. Any successful round — including one that calls a tool
-            // and continues — dismisses the retry notice and resets the next
-            // request to attempt 1.
             if round.is_ok() && retry_attempt > 0 {
                 let _ = tx
                     .send(AgentEvent::RetryEnd {
@@ -188,8 +175,6 @@ impl Agent {
                     break;
                 }
                 Ok(false) if tx.is_closed() => {
-                    // Receiver dropped mid-turn after a tool round. Record
-                    // the partial turn as a failed branch.
                     cancelled = true;
                     break;
                 }
@@ -202,10 +187,6 @@ impl Agent {
                         if let Some((byte_start, byte_end)) = recorder
                             .checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?
                         {
-                            // Storage watermark only. The live builder keeps
-                            // the same prompt, turn, and blocks; collapsed mode
-                            // may now release successful outer-exec payloads
-                            // that are recoverable from this durable range.
                             if !tx.is_closed() {
                                 let _ = tx
                                     .send(AgentEvent::RoundCommitted {
@@ -222,11 +203,6 @@ impl Agent {
                     // the next round would overflow the window and let the UI
                     // force-compact + continue.
                     if let Some(threshold) = self.hard_compact_threshold() {
-                        // Use the full prompt size (non-cached + cached) so
-                        // heavy prompt caching doesn't mask the real context
-                        // pressure. Without this, a session with 990k cached
-                        // tokens and 5k non-cached would never trip the hard
-                        // cap until the API rejects the request.
                         let prompt_tokens =
                             stats.usage.input_tokens + stats.usage.cache_read_tokens;
                         if prompt_tokens > threshold {
@@ -257,16 +233,9 @@ impl Agent {
                     break;
                 }
                 Err(e) => {
-                    // Transient provider errors are retried with exponential
-                    // backoff: the failed
-                    // assistant message is dropped and the round is restarted
-                    // so the provider produces a fresh response.
                     if retry.can_retry(retry_attempt) && crate::retry::is_retryable_error(&e) {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
-                        // Drop the partial assistant message the failed round
-                        // appended (if any) so the retried round starts from a
-                        // clean conversation tail.
                         if messages.last().is_some_and(|m| m.role == Role::Assistant) {
                             messages.pop();
                         }
@@ -282,19 +251,12 @@ impl Agent {
                         // stay open. If the receiver drops, roll back like a
                         // normal cancellation rather than driving a dead channel.
                         if tokio::time::timeout(delay, tx.closed()).await.is_err() {
-                            // Delay elapsed and the channel is still open;
-                            // proceed to the retry.
                         } else {
-                            // The receiver dropped during the backoff.
-                            // Treat as a user cancel: record the partial
-                            // turn as a failed branch.
                             cancelled = true;
                             break;
                         }
                         continue;
                     }
-                    // The error is not retryable or the budget is exhausted:
-                    // emit the final failure summary if a retry was in flight.
                     if retry_attempt > 0 {
                         let _ = tx
                             .send(AgentEvent::RetryEnd {
@@ -309,11 +271,6 @@ impl Agent {
                 }
             }
         }
-        // Commit the turn's messages and tool timings. A terminal marker
-        // (`TurnEnd` for success, `TurnFailed` for error/cancel) is written
-        // and emitted when the turn produced something to record — failed
-        // turns are now kept as branches so their consumed tokens are
-        // honestly accounted for and the failed attempt is inspectable.
         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
         let outcome = if finished_normally {
             Some(TurnOutcome::Finished)
@@ -360,9 +317,6 @@ impl Agent {
                 };
             }
         }
-        // Append anything not yet checkpointed plus the terminal marker. The
-        // recorder returns the full byte span across all round checkpoints so
-        // the UI can safely file-back the completed turn.
         if let Some(recorder) = recorder.as_mut() {
             let summary = stats.summary(elapsed_ms);
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
@@ -447,9 +401,6 @@ impl Agent {
         cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<bool> {
         let schema = exec_tool_schema();
-        // Effective output limit: an explicit agent override wins over the
-        // model's static `max_tokens`, and is encoded per API by the IR
-        // builders (previously OpenAI ignored it entirely).
         let mut model = self.model.clone();
         if let Some(mt) = self.max_output_tokens {
             model.max_tokens = Some(mt);
@@ -463,16 +414,10 @@ impl Agent {
         // end-of-run signal rather than firing before tool execution.
         let mut round_usage: Option<Usage> = None;
         let mut round_bytes = 0usize;
-        // Per tool-call accumulated raw input JSON and the byte length of the
-        // `code` field already streamed to the UI, for live exec streaming.
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, CodePrefixDecoder> = HashMap::new();
         let collect = async {
-            // Open thinking block timer: started on the first ThinkingDelta
-            // of a run, closed when a non-thinking event arrives (or the
-            // stream ends). Each closed duration is recorded in `stats` so it
-            // can be persisted as a `ThinkingTiming` event.
             let mut thinking_open: Option<Instant> = None;
             loop {
                 match tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await {
@@ -480,8 +425,6 @@ impl Agent {
                     Ok(None) => break,
                     Ok(Some(ev)) => match ev {
                         Ok(e) => {
-                            // A protocol-level Done event terminates the round even if
-                            // the HTTP/SSE connection remains open afterward.
                             let terminal = matches!(e, StreamingEvent::Done(_));
                             let is_thinking_ev = matches!(
                                 e,
@@ -563,10 +506,6 @@ impl Agent {
                                     round_usage = Some(*usage);
                                     if let Some(s) = stats.as_deref_mut() {
                                         s.add_usage(*usage, &self.model);
-                                        // Emit the turn's cumulative cost and
-                                        // this round's usage immediately so the
-                                        // UI's context gauge and cost counter
-                                        // refresh per round, not just at turn end.
                                         if !emit(
                                             tx,
                                             AgentEvent::RoundUsage {
@@ -581,15 +520,6 @@ impl Agent {
                                     }
                                 }
                                 StreamingEvent::Error(msg) => {
-                                    // Do not surface a provider error before the
-                                    // outer retry loop has classified it. A
-                                    // transient error is represented by
-                                    // RetryStart/RetryEnd only; emitting Error
-                                    // here would leave a fatal-looking row in
-                                    // the transcript even when the retry later
-                                    // succeeds. Unrecoverable errors are emitted
-                                    // by the run driver after run_continuation
-                                    // returns Err.
                                     return Err(Error::Provider(msg.clone()));
                                 }
                                 _ => {}
@@ -628,7 +558,6 @@ impl Agent {
                     },
                 }
             }
-            // Stream ended: close any still-open thinking block.
             if let (Some(start), Some(s)) = (thinking_open.take(), stats.as_deref_mut()) {
                 let elapsed = start.elapsed();
                 s.thinking_elapsed.push(elapsed);
@@ -678,12 +607,6 @@ impl Agent {
             .await?
         };
 
-        // Tool results travel under the dedicated Tool role: each provider
-        // converter emits them from its Role::Tool arm (Chat Completions
-        // role:"tool", Responses function_call_output, Anthropic
-        // tool_result). A User role would be skipped — collect_text ignores
-        // ToolResult blocks — and the next round would 400 with "No tool
-        // output found for function call".
         messages.push(Message {
             role: Role::Tool,
             blocks: results,
@@ -691,9 +614,6 @@ impl Agent {
         Ok(false)
     }
 
-    /// Execute each tool call in `tool_uses` against the sandbox, emitting
-    /// [`AgentEvent::ToolInput`] (the code) and [`AgentEvent::ToolEnd`] (the
-    /// result) per call, and return the `tool_result` blocks to append.
     #[allow(clippy::too_many_lines)]
     async fn execute_tools(
         &self,
@@ -729,8 +649,6 @@ impl Agent {
             }
         });
         for (id, name, input) in tool_uses {
-            // Only `exec` is advertised; an unknown tool name is a protocol
-            // error, not a silent empty success.
             if *name != "exec" {
                 let content = format!("unknown tool: {name}");
                 let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
@@ -793,11 +711,6 @@ impl Agent {
             {
                 return Err(Error::Cancelled);
             }
-            // Forward native tool-call events (one per `lofi.<tool>`
-            // invocation inside the sandbox) to the UI under this exec id, and
-            // capture each completed call so it can be written to the
-            // transcript and restored on resume. `pending` holds a Start's
-            // name/args until the matching End supplies the result.
             let native_tx = relay_tx.clone();
             let parent = id.to_string();
             let native_pending: Arc<Mutex<HashMap<u64, (String, String)>>> =
@@ -848,11 +761,6 @@ impl Agent {
                     }
                 }) as Arc<dyn Fn(ToolEvent) + Send + Sync>
             };
-            // Build the confirmation callback for shell-policy `ask`
-            // decisions. When a confirm channel is available (interactive
-            // mode), the callback sends a ConfirmRequest and awaits the
-            // user's response. In headless mode it is `None` and `ask`
-            // blocks the command.
             let confirm: Option<lofi_code::ConfirmFn> = self.confirm_tx.as_ref().map(|tx| {
                 let tx = tx.clone();
                 let counter = self.confirm_counter.clone();
@@ -899,8 +807,6 @@ impl Agent {
                 },
             )
             .await;
-            // Drain the native tool calls that completed inside this exec into
-            // the turn stats, so they are persisted with the turn.
             let captured = lock(&native_completed).drain(..).collect::<Vec<_>>();
             if let Some(s) = stats.as_deref_mut() {
                 s.native_tools.extend(captured);

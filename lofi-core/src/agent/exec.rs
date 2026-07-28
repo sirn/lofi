@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// Truncate a tool-result string to at most `max` bytes (on a UTF-8 char
-/// boundary), keeping the head and appending a truncation marker.
 pub(crate) fn cap_tool_result_to(content: &str, max: usize) -> String {
     if content.len() <= max {
         return content.to_string();
@@ -20,17 +18,14 @@ pub(crate) fn cap_tool_result_to(content: &str, max: usize) -> String {
     )
 }
 
-/// Per-native-tool cap. See [`MAX_TOOL_RESULT_BYTES`].
 pub(crate) fn cap_tool_result(content: &str) -> String {
     cap_tool_result_to(content, MAX_TOOL_RESULT_BYTES)
 }
 
-/// Exec-level outer cap. See [`MAX_EXEC_RESULT_BYTES`].
 pub(crate) fn cap_exec_result(content: &str) -> String {
     cap_tool_result_to(content, MAX_EXEC_RESULT_BYTES)
 }
 
-/// Adapt the code sandbox's tool contract to the provider IR.
 #[must_use]
 pub fn exec_tool_schema() -> ToolSchema {
     ToolSchema {
@@ -101,8 +96,6 @@ impl CodePrefixDecoder {
             }
         }
 
-        // Re-decode only the unfinished escape at the end. Normal deltas are
-        // consumed exactly once, avoiding a fresh full-prefix String per event.
         let suffix = &raw[self.processed..];
         let complete = complete_json_string_prefix(suffix);
         self.decoded
@@ -176,9 +169,6 @@ fn complete_json_string_prefix(s: &str) -> usize {
     i
 }
 
-/// Best-effort incremental extraction of the `code` string field from a
-/// partial tool-input JSON buffer. Returns the decoded content available so
-/// far, so the exec source can be streamed live as the model writes it.
 #[cfg(test)]
 pub(crate) fn extract_code_prefix(raw: &str) -> String {
     let bytes = raw.as_bytes();
@@ -231,11 +221,6 @@ pub(crate) fn extract_code_prefix(raw: &str) -> String {
     String::new()
 }
 
-/// Parse an `exec` tool input into `(code, strings, display)`.
-///
-/// Missing `code` yields an empty string (which compiles to a no-op).
-/// `strings` values are coerced to strings via `serde_json` for non-string
-/// entries. `display` is returned as-is for future use.
 pub fn parse_exec_input(
     input: &serde_json::Value,
 ) -> (String, HashMap<String, String>, serde_json::Value) {
@@ -262,9 +247,6 @@ pub fn parse_exec_input(
     (code, strings, display)
 }
 
-/// Extract a short UI label from an exec call's `display` field: a bare
-/// string is used directly, an object is probed for `name`/`title`/
-/// `description`.
 #[must_use]
 pub fn exec_label(display: &serde_json::Value) -> Option<String> {
     if let Some(s) = display.as_str() {
@@ -284,17 +266,12 @@ pub fn exec_label(display: &serde_json::Value) -> Option<String> {
     None
 }
 
-/// UI-facing extract: the TypeScript `code` and optional `display` label for
-/// an `exec` tool-call input. Used by the TUI when restoring a session.
 #[must_use]
 pub fn exec_input_code_and_label(input: &serde_json::Value) -> (String, Option<String>) {
     let (code, _strings, display) = parse_exec_input(input);
     (code, exec_label(&display))
 }
 
-/// UI-facing extract of an `exec` call's result: on success the payload is
-/// `{ "value": ..., "logs": [...] }` and we surface `value` (a string as-is,
-/// anything else pretty-printed); on error the raw message is returned.
 #[must_use]
 pub fn exec_result_display(result: &str, is_error: bool) -> String {
     if is_error {

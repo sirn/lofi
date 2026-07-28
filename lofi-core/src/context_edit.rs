@@ -26,13 +26,11 @@
 
 use lofi_types::{ContentBlock, EditConfig, Message, SessionEvent, SessionEventKind};
 
-/// A block's retention category for the recent-window count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cat {
     ToolResult,
     Thinking,
     ToolUse,
-    /// Text / anything else — always kept.
     Other,
 }
 
@@ -45,9 +43,6 @@ fn category(b: &ContentBlock) -> Cat {
     }
 }
 
-/// Stub for an elided tool result. `event_id` is the on-disk event id of the
-/// message that held the result, so `lofi.result("<id>")` can fetch the full
-/// original content from the transcript.
 fn result_stub(event_id: &str, is_error: bool) -> String {
     let kind = if is_error { "error result" } else { "result" };
     format!("[exec {kind} cleared — re-expand with lofi.result(\"{event_id}\")]")
@@ -89,9 +84,6 @@ pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> 
     edit_tail_refs(&refs, opts)
 }
 
-/// Borrowing variant used by compaction, where the event log already owns
-/// every message. Only the final edited output is allocated; large tool
-/// results are not cloned into an intermediate `(id, message)` list first.
 #[must_use]
 pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Message> {
     if !opts.enabled || kept.is_empty() {
@@ -167,20 +159,8 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
         .collect()
 }
 
-/// Recover the original, pre-elision content of a single message event by
-/// id — the inverse of [`edit_tail`]. Called by the `lofi.result` native
-/// tool so the model can re-expand a stubbed tool result or tool-call.
-///
-/// Returns the elided payload as a string:
-/// - a `Tool`-role message with `ToolResult` block(s) → their `content`
-///   (the exec output text),
-/// - an `Assistant` message with `ToolUse` block(s) → the first tool use's
-///   `input` pretty-printed (the verbatim `code`),
-/// - anything else → `None` (not recoverable; the id was not a message event
-///   or held no elidable block).
 #[must_use]
 pub fn recover_message_content(msg: &Message) -> Option<String> {
-    // Tool results: join the content of any ToolResult blocks.
     let results: Vec<&str> = msg
         .blocks
         .iter()
@@ -192,7 +172,6 @@ pub fn recover_message_content(msg: &Message) -> Option<String> {
     if !results.is_empty() {
         return Some(results.join("\n\n"));
     }
-    // Tool calls: return the first ToolUse's input (the verbatim code).
     msg.blocks.iter().find_map(|block| match block {
         ContentBlock::ToolUse { input, .. } => {
             Some(serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()))
@@ -216,7 +195,6 @@ mod tests {
     use super::*;
     use lofi_types::{ContentBlock, Message, Role};
 
-    // kept as a test fixture
     #[allow(dead_code)]
     fn user(t: &str) -> Message {
         Message {
@@ -304,7 +282,6 @@ mod tests {
 
     #[test]
     fn elides_old_tool_results_keeps_recent() {
-        // Three tool results; keep_results=1 -> only the last is verbatim.
         let kept = vec![
             (
                 "e1".to_string(),
@@ -359,8 +336,6 @@ mod tests {
             ),
         ];
         let out = tail(&kept);
-        // Old thinking dropped; its tool call stays (keep_calls=1 keeps the
-        // last call only, so a's code is stubbed but the block remains).
         assert!(out[0]
             .blocks
             .iter()
@@ -387,7 +362,6 @@ mod tests {
             ),
         ];
         let out = tail(&kept);
-        // Recent call keeps full code.
         let ContentBlock::ToolUse { input: recent, .. } = &out[1].blocks[0] else {
             panic!()
         };
@@ -395,7 +369,6 @@ mod tests {
             recent.get("code").and_then(|v| v.as_str()),
             Some("recent-code")
         );
-        // Old call: code stubbed, display kept.
         let ContentBlock::ToolUse { input: old, .. } = &out[0].blocks[0] else {
             panic!()
         };

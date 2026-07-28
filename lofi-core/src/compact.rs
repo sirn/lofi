@@ -1,9 +1,4 @@
 #![allow(clippy::doc_markdown)]
-//! Offline, no-LLM conversation compaction.
-//!
-//! Compaction creates a structured handoff plus a clipped turn transcript and
-//! merges stable facts across repeated passes. The full transcript remains on
-//! disk; only the context presented to the model is reduced.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,62 +10,31 @@ use lofi_types::{
 
 use crate::session::store;
 
-/// The marker that begins every compaction summary. Used to detect a
-/// previously-injected summary message when re-compacting, so it is stripped
-/// from the live message list before planning the next cut (its content is
-/// passed as previous_summary and merged into the fresh one).
 pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.";
 
-/// A live message on the active path with the event id of the
-/// SessionEventKind::Message it came from. The event id is needed to
-/// record the cut boundary (first_kept_entry_id) in the compaction marker.
 #[derive(Debug, Clone)]
 struct LiveMessage {
     event_id: String,
     message: Message,
 }
 
-/// The result of planning where to cut the live message list: how many
-/// leading messages to summarize, and the event id of the first kept
-/// message (the new compaction boundary).
 #[derive(Debug, Clone)]
 struct CutPlan {
     summarized: usize,
     first_kept_event_id: Option<String>,
 }
 
-/// A completed compaction: the merged summary text, the kept tail messages
-/// (to follow the injected summary message), and bookkeeping for the
-/// transcript marker and the user-facing notification.
 #[derive(Debug, Clone)]
 pub struct Compaction {
-    /// The full summary string (preamble + sections + brief transcript),
-    /// ready to inject as a single user message at the head of the kept tail.
     pub summary: String,
-    /// The kept tail messages, in order. The new history is
-    /// [summary_message] + kept_messages.
     pub kept_messages: Vec<Message>,
-    /// Number of live messages folded into the summary (excluding the prior
-    /// summary message itself).
     pub summarized_count: usize,
-    /// Total original messages represented by the merged summary. This is
-    /// persisted so resume preserves the history count across re-compactions.
     pub represented_count: usize,
-    /// Number of messages kept in the tail.
     pub kept_count: usize,
-    /// Event id of the first kept message — recorded in the
-    /// SessionEventKind::Compaction marker so a resumed session rebuilds
-    /// the same compacted history. None when nothing was kept (compact-all).
     pub first_kept_event_id: Option<String>,
-    /// Event ids `[first, last]` of the summarized range — every live
-    /// message folded into this summary. Recorded in the marker so
-    /// `/recall scope:compaction:N` can resolve the range to global message
-    /// indices and search within it. `None` only when the live list was
-    /// empty (compact refused earlier); in practice always `Some`.
     pub summarized_range: Option<[String; 2]>,
 }
 
-/// Options for compact.
 #[derive(Clone, Default)]
 pub struct CompactOptions {
     /// Soft token budget (chars/4) for the kept tail. When the most recent
@@ -78,34 +42,12 @@ pub struct CompactOptions {
     /// tool-cycle boundary so the oversized turn is partly summarized too.
     /// 0 disables the budget guard.
     pub max_kept_tokens: usize,
-    /// Tiered-retention context editing applied to the kept tail (see
-    /// [`crate::context_edit`]). When `enabled` is false the tail is carried
-    /// verbatim.
     pub edit: lofi_types::EditConfig,
-    /// Compaction hooks (e.g. lofi-code's tool-API section). Each hook
-    /// receives the normalized transcript blocks and returns additional
-    /// summary sections.
     pub hooks: Vec<Arc<dyn CompactionHook>>,
 }
 
-/// Minimum number of live messages the summarized prefix must contain for a
-/// compaction to be worth running. Below this there is too little to fold —
-/// the summary would be barely smaller than the original — so `compact`
-/// returns `None` and the caller refuses (manual `/compact` notifies;
-/// auto-compact simply no-ops).
 const MIN_SUMMARIZED: usize = 5;
 
-/// Run an offline compaction over the active path of events.
-///
-/// events is the full transcript event log; the active path (root -> leaf)
-/// is walked the same way store::active_path_from_leaf does, so a branched
-/// session compacts only the visible conversation. A prior
-/// SessionEventKind::Compaction marker on the path supplies
-/// previous_summary (its already-summarized range is excluded from the new
-/// cut); None when this is the first compaction.
-///
-/// Returns None when there is nothing worth compacting (no live messages,
-/// or too few to fold).
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compaction> {
@@ -114,9 +56,6 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         return None;
     }
 
-    // Walk leaf -> root once to find the most recent compaction marker on the
-    // active path (its summary is previous_summary; its first_kept_entry_id
-    // is where the already-summarized range ends).
     let mut previous_summary: Option<String> = None;
     // The summary stands in for this many messages. Keep that semantic count
     // across resume instead of treating the restored summary as one message
@@ -280,17 +219,8 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         .iter()
         .map(|message| (message.event_id.as_str(), &message.message))
         .collect();
-    // Apply tiered-retention context editing to the kept tail so the new
-    // prefix is much lighter (old tool results/thinking/tool-call code
-    // elided, recall-recoverable). Cache-safe: this rides the prefix
-    // rebuild compaction already pays.
     let kept_messages: Vec<Message> = crate::context_edit::edit_tail_refs(&kept_pairs, &opts.edit);
 
-    // The summarized range is `live[0 .. plan.summarized]`. Recorded as
-    // event ids so `/recall scope:compaction:N` can resolve it to global
-    // message indices without re-deriving the cut. Compact-all (summarized
-    // == live.len()) collapses the whole live list; the range still spans
-    // first..last.
     let summarized_range: Option<[String; 2]> = if plan.summarized > 0 {
         let first = live[0].event_id.clone();
         let last = live[plan.summarized - 1].event_id.clone();
@@ -310,8 +240,6 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     })
 }
 
-/// Build the new history for an agent run from a Compaction: the summary
-/// as a single user message, followed by the kept tail.
 #[must_use]
 pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
     let mut out = Vec::with_capacity(compaction.kept_messages.len() + 1);
@@ -327,14 +255,6 @@ pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
     out
 }
 
-// ── cut planning ──────────────────────────────────────────────────────────
-
-/// Decide where to cut the live message list. The default cut is at the last
-/// user prompt whose response cycle is complete — i.e. keep the most recent
-/// turn whole and summarize everything before it. With only one user prompt,
-/// fall back to a completed tool-cycle boundary in the first half, then to
-/// compact-all. The kept-tail token budget, when set, splits an oversized
-/// final turn at a completed tool-cycle so it does not re-overflow.
 fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
     let user_indices: Vec<usize> = live
         .iter()
@@ -343,28 +263,19 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         .map(|(i, _)| i)
         .collect();
 
-    // Strategy 1: Cut at the last completed user-prompt boundary.
-    // Summarize everything before it; keep the final turn whole (unless the
-    // oversized-turn guard splits it). Requires at least two user prompts so
-    // the summarized prefix is non-empty.
     if let Some(&last_user) = user_indices.last() {
         let mut cut = last_user;
-        // In-progress-turn guard: if the turn after the last user prompt has
-        // an unmatched tool call, push the cut back to the previous prompt.
         if has_unmatched_tool_call(live, last_user) {
             if let Some(&prev) = user_indices.iter().rev().nth(1) {
                 cut = prev;
             }
         }
-        // Oversized-turn guard: split the kept suffix at a completed
-        // tool-cycle so an oversized final turn is partly summarized.
         if opts.max_kept_tokens > 0 {
             let suffix_tokens = estimate_tokens(&live[cut..]);
             if suffix_tokens > opts.max_kept_tokens {
                 if let Some(split) = find_suffix_split(live, cut, opts.max_kept_tokens) {
                     cut = split;
                 } else {
-                    // No cycle boundary fits the budget — compact everything.
                     return CutPlan {
                         summarized: live.len(),
                         first_kept_event_id: None,
@@ -378,14 +289,8 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
                 first_kept_event_id: Some(live[cut].event_id.clone()),
             };
         }
-        // cut == 0: the only user prompt is at index 0, so there is no
-        // prefix to summarize. Fall through to strategy 2.
     }
 
-    // Strategy 2: Split a single turn (or a promptless conversation) at a
-    // completed tool-cycle boundary near the midpoint. This lets a long
-    // agentic turn with many tool calls be partially summarized even when
-    // there is only one user prompt.
     if let Some(mid) = find_mid_cycle_boundary(live) {
         if mid > 0 && mid < live.len() - 1 {
             return CutPlan {
@@ -395,16 +300,12 @@ fn plan_cut(live: &[LiveMessage], opts: &CompactOptions) -> CutPlan {
         }
     }
 
-    // Strategy 3: Compact-all. No suitable boundary was found; fold the
-    // entire live list into the summary.
     CutPlan {
         summarized: live.len(),
         first_kept_event_id: None,
     }
 }
 
-/// Whether m is a real user prompt (not a tool-result-only message and not
-/// empty).
 fn is_real_user(m: &Message) -> bool {
     if m.role != Role::User {
         return false;
@@ -414,8 +315,6 @@ fn is_real_user(m: &Message) -> bool {
         .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
 }
 
-/// Whether the turn starting at the user prompt from has an assistant tool
-/// call with no matching tool result (i.e. the cycle is incomplete).
 fn has_unmatched_tool_call(live: &[LiveMessage], from: usize) -> bool {
     let mut calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut results: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -434,9 +333,6 @@ fn has_unmatched_tool_call(live: &[LiveMessage], from: usize) -> bool {
     calls.iter().any(|c| !results.contains(c))
 }
 
-/// Find a completed tool-cycle boundary (a tool-result closing the last open
-/// tool call) nearest the midpoint of the first half. Used when there is no
-/// user prompt to cut at.
 fn find_mid_cycle_boundary(live: &[LiveMessage]) -> Option<usize> {
     let mut cycle_ends: Vec<usize> = Vec::new();
     let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -473,9 +369,6 @@ fn find_mid_cycle_boundary(live: &[LiveMessage]) -> Option<usize> {
     cycle_ends.into_iter().min_by_key(|&i| i.abs_diff(target))
 }
 
-/// Find a completed tool-cycle boundary inside the kept suffix such that the
-/// tail after it fits the token budget, keeping as much recent context as
-/// possible. Returns the index of the first message to keep.
 fn find_suffix_split(live: &[LiveMessage], cut: usize, budget_tokens: usize) -> Option<usize> {
     let suffix = &live[cut..];
     let mut cycle_ends: Vec<usize> = Vec::new();
@@ -515,10 +408,6 @@ fn find_suffix_split(live: &[LiveMessage], cut: usize, budget_tokens: usize) -> 
     None
 }
 
-// ── normalization ─────────────────────────────────────────────────────────
-
-/// Flatten a slice of messages (the summarized prefix) into Blocks,
-/// attaching the native tool calls that ran inside each exec.
 fn normalize(
     messages: &[&Message],
     native_by_parent: &HashMap<String, Vec<NativeToolRecord>>,
@@ -612,9 +501,6 @@ fn normalize(
     out
 }
 
-/// Surface the displayable text of an exec result. On success the payload
-/// is {"value":..., "logs":[...]}; extract value. On error, the content is
-/// the error message verbatim.
 fn exec_result_display(content: &str, is_error: bool) -> String {
     if is_error {
         return content.to_string();
@@ -634,20 +520,13 @@ fn exec_result_display(content: &str, is_error: bool) -> String {
         )
 }
 
-// ── summary building ──────────────────────────────────────────────────────
-
 const SEPARATOR: &str = "\n\n---\n\n";
 
-/// Build the full fresh summary (no merging): preamble + ordered sections +
-/// brief transcript.
 fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
     let goal = extract_session_goal(blocks);
     let prefs = extract_preferences(blocks);
     let outstanding = extract_outstanding(blocks, hooks);
 
-    // Files and Commits are provided by hooks (they know the tool
-    // vocabulary). Fall back to built-in extractors when no hook is
-    // registered, so tests without hooks still work.
     let files: Vec<String> = hooks
         .iter()
         .find_map(|h| {
@@ -675,8 +554,6 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
     .filter(|s| !s.is_empty())
     .collect();
 
-    // Hook sections (e.g. APIs Used from lofi-code) go after the stable
-    // built-in sections, before the volatile Outstanding Context.
     for hook in hooks {
         for sec in hook.sections(blocks) {
             let s = section(&sec.title, &sec.items);
@@ -697,8 +574,6 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
     } else {
         cap_brief(&brief)
     };
-    // Apply the summary token budget: trim the brief (most volatile) to
-    // keep the structured headers + brief within MAX_SUMMARY_TOKENS.
     let trimmed_brief = trim_brief_to_budget(&headers_text, &capped_brief);
     let mut parts: Vec<String> = Vec::new();
     if !headers_text.is_empty() {
@@ -714,7 +589,6 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
     format!("{HANDOFF_PREAMBLE}\n\n{body}")
 }
 
-/// Format a section: [Title] header followed by - item lines.
 fn section(title: &str, items: &[String]) -> String {
     if items.is_empty() {
         return String::new();
@@ -752,7 +626,6 @@ fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let n = prompts.len();
-    // Indices to keep: first HEAD, last TAIL, fill from the middle up to MAX.
     let mut keep: Vec<usize> = Vec::new();
     if n <= MAX {
         (0..n).for_each(|i| keep.push(i));
@@ -806,7 +679,6 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         "instead of",
         "rather than",
     ];
-    /// Check if any signal appears in the first `max_prefix` chars (lowercased).
     fn has_signal_near_start(lower: &str) -> bool {
         const MAX_PREFIX: usize = 60;
         let prefix = if lower.len() > MAX_PREFIX {
@@ -823,7 +695,6 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
             continue;
         };
         let trimmed = text.trim();
-        // Skip questions — they are requests, not preferences.
         if trimmed.ends_with('?') {
             continue;
         }
@@ -846,9 +717,6 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
     out
 }
 
-/// Files And Changes from native tool calls: read/bash_read -> Read,
-/// edit -> Modified, write -> Created. Dedup; Created drops files already
-/// in Modified.
 fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
     let mut modified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -901,7 +769,6 @@ fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
     lines
 }
 
-/// Commits from bash native calls whose command runs git commit.
 fn extract_commits(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -931,7 +798,6 @@ fn extract_commits(blocks: &[CompactBlock]) -> Vec<String> {
     out
 }
 
-/// Extract the -m "message" (or -m 'message') from a git commit command.
 fn extract_commit_message(cmd: &str) -> Option<String> {
     let m = cmd.find("-m")?;
     let rest = cmd[m + 2..].trim_start();
@@ -944,22 +810,18 @@ fn extract_commit_message(cmd: &str) -> Option<String> {
     Some(clip(body[..end].trim(), 120))
 }
 
-/// First short git hash in a bash result string.
 fn first_hash(text: &str) -> Option<String> {
     text.split(|c: char| !c.is_ascii_hexdigit())
         .find(|word| (7..=12).contains(&word.len()))
         .map(str::to_string)
 }
 
-/// The blocker regex. Compiled once and cached for the process lifetime.
 fn blocker_regex() -> Option<&'static regex::Regex> {
     static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(BLOCKER_RE).ok())
         .as_ref()
 }
 
-/// Outstanding Context: errors and blockers from the recent tail (last ~25
-/// blocks). Tagged by severity.
 fn extract_outstanding(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> Vec<String> {
     let blocker = blocker_regex();
     let tail = if blocks.len() > 25 {
@@ -1023,19 +885,12 @@ fn extract_outstanding(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>
     items
 }
 
-// ── brief transcript ──────────────────────────────────────────────────────
-
 const BRIEF_MAX_LINES: usize = 120;
 const TRUNC_USER: usize = 256;
 const TRUNC_ASSISTANT: usize = 200;
 
-/// Soft token budget (chars/4) for the entire summary. The brief transcript
-/// is trimmed first (it is the most volatile and least structured part);
-/// section headers are left intact. 0 disables the budget guard.
 const MAX_SUMMARY_TOKENS: usize = 4_000;
 
-/// Build the compressed per-turn transcript: [user]/[assistant] sections
-/// with clipped text and one-liner tool actions.
 #[allow(clippy::too_many_lines)]
 fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> String {
     let compress = |text: &str, max: usize| -> String {
@@ -1095,14 +950,11 @@ fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> St
                     let l = label.clone().unwrap_or_else(|| first_line(code, 60));
                     lines.push(format!("* exec \"{l}\""));
                 } else {
-                    // Collapse consecutive identical native-tool actions
-                    // into a single line with a repeat count.
                     let mut i = 0;
                     while i < native.len() {
                         let rec = &native[i];
                         let args = clip(&rec.args, 80);
                         let marker = if rec.is_error { " (error)" } else { "" };
-                        // Count consecutive identical entries.
                         let mut count = 1;
                         while i + count < native.len()
                             && native[i + count].name == rec.name
@@ -1159,9 +1011,6 @@ fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> St
     lines.join("\n")
 }
 
-/// Cap the brief transcript to the last BRIEF_MAX_LINES lines, noting how
-/// many earlier lines were omitted. If the result still exceeds the summary
-/// token budget, further trim from the front (keeping the most recent lines).
 fn cap_brief(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let (kept, omitted) = if lines.len() <= BRIEF_MAX_LINES {
@@ -1194,7 +1043,6 @@ fn trim_brief_to_budget(headers: &str, brief: &str) -> String {
     if brief_tokens <= budget {
         return brief.to_string();
     }
-    // Keep the last N lines that fit within the remaining budget.
     let lines: Vec<&str> = brief.split('\n').collect();
     let mut kept: Vec<&str> = Vec::new();
     let mut kept_chars = 0;
@@ -1218,11 +1066,7 @@ fn trim_brief_to_budget(headers: &str, brief: &str) -> String {
     }
 }
 
-/// The blocker pattern for the Outstanding Context section: matches lines
-/// that read as a failure or unresolved problem.
 const BLOCKER_RE: &str = r"(?i)(fail(ed|s|ure|ing)?|broken|cannot|can't|won't work|does not work|doesn't work|still (broken|failing|wrong)|blocked|blocker|not (fixed|resolved|working)|crash(es|ed|ing)?)";
-
-// ── merge with previous summary ───────────────────────────────────────────
 
 const SECTION_HEADERS: &[&str] = &[
     "Session Goal",
@@ -1232,10 +1076,6 @@ const SECTION_HEADERS: &[&str] = &[
     "Outstanding Context",
 ];
 
-/// Merge a fresh summary into a previous one. Stable sections (Goal,
-/// Preferences, Files, Commits) dedup and cap; the volatile section
-/// (Outstanding Context) is replaced wholesale; the brief transcript
-/// concatenates (prev then fresh), capped.
 fn merge_previous(prev: &str, fresh: &str) -> String {
     let prev = strip_preamble(prev);
     let fresh = strip_preamble(fresh);
@@ -1255,9 +1095,6 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
         }
     }
 
-    // Carry forward hook-provided sections (any [Header] not in
-    // SECTION_HEADERS). Fresh sections replace prev ones of the same name;
-    // prev-only sections are kept so hook data is never lost on re-compact.
     for header in extra_section_names(&prev_headers, &fresh_headers, &handled) {
         let p = section_of(&prev_headers, &header);
         let f = section_of(&fresh_headers, &header);
@@ -1298,7 +1135,6 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     format!("{HANDOFF_PREAMBLE}\n\n{}", parts.join(SEPARATOR))
 }
 
-/// Remove the leading preamble so only the section body remains.
 fn strip_preamble(text: &str) -> String {
     text.strip_prefix(HANDOFF_PREAMBLE).map_or_else(
         || text.to_string(),
@@ -1306,8 +1142,6 @@ fn strip_preamble(text: &str) -> String {
     )
 }
 
-/// Split a summary body into its [Header] block (all sections) and the
-/// brief transcript (everything after the --- separator).
 fn split_headers_brief(body: &str) -> (String, String) {
     match body.split_once(SEPARATOR) {
         Some((h, b)) => (h.trim().to_string(), b.trim().to_string()),
@@ -1315,8 +1149,6 @@ fn split_headers_brief(body: &str) -> (String, String) {
     }
 }
 
-/// Extract a single [Header] section block (header line + body lines) from
-/// the headers text.
 fn section_of(headers: &str, name: &str) -> String {
     let tag = format!("[{name}]");
     let start = headers.find(&tag).map(|i| i + tag.len());
@@ -1328,10 +1160,6 @@ fn section_of(headers: &str, name: &str) -> String {
     rest[..end].trim().to_string()
 }
 
-/// Collect `[Header]` names from both prev and fresh headers that are not in
-/// the built-in `SECTION_HEADERS` set. These are hook-provided sections that
-/// must be carried through merges. Returns names in order of first appearance
-/// (prev then fresh), deduplicated.
 fn extra_section_names(
     prev: &str,
     fresh: &str,
@@ -1353,10 +1181,6 @@ fn extra_section_names(
     out
 }
 
-/// Merge one section. Outstanding Context is volatile (fresh only). Files And
-/// Changes is unioned across categories. Session Goal preserves the original
-/// intent (first 2 prev items) before filling with recent ones. The rest
-/// dedup body lines and cap.
 fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     if name == "Outstanding Context" {
         if fresh.is_empty() {
@@ -1384,14 +1208,12 @@ fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     if name == "Session Goal" {
-        // Preserve the original intent: first 2 from prev always survive.
         const PROTECTED: usize = 2;
         for l in prev_lines.iter().take(PROTECTED) {
             if seen.insert(l.clone()) {
                 lines.push(l.clone());
             }
         }
-        // Then fill with fresh (most recent direction) and remaining prev.
         for l in fresh_lines.iter().chain(prev_lines.iter().skip(PROTECTED)) {
             if seen.insert(l.clone()) {
                 lines.push(l.clone());
@@ -1421,7 +1243,6 @@ fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
     format!("[{name}]\n{body}")
 }
 
-/// Merge Files And Changes by unioning each category path set.
 fn merge_files(prev: &str, fresh: &str) -> String {
     let mut modified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1473,8 +1294,6 @@ fn merge_files(prev: &str, fresh: &str) -> String {
     format!("[Files And Changes]\n{}", lines.join("\n"))
 }
 
-/// Split a "Modified: a, b, c (+recall: d, e)" line into individual paths,
-/// dropping the +recall marker.
 fn split_paths(rest: &str) -> Vec<String> {
     let no_recall = rest.split("+recall:").next().unwrap_or(rest);
     no_recall
@@ -1484,9 +1303,6 @@ fn split_paths(rest: &str) -> Vec<String> {
         .collect()
 }
 
-// ── text helpers ──────────────────────────────────────────────────────────
-
-/// Concatenate all text blocks of a message (used for user/assistant text).
 fn user_text(m: &Message) -> String {
     m.blocks
         .iter()
@@ -1498,8 +1314,6 @@ fn user_text(m: &Message) -> String {
         .join("\n")
 }
 
-/// Clip text to max chars on a word boundary, avoiding splitting a
-/// surrogate pair.
 fn clip(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
@@ -1530,38 +1344,27 @@ fn clip(text: &str, max: usize) -> String {
     text[..cut].trim_end().to_string()
 }
 
-/// First non-empty line of text, clipped to max.
 fn first_line(text: &str, max: usize) -> String {
     let line = text.split('\n').next().unwrap_or("").trim();
     clip(line, max)
 }
 
-/// Compress a tool result into a compact, meaningful summary.
-///
-/// Instead of just taking the first line (which may be `{` for JSON output),
-/// this tries to extract the most useful information:
-/// - For JSON objects, it picks out key fields like `output`, `ok`, `code`, etc.
-/// - For multi-line text, it takes the first few non-empty lines.
-/// - Falls back to first_line for single-line results.
 fn compress_tool_result(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    // Single-line results: just clip.
     if !trimmed.contains('\n') {
         return clip(trimmed, max);
     }
 
-    // Try JSON parsing for structured tool output.
     if trimmed.starts_with('{') {
         if let Some(summary) = compress_json_result(trimmed, max) {
             return summary;
         }
     }
 
-    // For multi-line text, take up to 3 non-empty lines and join with " | ".
     let lines: Vec<&str> = trimmed
         .lines()
         .map(str::trim)
@@ -1575,19 +1378,15 @@ fn compress_tool_result(text: &str, max: usize) -> String {
     clip(&joined, max)
 }
 
-/// Extract a compact summary from a JSON tool result object.
-/// Picks out the most informative fields and formats them as `key=value` pairs.
 fn compress_json_result(text: &str, max: usize) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = v.as_object()?;
-    // Priority fields that carry the most useful info.
     let priority = [
         "output", "error", "stderr", "stdout", "path", "value", "result", "content", "message",
         "text",
     ];
     let mut parts: Vec<String> = Vec::new();
 
-    // First, grab priority fields.
     for key in &priority {
         if let Some(val) = obj.get(*key) {
             let s = json_value_brief(val, 60);
@@ -1597,7 +1396,6 @@ fn compress_json_result(text: &str, max: usize) -> Option<String> {
         }
     }
 
-    // Then grab status-ish fields.
     for key in &["ok", "code", "status", "signal", "is_error", "duration_ms"] {
         if let Some(val) = obj.get(*key) {
             let s = json_value_brief(val, 30);
@@ -1608,7 +1406,6 @@ fn compress_json_result(text: &str, max: usize) -> Option<String> {
     }
 
     if parts.is_empty() {
-        // No recognised fields; show first 3 keys.
         for (k, v) in obj.iter().take(3) {
             let s = json_value_brief(v, 40);
             if !s.is_empty() {
@@ -1623,7 +1420,6 @@ fn compress_json_result(text: &str, max: usize) -> Option<String> {
     Some(clip(&parts.join(" "), max))
 }
 
-/// Render a JSON value as a brief string for inclusion in a compressed summary.
 fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
     match v {
         serde_json::Value::String(s) => clip(s.trim(), max),
@@ -1647,8 +1443,6 @@ fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
     }
 }
 
-/// Extract the absolute path from a bash truncation notice like
-/// "Full output: /tmp/lofi-bash-xxxx.log. Use lofi.read(...)".
 fn extract_full_output_path(text: &str) -> Option<&str> {
     let rest = text.split("Full output: ").nth(1)?;
     let path = rest.split(". Use lofi.read").next()?.trim();
@@ -1659,7 +1453,6 @@ fn extract_full_output_path(text: &str) -> Option<&str> {
     }
 }
 
-/// Non-empty, trimmed lines of text.
 fn non_empty_lines(text: &str) -> Vec<String> {
     text.split('\n')
         .map(|l| l.trim().to_string())
@@ -1667,7 +1460,6 @@ fn non_empty_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Rough token estimate (chars/4) for a message.
 fn estimate_message_tokens(m: &Message) -> usize {
     let chars: usize = m
         .blocks
@@ -1681,7 +1473,6 @@ fn estimate_message_tokens(m: &Message) -> usize {
     chars / 4
 }
 
-/// Rough token estimate for a slice of messages.
 fn estimate_tokens(msgs: &[LiveMessage]) -> usize {
     msgs.iter()
         .map(|lm| estimate_message_tokens(&lm.message))
@@ -1805,8 +1596,6 @@ mod tests {
 
     #[test]
     fn compact_refuses_when_too_little_to_fold() {
-        // Four messages: the prefix before the last user prompt is only two
-        // messages — below MIN_SUMMARIZED, so compact returns None.
         let events = events_of(&[
             user("hi"),
             assistant("hello"),
@@ -1874,8 +1663,6 @@ mod tests {
 
     #[test]
     fn merge_previous_preserves_original_goals() {
-        // 8 prior goals + 5 fresh goals = 13 unique. The cap is 8.
-        // The first 2 prior goals must always survive.
         let prev_goals: Vec<String> = (0..8).map(|i| format!("- original goal {i}")).collect();
         let fresh_goals: Vec<String> = (0..5).map(|i| format!("- fresh goal {i}")).collect();
         let prev = format!(
@@ -1887,12 +1674,9 @@ mod tests {
             fresh_goals.join("\n")
         );
         let merged = merge_previous(&prev, &fresh);
-        // Original intent preserved.
         assert!(merged.contains("original goal 0"));
         assert!(merged.contains("original goal 1"));
-        // Most recent fresh goals also present.
         assert!(merged.contains("fresh goal 4"));
-        // Not all 13 can fit (cap 8).
         let goal_count = merged
             .split("[Session Goal]")
             .nth(1)
@@ -1953,7 +1737,6 @@ mod tests {
         msgs.push(assistant("done"));
         let events = events_of(&msgs);
         let c = compact(&events, &CompactOptions::default()).expect("should compact");
-        // The summary should be well under the budget (4k tokens = 16k chars).
         let summary_chars = c.summary.len();
         assert!(
             summary_chars < 20_000,
@@ -1961,10 +1744,6 @@ mod tests {
         );
     }
 
-    /// On a re-compact, the on-disk transcript still has the *original* unedited
-    /// messages from the prior compaction's kept tail. The live list must apply
-    /// edit_tail to that old span so the second compact sees the same lightweight
-    /// prefix the agent does, not the bloated originals.
     #[test]
     fn re_compact_after_compact_all_ignores_summarized_messages() {
         let mut events = events_of(&[user("OLD MESSAGE MUST STAY SUMMARIZED"), assistant("old")]);
@@ -2009,27 +1788,17 @@ mod tests {
 
     #[test]
     fn re_compact_edits_old_kept_tail_from_disk() {
-        // Simulate the on-disk state after a hard-compact + continue:
-        // [old turn with large tool results] [Compaction marker] [new turn]
-        //
-        // The old turn's tool results are huge on disk. Without the fix,
-        // compact() loads them verbatim and the live list is inflated.
-        // With the fix, edit_tail is applied to the old kept tail span,
-        // shrinking the stubbed results before plan_cut runs.
         let big_result = "x".repeat(10_000);
         let mut events = events_of(&[
             user("do task"),
             exec_call("t1", "lofi.read"),
             exec_result("t1", &big_result),
             assistant("done"),
-            // --- prior compaction kept tail starts here (e4) ---
             user("now continue"),
             exec_call("t2", "lofi.read"),
             exec_result("t2", &big_result),
             assistant("ok"),
-            // --- prior compaction kept tail ends here ---
         ]);
-        // Add a Compaction marker after e7. first_kept_entry_id = "e4".
         events.push(SessionEvent {
             id: "c1".to_string(),
             parent_id: Some("e7".to_string()),
@@ -2043,7 +1812,6 @@ mod tests {
                 kept: 4,
             },
         });
-        // New messages after the compaction marker (the continuation).
         events.push(SessionEvent {
             id: "e8".to_string(),
             parent_id: Some("c1".to_string()),
@@ -2087,19 +1855,12 @@ mod tests {
 
         let c = compact(&events, &opts).expect("compaction should succeed");
 
-        // The old kept tail's tool result (e6, 10k chars) should have been
-        // edited to a short stub before plan_cut, so it does NOT appear in
-        // the summary. Without the fix, the 10k-char result would be loaded
-        // verbatim and inflate the prefix that gets summarized.
         assert!(c.summary.contains("[prior summary]"));
         assert!(
             !c.summary.contains(&"x".repeat(100)),
             "summary should not contain the big result from the old kept tail"
         );
 
-        // The old kept tail's tool result that ended up in the summarized
-        // prefix should have been stubbed — verify by checking the summary
-        // contains the stub marker, not the raw content.
         assert!(
             c.summary.contains("cleared") || !c.summary.contains(&big_result),
             "old kept tail results should be stubbed, not carried verbatim into summary"
