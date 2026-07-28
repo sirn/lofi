@@ -41,25 +41,15 @@ use lofi_types::BashConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::oneshot;
 
-/// A confirmation request from the shell policy, sent to the UI.
 #[derive(Debug)]
 pub struct ConfirmRequest {
-    /// Unique id for matching the response.
     pub id: u64,
-    /// The command text awaiting confirmation.
     pub command: String,
-    /// Current policy/auto-mode reason. The evaluator may update this while
-    /// the dialog is open.
     pub reason: Arc<Mutex<lofi_code::ConfirmReason>>,
-    /// Whether the request can still be answered. A completed auto-approval
-    /// clears this so the UI can discard its stale dialog.
     pub active: Arc<AtomicBool>,
-    /// Send `true` to allow, `false` to deny.
     pub respond: oneshot::Sender<bool>,
 }
 
-/// The system prompt shipped with lofi, `include_str!`'d from
-/// `prompts/system.md`.
 mod agent_run;
 mod auto_mode;
 mod event;
@@ -91,10 +81,6 @@ const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// for a single round, so a hostile or misbehaving endpoint sending many
 /// small valid events cannot exhaust memory within the stream timeout.
 const MAX_ROUND_BYTES: usize = 32 * 1024 * 1024;
-/// Cap on each native tool (`lofi.read`/`lofi.bash`/…) result, applied
-/// before it's folded into the exec payload. Without it a single huge
-/// sub-tool call would monopolize the exec result. Caps each native tool
-/// result at 50 KB / 2000 lines.
 const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
 /// Outer cap on the whole exec result sent back to the provider. Native
 /// sub-tool results are already individually capped to `MAX_TOOL_RESULT_BYTES`;
@@ -105,30 +91,15 @@ const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 /// Fixed per-event charge added to the round byte budget to cover
 /// Vec/enum/dispatch overhead not captured by owned-string lengths.
 const PER_EVENT_OVERHEAD: usize = 64;
-/// Lock a mutex, recovering from poison by taking the guard anyway. The
-/// native-tool capture callbacks run single-threaded within an `exec`, so
-/// poison is not expected in practice; this keeps the calls `unwrap`-free
-/// (the workspace denies `clippy::unwrap_used`).
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Per-turn accumulation of timing and cost, threaded through the round loop
-/// so the engine (not the UI) owns the timers. `tool_starts` records when each
-/// tool call began; `tool_elapsed` is filled as each call ends. `cost` sums
-/// every round's usage against the model's pricing; `usage` holds the final
-/// round's tokens for the context gauge.
 struct TurnStats {
     turn_start: Instant,
     tool_starts: HashMap<String, Instant>,
     tool_elapsed: HashMap<String, Duration>,
-    /// Wall-clock duration of each assistant thinking block this turn, in the
-    /// order they were produced, so the UI's "Thought for Ns" marker can be
-    /// restored from the transcript on freeze/resume.
     thinking_elapsed: Vec<Duration>,
-    /// Native tool calls (`lofi.<tool>`) completed inside `exec` blocks this
-    /// turn, captured so they can be written to the transcript and restored
-    /// on resume. Keyed by insertion order; each carries its parent exec id.
     native_tools: Vec<NativeToolRecord>,
     cost: f64,
     usage: Usage,
@@ -147,12 +118,10 @@ impl TurnStats {
         }
     }
 
-    /// Record a tool call starting.
     fn tool_start(&mut self, id: &str) {
         self.tool_starts.insert(id.to_string(), Instant::now());
     }
 
-    /// Record a tool call finishing; return its elapsed milliseconds.
     fn tool_end(&mut self, id: &str) -> u64 {
         let ms = self
             .tool_starts
@@ -163,7 +132,6 @@ impl TurnStats {
         ms
     }
 
-    /// Fold a round's usage into the turn cost and keep the latest usage.
     fn add_usage(&mut self, usage: Usage, model: &Model) {
         self.usage = usage;
         if let (Some(ip), Some(op)) = (model.input_price, model.output_price) {
@@ -178,9 +146,6 @@ impl TurnStats {
                 + usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write_rate
                 + usage.output_tokens as f64 / 1_000_000.0 * op;
         }
-        // A flat per-request cost is billed once per round, independent of
-        // token pricing. A round is one provider call, so multi-round turns
-        // accumulate one per-request charge per round.
         if let Some(pr) = model.per_request_price {
             self.cost += pr;
         }
@@ -220,39 +185,21 @@ pub struct Agent {
     provider: Arc<dyn Provider>,
     model: Model,
     root: PathBuf,
-    /// Per-session tmp directory for bash full-output logs. Created in
-    /// [`new`](Self::new) and passed to every exec so the sandbox's
-    /// `lofi.bash_read` and bash log writer share one location.
     tmp_dir: PathBuf,
     /// Transient-error retry budget and backoff schedule.
     retry: crate::retry::RetryPolicy,
     system_prompt: String,
     max_output_tokens: Option<u64>,
-    /// Hard-cap reserve for mid-run force-compaction: a round whose input
-    /// tokens exceed `model.context_window - reserved` triggers a
-    /// `ContextPressure` stop. 0 disables the hard cap.
     reserved_context_tokens: u64,
-    /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
-    /// Resolved shell policy for `lofi.bash`.
     shell_policy: ResolvedPolicy,
-    /// Channel for sending confirmation requests to the UI.
-    /// When `None` (headless), `ask` decisions block the command.
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
-    /// Counter for confirmation request ids.
     confirm_counter: Arc<AtomicU64>,
-    /// Async auto-mode callback for shell-policy `ask` decisions.
-    /// When `None` (auto-mode disabled), `ask` goes directly to the
-    /// confirmation flow.
     auto_mode: Option<lofi_code::AutoModeFn>,
-    /// Optional skills directory (`<config_dir>/skills`). When set,
-    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
-    /// skill files from here and from `<root>/.lofi/skills/`.
     skills_dir: Option<PathBuf>,
 }
 
 impl Agent {
-    /// Construct a new agent.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -337,8 +284,6 @@ impl Agent {
         }
     }
 
-    /// Return a new agent with its skills directory set. Used at startup
-    /// after the config directory is known.
     #[must_use]
     pub fn with_skills_dir(&self, skills_dir: Option<PathBuf>) -> Self {
         Self {
@@ -359,9 +304,6 @@ impl Agent {
         }
     }
 
-    /// Set the confirmation channel so the shell policy can ask the UI
-    /// before executing `ask`-classified commands. The matching receiver
-    /// is returned for the caller to poll.
     #[must_use]
     pub fn with_confirm_tx(
         &self,
@@ -373,8 +315,6 @@ impl Agent {
         }
     }
 
-    /// Set the auto-mode callback so the shell policy can consult an LLM
-    /// before prompting the user for `ask`-classified commands.
     #[must_use]
     pub fn with_auto_mode(&self, auto_mode: lofi_code::AutoModeFn) -> Self {
         Self {
@@ -383,15 +323,11 @@ impl Agent {
         }
     }
 
-    /// The system prompt this agent runs with.
     #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
     }
 
-    /// The mid-run hard-cap threshold: a round whose input tokens exceed this
-    /// triggers a `ContextPressure` force-stop. `None` when the reserve is 0
-    /// or the model has no context window, disabling the hard cap.
     #[must_use]
     pub fn hard_compact_threshold(&self) -> Option<u64> {
         if self.reserved_context_tokens == 0 {
@@ -403,13 +339,11 @@ impl Agent {
             .map(|w| w - self.reserved_context_tokens)
     }
 
-    /// The workspace root file operations are confined to.
     #[must_use]
     pub fn root(&self) -> &PathBuf {
         &self.root
     }
 
-    /// The per-session tmp directory (for bash full-output logs, etc.).
     #[must_use]
     pub fn tmp_dir(&self) -> &PathBuf {
         &self.tmp_dir
@@ -430,16 +364,12 @@ impl Agent {
         }
     }
 
-    /// Override the retry policy (used by tests to inject a fast backoff).
     #[must_use]
     pub fn with_retry(mut self, retry: crate::retry::RetryPolicy) -> Self {
         self.retry = retry;
         self
     }
 
-    /// The maximum output tokens hint, if set. Applied as an override on the
-    /// model's `max_tokens` and encoded per API by the IR builders
-    /// (`max_completion_tokens` for Chat, `max_output_tokens` for Responses).
     #[must_use]
     pub fn max_output_tokens(&self) -> Option<u64> {
         self.max_output_tokens

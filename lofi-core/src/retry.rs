@@ -12,21 +12,14 @@ use std::time::Duration;
 use lofi_error::Error;
 use regex::{Regex, RegexBuilder};
 
-/// Default cap on retry attempts (not counting the initial try).
 pub const DEFAULT_MAX_RETRIES: u32 = 10;
-/// Base delay for the first retry; subsequent retries double it.
 pub const DEFAULT_BASE_DELAY: Duration = Duration::from_secs(2);
-/// Per-retry delay ceiling; the exponential backoff clamps here so a long
-/// retry tail under persistent transient errors waits in bounded steps.
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_mins(1);
 
 /// Per-call retry budget and backoff schedule.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
-    /// Maximum retry attempts after the initial try.
     pub max_retries: u32,
-    /// Base delay; attempt N (1-indexed) waits `base * 2^(N-1)`, clamped to
-    /// `max_delay`.
     pub base_delay: Duration,
     /// Per-retry delay ceiling the exponential backoff never exceeds.
     pub max_delay: Duration,
@@ -53,8 +46,6 @@ impl From<lofi_types::RetryConfig> for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Delay before the Nth retry (1-indexed): `base * 2^(n-1)`, clamped to
-    /// `max_delay` so a long retry tail waits in bounded steps.
     #[must_use]
     pub fn delay_for(&self, attempt: u32) -> Duration {
         // Saturating shift so a very high attempt number can't overflow.
@@ -98,14 +89,12 @@ fn non_retryable() -> &'static Regex {
             "out of budget",
             "quota exceeded",
             "billing",
-            // Auth failures.
             "invalid.?api.?key",
             "incorrect.?api.?key",
             "authentication",
             "unauthorized",
             "401",
             "403",
-            // Bad requests are deterministic.
             "invalid.?request",
             "400",
             "bad.?request",
@@ -119,13 +108,11 @@ fn non_retryable() -> &'static Regex {
     })
 }
 
-/// Patterns that look like transient provider/transport failures.
 static RETRYABLE: OnceLock<Regex> = OnceLock::new();
 
 fn retryable() -> &'static Regex {
     RETRYABLE.get_or_init(|| {
         build_pattern(&[
-            // Generic provider load, HTTP status, and server-side transient failures.
             "overloaded",
             "rate.?limit",
             "too many requests",
@@ -140,7 +127,6 @@ fn retryable() -> &'static Regex {
             "internal.?error",
             // Wrapper/provider text for transient upstream failures.
             "provider.?returned.?error",
-            // Network, proxy, and fetch transport failures.
             "network.?error",
             "connection.?error",
             "connection.?refused",
@@ -154,33 +140,21 @@ fn retryable() -> &'static Regex {
             "timed? out",
             "timeout",
             "terminated",
-            // Premature stream endings.
             "ended without",
             "stream ended before message_stop",
             "http2 request did not get a response",
-            // Explicit retry guidance.
             "you can retry your request",
             "try your request again",
             "please retry your request",
-            // gRPC ResourceExhausted (e.g. NVIDIA NIM).
             "ResourceExhausted",
         ])
     })
 }
 
-/// Extract a lowercase message string from an error for pattern matching.
 fn error_text(e: &Error) -> String {
-    // `to_string` includes the variant prefix (e.g. "provider error: ...");
-    // the patterns above match the inner text, and some (like "timeout")
-    // also match the prefix. Matching on the full display string covers both.
     e.to_string()
 }
 
-/// Classify whether `e` looks like a transient provider or transport error
-/// that warrants an automatic retry.
-///
-/// Non-retryable patterns take precedence: a 429 that says `insufficient_quota`
-/// is a billing failure, not a throttle.
 #[must_use]
 pub fn is_retryable_error(e: &Error) -> bool {
     if matches!(e, Error::Cancelled) {
@@ -251,9 +225,7 @@ mod tests {
         assert_eq!(p.delay_for(1), Duration::from_secs(2));
         assert_eq!(p.delay_for(2), Duration::from_secs(4));
         assert_eq!(p.delay_for(3), Duration::from_secs(8));
-        // 2 * 2^5 = 64s, clamped to the 60s ceiling.
         assert_eq!(p.delay_for(6), Duration::from_mins(1));
-        // The ceiling holds for the whole tail.
         assert_eq!(p.delay_for(20), Duration::from_mins(1));
     }
 
@@ -276,9 +248,7 @@ mod tests {
         assert_eq!(p.max_retries, 5);
         assert_eq!(p.base_delay, Duration::from_millis(500));
         assert_eq!(p.max_delay, Duration::from_secs(10));
-        // 500ms * 2^4 = 8s, under the 10s ceiling.
         assert_eq!(p.delay_for(5), Duration::from_secs(8));
-        // 500ms * 2^5 = 16s, clamped to 10s.
         assert_eq!(p.delay_for(6), Duration::from_secs(10));
         assert!(!p.can_retry(5));
     }
