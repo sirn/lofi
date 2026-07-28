@@ -21,17 +21,12 @@ pub(super) fn js_to_json(v: &Value<'_>) -> Json {
     }
 }
 
-/// Convert a `serde_json::Value` into a rquickjs value.
 pub(super) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Value<'js>> {
     let val: Value = match v {
         Json::Null => Value::new_null(ctx.clone()),
         Json::Bool(b) => b.into_js(ctx)?,
         Json::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // JSON integers are bound to i64; rquickjs has no integer
-                // type wider than f64 on the JS side, so a widening cast is
-                // unavoidable. Loss only matters for |i| > 2^53, which we
-                // accept for sandbox return values.
                 #[allow(clippy::cast_precision_loss)]
                 (i as f64).into_js(ctx)?
             } else {
@@ -92,8 +87,6 @@ pub(super) fn js_to_json_bounded(
     }
     if let Some(f) = v.as_float() {
         if f.fract() == 0.0 && f.abs() < 9.0072e15 {
-            // The value is an integer-valued float inside the safe-i64 range;
-            // the truncation cast is guarded by the bound above.
             #[allow(clippy::cast_possible_truncation)]
             return json!(f as i64);
         }

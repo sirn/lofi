@@ -9,23 +9,15 @@
 pub const DEFAULT_MAX_LINES: usize = 2000;
 /// Default byte budget for truncated tool output (50 KB).
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
-/// Maximum chars per grep match line.
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
-/// Result of truncating tool output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Truncated {
-    /// The (possibly truncated) content.
     pub content: String,
-    /// Whether truncation occurred.
     pub truncated: bool,
-    /// Total lines in the original content.
     pub total_lines: usize,
-    /// Lines kept in `content`.
     pub output_lines: usize,
-    /// Total bytes in the original content (UTF-8).
     pub total_bytes: usize,
-    /// Bytes kept in `content` (UTF-8).
     pub output_bytes: usize,
 }
 
@@ -40,7 +32,6 @@ pub fn truncate_head(content: &str) -> Truncated {
     truncate_head_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
 }
 
-/// Head truncation with explicit limits.
 #[must_use]
 pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let total_bytes = content.len();
@@ -64,7 +55,6 @@ pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> 
         if i >= max_lines {
             break;
         }
-        // +1 for the newline joining this line to the previous one.
         let line_bytes = line.len() + usize::from(i > 0);
         if out_bytes + line_bytes > max_bytes {
             break;
@@ -81,8 +71,6 @@ pub fn truncate_head_with(content: &str, max_lines: usize, max_bytes: usize) -> 
         output_lines: out.len(),
         total_bytes,
         output_bytes,
-        // `truncated_by_bytes` is implicit in output_lines < max_lines; the
-        // caller distinguishes via the totals.
     }
 }
 
@@ -94,7 +82,6 @@ pub fn truncate_tail(content: &str) -> Truncated {
     truncate_tail_with(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
 }
 
-/// Tail truncation with explicit limits.
 #[must_use]
 pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let total_bytes = content.len();
@@ -139,14 +126,11 @@ pub fn truncate_tail_with(content: &str, max_lines: usize, max_bytes: usize) -> 
     }
 }
 
-/// Truncate a single line to at most `max_chars` chars, appending `...` when
-/// truncated. Used for grep match lines.
 #[must_use]
 pub fn truncate_line(line: &str) -> String {
     truncate_line_with(line, GREP_MAX_LINE_LENGTH)
 }
 
-/// Line truncation with an explicit char cap.
 #[must_use]
 pub fn truncate_line_with(line: &str, max_chars: usize) -> String {
     if line.chars().count() <= max_chars {
@@ -156,7 +140,6 @@ pub fn truncate_line_with(line: &str, max_chars: usize) -> String {
     format!("{kept}...")
 }
 
-/// Format a byte count as a human-readable size (e.g. `50.0KB`).
 #[must_use]
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
@@ -195,7 +178,6 @@ mod tests {
 
     #[test]
     fn head_truncates_by_bytes() {
-        // Each line ~100 bytes; 10 lines = ~1000 bytes. Cap at 250 bytes.
         let big = (0..50)
             .map(|_| "x".repeat(100))
             .collect::<Vec<_>>()

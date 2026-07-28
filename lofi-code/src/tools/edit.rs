@@ -26,7 +26,6 @@ impl BuiltinTools {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("edit: missing 'new'".into()))?
             .to_owned();
-        // Echo the replaced text back so the renderer can show a diff.
         let old_echo = old.clone();
         let new_echo = new.clone();
         reject_symlink_leaf(&self.root, &path, &format!("edit {path}"))?;

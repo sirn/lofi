@@ -1,6 +1,3 @@
-//! Shared runtime helpers for the sandbox tools: a process-group kill
-//! guard ([`PgrpKillGuard`]) and a capped async reader ([`read_capped`]).
-
 use tokio::io::AsyncReadExt;
 
 pub struct PgrpKillGuard {
@@ -21,9 +18,6 @@ impl PgrpKillGuard {
 impl Drop for PgrpKillGuard {
     fn drop(&mut self) {
         if let Some(pid) = self.pid.take() {
-            // `kill(-pgid, SIGKILL)` signals the whole process group. The
-            // child was made group leader by `process_group(0)`, so its pid
-            // is the group id. `nix` wraps the FFI behind a safe API.
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(-(pid as i32)),
                 nix::sys::signal::Signal::SIGKILL,

@@ -9,7 +9,6 @@ use super::convert::js_to_json;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Bind the builtin file/shell tool methods onto `lofi`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bind_tools<'js>(
     ctx: &Ctx<'js>,
@@ -255,20 +254,12 @@ fn bind_file_tools<'js>(
     Ok(())
 }
 
-/// Bind `lofi.skills()` and `lofi.skill(name)`.
-///
-/// Skills are markdown files discovered from a global directory (`<config_dir>/skills/`)
-/// and a per-workspace directory (`<root>/.lofi/skills/`). The `skills_dir`
-/// parameter is the global directory; the workspace directory is derived from
-/// the tool bundle's `root`.
 fn bind_skills_tools<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
     _skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
-    // Use the existing tool bundle, which already carries skills_dir and
-    // the event callback. A separate bundle would drop tool events.
     let t = tools.clone();
 
     let t1 = t.clone();
@@ -328,11 +319,6 @@ fn bind_skills_tools<'js>(
     Ok(())
 }
 
-/// Bind `lofi.docs(name?)` and `lofi.docsSearch(query)`.
-///
-/// These are pure computation on compile-time-embedded data (no I/O), but
-/// use `Async` closures to go through the same promise/`IntoJs` path as all
-/// other tool bindings.
 fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<()> {
     lofi.set(
         "docs",
@@ -372,9 +358,6 @@ fn tool_result(res: std::result::Result<Json, Error>) -> ToolOutput {
     }
 }
 
-/// Bind `lofi.recall({ query?, scope?, page?, expand? })` — session-history
-/// search (including messages a compaction folded away). Delegates to the
-/// `RecallFn` supplied by `lofi-core`, which owns the transcript.
 fn bind_recall_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
@@ -416,7 +399,6 @@ fn bind_recall_tool<'js>(
     Ok(())
 }
 
-/// Parse `lofi.recall`'s argument object into a `RecallRequest`.
 fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequest {
     use lofi_types::recall::{CompactionTarget, RecallRequest, RecallScope};
     let Some(obj) = json.as_object() else {
@@ -460,10 +442,6 @@ fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequ
     }
 }
 
-/// Bind `lofi.result(eventId) -> string` — recover the original, pre-elision
-/// content of one message event (a stubbed tool result or tool-call) by id.
-/// The inverse of compaction's tiered-retention elision; reads the session
-/// transcript fresh via the `ResultFn` supplied by `lofi-core`.
 fn bind_result_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
