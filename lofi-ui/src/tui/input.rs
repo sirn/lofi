@@ -375,7 +375,7 @@ pub(super) fn spawn_user_bash(
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
     let handle = tokio::task::spawn_local(async move {
-        let event = match lofi_core::run_user_bash(&cwd, command_for_run.clone()).await {
+        let event = match Box::pin(lofi_core::run_user_bash(&cwd, command_for_run.clone())).await {
             Ok(result) => AgentEvent::UserBash {
                 command: result.command,
                 output: result.output,
