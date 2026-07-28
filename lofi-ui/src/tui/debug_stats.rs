@@ -445,6 +445,7 @@ fn block_heap_bytes(block: &Block) -> usize {
                     })
                     .sum::<usize>()
         }
+        Block::UserBash { command, output, .. } => command.capacity() + output.capacity(),
         Block::TurnEnd { label, .. } => label.capacity(),
         Block::TurnFailed { label, error, .. } => label.capacity() + error.capacity(),
         Block::Compaction { summary, .. } => summary.capacity(),

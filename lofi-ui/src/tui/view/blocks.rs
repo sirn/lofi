@@ -124,6 +124,14 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                     stack.push(ToolLine { tool });
                 }
             }
+            Block::UserBash {
+                command, output, exit_code, signal, duration, truncated, cancelled,
+                exclude_from_context,
+            } => stack.push(UserBashLine {
+                command, output, exit_code: *exit_code, signal: *signal,
+                duration: *duration, truncated: *truncated, cancelled: *cancelled,
+                exclude_from_context: *exclude_from_context,
+            }),
             Block::Error(msg) => stack.push(ErrorLine { msg }),
             Block::TurnEnd { label, elapsed } => {
                 stack.push(TurnEnd {
@@ -1849,6 +1857,63 @@ impl Component for ToolLine<'_> {
 }
 
 // ── Fatal error ─────────────────────────────────────────────────────────
+
+// Direct user shell command.
+struct UserBashLine<'a> {
+    command: &'a str,
+    output: &'a str,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    duration: Duration,
+    truncated: bool,
+    cancelled: bool,
+    exclude_from_context: bool,
+}
+
+impl Component for UserBashLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let failed = self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0);
+        let color = if failed { t.error } else if self.exclude_from_context { t.subtle } else { t.info };
+        let mut out = vec![prim::rline(
+            vec![Span::raw("  "), Span::styled("$ ", Style::new().fg(color))],
+            vec![Span::styled(self.command.to_string(), Style::new().fg(color))],
+        )];
+        let lines: Vec<&str> = self.output.trim_end_matches('\n').split('\n').collect();
+        let limit = if cx.app.verbose { lines.len() } else { PREVIEW_LINES };
+        if !self.output.is_empty() {
+            for raw in lines.iter().take(limit) {
+                for seg in prim::wrap_pre(raw, cx.width.saturating_sub(4)) {
+                    out.push(prim::rline(
+                        vec![Span::raw("    ")],
+                        vec![Span::styled(seg, Style::new().fg(if failed { t.error } else { t.muted }))],
+                    ));
+                }
+            }
+            let hidden = lines.len().saturating_sub(limit);
+            if hidden > 0 {
+                out.push(prim::rline(
+                    vec![Span::raw("    ")],
+                    vec![Span::styled(format!("… ({hidden} lines hidden)"), Style::new().fg(t.subtle))],
+                ));
+            }
+        }
+        let mut status = if self.cancelled {
+            "cancelled".to_string()
+        } else if let Some(code) = self.exit_code.filter(|code| *code != 0) {
+            format!("exit {code}")
+        } else if let Some(signal) = self.signal {
+            format!("signal {signal}")
+        } else {
+            "done".to_string()
+        };
+        status.push_str(&format!(" in {}", prim::fmt_duration(self.duration)));
+        if self.truncated { status.push_str(" · truncated"); }
+        if self.exclude_from_context { status.push_str(" · not in context"); }
+        out.push(prim::rline(vec![Span::raw("  ")], vec![Span::styled(status, Style::new().fg(color))]));
+        out
+    }
+}
 
 /// A fatal error line: `✗ <message>`.
 struct ErrorLine<'a> {

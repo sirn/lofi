@@ -374,6 +374,21 @@ pub enum SessionEventKind {
     /// A conversation message: a user prompt, an assistant turn, or a tool
     /// result. Serialized as `{"type":"message", <Message fields>}`.
     Message(Message),
+    /// A direct user shell command (interactive `!command` / `!!command`).
+    UserBash {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        #[serde(default)]
+        signal: Option<i32>,
+        duration_ms: u64,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        cancelled: bool,
+        #[serde(default)]
+        exclude_from_context: bool,
+    },
     /// Wall-clock duration of a completed tool call within a turn, so the
     /// exec block's `took Ns` marker survives resume. `tool_call_id` is the
     /// provider tool-call id; named `tool_call_id` (not `id`) so it does not
