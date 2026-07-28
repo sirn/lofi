@@ -227,6 +227,16 @@ enum Block {
     Text(String),
     Thinking(ThinkingBlock),
     Tool(ToolCall),
+    UserBash {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        duration: Duration,
+        truncated: bool,
+        cancelled: bool,
+        exclude_from_context: bool,
+    },
     Error(String),
     /// Turn-end rule: `<label> done in Ns` followed by a dash
     /// fill, appended when a run finishes.

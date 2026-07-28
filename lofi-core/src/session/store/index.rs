@@ -104,6 +104,7 @@ pub struct EventIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     UserPrompt,
+    UserBash,
     AssistantMessage,
     SystemMessage,
     /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
@@ -249,6 +250,7 @@ fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
             Some("system") => IndexKind::SystemMessage,
             _ => IndexKind::Other,
         },
+        "user_bash" => IndexKind::UserBash,
         "turn_end" => IndexKind::TurnEnd,
         "turn_failed" => IndexKind::TurnFailed,
         "compaction" => IndexKind::Compaction,
