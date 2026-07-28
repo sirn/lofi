@@ -1,10 +1,7 @@
-/// Byte offset of the start of row (0-indexed) in s.
 pub(super) fn char_is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Byte offset of the start of the word before `cursor` (emacs
-/// `backward-word`): skip non-word chars backwards, then word chars.
 pub(super) fn prev_word_start(s: &str, cursor: usize) -> usize {
     let chars: Vec<(usize, char)> = s[..cursor].char_indices().collect();
     let mut i = chars.len();
@@ -17,8 +14,6 @@ pub(super) fn prev_word_start(s: &str, cursor: usize) -> usize {
     chars.get(i).map_or(0, |(b, _)| *b)
 }
 
-/// Byte offset just past the end of the word at/after `cursor` (emacs
-/// `forward-word`): skip non-word forwards, then word chars.
 pub(super) fn next_word_end(s: &str, cursor: usize) -> usize {
     let mut byte = cursor;
     let mut in_word = false;
@@ -36,7 +31,6 @@ pub(super) fn next_word_end(s: &str, cursor: usize) -> usize {
     byte
 }
 
-/// Compact token/byte count: `9.7M`, `119k`, `500`.
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn compact_count(n: u64) -> String {
     if n >= 1_000_000 {
@@ -51,12 +45,10 @@ pub(super) fn compact_count(n: u64) -> String {
     }
 }
 
-/// USD cost with trailing zeros trimmed: `$81.4`, `$81`.
 pub(super) fn fmt_cost(c: f64) -> String {
     format!("${c:.2}")
 }
 
-/// One component of an abbreviated path: `Dev` -> `D`, `~sirn` -> `~s`.
 pub(super) fn abbrev_component(c: &str) -> String {
     if let Some(rest) = c.strip_prefix('~') {
         let head = rest
@@ -73,9 +65,6 @@ pub(super) fn abbrev_component(c: &str) -> String {
     }
 }
 
-/// Render a path as `~/...` when under the home dir, then abbreviate to fit
-/// `max` display cells: keep the first and last component, shorten the middle
-/// to one char each; if that still does not fit, fall back to the basename.
 pub(super) fn abbreviate_path(path: &std::path::Path, max: usize) -> String {
     let full: String = match dirs::home_dir() {
         Some(h) if path.starts_with(&h) => match path.strip_prefix(&h) {
@@ -117,7 +106,6 @@ pub(super) fn line_start_byte(s: &str, row: usize) -> usize {
         .map_or(s.len(), |(i, _)| i + 1)
 }
 
-/// Convert a char column to bytes within a given logical line of s.
 pub(super) fn char_index_to_byte(s: &str, row: usize, col: usize) -> usize {
     let start = line_start_byte(s, row);
     let line_end = s[start..].find('\n').map_or(s.len(), |i| start + i);
@@ -164,8 +152,6 @@ pub(super) fn wrap_input_ranges(chars: &[char], content_w: usize) -> Vec<(usize,
         let end = if j == n {
             n
         } else if let Some(ls) = last_space {
-            // Break after the last space that fits: the space stays on this
-            // row (trailing blank cell) and the next word starts fresh.
             ls + 1
         } else {
             // No space to break at: hard-break. If even the first char
@@ -232,9 +218,6 @@ pub(super) fn wrap_cursor_pos(line: &str, col: usize, content_w: usize) -> (usiz
     (ranges.len().saturating_sub(1), x)
 }
 
-/// Index of the char whose display column is `col` (i.e. the cursor position
-/// `col` cells from the left). Never splits a wide char: it lands on the
-/// boundary before it.
 pub(super) fn col_to_char_idx(s: &str, col: usize) -> usize {
     let mut w = 0usize;
     let mut count = 0usize;

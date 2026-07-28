@@ -49,9 +49,6 @@ pub(super) fn build_tree_entry_skeletons(
     build_tree_entries_inner(indices, leaf_id, cursor, false, false, None)
 }
 
-/// Hydrate tree labels tail-first without rebuilding the tree topology for
-/// every batch. Exec rows project only their own native-call request metadata;
-/// nested result bodies remain skipped and historical execs remain lazy.
 pub(super) fn hydrate_tree_entry_rows(
     indices: &[store::EventIndex],
     cursor: &store::SessionCursor,
@@ -183,8 +180,6 @@ fn build_tree_entries_inner(
     retain_prefill: bool,
     hydrate_only: Option<&std::collections::HashSet<usize>>,
 ) -> Vec<TreeEntry> {
-    // Native tool details are label-only data. Do not read them while building
-    // the shape used for the first progressive draw.
     let native_tools = if hydrate && hydrate_only.is_none() {
         build_native_tool_map(indices, cursor)
     } else {
@@ -261,9 +256,6 @@ fn build_tree_entries_inner(
     out
 }
 
-/// Build a map from exec tool-call id to native display metadata.
-/// Projection skips native result bodies, which may be much larger than the
-/// parent/name/args needed by the tree label.
 fn build_native_tool_map(
     indices: &[store::EventIndex],
     cursor: &store::SessionCursor,
@@ -283,8 +275,6 @@ fn build_native_tool_map(
     map
 }
 
-/// Load native call request metadata for one exec result by walking forward
-/// through that turn's indexed chain. Result bodies are skipped by projection.
 fn load_native_tools_for_turn(
     ctx: &TreeCtx<'_>,
     tool_result_index: usize,
@@ -341,12 +331,6 @@ pub(super) fn active_path_from_index(
     path
 }
 
-/// Render branch subtrees. Each root is rendered as its own subtree:
-/// the root's linear chain (root → turn outcome → next user prompt → …)
-/// sits under the root's connector at this indentation level, and sibling
-/// roots are siblings of each other — not flattened into one list. Only
-/// actual sub-branches (divergences within a chain) create further
-/// indentation.
 fn render_branch_subtree(ctx: &TreeCtx, roots: &[usize], prefix: &str, out: &mut Vec<TreeEntry>) {
     let indices = ctx.indices;
     let children_by_parent = ctx.children_by_parent;
@@ -355,8 +339,6 @@ fn render_branch_subtree(ctx: &TreeCtx, roots: &[usize], prefix: &str, out: &mut
         let is_last = pos == n - 1;
         let connector = if is_last { "└─ " } else { "├─ " };
         let child_indent = format!("{prefix}{}", if is_last { "   " } else { "│  " });
-        // Chain = this root + its linear descendants (flat at this level,
-        // under the root's connector).
         let chain = walk_chain(root, indices, children_by_parent);
         let chain_set: std::collections::HashSet<usize> = chain.iter().copied().collect();
         let cn = chain.len();
@@ -397,14 +379,6 @@ fn render_branch_subtree(ctx: &TreeCtx, roots: &[usize], prefix: &str, out: &mut
     }
 }
 
-/// Walk the linear chain from `start`: user → turn outcome → next user
-/// prompt → …, following the first user-prompt child at each `turn_end` and
-/// the turn outcome at each user prompt.
-/// Find the next user-prompt event after a non-user node (a turn outcome
-/// or a compaction). After a compaction the next prompt is a grandchild —
-/// the compaction's child — so route through a compaction child when there
-/// is no direct user-prompt child. Keeps `walk_chain`'s flat chain intact
-/// across a compaction boundary.
 pub(super) fn find_next_user_prompt(
     start: usize,
     indices: &[store::EventIndex],
@@ -614,7 +588,6 @@ fn push_tree_entry(
     });
 }
 
-/// Whether a kind is a displayable tree node (user prompt or turn outcome).
 pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
     matches!(
         kind,
@@ -626,10 +599,6 @@ pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
     )
 }
 
-/// Walk the descendant chain from `start` (a user-prompt event) to find the
-/// first `turn_end/turn_failed` — the outcome of this turn. Follows the
-/// in-turn chain (assistant → tool → thinking → …), skipping user-prompt
-/// children that are branches.
 pub(super) fn find_turn_outcome(
     start: usize,
     indices: &[store::EventIndex],
@@ -652,9 +621,6 @@ pub(super) fn find_turn_outcome(
     }
 }
 
-/// Preview of the last assistant text in the turn ending at `turn_end_idx`:
-/// walk the parent chain (using the index) back to the user prompt, loading
-/// only assistant-message events to find the first text block.
 pub(super) fn load_assistant_preview(
     turn_end_idx: usize,
     indices: &[store::EventIndex],
@@ -684,7 +650,6 @@ pub(super) fn load_assistant_preview(
     String::new()
 }
 
-/// Load a user-prompt event and extract its first text block.
 pub(super) fn load_prompt_text(cursor: &store::SessionCursor, offset: u64) -> String {
     let Ok(ev) = cursor.event_at(offset) else {
         return String::new();
@@ -704,9 +669,6 @@ pub(super) fn load_prompt_text(cursor: &store::SessionCursor, offset: u64) -> St
     String::new()
 }
 
-/// Load a tool-result message and cross-reference the tool name from the
-/// parent assistant message's `ToolUse` block (matched by `tool_use_id`).
-/// Returns `(tool_name, result_content, is_error)`.
 pub(super) fn load_tool_result(
     idx: usize,
     indices: &[store::EventIndex],
@@ -731,8 +693,6 @@ pub(super) fn load_tool_result(
         return (String::new(), String::new(), String::new(), false);
     };
     let (tool_use_id, content, is_error) = block;
-    // Walk to the parent assistant message and find the matching ToolUse
-    // block to get the tool name.
     let name = ix
         .parent_id
         .as_ref()
@@ -752,7 +712,6 @@ pub(super) fn load_tool_result(
     (name, tool_use_id, content, is_error)
 }
 
-/// Load an assistant-message event and extract its first text block.
 pub(super) fn load_assistant_text(cursor: &store::SessionCursor, offset: u64) -> Option<String> {
     let ev = cursor.event_at(offset).ok()?;
     let SessionEventKind::Message(m) = ev.kind else {
@@ -767,7 +726,6 @@ pub(super) fn load_assistant_text(cursor: &store::SessionCursor, offset: u64) ->
     })
 }
 
-/// Load a `turn_failed` event and extract its error message.
 pub(super) fn load_failed_error(cursor: &store::SessionCursor, offset: u64) -> String {
     let Ok(ev) = cursor.event_at(offset) else {
         return String::new();
@@ -779,7 +737,6 @@ pub(super) fn load_failed_error(cursor: &store::SessionCursor, offset: u64) -> S
     }
 }
 
-/// Load the compaction metadata needed for its tree node and rollback.
 fn load_compaction_details(
     cursor: &store::SessionCursor,
     offset: u64,

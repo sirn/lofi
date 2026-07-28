@@ -1,6 +1,3 @@
-//! Modal and popover overlays: the resume picker, tree picker, info modal,
-//! and slash-complete popover. The scrollbar itself lives in [`prim`].
-
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::tui::Theme;
@@ -26,8 +23,6 @@ fn modal_title(t: Theme, title: impl Into<String>) -> Line<'static> {
     ))
 }
 
-/// Build a modal footer whose action keys stand out from their descriptions.
-/// Hint groups use the conventional `"key action  key action"` shape.
 fn modal_help(t: Theme, text: impl Into<String>) -> Line<'static> {
     let text = text.into();
     let leading = text.starts_with(' ');
@@ -70,8 +65,6 @@ struct ModalRows {
     help: Rect,
 }
 
-/// Keep title and help attached to the inside edges when a terminal is too
-/// short, allowing the content viewport to collapse before either chrome row.
 fn modal_rows(inner: Rect) -> ModalRows {
     let title_h = inner.height.min(1);
     let help_h = inner.height.saturating_sub(title_h).min(1);
@@ -115,10 +108,6 @@ fn render_modal_frame(
     rows
 }
 
-/// Extend a modal's content rect through its existing right padding cell,
-/// then split that span into content plus the universal scrollbar gutter.
-/// This preserves the modal's one-cell breathing room while ensuring list or
-/// body text can never occupy the scrollbar column.
 fn modal_scroll_area(content: Rect) -> prim::ScrollArea {
     prim::scroll_area(Rect::new(
         content.x,
@@ -266,9 +255,6 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Slash-command autocomplete popover: a popup listing commands that
-/// start with the current input, anchored just above the prompt cursor.
-/// `↑/↓` or `j`/`k` move; `Tab` accepts; `Esc` dismisses.
 pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(sc) = &app.slash_complete else {
@@ -276,7 +262,6 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     };
     let t = app.theme;
     let n_max = sc.candidates.len().min(8);
-    // Width: longest rich row or help footer, plus border and padding.
     let row_w = SLASH_COMMANDS
         .iter()
         .map(|(cmd, desc)| prim::width(cmd) + 2 + prim::width(desc))
@@ -368,8 +353,6 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Pre-wrap each styled line to `width` cells (span-aware, whitespace-
-/// preserving) and flatten into the visible row list.
 fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in lines {
@@ -378,12 +361,6 @@ fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'st
     out
 }
 
-/// Read-only, scrollable information modal (`/help`, `/session`): a
-/// centered box showing the title over the body, with a trailing hint
-/// line. Body lines are pre-wrapped to the available width so long lines
-/// never clip horizontally; when the body exceeds the viewport, a
-/// scrollbar appears and `j`/`k`/`↑`/`↓`/`Ctrl+N`/`Ctrl+P`/`PgUp`/`PgDn`
-/// scroll it. `y` copies the body; `Esc`/`q`/`Enter` dismiss.
 pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let t = app.theme;
     let Some(info) = app.info.as_mut() else {
@@ -408,8 +385,6 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_w = max_body.min(max_w).max(prim::width(&title));
     let max_body_h = (area.height as usize).saturating_sub(4);
     let need_sb = wrap_info_lines_styled(&info.lines, inner_w.max(1)).len() > max_body_h;
-    // The modal's existing right padding cell is the dedicated scrollbar
-    // gutter, leaving the full measured body width available for text.
     let body_w = inner_w;
     let wrapped = wrap_info_lines_styled(&info.lines, body_w);
     let total = wrapped.len();
@@ -547,9 +522,6 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// `/thinking` picker: a centered list of thinking levels offered for the
-/// current model (`off` plus its declared levels). The current level is
-/// highlighted; `↑/↓` or `j`/`k` move, `Enter` switches, `Esc`/`q` cancels.
 pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.thinking_picker else {
@@ -695,8 +667,6 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Shell-policy permission dialog with explicit selectable actions. Unrelated
-/// keys leave the request unresolved.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     const MAX_COMMAND_ROWS: usize = 12;
 
@@ -706,8 +676,6 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Dim the application beneath the dialog. This changes only the rendered
-    // frame; the transcript and its semantic styles remain untouched.
     f.buffer_mut()
         .set_style(area, Style::new().fg(t.subtle).bg(t.panel_bg));
 

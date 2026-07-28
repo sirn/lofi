@@ -3,10 +3,6 @@
 use super::*;
 
 impl App {
-    /// Number of select rows the input occupies after soft-wrapping to the
-    /// prompt width, capped at [`MAX_INPUT_LINES`]. `width` is the full
-    /// terminal width; 2 cells are reserved for the prompt's left inset and
-    /// one for the shared scrollbar gutter.
     pub(super) fn input_lines(&self, width: usize) -> usize {
         let content_w = width.saturating_sub(3);
         self.input_select_rows(content_w).len().min(MAX_INPUT_LINES)
@@ -48,9 +44,6 @@ impl App {
         rows
     }
 
-    /// Map the cursor to a (select row, x-within-content) pair for
-    /// [`set_cursor_position`], accounting for soft-wrap. `x` is relative to
-    /// the content area; the caller adds the 2-cell prefix.
     pub(super) fn input_cursor_pos(&self, content_w: usize) -> (usize, usize) {
         let (lrow, lcol) = self.cursor_row_col();
         let mut vrow = 0usize;
@@ -192,9 +185,6 @@ impl App {
 
     pub(super) fn kill_line_end(&mut self, append: bool) {
         let after = &self.input[self.input_cursor..];
-        // End of buffer with no trailing newline: nothing to kill. Emacs
-        // leaves the buffer untouched here, and the naive `cursor + 1` would
-        // slice one past the end and panic.
         if after.is_empty() {
             return;
         }
@@ -236,10 +226,6 @@ impl App {
         self.history_idx = None;
     }
 
-    /// Up arrow / `Ctrl+P`: move to the previous line, or — when already on
-    /// the first line — jump to its start, and once at the very first cell
-    /// recall the previous history entry. Mirrors zsh `up-line-or-history`
-    /// with a start-of-line intermediate step.
     pub(super) fn cursor_up(&mut self) {
         let (row, col) = self.cursor_row_col();
         if row > 0 {
@@ -251,8 +237,6 @@ impl App {
         }
     }
 
-    /// Down arrow / `Ctrl+N`: the symmetric counterpart — next line, then end
-    /// of the last line, then recall the next history entry.
     pub(super) fn cursor_down(&mut self) {
         let (row, _col) = self.cursor_row_col();
         let last_row = self.input.matches('\n').count();
@@ -265,8 +249,6 @@ impl App {
         }
     }
 
-    /// Content slice of the cursor line (char range `[cstart, cend)` mapped to
-    /// bytes), excluding the decorative gutter and trailing padding.
     pub(super) fn current_line_text(&self) -> Option<String> {
         let rel = self.nav_cursor.saturating_sub(self.log_off);
         // Prefer the raw markdown source (markers intact) when the rendered
@@ -275,8 +257,6 @@ impl App {
         if let Some(rl) = self.log_vis.get(rel).and_then(|v| v.raw.as_ref()) {
             if rl.map.len() >= 2 {
                 let end = *rl.map.last()?;
-                // On the first visual row (hard_break), include leading
-                // whitespace (indentation, list nesting) from source start.
                 if rl.hard_break && end > 0 {
                     return Some(rl.source[..end].to_string());
                 }

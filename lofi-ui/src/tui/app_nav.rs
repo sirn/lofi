@@ -3,8 +3,6 @@
 use super::*;
 
 impl App {
-    /// Enter Navigate mode, parking the viewport where it is (stop following
-    /// new output) and placing the cursor on the last visible line.
     pub(super) fn enter_nav(&mut self) {
         self.mode = Mode::Navigate;
         self.sel = None;
@@ -29,12 +27,10 @@ impl App {
                 .saturating_add(self.log_view_h)
                 .saturating_sub(1);
             self.nav_cursor = last.min(self.log_total.saturating_sub(1));
-            // Park the column at the content start; h/l snap it into range.
             self.nav_col = 0;
         }
     }
 
-    /// Return to Input mode, dropping any selection.
     pub(super) fn enter_input(&mut self) {
         self.mode = Mode::Input;
         self.sel = None;
@@ -47,7 +43,6 @@ impl App {
         self.top_line = self.last_base;
     }
 
-    /// From Navigate, start a charwise selection at the cursor.
     pub(super) fn enter_select(&mut self) {
         self.mode = Mode::Select;
         self.select_anchor = (self.nav_cursor, self.nav_col);
@@ -74,8 +69,6 @@ impl App {
         self.log_vis.get(rel).map_or((0, 0), |v| v.content)
     }
 
-    /// Move the cursor column by `delta` chars, clamped to the cursor line's
-    /// content. In Select the selection follows.
     pub(super) fn nav_col_delta(&mut self, delta: i32) {
         let (cstart, cend) = self.cursor_content_range();
         let raw = if delta > 0 {
@@ -89,8 +82,6 @@ impl App {
         }
     }
 
-    /// Set the cursor column to `target`, clamped to the cursor line's
-    /// content. In Select the selection follows.
     pub(super) fn nav_set_col(&mut self, target: usize) {
         let (cstart, cend) = self.cursor_content_range();
         self.nav_col = if cend > cstart {
@@ -103,8 +94,6 @@ impl App {
         }
     }
 
-    /// Column of the first non-blank content character on the cursor line
-    /// (vim `^`). Falls back to the content start when all blank.
     pub(super) fn first_nonblank_col(&self) -> usize {
         let (cstart, cend) = self.cursor_content_range();
         if cend <= cstart {
@@ -126,7 +115,6 @@ impl App {
         cstart
     }
 
-    /// Vim word/WORD motion target column for the cursor line.
     pub(super) fn nav_word_target(&self, motion: WordMotion) -> usize {
         let (cstart, cend) = self.cursor_content_range();
         if cend <= cstart {
@@ -198,9 +186,6 @@ impl App {
         self.nav_set_col(target);
     }
 
-    /// Move the Navigate/Select cursor by `delta` lines, clamping to the
-    /// transcript. In Select the selection follows; the viewport scrolls only
-    /// when the cursor leaves it.
     pub(super) fn nav_move(&mut self, delta: i32) {
         let max = self.log_total.saturating_sub(1);
         let step = delta.unsigned_abs() as usize;
@@ -259,8 +244,6 @@ impl App {
         self.pinned = cur == total.saturating_sub(1) && self.top_line >= base;
     }
 
-    /// Render turn `idx` at `width` without touching the frozen cache. Used to
-    /// (re)compute a content anchor for the cursor at the old or new width.
     fn render_turn_at(&self, idx: usize, width: usize, active_turn: bool) -> Vec<view::RenderLine> {
         let theme = self.theme;
         let turn = self.materialize_turn(idx);
@@ -287,7 +270,6 @@ impl App {
         if n == 0 {
             return None;
         }
-        // Largest turn whose start line is at or below the cursor.
         let mut k = 0;
         for i in 0..n {
             if self.turn_start_line(i) <= cursor {
@@ -299,11 +281,6 @@ impl App {
         let intra = cursor.saturating_sub(self.turn_start_line(k));
         let last = k + 1 == n;
         let live = last && self.frozen_heights.len() < n;
-        // Old-width lines: use the frozen cache (rendered with
-        // `active_turn = false`) whenever this turn is file-backed. Normally
-        // only the prefix is frozen, but an idle /tree rollback may freeze the
-        // selected final turn too. Only a genuinely live final turn renders
-        // with the current active state.
         let char_pos = if live {
             let v = self.render_turn_at(k, self.frozen_width, self.run_active());
             cursor_char_pos(&v, intra, col)
@@ -316,21 +293,14 @@ impl App {
         Some((k, char_pos))
     }
 
-    /// Capture the Navigate cursor's content anchor.
     pub(super) fn nav_content_anchor(&self) -> Option<(usize, usize)> {
         self.content_anchor_for(self.nav_cursor, self.nav_col)
     }
 
-    /// Capture the Select-mode selection anchor's content anchor.
     pub(super) fn sel_content_anchor(&self) -> Option<(usize, usize)> {
         self.content_anchor_for(self.select_anchor.0, self.select_anchor.1)
     }
 
-    /// Re-seat an arbitrary position onto its previous content character after
-    /// a re-wrap: find the line in the (new-width) turn whose cumulative content
-    /// offset is the largest not exceeding the captured anchor, and the display
-    /// column that lands on that character. `last_lines` is the freshly rendered
-    /// last turn at the new width. Returns the absolute `(cursor, col)`.
     fn reseat_position(
         &self,
         anchor: (usize, usize),
@@ -357,8 +327,6 @@ impl App {
         Some((self.turn_start_line(k).saturating_add(seated.0), seated.1))
     }
 
-    /// Re-seat the cursor on its previous content line after a re-wrap.
-    /// `last_lines` is the freshly rendered last turn at the new width.
     pub(super) fn reseat_nav_cursor(
         &mut self,
         anchor: (usize, usize),
@@ -374,8 +342,6 @@ impl App {
         }
     }
 
-    /// Re-seat the Select-mode selection anchor on its previous content
-    /// character after a re-wrap, then rebuild the selection.
     pub(super) fn reseat_sel_anchor(
         &mut self,
         anchor: (usize, usize),
@@ -388,9 +354,6 @@ impl App {
         }
     }
 
-    /// First transcript line of turn `i` (0-based). Turns are laid out as
-    /// `turn0, blank, turn1, blank, ...`, so turn `i` starts at the sum of all
-    /// preceding turn heights plus one blank separator per preceding turn.
     pub(super) fn turn_start_line(&self, i: usize) -> usize {
         let n = self.turns.len();
         if i == 0 || n == 0 {
@@ -438,10 +401,6 @@ impl App {
         self.nav_show_cursor();
     }
 
-    /// Move by one viewport page. In [`Mode::Input`] this scrolls the
-    /// transcript (unpinning from the bottom on `PgUp`); in
-    /// [`Mode::Navigate`]/[`Mode::Select`] the cursor moves a page and the
-    /// viewport follows.
     pub(super) fn page_up(&mut self) {
         let h = self.log_view_h;
         if h == 0 {
@@ -478,7 +437,6 @@ impl App {
         }
     }
 
-    /// Copy the current selection to the system clipboard via OSC 52.
     pub(super) fn yank_selection(&mut self) {
         if let Some(text) = self.selection_text() {
             self.save_yank_cursor();
@@ -486,8 +444,6 @@ impl App {
         }
     }
 
-    /// Yank the cursor line's content (decoration excluded) to the clipboard.
-    /// Used by Navigate's `y`.
     pub(super) fn yank_line(&mut self) {
         if let Some(text) = self.current_line_text() {
             self.save_yank_cursor();
@@ -507,8 +463,6 @@ impl App {
         }
     }
 
-    /// Copy `text` to the system clipboard via OSC 52 and arm the
-    /// "Copied to clipboard" rule-line badge.
     pub(super) fn yank_text(&mut self, text: &str) {
         Self::osc52(text);
         self.yank_notify = Some(Instant::now());
@@ -520,14 +474,10 @@ impl App {
         let _ = io::stdout().flush();
     }
 
-    /// Multi-line scroll for the mouse wheel; negative scrolls up (towards
-    /// older output), positive scrolls down. Scrolling up un-pins follow mode.
     pub(super) fn scroll_by(&mut self, delta: i32) {
         if delta == 0 {
             return;
         }
-        // Scrolling moves the viewport; a mouse selection no longer maps to
-        // the visible lines, so drop it (terminals clear selection on scroll).
         self.sel = None;
         if delta < 0 {
             let n = delta.unsigned_abs() as usize;
@@ -560,11 +510,6 @@ impl App {
         }
     }
 
-    /// Mouse-wheel scroll: enter Navigate and move the viewport, clamping the
-    /// cursor to the near edge when it leaves the viewport. Scrolling up parks
-    /// the cursor on the bottom edge (it falls below as older lines enter);
-    /// scrolling down parks it on the top edge. A no-op scroll (already at the
-    /// boundary) leaves the mode untouched.
     pub(super) fn scroll_nav(&mut self, delta: i32) {
         let before = self.view_off();
         self.scroll_by(delta);
@@ -628,7 +573,6 @@ impl App {
             let (cstart, cend) = vl.content;
             let cs = (if li_abs == sl { sc } else { 0 }).clamp(cstart, cend);
             let ce = (if li_abs == el { ec } else { n }).clamp(cstart, cend);
-            // Raw markdown: map the content-relative selection to a source slice.
             if let Some(rl) = vl.raw.as_ref() {
                 if rl.map.len() >= 2 {
                     let start_rel = cs.saturating_sub(cstart).min(rl.map.len() - 1);
@@ -640,9 +584,6 @@ impl App {
                             rl.map[start_rel]
                         };
                         let end = rl.map[end_rel];
-                        // A soft-wrap continuation of the same source line
-                        // concatenates without a separator; anything else
-                        // starts a new line.
                         let cont = !rl.hard_break
                             && prev_src
                                 .as_ref()
@@ -654,10 +595,6 @@ impl App {
                         prev_src = Some(rl.source.clone());
                         continue;
                     }
-                    // Empty contribution — still track the source for
-                    // contiguity.  A hard-break blank line in the middle
-                    // of a selection must emit a separator so it is not
-                    // silently collapsed into the next line.
                     if rl.hard_break && !out.is_empty() {
                         out.push('\n');
                     }
@@ -668,9 +605,6 @@ impl App {
                     };
                     continue;
                 }
-                // Degenerate raw (no per-char map): table data/header rows
-                // carry the full markdown source; border rows carry an
-                // empty source and are suppressed.
                 if !rl.source.is_empty() && cs < ce {
                     let cont = !rl.hard_break
                         && prev_src
@@ -694,7 +628,6 @@ impl App {
                 }
                 continue;
             }
-            // Decoration-only line: rendered content slice, hard break.
             let chars: Vec<(usize, char)> = s.char_indices().collect();
             let b0 = if cs == 0 || cs >= ce {
                 0
@@ -729,8 +662,6 @@ impl App {
     }
 }
 
-/// Cumulative selectable-content char offset of line `intra`'s start within a
-/// turn's rendered lines. Blanks contribute zero, so separators don't shift it.
 fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
     lines
         .iter()
@@ -739,9 +670,6 @@ fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
         .sum()
 }
 
-/// Cursor's content-char position within a turn: the line's cumulative content
-/// start offset plus the cursor's column mapped into that line's selectable
-/// content (decoration stripped, clamped to the content length).
 pub(super) fn cursor_char_pos(lines: &[view::RenderLine], intra: usize, nav_col: usize) -> usize {
     let start = content_offset(lines, intra);
     match lines.get(intra) {
@@ -754,9 +682,6 @@ pub(super) fn cursor_char_pos(lines: &[view::RenderLine], intra: usize, nav_col:
     }
 }
 
-/// Re-seat onto `char_pos`: the line whose cumulative content start is the
-/// largest not exceeding it, and the display column (decoration + offset into
-/// that line) that lands on the character. Returns `None` only for empty input.
 fn reseat_at(lines: &[view::RenderLine], char_pos: usize) -> Option<(usize, usize)> {
     let j = line_at_content_offset(lines, char_pos)?;
     let start = content_offset(lines, j);
@@ -766,9 +691,6 @@ fn reseat_at(lines: &[view::RenderLine], char_pos: usize) -> Option<(usize, usiz
     Some((j, rl.content.0 + col))
 }
 
-/// Index of the line whose cumulative content start offset is the largest not
-/// exceeding `c` — i.e. the line containing the `c`-th content char. This is
-/// the same content line across a re-wrap.
 fn line_at_content_offset(lines: &[view::RenderLine], c: usize) -> Option<usize> {
     let mut acc = 0usize;
     let mut found = None;

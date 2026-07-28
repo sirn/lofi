@@ -2,7 +2,6 @@
 #![allow(clippy::expect_used)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::many_single_char_names)]
-// Cost/format tests assert exact computed float values.
 #![allow(clippy::float_cmp)]
 
 use super::*;
@@ -27,8 +26,6 @@ fn push_turn(app: &mut App) {
     });
 }
 
-/// Test fixture helper that makes the intended logical parent explicit while
-/// using the same cursor append path as production.
 fn test_append_events(
     path: &Path,
     events: &mut [SessionEvent],
@@ -494,8 +491,6 @@ fn render_tree_smoke() {
     assert!(!text.lines.is_empty());
 }
 
-/// Render assistant text containing inline markdown and collect the content
-/// spans (skipping the 2-space margin) so tests can assert on styles.
 fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -551,7 +546,6 @@ fn inline_markdown_code_stays_literal() {
         .iter()
         .find(|s| s.content == " inline_spans ")
         .expect("code span");
-    // Code spans have an inline_bg background; plain text does not.
     assert!(code.style.bg.is_some(), "code should have bg: {code:?}");
 }
 
@@ -559,16 +553,11 @@ fn inline_markdown_code_stays_literal() {
 fn inline_markdown_code_wraps_across_lines() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
-    // Inline code that spans a wrap boundary must still be rendered as code
-    // on every wrapped line.  Previously, wrapping split the text first and
-    // each segment was parsed independently, leaving backtick markers visible
-    // and losing the code style.
     let md = "Run `git rebase --interactive upstream main` now";
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
     let turn = &a.turns[0];
-    // Narrow enough to force the code span to wrap.
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -581,12 +570,10 @@ fn inline_markdown_code_wraps_across_lines() {
         .flat_map(|rl| rl.line.spans.iter().cloned())
         .collect();
     let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    // No backtick markers should survive in the output.
     assert!(
         !body.contains('`'),
         "backtick markers should be stripped: {body}"
     );
-    // Every word from the code span should carry the code style (bg set).
     for word in ["git", "rebase", "interactive", "upstream", "main"] {
         let found = spans
             .iter()
@@ -655,7 +642,6 @@ fn raw_map_snaps_to_markers_for_bold() {
         active_turn: false,
     };
     let rls = render_turn_lines(&cx, turn);
-    // Find the assistant text line (source contains the markdown).
     let rl = rls
         .iter()
         .find(|r| {
@@ -665,18 +651,14 @@ fn raw_map_snaps_to_markers_for_bold() {
         })
         .expect("a line with a raw map");
     let raw = rl.raw.as_ref().unwrap();
-    // Whole content → full source.
     let start = *raw.map.first().unwrap();
     let end = *raw.map.last().unwrap();
     assert_eq!(&raw.source[start..end], "**bold** text");
-    // The visible "bold" (display positions 0..4) snaps to source `**bold**`.
     let s = raw.map[0];
     let e = raw.map[4];
     assert_eq!(&raw.source[s..e], "**bold**");
 }
 
-/// Populate the app's log fields from rendered lines so yank tests exercise
-/// the same path as `feed_segment`.
 fn feed_lines(a: &mut App, rls: &[view::RenderLine]) {
     a.log_off = 0;
     a.log_vis = rls
@@ -706,7 +688,6 @@ fn yank_heading_includes_prefix() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find the heading row (source contains "##").
     let row = a
         .log_vis
         .iter()
@@ -759,7 +740,6 @@ fn yank_table_row_returns_markdown() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find the header data row (source starts with `| Name`).
     let hdr = a
         .log_vis
         .iter()
@@ -771,7 +751,6 @@ fn yank_table_row_returns_markdown() {
         .expect("header data row");
     a.nav_cursor = hdr;
     assert_eq!(a.current_line_text().as_deref(), Some("| Name | Age |"));
-    // Find a data row.
     let data = a
         .log_vis
         .iter()
@@ -802,8 +781,6 @@ fn yank_table_header_separator_returns_markdown() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // The header-separator border (├─┼─┤) carries the markdown separator
-    // line so yanking it recovers `|------|-----|`.
     let sep = a
         .log_vis
         .iter()
@@ -834,15 +811,12 @@ fn yank_table_border_returns_empty() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find the top border row (raw exists but source is empty).
     let border = a
         .log_vis
         .iter()
         .position(|v| v.raw.as_ref().is_some_and(|r| r.source.is_empty()))
         .expect("border row");
     a.nav_cursor = border;
-    // Non-separator border rows carry no markdown source — yank should
-    // return nothing, not the rendered box-drawing characters.
     assert_eq!(a.current_line_text(), None);
 }
 
@@ -863,7 +837,6 @@ fn yank_nested_list_preserves_indent() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find the nested item row (source starts with "  -").
     let nested = a
         .log_vis
         .iter()
@@ -890,7 +863,6 @@ fn yank_code_block_preserves_indent() {
     };
     let rls = render_turn_lines(&cx, turn);
     feed_lines(&mut a, &rls);
-    // Find the indented line (source starts with "  return").
     let indented = a
         .log_vis
         .iter()
@@ -934,7 +906,6 @@ fn selection_blockquote_to_text_preserves_blank() {
     }
     let n = rls.len();
     feed_lines(&mut a, &rls);
-    // Select all content lines (skip marker line 0 and gap line 1).
     a.sel = Some(Selection {
         start: (2, 0),
         end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
@@ -959,7 +930,6 @@ fn blockquote_renders_with_bar_and_empty_lines() {
         active_turn: false,
     };
     let rls = render_turn_lines(&cx, turn);
-    // Every quote line should have the bar character.
     let quote_lines: Vec<String> = rls
         .iter()
         .skip(2)
@@ -971,7 +941,6 @@ fn blockquote_renders_with_bar_and_empty_lines() {
             .any(|s| s.contains("Line one") && s.contains("▎")),
         "Line one should have bar: {quote_lines:?}"
     );
-    // The bare > should produce a line with just the bar (not dropped).
     assert!(
         quote_lines
             .iter()
@@ -984,7 +953,6 @@ fn blockquote_renders_with_bar_and_empty_lines() {
             .any(|s| s.contains("Line three") && s.contains("▎")),
         "Line three should have bar: {quote_lines:?}"
     );
-    // Yanking the full quote should preserve the bare ">" line.
     let n = rls.len();
     feed_lines(&mut a, &rls);
     a.sel = Some(Selection {
@@ -1013,7 +981,6 @@ fn selection_blank_line_between_paragraphs_preserved() {
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
-    // Select all content lines (skip turn marker at line 0 and gap at 1).
     a.sel = Some(Selection {
         start: (2, 0),
         end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
@@ -1040,7 +1007,6 @@ fn selection_nested_list_preserves_indent() {
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
-    // Select all lines.
     a.sel = Some(Selection {
         start: (0, 0),
         end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
@@ -1070,16 +1036,12 @@ fn selection_table_returns_markdown_not_grid() {
     let rls = render_turn_lines(&cx, turn);
     let n = rls.len();
     feed_lines(&mut a, &rls);
-    // Select the entire table top to bottom.
     a.sel = Some(Selection {
         start: (2, 0),
         end: (n - 1, a.log_vis[n - 1].rendered.chars().count()),
     });
     let text = a.selection_text().expect("selection text");
-    // Non-separator borders are suppressed; the header, separator, and
-    // data rows carry markdown source, joined by `\n`.
     assert_eq!(text, "| Name | Age |\n|------|-----|\n| Ada | 36 |");
-    // No box-drawing characters survive.
     assert!(
         !text.contains('│') && !text.contains('─'),
         "no grid chars: {text}"
@@ -1172,8 +1134,6 @@ fn inline_markdown_table_fits_narrow_width() {
             .sum();
         assert!(w <= 40, "line too wide ({w} > 40): {:?}", rl.line);
     }
-    // All content must be present (wrapped, not truncated). Words that fit
-    // survive intact; long unbreakable tokens hard-break across rows.
     let body: String = rls
         .iter()
         .flat_map(|rl| rl.line.spans.iter())
@@ -1200,11 +1160,9 @@ fn inline_markdown_table_fits_narrow_width() {
 
 #[test]
 fn inline_markdown_table_right_aligns() {
-    // Right-aligned column: `--:` → numbers should be right-padded.
     let md = "| Item | Count |\n|------|------:|\n| a    | 1     |\n| bb   | 22    |";
     let spans = render_text_spans(md);
     let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    // The right-aligned cells should have leading spaces before the numbers.
     assert!(body.contains(" 1"), "right-aligned 1: {body}");
     assert!(body.contains("22"), "right-aligned 22: {body}");
 }
@@ -1212,12 +1170,9 @@ fn inline_markdown_table_right_aligns() {
 #[test]
 fn inline_markdown_table_renders_inline_formatting() {
     use ratatui::style::Modifier;
-    // Bold and code formatting inside table cells should be rendered with
-    // the appropriate styles, and markers stripped from the visible text.
     let md = "| Name | Type |\n|------|------|\n| **bold** | `code` |";
     let spans = render_text_spans(md);
     let body: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    // Markers should be stripped.
     assert!(
         !body.contains("**"),
         "bold markers should be stripped: {body}"
@@ -1226,10 +1181,8 @@ fn inline_markdown_table_renders_inline_formatting() {
         !body.contains('`'),
         "code markers should be stripped: {body}"
     );
-    // Content should be present.
     assert!(body.contains("bold"), "bold text should be present: {body}");
     assert!(body.contains("code"), "code text should be present: {body}");
-    // The bold cell should have BOLD modifier.
     let bold_span = spans
         .iter()
         .find(|s| s.content == "bold")
@@ -1238,7 +1191,6 @@ fn inline_markdown_table_renders_inline_formatting() {
         bold_span.style.add_modifier.contains(Modifier::BOLD),
         "bold cell should be BOLD: {bold_span:?}"
     );
-    // The code cell should have the code style (fg = info).
     let code_span = spans
         .iter()
         .find(|s| s.content == " code ")
@@ -1332,8 +1284,6 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
             .to_string(),
         label: Some("mixed".to_string()),
     });
-    // A read (hidden in non-verbose), mutating tools bash/write/edit (kept),
-    // and a failed read whose error stays visible even when read results hide.
     a.apply_event(AgentEvent::NativeToolStart {
         parent: "e1".to_string(),
         id: 0,
@@ -1412,8 +1362,6 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
             .flat_map(|s| s.content.chars())
             .collect()
     };
-    // Non-verbose: read body hidden; bash body and the written write/edit
-    // content, the error, and every tool header stay visible.
     a.verbose = false;
     let nv = text(&a);
     assert!(
@@ -1444,7 +1392,6 @@ fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
         nv.contains("Tool write"),
         "write header should still show: {nv}"
     );
-    // Verbose: the hidden read body comes back.
     a.verbose = true;
     let v = text(&a);
     assert!(
@@ -1470,9 +1417,6 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
             .flat_map(|s| s.content.chars())
             .collect()
     };
-    // A successful exec whose returned value is a short summary. In
-    // non-verbose the result body hides (the native-tool lines already showed
-    // the work) but the Succeed status header stays; verbose brings it back.
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::ToolStart {
@@ -1564,18 +1508,13 @@ fn vim_motions_move_within_content() {
     }]; // "aa bb cc"
     a.nav_cursor = 0;
     a.nav_col = 2;
-    // ^ and 0 land on the first content char.
     assert_eq!(a.first_nonblank_col(), 2);
-    // $ lands on the last content char.
     a.nav_set_col(usize::MAX);
     assert_eq!(a.nav_col, 9);
-    // w from "aa" -> "bb" start.
     a.nav_col = 2;
     assert_eq!(a.nav_word_target(WordMotion::NextStart { big: false }), 5);
-    // e from "aa" -> end of "aa".
     a.nav_col = 2;
     assert_eq!(a.nav_word_target(WordMotion::NextEnd { big: false }), 3);
-    // b from "bb" -> "aa" start.
     a.nav_col = 5;
     assert_eq!(a.nav_word_target(WordMotion::PrevStart { big: false }), 2);
 }
@@ -1592,9 +1531,7 @@ fn vim_word_motion_skips_punctuation() {
     }]; // "a.b c"
     a.nav_cursor = 0;
     a.nav_col = 2;
-    // w from "a" lands on "." (punctuation is its own word).
     assert_eq!(a.nav_word_target(WordMotion::NextStart { big: false }), 3);
-    // W from "a" lands on "c" (only whitespace separates, so "a.b" is one WORD).
     assert_eq!(a.nav_word_target(WordMotion::NextStart { big: true }), 6);
 }
 
@@ -1646,8 +1583,6 @@ fn empty_text_blocks_leave_no_gap() {
             }
         })
         .0;
-    // At most the Stack separator plus one exec-padding fill (= 2) should
-    // ever appear consecutively; whitespace-only text blocks leave nothing.
     assert!(
         max_run <= 2,
         "max blank run {max_run}; lines:\n{:#?}",
@@ -1680,10 +1615,6 @@ fn assistant(text: &str) -> Message {
     }
 }
 
-/// Build a `Vec<SessionEvent>` from kinds, assigning fresh ids and
-/// chaining each event's `parent_id` to the previous one (root = first).
-/// Mirrors what `test_append_events` does on disk, so
-/// `messages_from_events` / `replay_session_events` see a valid tree.
 fn sev_chain<I: IntoIterator<Item = SessionEventKind>>(kinds: I) -> Vec<SessionEvent> {
     let mut out = Vec::new();
     let mut parent: Option<String> = None;
@@ -1699,7 +1630,6 @@ fn sev_chain<I: IntoIterator<Item = SessionEventKind>>(kinds: I) -> Vec<SessionE
     out
 }
 
-/// Wrap a message as a `Message` session-event kind.
 fn msg(m: Message) -> SessionEventKind {
     SessionEventKind::Message(m)
 }
@@ -1960,14 +1890,11 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
     });
     a.run_finished();
 
-    // Until TurnStart arrives, the completed response remains authoritative.
     assert!(a.turns[0]
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "previous response")));
 
-    // One event both freezes the old turn and exposes the new prompt; there is
-    // no renderable state where only the old prompt remains on screen.
     a.apply_event(AgentEvent::TurnStart {
         prompt: "new prompt".into(),
     });
@@ -2068,7 +1995,6 @@ fn turn_end_updates_usage() {
             cache_write_tokens: 0,
         },
     });
-    // TurnEnd accumulates into the footer totals (input + output).
     assert_eq!(a.total_in, 10);
     assert_eq!(a.total_out, 20);
 }
@@ -2077,8 +2003,6 @@ fn turn_end_updates_usage() {
 fn round_usage_updates_totals_per_round() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
-    // Two rounds within one turn: each carries the turn's cumulative
-    // cost and that round's usage.
     a.apply_event(AgentEvent::RoundUsage {
         cost: 0.01,
         usage: Usage {
@@ -2092,7 +2016,6 @@ fn round_usage_updates_totals_per_round() {
     assert_eq!(a.total_out, 50);
     assert_eq!(a.turn_cost, 0.01);
     assert!(a.turn_has_round_usage);
-    // Footer shows the live running cost (base cost + turn_cost).
     assert!((a.cost + a.turn_cost - 0.01).abs() < 1e-9);
 
     a.apply_event(AgentEvent::RoundUsage {
@@ -2104,14 +2027,11 @@ fn round_usage_updates_totals_per_round() {
             cache_write_tokens: 0,
         },
     });
-    // Tokens accumulate per round; turn_cost is replaced with the
-    // turn's new cumulative cost.
     assert_eq!(a.total_in, 300);
     assert_eq!(a.total_out, 130);
     assert!((a.turn_cost - 0.03).abs() < 1e-9);
     assert!((a.cost + a.turn_cost - 0.03).abs() < 1e-9);
 
-    // TurnEnd folds turn_cost into cost and does NOT re-add tokens.
     a.apply_event(AgentEvent::TurnEnd {
         model: "m".into(),
         elapsed_ms: 0,
@@ -2126,15 +2046,12 @@ fn round_usage_updates_totals_per_round() {
     assert!((a.cost - 0.03).abs() < 1e-9);
     assert_eq!(a.turn_cost, 0.0);
     assert!(!a.turn_has_round_usage);
-    // Tokens unchanged: TurnEnd skipped re-accumulation.
     assert_eq!(a.total_in, 300);
     assert_eq!(a.total_out, 130);
 }
 
 #[test]
 fn turn_end_folds_bundled_totals_on_resume_path() {
-    // The resume path has no RoundUsage events, so TurnEnd must apply
-    // its bundled cost/usage as before.
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
     a.apply_event(AgentEvent::TurnEnd {
@@ -2193,7 +2110,6 @@ fn input_wraps_at_word_boundaries() {
 fn input_hard_breaks_unbreakable_token() {
     let mut a = app();
     a.set_input("supercalifragilistic".to_string());
-    // No spaces to break at: hard-break at the column width.
     let rows = a.input_select_rows(7);
     assert_eq!(rows, vec!["superca", "lifragi", "listic"]);
 }
@@ -2211,7 +2127,6 @@ fn input_cursor_tracks_word_wrap_past_cursor() {
     assert_eq!(a.input_cursor_pos(7), (0, 6));
     a.input_cursor = "hello w".len();
     assert_eq!(a.input_cursor_pos(7), (1, 1));
-    // End of line lands at the end of the last row.
     a.input_cursor = "hello world".len();
     assert_eq!(a.input_cursor_pos(7), (1, 5));
 }
@@ -2222,19 +2137,15 @@ fn cursor_up_recalls_at_first_cell() {
     a.history_nav.push("first".to_string());
     a.history_nav.push("second".to_string());
     a.set_input("Hello".to_string());
-    // first line, not at start -> jump to start (no recall yet)
     a.cursor_up();
     assert_eq!(a.input, "Hello");
     assert_eq!(a.input_cursor, 0);
-    // at first cell -> recall previous ("second"), cursor parked at start
     a.cursor_up();
     assert_eq!(a.input, "second");
     assert_eq!(a.input_cursor, 0);
-    // recall again -> "first"
     a.cursor_up();
     assert_eq!(a.input, "first");
     assert_eq!(a.input_cursor, 0);
-    // at the oldest entry, another up is a no-op
     a.cursor_up();
     assert_eq!(a.input, "first");
 }
@@ -2245,21 +2156,17 @@ fn cursor_down_recalls_at_last_cell() {
     a.history_nav.push("first".to_string());
     a.history_nav.push("second".to_string());
     a.set_input("Hello".to_string());
-    // walk back to "first" (cursor at start)
     a.cursor_up();
     a.cursor_up();
     a.cursor_up();
     a.cursor_up();
     assert_eq!(a.input, "first");
-    // last line, not at end -> jump to end
     a.cursor_down();
     assert_eq!(a.input, "first");
     assert_eq!(a.input_cursor, "first".len());
-    // at end -> recall next ("second"), cursor at end
     a.cursor_down();
     assert_eq!(a.input, "second");
     assert_eq!(a.input_cursor, "second".len());
-    // recall next -> restored stash "Hello"
     a.cursor_down();
     assert_eq!(a.input, "Hello");
     assert_eq!(a.input_cursor, "Hello".len());
@@ -2269,15 +2176,12 @@ fn cursor_down_recalls_at_last_cell() {
 fn cursor_up_down_navigate_multiline() {
     let mut a = app();
     a.set_input("line1\nline2\nline3".to_string());
-    // cursor at end (row 2). up -> row 1
     a.cursor_up();
     assert_eq!(a.cursor_row_col().0, 1);
     a.cursor_up();
     assert_eq!(a.cursor_row_col().0, 0);
-    // up on first line (col>0) -> start of line
     a.cursor_up();
     assert_eq!(a.cursor_row_col(), (0, 0));
-    // down -> row 1
     a.cursor_down();
     assert_eq!(a.cursor_row_col().0, 1);
     a.cursor_down();
@@ -2321,7 +2225,6 @@ fn slash_clear_help_session_resume_new() {
     assert_eq!(kind, NotifyKind::Error);
     assert!(msg.contains("unknown command"));
 
-    // /resume with no store notifies (warn) and opens no picker.
     assert!(a.slash_command("/resume"));
     assert!(a.picker.is_none());
     let (msg, kind) = a.notify_badge().expect("/resume notified");
@@ -2331,7 +2234,6 @@ fn slash_clear_help_session_resume_new() {
     assert!(a.slash_command("/new"));
     assert!(a.turns.is_empty());
     assert!(a.session.cursor.is_none());
-    // Footer stats reset with the session.
     assert!(a.status_usage.is_none());
     assert_eq!(a.cost, 0.0);
     assert_eq!(a.turn_cost, 0.0);
@@ -2344,7 +2246,6 @@ fn slash_clear_help_session_resume_new() {
 #[test]
 fn session_info_opens_modal() {
     let mut a = app();
-    // No session path: the modal still opens, showing "(none)" and a note.
     assert!(a.slash_command("/session"));
     assert!(a.turns.is_empty());
     let info = a.info.as_ref().expect("modal opened");
@@ -2394,10 +2295,8 @@ fn paste_blocked_while_modal_open() {
     let mut run = None;
     a.slash_command("/help");
     assert!(a.modal_open());
-    // Paste is ignored while the modal owns input.
     handle_event(&Event::Paste("pasted".to_string()), &mut a, None, &mut run);
     assert_eq!(a.input, "");
-    // Dismiss, then paste lands in the prompt.
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
     handle_event(&Event::Paste("pasted".to_string()), &mut a, None, &mut run);
     assert_eq!(a.input, "pasted");
@@ -2428,8 +2327,6 @@ fn permission_dialog_requires_an_explicit_choice() {
     let (req, mut response) = confirm_request("rm -rf build");
     a.pending_confirms.push(req);
 
-    // The old behavior denied on any non-y key. Printable noise must now be
-    // swallowed while leaving both the request and response pending.
     assert!(a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE,)));
     assert_eq!(a.pending_confirms.len(), 1);
     assert!(matches!(
@@ -2437,7 +2334,6 @@ fn permission_dialog_requires_an_explicit_choice() {
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
 
-    // Move to Deny and explicitly confirm it. Cursor aliases work too.
     a.handle_confirm_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(a.confirm_selected, 1);
     a.handle_confirm_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -2546,8 +2442,6 @@ fn scrollbars_use_a_gutter_outside_transcript_and_prompt_text() {
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let buf = term.backend().buffer();
 
-    // The semantic content rectangles stop before the terminal's rightmost
-    // column. That column belongs exclusively to each viewport's scrollbar.
     assert_eq!(a.log_rect.right(), 59);
     assert_eq!(a.input_rect.right(), 59);
     let log_gutter_x = a.log_rect.right();
@@ -2670,8 +2564,6 @@ fn tree_picker_is_centered() {
     assert!(!row(top_y).contains("Roll back"));
     assert!(row(title_y).contains('│'));
 
-    // The navigation hint is restored to the final interior row, directly
-    // above the bottom border.
     let help_y = (title_y + 1..22)
         .find(|&y| row(y).contains("navigate") && row(y).contains("restore"))
         .expect("tree modal bottom hint found");
@@ -2700,7 +2592,6 @@ fn help_modal_scrolls_and_dismisses() {
     let total = a.info.as_ref().unwrap().total;
     let view_h = a.info.as_ref().unwrap().view_h;
     assert!(total > view_h, "help should overflow the viewport");
-    // j scrolls down, k back up.
     handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
     assert_eq!(a.info.as_ref().unwrap().scroll, 1);
     for _ in 0..5 {
@@ -2709,12 +2600,10 @@ fn help_modal_scrolls_and_dismisses() {
     assert_eq!(a.info.as_ref().unwrap().scroll, 6);
     handle_event(&plain_key(KeyCode::Char('k')), &mut a, None, &mut run);
     assert_eq!(a.info.as_ref().unwrap().scroll, 5);
-    // Scrolling clamps at the bottom.
     for _ in 0..total {
         handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
     }
     assert_eq!(a.info.as_ref().unwrap().scroll, total - view_h);
-    // q dismisses.
     handle_event(&plain_key(KeyCode::Char('q')), &mut a, None, &mut run);
     assert!(a.info.is_none());
 }
@@ -2722,25 +2611,20 @@ fn help_modal_scrolls_and_dismisses() {
 #[test]
 fn slash_complete_filters_and_accepts() {
     let mut a = app();
-    // "/" matches all commands.
     a.input = "/".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
     assert_eq!(sc.candidates.len(), SLASH_COMMANDS.len());
-    // "/tr" filters to just /tree.
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
     assert_eq!(sc.candidates, vec![9]); // /tree is index 9
-                                        // Typing the full command dismisses (nothing left to complete).
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
     assert!(a.slash_complete.is_none());
-    // Non-command input dismisses.
     a.input = "hello".to_string();
     a.refresh_slash_complete();
     assert!(a.slash_complete.is_none());
-    // Accept replaces the input with the selected candidate.
     a.input = "/".to_string();
     a.refresh_slash_complete();
     a.slash_complete_down(); // index 1 = /compact
@@ -2760,13 +2644,10 @@ fn slash_complete_enter_accepts_tab_wraps() {
     a.input = "/".to_string();
     a.refresh_slash_complete();
     let len = a.slash_complete.as_ref().unwrap().candidates.len();
-    // Tab cycles forward with wrap-around: after `len` presses we're
-    // back at the first candidate (/clear, index 0 in SLASH_COMMANDS).
     for _ in 0..len {
         handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     }
     assert_eq!(a.slash_complete.as_ref().unwrap().selected, 0);
-    // Enter accepts the selection (auto-completes), replacing the input.
     handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
     assert_eq!(a.input, "/clear");
     assert!(a.slash_complete.is_none());
@@ -2784,7 +2665,6 @@ fn slash_complete_single_item_tab_accepts() {
     handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     assert_eq!(a.input, "/tree");
     assert!(a.slash_complete.is_none());
-    // Same for Shift+Tab on a single candidate.
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     handle_event(&plain_key(KeyCode::BackTab), &mut a, None, &mut run);
@@ -2795,8 +2675,6 @@ fn slash_complete_single_item_tab_accepts() {
 #[test]
 fn tree_no_session_pushes_error() {
     let mut a = app();
-    // No session cursor set — ephemeral. /tree notifies on the rule line
-    // and leaves no overlay.
     assert!(a.slash_command("/tree"));
     assert!(a.tree_picker.is_none());
     let (msg, kind) = a.notify_badge().expect("/tree notified");
@@ -2884,10 +2762,8 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
-    // Tree: user1, agent1 (turn_end1), user2, agent2 (turn_end2).
     assert_eq!(picker.entries.len(), 4);
     assert_eq!(picker.selected, 3); // defaults to the last entry
-                                    // Find the "edit turn 2" entry (prefill = "second").
     let edit_idx = picker
         .entries
         .iter()
@@ -2895,9 +2771,6 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .unwrap();
     a.tree_picker.as_mut().unwrap().selected = edit_idx;
     a.tree_picker_confirm();
-    // Confirm rolls back: the visible turns drop to just turn 1
-    // (user "first" + assistant "hello" + turn_end), the input is
-    // prefilled with "second", and the branch hint is turn_end1's id.
     assert!(a.tree_picker.is_none());
     assert_eq!(a.input, "second");
     assert_eq!(
@@ -2967,8 +2840,6 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
         kind,
     };
 
-    // Branch A is appended before branch B, so one physical byte range for
-    // the selected B lineage would contain all of sibling A.
     let mut root = [
         wrap(msg(user("root"))),
         wrap(msg(assistant("shared"))),
@@ -3023,7 +2894,6 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     assert_eq!(text(&chosen), "chosen");
     assert!(!text(&shared).contains("SIBLING MUST NOT LEAK"));
 
-    // Rendering must stay on the selected lineage, including the final turn.
     let mut term = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();
@@ -3040,11 +2910,6 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
 
 #[test]
 fn tree_shows_compaction_node_and_reverts_before_it() {
-    // user1 -> assistant1 -> turn_end1 -> Compaction -> user2 -> assistant2
-    // -> turn_end2. /tree must list a "compact:" node between turn 1 and
-    // turn 2. Selecting it rolls back to the compaction's parent
-    // (turn_end1), restoring the pre-compaction history (user1 + assistant1)
-    // and leaving the input empty.
     use lofi_core::session::store::SessionStore;
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
@@ -3121,7 +2986,6 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
-    // Trunk: user1, agent1, compact, user2, agent2.
     assert!(picker
         .entries
         .iter()
@@ -3131,12 +2995,10 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         .iter()
         .position(|e| e.label.starts_with("compact:"))
         .unwrap();
-    // The compaction node reverts to its parent (turn_end1), prefill empty.
     assert_eq!(picker.entries[comp_idx].branch_point, turn_end1_id);
     assert!(picker.entries[comp_idx].prefill.is_empty());
     a.tree_picker.as_mut().unwrap().selected = comp_idx;
     a.tree_picker_confirm();
-    // Rolled back to before the compact: only turn 1's messages remain.
     assert!(a.tree_picker.is_none());
     assert_eq!(
         a.session
@@ -3216,9 +3078,6 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
 
 #[test]
 fn modal_tab_cycles_with_wraparound() {
-    // /tree on a two-turn session yields 4 entries, defaulting to the
-    // last (index 3). Tab wraps forward (3 -> 0); Shift+Tab wraps back
-    // (0 -> 3); Ctrl+N/Ctrl+P clamp at the edges.
     use lofi_core::session::store::SessionStore;
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
@@ -3283,13 +3142,10 @@ fn modal_tab_cycles_with_wraparound() {
     assert_eq!(len, 4);
     assert_eq!(a.tree_picker.as_ref().unwrap().selected, 3);
     let mut run = None;
-    // Tab wraps forward: last (3) -> first (0).
     handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     assert_eq!(a.tree_picker.as_ref().unwrap().selected, 0);
-    // Shift+Tab wraps back: first (0) -> last (3).
     handle_event(&plain_key(KeyCode::BackTab), &mut a, None, &mut run);
     assert_eq!(a.tree_picker.as_ref().unwrap().selected, 3);
-    // Ctrl+N moves forward (clamped, no wrap): 0 -> 1.
     handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     assert_eq!(a.tree_picker.as_ref().unwrap().selected, 0);
     handle_event(
@@ -3307,10 +3163,6 @@ fn modal_tab_cycles_with_wraparound() {
 
 #[test]
 fn tree_revert_to_root_then_reopens() {
-    // Reverting to the first user prompt (root, no parent) sets
-    // The cursor moves to the root branch point. Reopening /tree
-    // must still show every turn as an unhighlighted branch, not
-    // "no branch points in this session yet".
     use lofi_core::session::store::SessionStore;
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
@@ -3390,7 +3242,6 @@ fn tree_revert_to_root_then_reopens() {
         .is_some());
     assert_eq!(a.turns.len(), 0); // rolled back to before any user turn
     assert_eq!(a.input, "first");
-    // Reopen /tree: all four nodes must appear, none active.
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker reopened");
     assert_eq!(picker.entries.len(), 4);
@@ -3399,10 +3250,6 @@ fn tree_revert_to_root_then_reopens() {
 
 #[test]
 fn tree_shows_tool_result_nodes() {
-    // user -> assistant(ToolUse) -> tool_result -> assistant(text) -> turn_end
-    // /tree must list a `tool:` node between the user prompt and the agent
-    // turn-end, showing the tool name and a result preview. Selecting the
-    // tool node rolls back to after the tool result (branch_point = its id).
     use lofi_core::session::store::SessionStore;
     use lofi_types::{ContentBlock, Role};
     let dir = tempfile::tempdir().unwrap();
@@ -3468,7 +3315,6 @@ fn tree_shows_tool_result_nodes() {
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
-    // Tree: user, tool, agent (turn_end).
     assert_eq!(picker.entries.len(), 3);
     assert!(picker.entries[0].label.starts_with("user:"));
     assert!(
@@ -3477,7 +3323,6 @@ fn tree_shows_tool_result_nodes() {
         picker.entries[1].label
     );
     assert!(picker.entries[2].label.starts_with("agent:"));
-    // The tool node shows the tool name (bash) and a result preview.
     assert!(
         picker.entries[1].label.contains("bash"),
         "tool label should contain tool name, got {}",
@@ -3488,7 +3333,6 @@ fn tree_shows_tool_result_nodes() {
         "tool label should contain result preview, got {}",
         picker.entries[1].label
     );
-    // Tool node is branchable (branch_point = its own id, prefill empty).
     assert_eq!(picker.entries[1].branch_point, tool_result_id);
     assert!(picker.entries[1].prefill.is_empty());
 }
@@ -3584,13 +3428,11 @@ fn tree_exec_label_shows_native_tools() {
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
-    // Find the exec entry (starts with "exec:")
     let exec_entry = picker
         .entries
         .iter()
         .find(|e| e.label.starts_with("exec:"))
         .expect("should have an exec: node");
-    // The label should list the native tools, not the raw exec result.
     assert!(
         exec_entry.label.contains("write"),
         "exec label should list write tool, got: {}",
@@ -3651,7 +3493,6 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
     use lofi_types::{ContentBlock, Message, Role};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
-    // Write a v1 header + raw message lines (no `type` field on messages).
     let header = r#"{"type":"meta","version":1,"created":1784436411351,"cwd":"/x","model":"m"}
 "#;
     let lines = [
@@ -3688,7 +3529,6 @@ fn tree_shows_tool_result_nodes_in_v1_session() {
     a.session.cwd = std::path::PathBuf::from("/x");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
-    // V1: user, tool (no turn_end, so no agent node).
     assert!(
         picker.entries.iter().any(|e| e.label.starts_with("user:")),
         "should have user node"
@@ -3710,7 +3550,6 @@ fn verbose_toggles() {
     assert_eq!(a.debug_after_draw, Some("verbose"));
     assert!(a.frozen_heights.is_empty());
     assert_eq!(a.frozen_heights_other_mode, vec![3, 5, 8]);
-    // Verbose state surfaces on the rule line, not as a chat turn.
     assert_eq!(a.turns.len(), before);
     a.debug_after_draw = None;
     a.frozen_heights = vec![30, 50, 80];
@@ -3735,7 +3574,6 @@ fn verbose_expands_compaction_summary() {
         }],
     });
 
-    // Collapsed: only the one-line marker; the folded text is absent.
     let collapsed = render_turns(&a, 80);
     let collapsed_s = join_rendered(&collapsed);
     assert!(
@@ -3747,7 +3585,6 @@ fn verbose_expands_compaction_summary() {
         "collapsed leaked summary: {collapsed_s}"
     );
 
-    // Expanded: the marker plus the folded summary text.
     a.toggle_verbose();
     let expanded = render_turns(&a, 80);
     let expanded_s = join_rendered(&expanded);
@@ -3814,7 +3651,6 @@ fn turn_failed_wraps_error_below_header() {
         !header.contains("503"),
         "header must not carry the error inline: {header}"
     );
-    // The error text lives on later, indented lines that each fit the column.
     let body: String = rls[1..]
         .iter()
         .flat_map(|rl| rl.line.spans.iter())
@@ -3894,9 +3730,6 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
         name: "bash".to_string(),
         args: "echo t".to_string(),
     });
-    // A single long unbreakable result line. Under truncation its tail
-    // ("hij") would be clipped at the column edge; under wrapping it must
-    // appear on a continuation row.
     let token = "abcdefghijklmnopqrstuvwxyz1234567890abcdefghij";
     a.apply_event(AgentEvent::NativeToolEnd {
         parent: "e1".to_string(),
@@ -3918,7 +3751,6 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
         active_turn: false,
     };
     let rls = render_turn_lines(&cx, turn);
-    // No row overflows the column — wrapping keeps every line in bounds.
     for rl in &rls {
         assert!(
             rl.line.width() <= 28,
@@ -3926,7 +3758,6 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
             rl.line.width()
         );
     }
-    // The tail of the long line is visible (wrapping, not truncation).
     let all = rls
         .iter()
         .map(|rl| {
@@ -4063,9 +3894,6 @@ fn selected_replay_preserves_prompt_when_compaction_parent_was_filtered_out() {
             parent_id: Some("prompt".into()),
             kind: msg(assistant("current reply")),
         },
-        // The cursor index has already removed this marker's checkpoint-copy
-        // parent. The supplied slice is selected and ordered, but no longer a
-        // self-contained parent graph.
         SessionEvent {
             id: "marker".into(),
             parent_id: Some("filtered-checkpoint-copy".into()),
@@ -4109,7 +3937,6 @@ fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
         msg(assistant("old reply")),
         msg(user("kept prompt")),
         msg(assistant("kept reply")),
-        // Durable, context-edited copies written by append_compaction.
         msg(user("kept prompt")),
         msg(assistant("kept reply")),
         SessionEventKind::Compaction {
@@ -4183,7 +4010,6 @@ fn turns_from_events_links_tool_results() {
     let turns = turns_from_session_events(&events);
     assert_eq!(turns.len(), 1);
     let blocks = &turns[0].blocks;
-    // Text, Tool, Text.
     assert!(matches!(blocks[0], Block::Text(_)));
     let Block::Tool(t) = &blocks[1] else {
         unreachable!()
@@ -4233,12 +4059,10 @@ fn turns_from_events_restores_timings() {
     let turns = turns_from_session_events(&events);
     assert_eq!(turns.len(), 1);
     let blocks = &turns[0].blocks;
-    // Tool elapsed is restored from the ToolTiming event.
     let Block::Tool(t) = &blocks[0] else {
         unreachable!()
     };
     assert_eq!(t.elapsed, Some(Duration::from_millis(7)));
-    // The trailing block is the restored turn-end marker.
     match blocks.last() {
         Some(Block::TurnEnd { label, elapsed }) => {
             assert_eq!(label, "proxy/gemini-3-flash:medium");
@@ -4289,9 +4113,6 @@ fn messages_from_events_excludes_failed_turn_branch() {
     test_append_events(&path, &mut t1_events, None).unwrap();
     let checkpoint = t1_events.last().unwrap().id.clone();
 
-    // Second (failed) turn: messages + TurnFailed marker, all chained
-    // linearly off the checkpoint cursor, mirroring
-    // the recorder's flush(Failed) which does NOT branch the marker.
     let mut t2_events: Vec<SessionEvent> = [
         SessionEventKind::Message(user("oops")),
         SessionEventKind::Message(assistant("partial")),
@@ -4316,8 +4137,6 @@ fn messages_from_events_excludes_failed_turn_branch() {
         .unwrap()
         .load_tree_events()
         .unwrap();
-    // The active leaf is the TurnFailed marker; the active path includes
-    // the failed turn's messages (they're ancestors of TurnFailed).
     let path_idx = active_path_from_leaf(&events);
     assert_eq!(path_idx.len(), 6, "active path includes failed turn's msgs");
     assert!(
@@ -4341,8 +4160,6 @@ fn messages_from_events_excludes_failed_turn_branch() {
         SessionEventKind::TurnFailed { .. }
     ));
 
-    // messages_from_events yields only the checkpoint's messages,
-    // excluding the failed turn's messages via the TurnFailed boundary.
     let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].role, Role::User);
@@ -4351,10 +4168,6 @@ fn messages_from_events_excludes_failed_turn_branch() {
 
 #[test]
 fn messages_from_events_prepends_compaction_summary() {
-    // After a compaction, the summary must LEAD the history (matching
-    // `compacted_history`: summary first, then the kept tail), and a
-    // force-continued turn appended after the marker must follow the kept
-    // tail — not sandwich the summary mid-stream.
     use lofi_core::session::store;
     use lofi_types::{ContentBlock, SessionEvent, SessionEventKind};
 
@@ -4366,9 +4179,6 @@ fn messages_from_events_prepends_compaction_summary() {
     )
     .unwrap();
 
-    // Summarized prefix (folded), then the kept tail (latest turn), then a
-    // Compaction marker whose first_kept_entry_id points at the kept tail's
-    // first message, then a force-continued assistant message.
     let mut events: Vec<SessionEvent> = [
         SessionEventKind::Message(user("old")),
         SessionEventKind::Message(user("kept-prompt")),
@@ -4392,7 +4202,6 @@ fn messages_from_events_prepends_compaction_summary() {
     })
     .collect();
     test_append_events(&path, &mut events, None).unwrap();
-    // Patch the marker's first_kept_entry_id to the kept-prompt event id.
     let mut events = store::SessionCursor::open(path.clone())
         .unwrap()
         .load_tree_events()
@@ -4414,7 +4223,6 @@ fn messages_from_events_prepends_compaction_summary() {
     }
 
     let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
-    // [summary, kept-prompt, kept-reply, continued]
     assert_eq!(msgs.len(), 4);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
     assert_eq!(user_text(&msgs[1]), "kept-prompt");
@@ -4448,34 +4256,23 @@ fn messages_from_events_compact_all_does_not_restore_old_messages() {
 
 #[test]
 fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
-    // compact_now writes the EDITED kept-tail messages to the transcript.
-    // messages_from_events reads verbatim — no in-memory edit_tail needed.
-    // This test simulates the on-disk layout: edited kept-tail messages
-    // (already stubbed by compact_now), then the marker, then post-compaction
-    // messages with full results.
     use lofi_types::{ContentBlock, SessionEvent, SessionEventKind};
 
-    let exec_call_stub = |id: &str, eid: &str| {
-        // Already edit_tail'd: code replaced with a lofi.result stub.
-        Message {
-            role: Role::Assistant,
-            blocks: vec![ContentBlock::ToolUse {
-                id: id.to_string(),
-                name: "exec".to_string(),
-                input: serde_json::json!({"code": format!("[code cleared — re-expand with lofi.result(\"{eid}\")]" )}),
-            }],
-        }
+    let exec_call_stub = |id: &str, eid: &str| Message {
+        role: Role::Assistant,
+        blocks: vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "exec".to_string(),
+            input: serde_json::json!({"code": format!("[code cleared — re-expand with lofi.result(\"{eid}\")]" )}),
+        }],
     };
-    let exec_result_stub = |id: &str, eid: &str| {
-        // Already edit_tail'd: content replaced with a lofi.result stub.
-        Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
-                is_error: false,
-            }],
-        }
+    let exec_result_stub = |id: &str, eid: &str| Message {
+        role: Role::User,
+        blocks: vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
+            is_error: false,
+        }],
     };
     let exec_call_full = |id: &str| Message {
         role: Role::Assistant,
@@ -4494,9 +4291,6 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         }],
     };
 
-    // On-disk layout after compact_now:
-    // [old summarized msg] [edited kept-tail: stubbed t1 + verbatim t2] [marker]
-    // [post-compaction: full t3]
     let events: Vec<SessionEvent> = sev_chain([
         msg(user("old prompt")),
         msg(exec_call_stub("t1", "e1")),
@@ -4517,11 +4311,9 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
     ]);
 
     let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
-    // [SUMMARY, edited kept-tail(4), post-compaction(2)] = 7
     assert_eq!(msgs.len(), 7);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
 
-    // Kept tail: read verbatim from disk (already edited by compact_now).
     let ContentBlock::ToolResult { content, .. } = &msgs[4].blocks[0] else {
         panic!()
     };
@@ -4534,7 +4326,6 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         "older kept-tail result should be the stub written by compact_now, got {content}"
     );
 
-    // Post-compaction: verbatim, full results.
     let ContentBlock::ToolResult { content, .. } = &msgs[6].blocks[0] else {
         panic!()
     };
@@ -4578,7 +4369,6 @@ fn abbreviate_path_progressive() {
     assert_eq!(abbreviate_path(&p, 100), "~/Dev/src/proj");
     assert_eq!(abbreviate_path(&p, 10), "~/D/s/proj");
     assert_eq!(abbreviate_path(&p, 4), "proj");
-    // A component starting with `~` keeps the tilde: `~sirn` -> `~s`.
     let p2 = home.join("Dev/~sirn/lofi");
     assert_eq!(abbreviate_path(&p2, 12), "~/D/~s/lofi");
 }
@@ -4625,7 +4415,6 @@ fn footer_and_header_show_cost_and_usage() {
         .map(|s| s.content.as_ref().to_string())
         .collect();
     assert!(header.contains("lofi"), "header: {header}");
-    // Cost lives in the footer now, not the header.
     assert!(
         !header.contains('$'),
         "header should not show cost: {header}"
@@ -4689,13 +4478,10 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
 #[test]
 fn queue_badge_shows_preview_and_count() {
     let mut a = app();
-    // Empty queue: no badge.
     assert!(a.queue_badge().is_none());
-    // One item: "Queue: <preview>".
     a.prompt_queue.push("fix the bug".to_string());
     let badge = a.queue_badge().expect("badge for one item");
     assert!(badge.contains("Queue: fix the bug"), "badge: {badge}");
-    // Two items: "Queue: <preview> (+1)".
     a.prompt_queue.push("also add tests".to_string());
     let badge = a.queue_badge().expect("badge for two items");
     assert!(badge.contains("Queue: fix the bug (+1)"), "badge: {badge}");
@@ -4723,7 +4509,6 @@ fn alt_up_restores_queued_prompt_lifo() {
     let mut run = None;
     a.prompt_queue.push("first prompt".to_string());
     a.prompt_queue.push("second prompt".to_string());
-    // Alt+Up restores the last queued (LIFO).
     let ev = Event::Key(crossterm::event::KeyEvent::new_with_kind(
         KeyCode::Up,
         KeyModifiers::ALT,
@@ -4732,7 +4517,6 @@ fn alt_up_restores_queued_prompt_lifo() {
     handle_event(&ev, &mut a, None, &mut run);
     assert_eq!(a.input, "second prompt");
     assert_eq!(a.prompt_queue.len(), 1);
-    // Again: restores the first.
     handle_event(&ev, &mut a, None, &mut run);
     assert_eq!(a.input, "first prompt");
     assert!(a.prompt_queue.is_empty());
@@ -4767,25 +4551,18 @@ fn no_model_submit_surfaces_hint_without_running() {
 #[test]
 fn selection_text_is_content_aware() {
     let mut a = app();
-    // Simulated rendered log lines paired with their content ranges
-    // (as components now report them): the leading gutter/rails and the
-    // trailing padding tail fall outside the content range, while the
-    // content's own leading spaces (indentation) are inside it.
     a.log_off = 0;
     a.log_vis = vec![
-        // gutter "  " + content "hello world" + padding "   "
         view::VisLine {
             rendered: "  hello world   ".to_string(),
             content: (2, 13),
             raw: None,
         },
-        // gutter "  " + rails "│ │ " + content "lofi-core…Agent {" + padding
         view::VisLine {
             rendered: "  │ │ lofi-core/src/agent.rs:233:pub struct Agent {     ".to_string(),
             content: (6, 51),
             raw: None,
         },
-        // gutter "  " + content "    let x = 1;" (indentation preserved!)
         view::VisLine {
             rendered: "      let x = 1;".to_string(),
             content: (2, 16),
@@ -4804,10 +4581,6 @@ fn selection_text_is_content_aware() {
 
 #[test]
 fn yank_line_returns_raw_markdown() {
-    // A rendered line strips markdown markers (e.g. **bold** → bold), but the
-    // raw source is retained via a position map so yank copies the original
-    // markdown. The map `[0,3,4,5,8]` for source `**bold**` (display "bold")
-    // snaps the whole-row yank to `source[0..8]` = `**bold**`.
     let mut a = app();
     a.log_off = 0;
     a.log_vis = vec![view::VisLine {
@@ -4825,8 +4598,6 @@ fn yank_line_returns_raw_markdown() {
 
 #[test]
 fn yank_line_falls_back_to_rendered_without_raw() {
-    // Decoration-only lines carry no raw source; yank returns the rendered
-    // content slice as before.
     let mut a = app();
     a.log_off = 0;
     a.log_vis = vec![view::VisLine {
@@ -4840,8 +4611,6 @@ fn yank_line_falls_back_to_rendered_without_raw() {
 
 #[test]
 fn selection_text_raw_partial_includes_markers() {
-    // Selecting just the visible "bold" within `**bold**` still yields the
-    // raw `**bold**` — the map snaps the selection to the enclosing markers.
     let mut a = app();
     a.log_off = 0;
     a.log_vis = vec![view::VisLine {
@@ -4853,7 +4622,6 @@ fn selection_text_raw_partial_includes_markers() {
             true,
         )),
     }];
-    // Select display content [2, 6) = "bold".
     a.sel = Some(Selection {
         start: (0, 2),
         end: (0, 6),
@@ -4863,9 +4631,6 @@ fn selection_text_raw_partial_includes_markers() {
 
 #[test]
 fn selection_text_raw_skips_softwrap_newlines() {
-    // `hello world` soft-wrapped across two rows; `second line` on a third.
-    // Selecting all three rows yields the two source lines joined by a single
-    // `\n` — the soft-wrap boundary contributes no separator.
     let mut a = app();
     a.log_off = 0;
     let first: Arc<str> = Arc::from("hello world");
@@ -4898,8 +4663,6 @@ fn selection_text_raw_skips_softwrap_newlines() {
 
 #[test]
 fn selection_text_raw_char_level_on_continuation() {
-    // Selecting only the continuation row "world" yields just `world` (char
-    // level), not the whole source line — the map slices the row's fragment.
     let mut a = app();
     a.log_off = 0;
     let first: Arc<str> = Arc::from("hello world");
@@ -5001,7 +4764,6 @@ fn scroll_up_enters_nav_and_clamps_cursor_to_bottom_edge() {
     a.nav_cursor = 19; // bottom line
     a.scroll_nav(-3);
     assert_eq!(a.mode, Mode::Navigate);
-    // Viewport moved up to [12, 16]; cursor fell below -> clamp to 16.
     assert_eq!(a.view_off(), 12);
     assert_eq!(a.nav_cursor, 16);
 }
@@ -5017,7 +4779,6 @@ fn scroll_down_clamps_cursor_to_top_edge() {
     a.top_line = 10;
     a.nav_cursor = 10; // top of the viewport
     a.scroll_nav(3);
-    // Viewport moved down to [13, 17]; cursor fell above -> clamp to 13.
     assert_eq!(a.view_off(), 13);
     assert_eq!(a.nav_cursor, 13);
 }
@@ -5056,7 +4817,6 @@ fn navigating_to_latest_line_pins_before_settle_reflows_log() {
     assert!(a.pinned);
     assert_eq!(a.top_line, 15);
 
-    // Simulate settlement adding/reflowing rows before rendering again.
     a.last_base = 18;
     assert_eq!(a.view_off(), 18);
 }
@@ -5079,7 +4839,6 @@ fn ctrl_c_on_empty_shows_quit_badge() {
     let mut run = None;
     handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
     assert_eq!(a.quit_badge(), Some("Press Ctrl-C again to quit"));
-    // A non-empty draft clears the quit window, dropping the badge.
     a.set_input("draft".to_string());
     handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
     assert_eq!(a.quit_badge(), None);
@@ -5094,7 +4853,6 @@ fn ctrl_d_deletes_char_or_quits_on_empty() {
     handle_event(&ctrl_key(KeyCode::Char('d')), &mut a, None, &mut run);
     assert_eq!(a.input, "b");
     assert!(!a.should_quit);
-    // Empty prompt -> EOF -> quit.
     let mut b = app();
     handle_event(&ctrl_key(KeyCode::Char('d')), &mut b, None, &mut run);
     assert!(b.should_quit);
@@ -5114,7 +4872,6 @@ fn tab_enters_navigate_and_esc_clears() {
     let mut run = None;
     handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     assert_eq!(a.mode, Mode::Navigate);
-    // Esc on a non-empty prompt just clears it (no mode switch).
     let mut b = app();
     b.set_input("draft".to_string());
     handle_event(&plain_key(KeyCode::Esc), &mut b, None, &mut run);
@@ -5131,10 +4888,8 @@ fn navigate_jk_moves_cursor_and_clamps() {
     a.nav_cursor = 9;
     a.nav_move(-3);
     assert_eq!(a.nav_cursor, 6);
-    // Clamp at the top.
     a.nav_move(-100);
     assert_eq!(a.nav_cursor, 0);
-    // Clamp at the bottom.
     a.nav_move(100);
     assert_eq!(a.nav_cursor, 9);
 }
@@ -5150,7 +4905,6 @@ fn select_sel_is_charwise_inclusive() {
     // Max end is exclusive (+1) so the cursor char is included.
     assert_eq!(sel.start, (2, 3));
     assert_eq!(sel.end, (5, 7));
-    // Cursor left of anchor: same span, min becomes start.
     a.nav_cursor = 1;
     a.nav_col = 1;
     let sel = a.select_sel();
@@ -5168,16 +4922,12 @@ fn v_enters_select_and_extends_selection() {
     let mut run = None;
     handle_event(&plain_key(KeyCode::Char('v')), &mut a, None, &mut run);
     assert_eq!(a.mode, Mode::Select);
-    // Empty selection at the cursor (anchor == cursor); +1 makes the end
-    // exclusive, so it spans one char once clamped to the content range.
     assert_eq!(a.sel.as_ref().unwrap().start, (3, 0));
     assert_eq!(a.sel.as_ref().unwrap().end, (3, 1));
-    // Move down: selection extends to the next line, column preserved.
     handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 4);
     assert_eq!(a.sel.as_ref().unwrap().start, (3, 0));
     assert_eq!(a.sel.as_ref().unwrap().end, (4, 1));
-    // Tab drops selection, back to Navigate.
     handle_event(&plain_key(KeyCode::Tab), &mut a, None, &mut run);
     assert_eq!(a.mode, Mode::Navigate);
     assert!(a.sel.is_none());
@@ -5185,8 +4935,6 @@ fn v_enters_select_and_extends_selection() {
 
 #[test]
 fn esc_discards_select_back_to_nav() {
-    // From Select, Esc returns to Navigate and clears the selection —
-    // same as Tab, but more conventional for drop-without-yank.
     let mut a = app();
     a.mode = Mode::Navigate;
     a.log_total = 10;
@@ -5212,9 +4960,7 @@ fn turn_start_line_accounts_for_blanks() {
         push_turn(&mut a);
     }
     assert_eq!(a.turn_start_line(0), 0);
-    // turn0 (3) + blank (1) = 4.
     assert_eq!(a.turn_start_line(1), 4);
-    // + turn1 (2) + blank (1) = 7.
     assert_eq!(a.turn_start_line(2), 7);
 }
 
@@ -5236,14 +4982,12 @@ fn bracket_jumps_between_turns() {
     assert_eq!(a.nav_cursor, 4);
     handle_event(&plain_key(KeyCode::Char(']')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 7);
-    // At the last turn, `]` stays at its start.
     handle_event(&plain_key(KeyCode::Char(']')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 7);
     handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 4);
     handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 0);
-    // At the first turn, `[` stays at 0.
     handle_event(&plain_key(KeyCode::Char('[')), &mut a, None, &mut run);
     assert_eq!(a.nav_cursor, 0);
 }
@@ -5336,7 +5080,6 @@ fn model_picker_open_preselects_current() {
     a.open_model_picker();
     let picker = a.model_picker.as_ref().unwrap();
     assert_eq!(picker.choices.len(), 2);
-    // The current model is the second entry.
     assert_eq!(picker.selected, 1);
     assert!(a.modal_open());
 }
@@ -5347,7 +5090,6 @@ fn model_picker_open_empty_notifies() {
     a.model_choices = Vec::new();
     a.open_model_picker();
     assert!(a.model_picker.is_none());
-    // A warn notification is surfaced (not a crash).
     assert!(a.notify.is_some());
 }
 
@@ -5373,7 +5115,6 @@ fn model_picker_confirm_sets_pending_switch() {
         },
     ];
     a.open_model_picker();
-    // Move up to the first entry (anthropic/claude).
     a.model_picker.as_mut().unwrap().selected = 0;
     a.model_picker_confirm();
     assert_eq!(a.pending_model_switch.as_deref(), Some("anthropic/claude"));
@@ -5446,7 +5187,6 @@ fn thinking_picker_open_preselects_current() {
     }];
     a.open_thinking_picker();
     let picker = a.thinking_picker.as_ref().unwrap();
-    // off first, then the model's declared levels.
     assert_eq!(
         picker.levels,
         vec![
@@ -5455,7 +5195,6 @@ fn thinking_picker_open_preselects_current() {
             ThinkingLevel::High
         ]
     );
-    // Medium is the current level.
     assert_eq!(picker.selected, 1);
     assert!(a.modal_open());
 }
@@ -5488,7 +5227,6 @@ fn thinking_picker_confirm_sets_pending_switch() {
         context_window: None,
     }];
     a.open_thinking_picker();
-    // Move to High (index 2).
     a.thinking_picker.as_mut().unwrap().selected = 2;
     a.thinking_picker_confirm();
     assert_eq!(
@@ -5552,7 +5290,6 @@ fn resume_model_switch_none_when_same_model() {
 #[test]
 fn resume_model_switch_none_when_no_choices_or_no_turn() {
     let mut a = app();
-    // No models available -> never switch.
     a.model_choices = Vec::new();
     let events = vec![SessionEvent {
         id: "1".into(),
@@ -5565,7 +5302,6 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
         },
     }];
     assert!(a.resume_model_switch(&events).is_none());
-    // No turn marker -> nothing to restore even with choices.
     a.model_choices = vec![lofi_types::ModelChoice {
         provider: "x".into(),
         id: "y".into(),
@@ -5594,12 +5330,10 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
 #[test]
 fn frozen_cache_invalidates_on_width_change() {
     let mut a = app();
-    // turn[0]: a long prompt that wraps to many lines when narrow.
     a.turns.push(Turn {
         prompt: "word ".repeat(30),
         blocks: Vec::new(),
     });
-    // turn[1] keeps turn[0] frozen (the last turn is rebuilt each frame).
     push_turn(&mut a);
 
     a.ensure_frozen(20);
@@ -5611,8 +5345,6 @@ fn frozen_cache_invalidates_on_width_change() {
     a.sync_frozen_cache_for_viewport(0, 24, 100);
     let h_wide = a.frozen_heights[0];
     assert!(a.frozen_render.get(0).is_some());
-    // Without width invalidation the cache would keep its narrow rendering
-    // and h_wide would equal h_narrow.
     assert!(
         h_wide < h_narrow,
         "frozen cache should re-wrap at the new width: narrow={h_narrow} wide={h_wide}"
@@ -5634,10 +5366,8 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
         prompt: "word ".repeat(3000),
         blocks: Vec::new(),
     });
-    // turn[1] keeps turn[0] frozen (the last turn is rebuilt each frame).
     push_turn(&mut a);
 
-    // Render narrow, then scroll up to the middle of the transcript.
     let mut term = Terminal::new(TestBackend::new(30, 20)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let base_narrow = a.last_base;
@@ -5652,10 +5382,6 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     assert_eq!(a.log_off, a.top_line);
     assert!(a.log_off < a.last_base, "scrolled up, not at the bottom");
 
-    // Resize wider. Without re-anchoring the carried-over `top_line` would
-    // exceed the new (smaller) `base`, clamp to the bottom, and stick
-    // (`pinned = true`). With re-anchoring the view keeps its relative
-    // position and stays scrolled up.
     let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     assert!(
@@ -5677,7 +5403,6 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut a = app();
-    // A prompt long enough to wrap to several lines at both widths.
     let prompt =
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
@@ -5688,11 +5413,8 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     push_turn(&mut a); // turn[1] keeps turn[0] frozen.
     a.mode = Mode::Navigate;
 
-    // Narrow render; place the cursor on a line well inside turn 0.
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    // Place the cursor on a line well inside turn 0 and capture the cumulative
-    // content-char offset of its start — the stable anchor across a re-wrap.
     let (intra, c) = {
         let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 4.min(narrow.len().saturating_sub(1));
@@ -5747,7 +5469,6 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
     push_turn(&mut a);
     a.mode = Mode::Navigate;
 
-    // Narrow render; park the cursor cell mid-content on a line inside turn 0.
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let (intra, nav_col, char_pos) = {
@@ -5763,8 +5484,6 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
     a.nav_show_cursor();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
 
-    // Widen: the line re-wraps, but the cursor cell must stay on the same
-    // content character (its `nav_col` re-seated onto that char).
     let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let new_char_pos = {
@@ -5793,10 +5512,8 @@ fn resize_keeps_select_anchor_on_same_content_char() {
     });
     push_turn(&mut a);
 
-    // Narrow render; set up a selection spanning two lines inside turn 0.
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    // Anchor on line 2, cursor on line 5 — both within turn 0.
     let (anchor_intra, anchor_col, anchor_char) = {
         let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 2.min(narrow.len().saturating_sub(1));
@@ -5818,9 +5535,6 @@ fn resize_keeps_select_anchor_on_same_content_char() {
     a.sel = Some(a.select_sel());
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
 
-    // Widen: both selection endpoints must stay on their content chars.
-    // Before the fix, the anchor kept its stale absolute line index and
-    // drifted onto the wrong content character.
     let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let wide = a.frozen_render.get(0).expect("turn 0 frozen");
@@ -5862,7 +5576,6 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
     }
     a.mode = Mode::Navigate;
 
-    // Narrow render; place the cursor a few rows into the viewport.
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     assert!(
@@ -5906,7 +5619,6 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     push_turn(&mut a);
     a.mode = Mode::Navigate;
 
-    // Tall viewport; cursor near the bottom of it.
     let mut term = Terminal::new(TestBackend::new(60, 40)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let h_tall = a.log_view_h;
@@ -5940,7 +5652,6 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     a.apply_event(AgentEvent::TurnStart {
         prompt: "p".to_string(),
     });
-    // Long flow text that wraps with break spaces (exercises `wrap`).
     a.apply_event(AgentEvent::Text(
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".repeat(3),
     ));
@@ -5963,7 +5674,6 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         is_error: false,
         elapsed_ms: 100,
     });
-    // The cursor's exec header.
     a.apply_event(AgentEvent::ToolStart {
         id: "e2".to_string(),
         name: "exec".to_string(),
@@ -6030,7 +5740,6 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         }
     };
 
-    // Render at 64; find the second Exec header and place the cursor on it.
     let mut term = Terminal::new(TestBackend::new(64, 57)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let exec_idx = (0..a.log_total)
@@ -6055,9 +5764,6 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     );
 }
 
-/// A fenced code block renders as plain triple-backtick fences (not the old
-/// `╭─`/`╰──` frame art) on a full-width surface tile with a 2-space right
-/// gutter, and the language label follows the opening backticks.
 #[test]
 fn fence_renders_plain_backticks_on_full_width_tile() {
     use crate::tui::view::blocks::render_turn_lines;
@@ -6082,7 +5788,6 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
         .iter()
         .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    // Locate the opening fence, code line, and closing fence.
     let open = lines
         .iter()
         .find(|l| l.starts_with("▌ ```rust"))
@@ -6095,14 +5800,11 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
         .iter()
         .find(|l| l.trim_start_matches("▌ ").trim() == "```")
         .expect("closing ```");
-    // No frame art survives.
     for l in &lines {
         assert!(!l.contains('╭'), "stray frame art: {l}");
         assert!(!l.contains('╰'), "stray frame art: {l}");
         assert!(!l.contains('│'), "stray rail: {l}");
     }
-    // Every fence/code line fills the full width (surface bg spans edge-to-edge
-    // via rtile, with the 2-space right gutter as trailing bg padding).
     for l in [&open.clone(), &code.clone(), &close.clone()] {
         assert_eq!(l.chars().count(), w, "line not full-width: {l:?}");
     }
@@ -6315,8 +6017,6 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
     test_append_events(&path, &mut branch_a, None).unwrap();
     let branch_a_leaf = branch_a.last().unwrap().id.clone();
 
-    // This is the resume boundary: reconstructed history and future commits
-    // are tied to the same explicit leaf.
     let resumed = store::SessionCursor::open(path.clone()).unwrap();
     let resumed_index = resumed.snapshot().unwrap().index;
     let mut a = app();
@@ -6324,8 +6024,6 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
     *a.history.lock().unwrap() =
         history_from_index(&resumed, &resumed_index, &a.compaction.edit).unwrap();
 
-    // A stale/concurrent process writes a sibling after resume, making B the
-    // physical EOF without changing this app's logical cursor.
     let root = branch_a[0].id.clone();
     let mut branch_b = [
         SessionEvent {
@@ -6434,8 +6132,6 @@ fn resume_does_not_restore_usage_measured_before_latest_compaction() {
         },
     )
     .unwrap();
-    // Simulate shutdown during the silent continuation: content was
-    // checkpointed after compact, but no post-compact usage marker exists.
     let mut continuation = vec![SessionEvent {
         id: String::new(),
         parent_id: None,
@@ -6483,9 +6179,6 @@ fn working_status_is_replaced_in_place_by_done_status() {
     ));
     a.run = Some(0);
     a.run_start = Some(Instant::now());
-    // The producer sends TurnEnd before dropping the event channel. This is
-    // the intermediate state that previously rendered Done in the log while
-    // Working still occupied separate footer rows.
     a.apply_event(AgentEvent::TurnEnd {
         model: "openai/gpt-4o".into(),
         elapsed_ms: 1_500,
