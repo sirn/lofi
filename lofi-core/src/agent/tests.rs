@@ -351,7 +351,7 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         }),
         ..agent_with(Vec::new(), dir.path())
     };
-    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let commit = SessionCommit {
         cursor: crate::session::store::SessionCursor::new(path.clone(), None),
@@ -377,6 +377,19 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         &event.kind,
         SessionEventKind::Message(message) if message.role == Role::Tool
     )));
+    let mut checkpoint = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::TurnCheckpoint {
+            byte_start,
+            byte_end,
+        } = event
+        {
+            checkpoint = Some((byte_start, byte_end));
+        }
+    }
+    let (start, end) = checkpoint.expect("completed round should notify the UI");
+    assert!(start < end);
+    assert_eq!(end, std::fs::metadata(&path).unwrap().len());
 }
 
 #[tokio::test]

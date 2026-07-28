@@ -118,6 +118,10 @@ impl Agent {
         // final flush only appends the remaining suffix and terminal marker.
         let mut recorder =
             commit.map(|commit| SessionRecorder::new(commit.cursor.clone(), self.run_model()));
+        // End of the latest incremental round checkpoint. Final flush returns
+        // the recorder's cumulative turn range; this boundary lets the UI
+        // receive only the still-live suffix.
+        let mut checkpoint_end: Option<u64> = None;
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
@@ -199,7 +203,26 @@ impl Agent {
                     // retaining the entire long turn only in memory.
                     if let Some(recorder) = recorder.as_mut() {
                         let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                        recorder.checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?;
+                        if let Some((byte_start, byte_end)) = recorder
+                            .checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?
+                        {
+                            // Checkpointing already made this completed round
+                            // durable. Let the UI file-back it now instead of
+                            // retaining every prior round until the whole
+                            // (possibly 100+ step) turn settles.
+                            checkpoint_end = Some(byte_end);
+                            if !emit(
+                                Some(&tx),
+                                AgentEvent::TurnCheckpoint {
+                                    byte_start,
+                                    byte_end,
+                                },
+                            )
+                            .await
+                            {
+                                return Ok(());
+                            }
+                        }
                     }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
@@ -353,6 +376,11 @@ impl Agent {
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
+                    // Earlier round prefixes were already handed to the UI as
+                    // TurnCheckpoint fragments. Commit only the suffix that
+                    // remains live there (usually the terminal assistant
+                    // message + TurnEnd), avoiding overlapping fragments.
+                    let byte_start = checkpoint_end.unwrap_or(byte_start);
                     let _ = tx
                         .send(AgentEvent::TurnCommitted {
                             byte_start,

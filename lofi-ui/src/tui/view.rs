@@ -273,7 +273,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let frozen_total: usize = app.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
     let mut total: usize = frozen_total + last_h;
-    total += if n_turns == 0 { 1 } else { n_turns - 1 };
+    // Internal checkpoint fragments are visually contiguous parts of one user
+    // turn; only real turn boundaries contribute a blank separator.
+    total += app.turns.iter().skip(1).filter(|turn| !turn.joined).count();
 
     let base = total.saturating_sub(height);
     app.log_rect = content;
@@ -380,7 +382,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         );
     } else {
         for i in 0..n_turns {
-            if i > 0 {
+            if i > 0 && !app.turns[i].joined {
                 feed_segment(
                     std::slice::from_ref(&blank),
                     &mut pos,
@@ -650,7 +652,15 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
-    let bar = if active { t.user } else { t.subtle };
+    // A leading `!` (including `!!`) switches the prompt rail to the shell
+    // accent immediately, making bash mode visible before submission.
+    let bar = if !active {
+        t.subtle
+    } else if app.input.starts_with('!') {
+        t.warn
+    } else {
+        t.user
+    };
     for y in panel.y..panel.bottom() {
         let cell = &mut f.buffer_mut()[(panel.x, y)];
         cell.set_char('▌');

@@ -21,6 +21,19 @@ pub enum AgentEvent {
     /// new turn (no "You:" line); it appends blocks to the current turn.
     /// Mirrors [`TurnStart`](Self::TurnStart) for a continuation.
     TurnContinue,
+    /// A completed direct user shell command. This never starts an agent
+    /// turn; the TUI renders it as a standalone shell block and the session
+    /// replayer reconstructs it from `SessionEventKind::UserBash`.
+    UserBash {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        duration_ms: u64,
+        truncated: bool,
+        cancelled: bool,
+        exclude_from_context: bool,
+    },
     /// A chunk of assistant text.
     Text(String),
     /// A chunk of the model's reasoning / chain-of-thought trace. Surfaced
@@ -190,6 +203,11 @@ pub enum AgentEvent {
         /// This round's token usage (drives the context gauge).
         usage: Usage,
     },
+    /// One completed provider/tool round was durably checkpointed. The UI
+    /// freezes that completed visual fragment immediately and starts a joined
+    /// continuation fragment, bounding a long turn's resident blocks to the
+    /// currently active round instead of retaining the entire agent loop.
+    TurnCheckpoint { byte_start: u64, byte_end: u64 },
     /// A turn's events were durably appended to the transcript file, covering
     /// the byte range `[byte_start, byte_end)`. The UI uses this to make the
     /// now-frozen turn file-backed (drop its in-memory blocks and re-materialize

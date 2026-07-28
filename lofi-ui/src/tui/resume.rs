@@ -112,6 +112,32 @@ fn messages_from_cursor(
             SessionEventKind::TurnFailed { .. } => skipping = true,
             SessionEventKind::TurnEnd { .. } => skipping = false,
             SessionEventKind::Message(message) if !skipping => out.push(message),
+            SessionEventKind::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration_ms,
+                truncated,
+                cancelled,
+                exclude_from_context: false,
+            } if !skipping => {
+                let result = lofi_core::UserBashResult::from_session(
+                    command,
+                    output,
+                    exit_code,
+                    signal,
+                    duration_ms,
+                    truncated,
+                    cancelled,
+                );
+                out.push(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text {
+                        text: result.context_text(),
+                    }],
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -138,13 +164,28 @@ pub(super) fn replay_indexed_session(
     let starts: Vec<usize> = visible
         .iter()
         .enumerate()
-        .filter_map(|(p, &i)| (index[i].kind == store::IndexKind::UserPrompt).then_some(p))
+        .filter_map(|(p, &i)| {
+            matches!(
+                index[i].kind,
+                store::IndexKind::UserPrompt | store::IndexKind::UserBash
+            )
+            .then_some(p)
+        })
         .collect();
-    let prompt_offsets: Vec<u64> = starts
+    let prompt_entries: Vec<(usize, u64)> = starts
         .iter()
-        .map(|&start_pos| index[visible[start_pos]].offset)
+        .enumerate()
+        .filter_map(|(turn, &start_pos)| {
+            (index[visible[start_pos]].kind == store::IndexKind::UserPrompt)
+                .then_some((turn, index[visible[start_pos]].offset))
+        })
         .collect();
-    let prompts = cursor.prompt_texts(&prompt_offsets)?;
+    let prompt_offsets: Vec<u64> = prompt_entries.iter().map(|(_, offset)| *offset).collect();
+    let prompt_texts = cursor.prompt_texts(&prompt_offsets)?;
+    let mut prompts = vec![String::new(); starts.len()];
+    for ((turn, _), prompt) in prompt_entries.into_iter().zip(prompt_texts) {
+        prompts[turn] = prompt;
+    }
     app.turn_byte_ranges.clear();
     app.turn_event_offsets.clear();
     for (turn, &start_pos) in starts.iter().enumerate() {
@@ -157,6 +198,14 @@ pub(super) fn replay_indexed_session(
             replay_selected_session_events(&events, |ev| {
                 app.apply_file_backed_replay_event(ev);
             });
+        } else if index[visible[start_pos]].kind == store::IndexKind::UserBash {
+            let event = cursor.event_at(index[visible[start_pos]].offset)?;
+            replay_selected_session_events(&[event], |ev| {
+                app.apply_file_backed_replay_event(ev);
+            });
+            if let Some(shell_turn) = app.turns.last_mut() {
+                shell_turn.blocks.clear();
+            }
         } else {
             app.apply_file_backed_replay_event(AgentEvent::TurnStart {
                 prompt: prompts.get(turn).cloned().unwrap_or_default(),

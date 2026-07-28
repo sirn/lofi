@@ -21,6 +21,7 @@ fn app() -> App {
 
 fn push_turn(app: &mut App) {
     app.turns.push(Turn {
+        joined: false,
         prompt: "p".to_string(),
         blocks: Vec::new(),
     });
@@ -141,6 +142,7 @@ fn rich_header_suffix_for_read_and_bash() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: String::new(),
         blocks: vec![Block::Tool(ToolCall {
             id: "e1".to_string(),
@@ -219,6 +221,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
 
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: "A long user prompt\nwith another line".to_string(),
         blocks: Vec::new(),
     });
@@ -324,6 +327,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
 
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: String::new(),
         blocks: Vec::new(),
     });
@@ -1694,21 +1698,81 @@ fn tool_input_and_end_land_under_matching_id() {
 }
 
 #[test]
-fn turn_committed_extends_existing_range_across_silent_continuation() {
+fn round_checkpoints_file_back_completed_fragments_and_bound_live_blocks() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
         prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "round-1".into(),
+        name: "exec".into(),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "round-1".into(),
+        result: "x".repeat(1_000_000),
+        is_error: false,
+        elapsed_ms: 1,
+    });
+    a.apply_event(AgentEvent::TurnCheckpoint {
+        byte_start: 100,
+        byte_end: 200,
+    });
+
+    assert_eq!(a.turn_byte_ranges, vec![Some((100, 200)), None]);
+    assert!(a.turns[0].blocks.is_empty());
+    assert!(a.turns[1].joined);
+    assert!(a.turns[1].blocks.is_empty());
+
+    a.apply_event(AgentEvent::Text("final answer".into()));
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 2,
+        cost: 0.0,
+        usage: Usage::default(),
+    });
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 200,
+        byte_end: 300,
+    });
+
+    assert_eq!(a.turn_byte_ranges, vec![Some((100, 200)), Some((200, 300))]);
+    assert_eq!(a.turns[0].prompt, "go");
+    assert!(a.turns[0].blocks.is_empty());
+    assert_eq!(last_text(&a), Some("final answer"));
+}
+
+#[test]
+fn terminal_continuation_splits_compaction_marker_from_committed_response() {
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::Compaction {
+        summarized: 10,
+        kept: 2,
+        summary: "summary".into(),
+    });
+    a.apply_event(AgentEvent::TurnContinue);
+    a.apply_event(AgentEvent::Text("done".into()));
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 2,
+        cost: 0.0,
+        usage: Usage::default(),
     });
     a.apply_event(AgentEvent::TurnCommitted {
         byte_start: 100,
         byte_end: 200,
     });
-    a.apply_event(AgentEvent::TurnContinue);
-    a.apply_event(AgentEvent::TurnCommitted {
-        byte_start: 250,
-        byte_end: 300,
-    });
-    assert_eq!(a.turn_byte_ranges, vec![Some((100, 300))]);
+
+    assert_eq!(a.turns.len(), 2);
+    assert!(matches!(
+        a.turns[0].blocks.as_slice(),
+        [Block::Compaction { .. }]
+    ));
+    assert!(a.turns[1].joined);
+    assert_eq!(last_text(&a), Some("done"));
+    assert_eq!(a.turn_byte_ranges, vec![None, Some((100, 200))]);
 }
 
 #[test]
@@ -3514,6 +3578,7 @@ fn verbose_expands_compaction_summary() {
     let summary = "## Session Goal\nBuild a coding agent.\n## Decisions\n- Use Rust.";
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: "p".to_string(),
         blocks: vec![Block::Compaction {
             summarized: 7,
@@ -3566,6 +3631,7 @@ fn turn_failed_wraps_error_below_header() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: String::new(),
         blocks: vec![Block::TurnFailed {
             label: "openai/gpt-4o · medium".to_string(),
@@ -3627,6 +3693,7 @@ fn turn_failed_dedups_after_fatal_error_block() {
     let mut a = app();
     let msg = "stream interrupted by upstream gateway";
     a.turns.push(Turn {
+        joined: false,
         prompt: String::new(),
         blocks: vec![
             Block::Error(msg.to_string()),
@@ -5383,6 +5450,7 @@ fn frozen_cache_invalidates_on_width_change() {
     let mut a = app();
     // turn[0]: a long prompt that wraps to many lines when narrow.
     a.turns.push(Turn {
+        joined: false,
         prompt: "word ".repeat(30),
         blocks: Vec::new(),
     });
@@ -5418,6 +5486,7 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     // A long prompt that wraps to many lines when narrow and far fewer when
     // wide, so the re-wrap materially shrinks `total`/`base` on resize.
     a.turns.push(Turn {
+        joined: false,
         prompt: "word ".repeat(3000),
         blocks: Vec::new(),
     });
@@ -5469,6 +5538,7 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        joined: false,
         prompt,
         blocks: Vec::new(),
     });
@@ -5528,6 +5598,7 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        joined: false,
         prompt,
         blocks: Vec::new(),
     });
@@ -5575,6 +5646,7 @@ fn resize_keeps_select_anchor_on_same_content_char() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        joined: false,
         prompt,
         blocks: Vec::new(),
     });
@@ -5642,6 +5714,7 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".to_string();
     for _ in 0..6 {
         a.turns.push(Turn {
+            joined: false,
             prompt: prompt.clone(),
             blocks: Vec::new(),
         });
@@ -5687,6 +5760,7 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     use ratatui::Terminal;
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: "word ".repeat(4000),
         blocks: Vec::new(),
     });
@@ -5851,6 +5925,7 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        joined: false,
         prompt: String::new(),
         blocks: vec![Block::Text(
             "before\n```rust\nlet x = 1;\n```\nafter".to_string(),
