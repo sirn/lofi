@@ -88,4 +88,8 @@ impl SseMapper for OpenAiChatMapper {
             "stream ended before [DONE] sentinel".into(),
         ))
     }
+
+    fn defer_done_until_transport_end(&self) -> bool {
+        true
+    }
 }

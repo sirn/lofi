@@ -45,6 +45,15 @@ pub(crate) trait SseMapper: Send + 'static {
     fn handles_done_marker(&self) -> bool {
         true
     }
+
+    /// Whether a mapped logical [`StreamingEvent::Done`] must be withheld
+    /// until the transport's `[DONE]` marker or an accepted EOF is consumed.
+    /// OpenAI-compatible servers may account a response as cancelled when the
+    /// client drops the body immediately after `response.completed` or the
+    /// final usage chunk, before reading the SSE sentinel.
+    fn defer_done_until_transport_end(&self) -> bool {
+        false
+    }
 }
 
 impl<F> SseMapper for F
@@ -81,6 +90,10 @@ struct SseState<M> {
     pending_cr: bool,
     /// Parsed events not yet emitted (a single chunk can carry several).
     queued: std::collections::VecDeque<Result<StreamingEvent>>,
+    /// Logical completion held until an `OpenAI` transport sentinel or accepted
+    /// EOF has been consumed, so dropping the returned stream cannot cancel a
+    /// server response that already reported semantic completion.
+    pending_done: Option<StreamingEvent>,
     /// `true` once the upstream byte stream has ended.
     exhausted: bool,
     /// `true` once a terminal sentinel or mapper terminal event was seen.
@@ -103,6 +116,7 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
         pending_lines: String::new(),
         pending_cr: false,
         queued: std::collections::VecDeque::new(),
+        pending_done: None,
         exhausted: false,
         done: false,
         mapper,
@@ -111,10 +125,9 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
 }
 
 /// One unfold step: emit the next queued event, or pull and decode chunks
-/// until one produces an event (or the upstream ends). Once the terminal
-/// sentinel is seen, the response is dropped immediately. A protocol terminal
-/// event must never wait for transport EOF: HTTP/SSE peers may keep the connection
-/// open for reuse or heartbeats after the logical response has completed.
+/// until one produces an event (or the upstream ends). Protocols may either
+/// finish on their mapped terminal event or defer that event until an explicit
+/// transport sentinel/accepted EOF has been consumed.
 async fn step<M: SseMapper>(
     mut state: SseState<M>,
 ) -> Option<(Result<StreamingEvent>, SseState<M>)> {
@@ -138,9 +151,17 @@ async fn step<M: SseMapper>(
                 if !state.done {
                     // Require a provider terminal event; a disconnect before
                     // one is an error, not a successful partial turn.
-                    if let Err(e) = state.mapper.on_eof() {
-                        state.queued.push_back(Err(e));
-                        state.done = true;
+                    match state.mapper.on_eof() {
+                        Ok(()) => {
+                            if let Some(done) = state.pending_done.take() {
+                                state.queued.push_back(Ok(done));
+                            }
+                        }
+                        Err(e) => {
+                            state.pending_done = None;
+                            state.queued.push_back(Err(e));
+                            state.done = true;
+                        }
                     }
                 }
             }
@@ -279,30 +300,43 @@ fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool)
 fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
     for ev in parse_sse_lines(block.lines()) {
         if is_done_marker(&ev.data) && state.mapper.handles_done_marker() {
-            // `[DONE]` is the terminal sentinel for OpenAI transports: stop
-            // accepting further blocks. Already-queued events are still
-            // emitted. Anthropic does not use this sentinel.
+            // `[DONE]` is the transport sentinel for OpenAI transports. Emit
+            // any logical Done held from `response.completed`/the usage chunk
+            // only now, after the server's terminal bytes have been consumed.
+            if let Some(done) = state.pending_done.take() {
+                state.queued.push_back(Ok(done));
+            }
             state.done = true;
             return;
         }
         match state.mapper.map(ev) {
             Ok(events) => {
-                let terminal = events
-                    .iter()
-                    .any(|event| matches!(event, StreamingEvent::Done(_)));
-                for e in events {
-                    state.queued.push_back(Ok(e));
+                let defer_done = state.mapper.defer_done_until_transport_end();
+                let mut terminal = false;
+                for event in events {
+                    if matches!(event, StreamingEvent::Done(_)) {
+                        if defer_done {
+                            state.pending_done = Some(event);
+                        } else {
+                            state.queued.push_back(Ok(event));
+                            terminal = true;
+                        }
+                    } else {
+                        state.queued.push_back(Ok(event));
+                    }
                 }
-                // Provider mappers normalize their logical terminal event to
-                // Done. Stop after emitting it; transport EOF is not part of
-                // the completion contract and may never arrive.
+                // Protocols that do not defer logical completion retain the
+                // existing behavior: their terminal event ends the stream
+                // without waiting for transport EOF.
                 if terminal {
                     state.done = true;
                     return;
                 }
             }
             Err(e) => {
-                // A provider-reported error is terminal: surface it and stop.
+                // A provider-reported error is terminal: discard any pending
+                // logical completion, surface the error, and stop.
+                state.pending_done = None;
                 state.queued.push_back(Err(e));
                 state.done = true;
                 return;
@@ -340,6 +374,7 @@ mod tests {
             pending_lines: String::new(),
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
+            pending_done: None,
             exhausted: false,
             done: false,
             mapper: text_mapper,
@@ -357,6 +392,7 @@ mod tests {
             pending_lines: String::new(),
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
+            pending_done: None,
             exhausted: false,
             done: false,
             mapper: text_mapper,
@@ -495,6 +531,82 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DeferredDoneMapper;
+
+    impl SseMapper for DeferredDoneMapper {
+        fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
+            if event.data == "done" {
+                Ok(vec![StreamingEvent::Done(Default::default())])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn defer_done_until_transport_end(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_done_consumes_transport_sentinel_before_emitting() {
+        let sentinel_polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = sentinel_polled.clone();
+        let byte_stream = futures::stream::iter([
+            Ok(Bytes::from_static(b"data: done\n\n")),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ])
+        .inspect(move |chunk| {
+            if chunk
+                .as_ref()
+                .is_ok_and(|bytes| bytes.as_ref().windows(6).any(|w| w == b"[DONE]"))
+            {
+                observed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let state = SseState {
+            bytes: Box::pin(byte_stream),
+            pending_bytes: Vec::new(),
+            pending_lines: String::new(),
+            pending_cr: false,
+            queued: std::collections::VecDeque::new(),
+            pending_done: None,
+            exhausted: false,
+            done: false,
+            mapper: DeferredDoneMapper,
+        };
+        let events = futures::stream::unfold(state, step)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(sentinel_polled.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+    }
+
+    #[tokio::test]
+    async fn deferred_done_is_emitted_after_accepted_eof() {
+        let byte_stream =
+            futures::stream::once(async { Ok(Bytes::from_static(b"data: done\n\n")) });
+        let state = SseState {
+            bytes: Box::pin(byte_stream),
+            pending_bytes: Vec::new(),
+            pending_lines: String::new(),
+            pending_cr: false,
+            queued: std::collections::VecDeque::new(),
+            pending_done: None,
+            exhausted: false,
+            done: false,
+            mapper: DeferredDoneMapper,
+        };
+        let events = futures::stream::unfold(state, step)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+    }
+
     #[tokio::test]
     async fn mapper_done_terminates_without_transport_eof() {
         let byte_stream =
@@ -506,6 +618,7 @@ mod tests {
             pending_lines: String::new(),
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
+            pending_done: None,
             exhausted: false,
             done: false,
             mapper: DoneMapper,

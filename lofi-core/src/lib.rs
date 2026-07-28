@@ -26,6 +26,7 @@ pub use agent::{
 };
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lofi_code::compact_hook::CodeCompactionHook;
+pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};
 pub use lofi_types::{CompactBlock, CompactionHook, SummarySection};
 pub use lofi_types::{Config, SessionEvent};

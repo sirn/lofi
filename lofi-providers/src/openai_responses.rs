@@ -84,4 +84,8 @@ impl SseMapper for OpenAiResponsesMapper {
             ))
         }
     }
+
+    fn defer_done_until_transport_end(&self) -> bool {
+        true
+    }
 }

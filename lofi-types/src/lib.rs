@@ -1310,7 +1310,9 @@ pub struct AutoModeConfig {
     pub provider: String,
     /// Model id within the provider (e.g. "gpt-4o-mini").
     pub model: String,
-    /// Timeout in milliseconds for the LLM evaluation. Defaults to 30s.
+    /// Total timeout in milliseconds for the LLM evaluation. Defaults to
+    /// 30s. Interactive mode shows an overridable dialog after 3s, but that
+    /// UI grace period does not change this evaluator deadline.
     #[serde(default = "default_auto_mode_timeout_ms")]
     pub timeout_ms: u64,
     /// Max output tokens for the evaluation response.

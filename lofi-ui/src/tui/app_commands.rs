@@ -862,6 +862,20 @@ impl App {
         if self.pending_confirms.is_empty() {
             return false;
         }
+        // Auto-mode may have approved between the last draw and this key.
+        // Consume the key while dismissing that stale modal rather than
+        // letting it leak through to the prompt or a queued confirmation.
+        if !self.pending_confirms[0]
+            .active
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.pending_confirms.remove(0);
+            self.confirm_selected = 0;
+            self.confirm_scroll = 0;
+            self.confirm_total = 0;
+            self.confirm_view_h = 0;
+            return true;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let max_scroll = self.confirm_total.saturating_sub(self.confirm_view_h);
         let response = match k.code {
@@ -914,6 +928,8 @@ impl App {
         };
         if let Some(approved) = response {
             let req = self.pending_confirms.remove(0);
+            req.active
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = req.respond.send(approved);
             self.confirm_selected = 0;
             self.confirm_scroll = 0;

@@ -5,6 +5,9 @@ use super::truncate::{format_size, truncate_tail_with};
 /// through the per-session log named in the truncation notice.
 const BASH_MAX_LINES: usize = 20;
 const BASH_MAX_BYTES: usize = 4 * 1024;
+/// Keep fast auto-mode evaluations invisible. Once this grace period elapses,
+/// the user can override the still-running evaluator from the permission UI.
+const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -38,11 +41,11 @@ impl BuiltinTools {
     /// command is denied or needs confirmation, `None` if allowed.
     ///
     /// Decision flow for `Ask`:
-    /// 1. If auto-mode is enabled, ask the LLM first. If it says allow,
-    ///    proceed (`None`).
-    /// 2. If a confirmation callback is available, ask the user. If they
-    ///    approve, proceed (`None`).
-    /// 3. Otherwise, return `needs_confirmation`.
+    /// 1. Auto-mode gets a three-second head start with no UI.
+    /// 2. If it is still running, show a live confirmation dialog and race
+    ///    the evaluator against the user's override.
+    /// 3. An auto-mode `ask` or failure leaves the dialog open with its
+    ///    reason. An `allow` dismisses it and proceeds.
     async fn check_policy(&self, cmd: &str) -> Option<Value> {
         let decision = self.shell_policy.evaluate(cmd);
         let suffix = decision
@@ -62,21 +65,16 @@ impl BuiltinTools {
                 "status": "denied",
             })),
             lofi_types::PolicyAction::Ask => {
-                // Step 1: auto-mode LLM pre-approval.
-                if let Some(auto_mode) = &self.auto_mode {
-                    if let Some(true) = auto_mode(cmd.to_string()).await {
-                        return None;
-                    }
-                    // Some(false) or None: fall through to confirm.
+                let approved = if let Some(auto_mode) = &self.auto_mode {
+                    self.auto_mode_decision_after(cmd, auto_mode, AUTO_MODE_UI_GRACE)
+                        .await
+                } else {
+                    self.confirm_decision(cmd, crate::ConfirmReason::Policy)
+                        .await
+                };
+                if approved {
+                    return None;
                 }
-                // Step 2: user confirmation.
-                if let Some(confirm) = &self.confirm {
-                    let approved = confirm(cmd.to_string()).await;
-                    if approved {
-                        return None;
-                    }
-                }
-                // Step 3: blocked (no UI or user denied).
                 Some(json!({
                     "ok": false,
                     "output": format!("requires confirmation: {}{}", decision.reason, suffix),
@@ -90,6 +88,95 @@ impl BuiltinTools {
             }
             lofi_types::PolicyAction::Allow => None,
         }
+    }
+
+    async fn auto_mode_decision_after(
+        &self,
+        cmd: &str,
+        auto_mode: &crate::AutoModeFn,
+        ui_grace: Duration,
+    ) -> bool {
+        let started_at = Instant::now();
+        let mut evaluation = auto_mode(cmd.to_string());
+        match tokio::time::timeout(ui_grace, &mut evaluation).await {
+            Ok(outcome) => return self.finish_auto_mode(cmd, outcome).await,
+            Err(_) if self.confirm.is_none() => {
+                return matches!(evaluation.await, crate::AutoModeOutcome::Allow { .. });
+            }
+            Err(_) => {}
+        }
+
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reason = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::ConfirmReason::AutoEvaluating { started_at },
+        ));
+        let prompt = crate::ConfirmPrompt {
+            command: cmd.to_string(),
+            reason: reason.clone(),
+            active: active.clone(),
+        };
+        let Some(confirm) = &self.confirm else {
+            return false;
+        };
+        let mut response = confirm(prompt);
+
+        tokio::select! {
+            outcome = &mut evaluation => {
+                match outcome {
+                    crate::AutoModeOutcome::Allow { .. } => {
+                        active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    }
+                    crate::AutoModeOutcome::Ask { reason: ask_reason } => {
+                        *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            crate::ConfirmReason::AutoAsk { reason: ask_reason };
+                        let approved = response.await;
+                        active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        approved
+                    }
+                    crate::AutoModeOutcome::Failed { reason: failure } => {
+                        *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            crate::ConfirmReason::AutoFailed { reason: failure };
+                        let approved = response.await;
+                        active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        approved
+                    }
+                }
+            }
+            approved = &mut response => {
+                active.store(false, std::sync::atomic::Ordering::Relaxed);
+                approved
+            }
+        }
+    }
+
+    async fn finish_auto_mode(&self, cmd: &str, outcome: crate::AutoModeOutcome) -> bool {
+        match outcome {
+            crate::AutoModeOutcome::Allow { .. } => true,
+            crate::AutoModeOutcome::Ask { reason } => {
+                self.confirm_decision(cmd, crate::ConfirmReason::AutoAsk { reason })
+                    .await
+            }
+            crate::AutoModeOutcome::Failed { reason } => {
+                self.confirm_decision(cmd, crate::ConfirmReason::AutoFailed { reason })
+                    .await
+            }
+        }
+    }
+
+    async fn confirm_decision(&self, cmd: &str, reason: crate::ConfirmReason) -> bool {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let Some(confirm) = &self.confirm else {
+            return false;
+        };
+        let approved = confirm(crate::ConfirmPrompt {
+            command: cmd.to_string(),
+            reason: std::sync::Arc::new(std::sync::Mutex::new(reason)),
+            active: active.clone(),
+        })
+        .await;
+        active.store(false, std::sync::atomic::Ordering::Relaxed);
+        approved
     }
 
     /// # Errors
@@ -290,4 +377,142 @@ fn temp_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     format!("{nanos:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use std::future;
+    use std::sync::{Arc, Mutex};
+
+    fn tools_with_auto(
+        auto_mode: crate::AutoModeFn,
+        confirm: crate::ConfirmFn,
+    ) -> (tempfile::TempDir, BuiltinTools) {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = crate::policy::ResolvedPolicy {
+            allow: Vec::new(),
+            ask: Vec::new(),
+            deny: Vec::new(),
+            wrappers: std::collections::HashMap::new(),
+            redirects: lofi_types::RedirectPolicy::default(),
+            heredocs: lofi_types::HeredocPolicy::default(),
+            yolo: false,
+            allow_by_default: false,
+        };
+        let tools = BuiltinTools::with_skills_dir(
+            dir.path().to_path_buf(),
+            None,
+            super::default_tmp_dir(),
+            crate::BashEnv::default(),
+            policy,
+            Some(confirm),
+            Some(auto_mode),
+            None,
+        );
+        (dir, tools)
+    }
+
+    #[tokio::test]
+    async fn fast_auto_approval_does_not_open_confirmation() {
+        let confirmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let confirm: crate::ConfirmFn = {
+            let confirmed = confirmed.clone();
+            Arc::new(move |_| {
+                confirmed.store(true, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async { false })
+            })
+        };
+        let auto: crate::AutoModeFn = Arc::new(|_| {
+            Box::pin(async {
+                crate::AutoModeOutcome::Allow {
+                    reason: "safe".to_string(),
+                }
+            })
+        });
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+
+        assert!(
+            tools
+                .auto_mode_decision_after("echo ok", &auto, Duration::from_secs(1))
+                .await
+        );
+        assert!(!confirmed.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn slow_auto_evaluation_can_be_overridden() {
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let confirm: crate::ConfirmFn = {
+            let seen = seen.clone();
+            Arc::new(move |prompt| {
+                let evaluating = matches!(
+                    *prompt
+                        .reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    crate::ConfirmReason::AutoEvaluating { .. }
+                );
+                seen.store(evaluating, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async { true })
+            })
+        };
+        let auto: crate::AutoModeFn = Arc::new(|_| Box::pin(future::pending()));
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+
+        assert!(
+            tools
+                .auto_mode_decision_after("echo ok", &auto, Duration::from_millis(1))
+                .await
+        );
+        assert!(seen.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn auto_ask_reason_is_forwarded_to_confirmation() {
+        let seen = Arc::new(Mutex::new(String::new()));
+        let confirm: crate::ConfirmFn = {
+            let seen = seen.clone();
+            Arc::new(move |prompt| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let reason = prompt
+                        .reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let crate::ConfirmReason::AutoAsk { reason } = reason {
+                        *seen
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+                    }
+                    false
+                })
+            })
+        };
+        let auto: crate::AutoModeFn = Arc::new(|_| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                crate::AutoModeOutcome::Ask {
+                    reason: "writes outside the workspace".to_string(),
+                }
+            })
+        });
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+
+        assert!(
+            !tools
+                .auto_mode_decision_after("cp x /tmp/x", &auto, Duration::from_millis(1))
+                .await
+        );
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            "writes outside the workspace"
+        );
+    }
 }

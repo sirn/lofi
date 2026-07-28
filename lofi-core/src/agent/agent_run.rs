@@ -836,7 +836,7 @@ impl Agent {
             let confirm: Option<lofi_code::ConfirmFn> = self.confirm_tx.as_ref().map(|tx| {
                 let tx = tx.clone();
                 let counter = self.confirm_counter.clone();
-                Arc::new(move |command: String| {
+                Arc::new(move |prompt: lofi_code::ConfirmPrompt| {
                     let tx = tx.clone();
                     let counter = counter.clone();
                     Box::pin(async move {
@@ -844,7 +844,9 @@ impl Agent {
                         let (resp_tx, resp_rx) = oneshot::channel();
                         let req = ConfirmRequest {
                             id,
-                            command,
+                            command: prompt.command,
+                            reason: prompt.reason,
+                            active: prompt.active,
                             respond: resp_tx,
                         };
                         if tx.send(req).is_err() {

@@ -145,33 +145,69 @@ pub type RecallFn = Arc<
 /// the session file fresh, like `RecallFn`.
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
+/// Why a shell-policy confirmation is being requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmReason {
+    /// The shell policy requires direct user confirmation.
+    Policy,
+    /// Auto-mode is still evaluating the command. The UI may display elapsed
+    /// time while allowing the user to override the pending evaluation.
+    AutoEvaluating { started_at: std::time::Instant },
+    /// Auto-mode completed and explicitly requested confirmation.
+    AutoAsk { reason: String },
+    /// Auto-mode could not produce a decision (timeout, provider failure, or
+    /// malformed response), so the user must decide.
+    AutoFailed { reason: String },
+}
+
+/// A shell-policy confirmation request shared with the UI.
+#[derive(Debug, Clone)]
+pub struct ConfirmPrompt {
+    /// Command awaiting confirmation.
+    pub command: String,
+    /// Current reason for confirmation. Auto-mode updates this in place when
+    /// a pending evaluation resolves to `ask` or fails.
+    pub reason: Arc<std::sync::Mutex<ConfirmReason>>,
+    /// True while this prompt can still accept a user response. Auto-mode
+    /// clears it when an approval or override wins the race, allowing the UI
+    /// to dismiss a stale request whose response future was cancelled.
+    pub active: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Async confirmation callback used by the shell policy.
 ///
-/// When `lofi.bash` hits an `ask` decision, the runtime calls this with
-/// the command text and awaits the boolean response (`true` = allow,
-/// `false` = deny). When `None` (headless mode), `ask` blocks the command.
+/// The runtime passes a shared prompt and awaits the boolean response
+/// (`true` = allow, `false` = deny). When `None` (headless mode), an
+/// `ask` decision blocks the command.
 pub type ConfirmFn = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
+    dyn Fn(
+            ConfirmPrompt,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
         + Send
         + Sync,
 >;
 
+/// Result of an auto-mode command evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoModeOutcome {
+    /// The command is safe to run without confirmation.
+    Allow { reason: String },
+    /// The evaluator requires a user decision.
+    Ask { reason: String },
+    /// The evaluator timed out, failed, or returned an invalid response.
+    Failed { reason: String },
+}
+
 /// Async auto-mode callback used by the shell policy.
 ///
-/// When `lofi.bash` hits an `ask` decision and auto-mode is enabled, the
-/// runtime calls this with the command text and awaits the result:
-/// - `Some(true)` — the LLM approved the command; run it without prompting.
-/// - `Some(false)` — the LLM said ask; fall through to the confirmation flow.
-/// - `None` — auto-mode failed or timed out; fall through to the confirmation
-///   flow.
-///
-/// When `None` (auto-mode disabled or not configured), `ask` goes directly
-/// to the confirmation flow.
+/// The configured timeout remains an upper bound for this future. The shell
+/// tool races it against a short UI grace period and, once shown, the user's
+/// override response.
 pub type AutoModeFn = Arc<
     dyn Fn(
             String,
         )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
         + Send
         + Sync,
 >;

@@ -16,11 +16,30 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use lofi_code::policy::auto_mode;
-use lofi_code::AutoModeFn;
+use lofi_code::{AutoModeFn, AutoModeOutcome};
 use lofi_providers::{open, Provider};
 use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Model, Role};
 
 use lofi_error::{Error, Result};
+
+/// Abort a spawned provider evaluation if the surrounding auto-mode future is
+/// dropped because the user overrides it. Dropping a bare Tokio `JoinHandle`
+/// would detach the request and let it keep consuming provider resources.
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl AbortOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
 
 /// Build an [`AutoModeFn`] from the shell-policy auto-mode config, or return
 /// `None` when auto-mode is disabled or the configured model is unavailable.
@@ -89,13 +108,24 @@ pub fn build_auto_mode(
             let handle = tokio::task::spawn(async move {
                 evaluate_command(&provider, &model, &command, &cwd, max_tokens).await
             });
-            tokio::time::timeout(timeout, handle)
-                .await
-                .ok()
-                .and_then(std::result::Result::ok)
-                .flatten()
+            let mut handle = handle;
+            let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
+            let outcome = match tokio::time::timeout(timeout, &mut handle).await {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(e)) => AutoModeOutcome::Failed {
+                    reason: format!("evaluation task failed: {e}"),
+                },
+                Err(_) => {
+                    handle.abort();
+                    AutoModeOutcome::Failed {
+                        reason: format!("evaluation timed out after {}s", timeout.as_secs()),
+                    }
+                }
+            };
+            abort_on_drop.disarm();
+            outcome
         })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send + Sync>>
+            as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
     });
 
     Ok(Some(auto_mode_fn))
@@ -103,16 +133,16 @@ pub fn build_auto_mode(
 
 /// Run a single-turn LLM evaluation of a command.
 ///
-/// Returns `Some(true)` when the model approves, `Some(false)` when it says
-/// ask, and `None` on any error or timeout (so the caller falls back to the
-/// confirmation flow).
+/// Return the evaluator's decision with a user-facing reason. Provider,
+/// stream, and parsing failures remain distinct so the confirmation dialog can
+/// explain why automatic approval did not complete.
 async fn evaluate_command(
     provider: &Arc<dyn Provider>,
     model: &Model,
     command: &str,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
-) -> Option<bool> {
+) -> AutoModeOutcome {
     let prompt = auto_mode::build_prompt(command, &cwd.display().to_string());
 
     let mut model = model.clone();
@@ -131,7 +161,9 @@ async fn evaluate_command(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "auto-mode: provider stream failed");
-            return None;
+            return AutoModeOutcome::Failed {
+                reason: format!("provider request failed: {e}"),
+            };
         }
     };
 
@@ -145,25 +177,30 @@ async fn evaluate_command(
                         reason = d.reason.as_str(),
                         "auto-mode: approved"
                     );
+                    AutoModeOutcome::Allow { reason: d.reason }
                 } else {
                     tracing::debug!(
                         command = command,
                         reason = d.reason.as_str(),
                         "auto-mode: deferred to confirmation"
                     );
+                    AutoModeOutcome::Ask { reason: d.reason }
                 }
-                Some(d.allow)
             } else {
                 tracing::warn!(
                     response = text.as_str(),
                     "auto-mode: could not parse LLM response"
                 );
-                None
+                AutoModeOutcome::Failed {
+                    reason: "evaluator returned an invalid response".to_string(),
+                }
             }
         }
         Err(e) => {
             tracing::warn!(error = %e, "auto-mode: stream error");
-            None
+            AutoModeOutcome::Failed {
+                reason: format!("evaluation stream failed: {e}"),
+            }
         }
     }
 }

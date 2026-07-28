@@ -2199,6 +2199,8 @@ fn confirm_request(
         lofi_core::ConfirmRequest {
             id: 1,
             command: command.to_string(),
+            reason: std::sync::Arc::new(std::sync::Mutex::new(lofi_core::ConfirmReason::Policy)),
+            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             respond,
         },
         response,
@@ -6270,5 +6272,58 @@ fn working_status_is_replaced_in_place_by_done_status() {
     assert_eq!(
         done_y, working_y,
         "Done should replace Working on the same physical row"
+    );
+}
+
+#[test]
+fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn screen(term: &Terminal<TestBackend>) -> String {
+        let buf = term.backend().buffer();
+        let area = buf.area;
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+    }
+
+    let mut a = app();
+    let (mut req, _response) = confirm_request("rm generated.txt");
+    req.reason = std::sync::Arc::new(std::sync::Mutex::new(
+        lofi_core::ConfirmReason::AutoEvaluating {
+            started_at: std::time::Instant::now() - std::time::Duration::from_secs(4),
+        },
+    ));
+    let reason = req.reason.clone();
+    a.pending_confirms.push(req);
+    let mut term = Terminal::new(TestBackend::new(90, 28)).unwrap();
+
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let evaluating = screen(&term);
+    assert!(
+        evaluating.contains("Auto evaluation for 4s..."),
+        "{evaluating}"
+    );
+    assert!(evaluating.contains("override it"), "{evaluating}");
+
+    *reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = lofi_core::ConfirmReason::AutoAsk {
+        reason: "command deletes a file".to_string(),
+    };
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let asking = screen(&term);
+    assert!(
+        asking.contains("Auto evaluation asks: command deletes a file"),
+        "{asking}"
     );
 }

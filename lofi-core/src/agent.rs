@@ -48,6 +48,12 @@ pub struct ConfirmRequest {
     pub id: u64,
     /// The command text awaiting confirmation.
     pub command: String,
+    /// Current policy/auto-mode reason. The evaluator may update this while
+    /// the dialog is open.
+    pub reason: Arc<Mutex<lofi_code::ConfirmReason>>,
+    /// Whether the request can still be answered. A completed auto-approval
+    /// clears this so the UI can discard its stale dialog.
+    pub active: Arc<AtomicBool>,
     /// Send `true` to allow, `false` to deny.
     pub respond: oneshot::Sender<bool>,
 }

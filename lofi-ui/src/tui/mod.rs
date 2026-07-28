@@ -1246,6 +1246,23 @@ async fn run_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
+                // Auto-mode may resolve and cancel its dialog without sending
+                // another UI event. Drop such stale requests on the regular
+                // animation tick; active evaluations also need redraws for
+                // their elapsed-time label.
+                let before = app.pending_confirms.len();
+                app.pending_confirms.retain(|req| {
+                    req.active.load(std::sync::atomic::Ordering::Relaxed)
+                });
+                if app.pending_confirms.len() != before {
+                    app.confirm_selected = 0;
+                    app.confirm_scroll = 0;
+                    app.confirm_total = 0;
+                    app.confirm_view_h = 0;
+                    dirty = true;
+                } else if !app.pending_confirms.is_empty() {
+                    dirty = true;
+                }
                 // The spinner and the retry countdown both animate and need
                 // periodic redraw; an idle session has nothing to draw — except
                 // while the yank badge is on screen, which must expire.
@@ -1288,14 +1305,19 @@ async fn run_loop(
             // Shell-policy confirmation request from the agent.
             req = confirm_rx.recv() => {
                 if let Some(req) = req {
-                    if app.pending_confirms.is_empty() {
-                        app.confirm_selected = 0;
-                        app.confirm_scroll = 0;
-                        app.confirm_total = 0;
-                        app.confirm_view_h = 0;
+                    // An auto approval can win after the callback enqueues its
+                    // request but before the UI receives it. Never flash that
+                    // already-settled dialog for a frame.
+                    if req.active.load(std::sync::atomic::Ordering::Relaxed) {
+                        if app.pending_confirms.is_empty() {
+                            app.confirm_selected = 0;
+                            app.confirm_scroll = 0;
+                            app.confirm_total = 0;
+                            app.confirm_view_h = 0;
+                        }
+                        app.pending_confirms.push(req);
+                        dirty = true;
                     }
-                    app.pending_confirms.push(req);
-                    dirty = true;
                 }
             }
         }

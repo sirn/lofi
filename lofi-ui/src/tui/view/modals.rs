@@ -734,6 +734,29 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let desired_w = area.width.saturating_mul(3).saturating_div(5).max(52);
     let w = desired_w.min(100).min(area.width);
     let content_w = w.saturating_sub(6).max(1) as usize;
+    let reason = req
+        .reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let explanation = match reason {
+        lofi_core::ConfirmReason::Policy => "Shell wants to run this command".to_string(),
+        lofi_core::ConfirmReason::AutoEvaluating { started_at } => format!(
+            "Auto evaluation for {}s... You can allow or deny now to override it.",
+            started_at.elapsed().as_secs()
+        ),
+        lofi_core::ConfirmReason::AutoAsk { reason } => {
+            if reason.trim().is_empty() {
+                "Auto evaluation asks for your approval.".to_string()
+            } else {
+                format!("Auto evaluation asks: {reason}")
+            }
+        }
+        lofi_core::ConfirmReason::AutoFailed { reason } => {
+            format!("Auto evaluation could not decide: {reason}")
+        }
+    };
+    let explanation_lines = prim::wrap(&explanation, content_w);
     // Commands are preformatted source: preserve leading blank lines and
     // indentation instead of treating them as flow text.
     let cmd_lines = prim::wrap_pre(&req.command, content_w);
@@ -741,13 +764,18 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // a viewport rather than a truncation point, so every wrapped row remains
     // reachable with the scrolling keys.
     const MAX_COMMAND_ROWS: usize = 12;
-    let available_command_rows = area.height.saturating_sub(11).max(1) as usize;
+    let explanation_rows = explanation_lines.len().max(1);
+    let non_command_rows = explanation_rows + 9;
+    let available_command_rows = area
+        .height
+        .saturating_sub(u16::try_from(non_command_rows).unwrap_or(u16::MAX))
+        .max(1) as usize;
     let command_rows = cmd_lines
         .len()
         .max(1)
         .min(MAX_COMMAND_ROWS)
         .min(available_command_rows);
-    let desired_frame_h = u16::try_from(command_rows + 10).unwrap_or(u16::MAX);
+    let desired_frame_h = u16::try_from(command_rows + non_command_rows).unwrap_or(u16::MAX);
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
 
@@ -785,7 +813,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let rows = Layout::vertical([
-        Constraint::Length(1), // explanation
+        Constraint::Length(u16::try_from(explanation_rows).unwrap_or(u16::MAX)),
         Constraint::Length(1), // gap
         Constraint::Length(1), // content label
         Constraint::Min(1),    // command panel
@@ -795,10 +823,11 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     ])
     .split(chrome.content);
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Shell", Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-            Span::styled(" wants to run this command", Style::new().fg(t.muted)),
-        ])),
+        Paragraph::new(explanation_lines.join(
+            "
+",
+        ))
+        .style(Style::new().fg(t.muted)),
         rows[0],
     );
     f.render_widget(
