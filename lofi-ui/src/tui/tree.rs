@@ -125,6 +125,56 @@ pub(super) fn hydrate_tree_entry_window(
     hydrate_tree_entry_rows(indices, cursor, &requested, emit, cancelled);
 }
 
+fn hidden_checkpoint_indices(
+    indices: &[store::EventIndex],
+    active_path: &[usize],
+    cursor: &store::SessionCursor,
+) -> std::collections::HashSet<usize> {
+    let mut hidden = std::collections::HashSet::new();
+    for (marker_pos, &idx) in active_path.iter().enumerate() {
+        if indices[idx].kind != store::IndexKind::Compaction {
+            continue;
+        }
+        let (_, _, checkpointed, first_kept) = load_compaction_details(cursor, indices[idx].offset);
+        if checkpointed && !first_kept.is_empty() {
+            if let Some(start) = active_path[..marker_pos]
+                .iter()
+                .position(|&i| indices[i].id.matches(&first_kept))
+            {
+                hidden.extend(active_path[start..marker_pos].iter().copied());
+            }
+        }
+    }
+    hidden
+}
+
+fn top_level_tree_nodes(
+    indices: &[store::EventIndex],
+    by_id: &HashMap<&store::IndexId, usize>,
+) -> Vec<usize> {
+    indices
+        .iter()
+        .enumerate()
+        .filter(|&(_, entry)| {
+            if !is_tree_node(entry.kind) {
+                return false;
+            }
+            let mut parent = entry.parent_id.as_ref();
+            while let Some(id) = parent {
+                let Some(&index) = by_id.get(id) else {
+                    break;
+                };
+                if is_tree_node(indices[index].kind) {
+                    return false;
+                }
+                parent = indices[index].parent_id.as_ref();
+            }
+            true
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn build_tree_entries_inner(
     indices: &[store::EventIndex],
     leaf_id: Option<&str>,
@@ -156,27 +206,7 @@ fn build_tree_entries_inner(
         .filter(|id| !id.is_empty())
         .map_or_else(Vec::new, |id| active_path_from_index(indices, &by_id, id));
     let active_set: std::collections::HashSet<usize> = active_path.iter().copied().collect();
-    // Context-edited kept-tail copies are durable model checkpoints, not
-    // additional branch nodes. Hide the copy span immediately preceding each
-    // checkpoint marker while retaining the marker itself.
-    let mut hidden_checkpoint: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (marker_pos, &idx) in active_path.iter().enumerate() {
-        if indices[idx].kind != store::IndexKind::Compaction {
-            continue;
-        }
-        let (_, _, checkpointed, first_kept) = load_compaction_details(cursor, indices[idx].offset);
-        if !checkpointed || first_kept.is_empty() {
-            continue;
-        }
-        if let Some(start_pos) = active_path[..marker_pos]
-            .iter()
-            .position(|&i| indices[i].id.matches(&first_kept))
-        {
-            hidden_checkpoint.extend(active_path[start_pos..marker_pos].iter().copied());
-        }
-    }
-
-    // Trunk = active path filtered to displayable, non-checkpoint-copy nodes.
+    let hidden_checkpoint = hidden_checkpoint_indices(indices, &active_path, cursor);
     let trunk: Vec<usize> = active_path
         .iter()
         .copied()
@@ -224,36 +254,9 @@ fn build_tree_entries_inner(
             render_branch_subtree(&ctx, &branches, child_indent, &mut out);
         }
     }
-    // Rolled back to before the root prompt: the trunk is empty, so
-    // render every top-level tree node (a tree node whose nearest
-    // tree-node ancestor — walking up the parent chain — is absent) as a
-    // branch. Nothing is active. The file's root may be a system message
-    // (not a tree node), so we can't just take parent_id.is_none().
     if trunk.is_empty() && out.is_empty() {
-        let roots: Vec<usize> = indices
-            .iter()
-            .enumerate()
-            .filter(|&(_, ix)| {
-                if !is_tree_node(ix.kind) {
-                    return false;
-                }
-                // Walk up the parent chain; this is a top-level tree node
-                // iff no ancestor is a tree node.
-                let mut cur = ix.parent_id.as_ref();
-                while let Some(pid) = cur {
-                    let Some(&pidx) = by_id.get(pid) else { break };
-                    if is_tree_node(indices[pidx].kind) {
-                        return false;
-                    }
-                    cur = indices[pidx].parent_id.as_ref();
-                }
-                true
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if !roots.is_empty() {
-            render_branch_subtree(&ctx, &roots, "", &mut out);
-        }
+        let roots = top_level_tree_nodes(indices, &by_id);
+        render_branch_subtree(&ctx, &roots, "", &mut out);
     }
     out
 }
@@ -451,8 +454,131 @@ pub(super) fn walk_chain(
     chain
 }
 
-/// Append one `TreeEntry` for index `idx`, loading the label lazily from
-/// disk via the event's byte offset.
+type TreeEntryFields = (String, String, String);
+
+fn skeleton_tree_entry(ix: &store::EventIndex) -> Option<TreeEntryFields> {
+    let label = match ix.kind {
+        store::IndexKind::UserPrompt => "user: loading…",
+        store::IndexKind::ToolResult => "tool: loading…",
+        store::IndexKind::TurnEnd => "agent: loading…",
+        store::IndexKind::TurnFailed => "agent: loading… (failed)",
+        store::IndexKind::Compaction => "compact: loading…",
+        _ => return None,
+    }
+    .to_string();
+    let branch_point = match ix.kind {
+        store::IndexKind::UserPrompt | store::IndexKind::Compaction => ix
+            .parent_id
+            .as_ref()
+            .map(store::IndexId::to_event_id)
+            .unwrap_or_default(),
+        _ => ix.id.to_event_id(),
+    };
+    Some((label, String::new(), branch_point))
+}
+
+fn tool_result_tree_entry(ctx: &TreeCtx, idx: usize) -> TreeEntryFields {
+    let ix = &ctx.indices[idx];
+    let (name, tool_use_id, content, is_error) =
+        load_tool_result(idx, ctx.indices, ctx.by_id, ctx.cursor);
+    let marker = if is_error { "\u{2717} " } else { "" };
+    let label = if name == "exec" {
+        let mut tools = ctx.native_tools.borrow().get(&tool_use_id).cloned();
+        if tools.is_none() && ctx.lazy_native_tools {
+            let loaded = load_native_tools_for_turn(ctx, idx, &tool_use_id);
+            ctx.native_tools
+                .borrow_mut()
+                .insert(tool_use_id.clone(), loaded.clone());
+            tools = Some(loaded);
+        }
+        if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+            let summary = tools
+                .iter()
+                .map(|(name, args)| format!("{name} {args}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("exec: {marker}{}", one_line(&summary))
+        } else {
+            format!("exec: {marker}{}", one_line(&content))
+        }
+    } else {
+        format!("tool: {marker}{name}: {}", one_line(&content))
+    };
+    (label, String::new(), ix.id.to_event_id())
+}
+
+fn compaction_tree_entry(ctx: &TreeCtx, ix: &store::EventIndex) -> TreeEntryFields {
+    let (summarized, kept, checkpointed, first_kept) =
+        load_compaction_details(ctx.cursor, ix.offset);
+    let branch_point = if checkpointed && !first_kept.is_empty() {
+        ctx.by_id
+            .get(&store::IndexId::parse(first_kept))
+            .and_then(|&i| {
+                ctx.indices[i]
+                    .parent_id
+                    .as_ref()
+                    .map(store::IndexId::to_event_id)
+            })
+            .unwrap_or_default()
+    } else {
+        ix.parent_id
+            .as_ref()
+            .map(store::IndexId::to_event_id)
+            .unwrap_or_default()
+    };
+    (
+        format!("compact: Compacted {summarized} messages · kept {kept}"),
+        String::new(),
+        branch_point,
+    )
+}
+
+fn hydrated_tree_entry(ctx: &TreeCtx, idx: usize) -> Option<TreeEntryFields> {
+    let ix = &ctx.indices[idx];
+    match ix.kind {
+        store::IndexKind::UserPrompt => {
+            let prompt = load_prompt_text(ctx.cursor, ix.offset);
+            let prefill = if ctx.retain_prefill {
+                prompt.clone()
+            } else {
+                String::new()
+            };
+            Some((
+                format!("user: {}", one_line(&prompt)),
+                prefill,
+                ix.parent_id
+                    .as_ref()
+                    .map(store::IndexId::to_event_id)
+                    .unwrap_or_default(),
+            ))
+        }
+        store::IndexKind::ToolResult => Some(tool_result_tree_entry(ctx, idx)),
+        store::IndexKind::TurnEnd => {
+            let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
+            let preview = if preview.is_empty() {
+                "(turn end)".to_string()
+            } else {
+                preview
+            };
+            Some((
+                format!("agent: {preview}"),
+                String::new(),
+                ix.id.to_event_id(),
+            ))
+        }
+        store::IndexKind::TurnFailed => Some((
+            format!(
+                "agent: {} (failed)",
+                one_line(&load_failed_error(ctx.cursor, ix.offset))
+            ),
+            String::new(),
+            ix.id.to_event_id(),
+        )),
+        store::IndexKind::Compaction => Some(compaction_tree_entry(ctx, ix)),
+        _ => None,
+    }
+}
+
 fn push_tree_entry(
     ctx: &TreeCtx,
     idx: usize,
@@ -467,125 +593,13 @@ fn push_tree_entry(
         return;
     }
     let ix = &ctx.indices[idx];
-    let (label, prefill, branch_point) = if !ctx.hydrate {
-        let label = match ix.kind {
-            store::IndexKind::UserPrompt => "user: loading…",
-            store::IndexKind::ToolResult => "tool: loading…",
-            store::IndexKind::TurnEnd => "agent: loading…",
-            store::IndexKind::TurnFailed => "agent: loading… (failed)",
-            store::IndexKind::Compaction => "compact: loading…",
-            _ => return,
-        }
-        .to_string();
-        let branch_point = match ix.kind {
-            store::IndexKind::UserPrompt | store::IndexKind::Compaction => ix
-                .parent_id
-                .as_ref()
-                .map(store::IndexId::to_event_id)
-                .unwrap_or_default(),
-            _ => ix.id.to_event_id(),
-        };
-        (label, String::new(), branch_point)
+    let fields = if ctx.hydrate {
+        hydrated_tree_entry(ctx, idx)
     } else {
-        match ix.kind {
-            store::IndexKind::UserPrompt => {
-                let prompt = load_prompt_text(ctx.cursor, ix.offset);
-                (
-                    format!("user: {}", one_line(&prompt)),
-                    if ctx.retain_prefill {
-                        prompt
-                    } else {
-                        String::new()
-                    },
-                    ix.parent_id
-                        .as_ref()
-                        .map(store::IndexId::to_event_id)
-                        .unwrap_or_default(),
-                )
-            }
-            store::IndexKind::ToolResult => {
-                let (name, tool_use_id, content, is_error) =
-                    load_tool_result(idx, ctx.indices, ctx.by_id, ctx.cursor);
-                let marker = if is_error { "\u{2717} " } else { "" };
-                let label = if name == "exec" {
-                    let mut tools = ctx.native_tools.borrow().get(&tool_use_id).cloned();
-                    if tools.is_none() && ctx.lazy_native_tools {
-                        let loaded = load_native_tools_for_turn(ctx, idx, &tool_use_id);
-                        ctx.native_tools
-                            .borrow_mut()
-                            .insert(tool_use_id.clone(), loaded.clone());
-                        tools = Some(loaded);
-                    }
-                    if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
-                        let summary = tools
-                            .iter()
-                            .map(|(name, args)| format!("{name} {args}"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("exec: {marker}{}", one_line(&summary))
-                    } else {
-                        format!("exec: {marker}{}", one_line(&content))
-                    }
-                } else {
-                    format!("tool: {marker}{name}: {}", one_line(&content))
-                };
-                (label, String::new(), ix.id.to_event_id())
-            }
-            store::IndexKind::TurnEnd => {
-                let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
-                (
-                    format!(
-                        "agent: {}",
-                        if preview.is_empty() {
-                            "(turn end)".to_string()
-                        } else {
-                            preview
-                        }
-                    ),
-                    String::new(),
-                    ix.id.to_event_id(),
-                )
-            }
-            store::IndexKind::TurnFailed => {
-                let error = load_failed_error(ctx.cursor, ix.offset);
-                (
-                    format!("agent: {} (failed)", one_line(&error)),
-                    String::new(),
-                    ix.id.to_event_id(),
-                )
-            }
-            store::IndexKind::Compaction => {
-                let (summarized, kept, checkpointed, first_kept) =
-                    load_compaction_details(ctx.cursor, ix.offset);
-                let branch_point = if checkpointed && !first_kept.is_empty() {
-                    ctx.by_id
-                        .get(&store::IndexId::parse(first_kept))
-                        .and_then(|&i| {
-                            ctx.indices[i]
-                                .parent_id
-                                .as_ref()
-                                .map(store::IndexId::to_event_id)
-                        })
-                        .unwrap_or_default()
-                } else {
-                    ix.parent_id
-                        .as_ref()
-                        .map(store::IndexId::to_event_id)
-                        .unwrap_or_default()
-                };
-                (
-                    format!("compact: Compacted {summarized} messages · kept {kept}"),
-                    String::new(),
-                    branch_point,
-                )
-            }
-            store::IndexKind::UserBash
-            | store::IndexKind::AssistantMessage
-            | store::IndexKind::SystemMessage
-            | store::IndexKind::NativeTool
-            | store::IndexKind::Cursor
-            | store::IndexKind::Other => return,
-        }
+        skeleton_tree_entry(ix)
+    };
+    let Some((label, prefill, branch_point)) = fields else {
+        return;
     };
     out.push(TreeEntry {
         prefix: prefix.to_string(),

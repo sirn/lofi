@@ -1018,6 +1018,7 @@ impl App {
     /// (clamped); `Tab`/`Shift+Tab` cycle with wrap-around; `Enter`
     /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
     /// key (so the caller skips normal Input-mode processing).
+    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         /// Which overlay slot is active, for per-slot confirm/cancel.
         enum Slot {
