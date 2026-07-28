@@ -816,18 +816,9 @@ impl App {
         true
     }
 
-    /// Auto-compact when the latest round's input tokens cross above the
-    /// configured threshold. Mirrors pi's hm-smart-compact: the trigger fires
-    /// only on the upward crossing (hysteresis), so a session hovering above
-    /// the threshold is not re-compacted every turn. The baseline resets to
-    /// `None` after a compaction (and on rollback/resume) so the next
-    /// crossing re-evaluates cleanly. Called after a run fully finishes — the
-    /// lofi equivalent of pi's `agent_settled`.
-    ///
-    /// This is the **soft** path: speculative, post-settled, and only active
-    /// when a soft cap (`max_context_tokens` / `context_ratio`) is set.
-    /// The **hard** cap (`reserved_context_tokens`) is enforced mid-run by
-    /// the engine (force-compact + force-continue), not here.
+    /// Auto-compact after an upward soft-threshold crossing. Hysteresis avoids
+    /// repeated compaction while usage remains above the threshold; hard-cap
+    /// compaction remains an engine concern during a run.
     /// `/recall [query]` — search the full session transcript (including
     /// messages a compaction folded away) and render the matches inline in
     /// the log. With no query, browse the most recent entries. Args:
