@@ -1,13 +1,11 @@
 //! Durable-event recorder: translates a finished turn into the
 //! [`SessionEvent`] subset that gets appended to the transcript.
-//!
 //! This is the single place that shapes `SessionEvent`s, so the agent loop
 //! (`agent::run_continuation`) is free of on-disk-format concerns — it emits
 //! `AgentEvent`s to the live channel and, at turn end, hands the recorder the
 //! growing message slice plus a [`TurnSummary`] of the engine's accumulators.
 //! The recorder appends the newly completed suffix after each round, then
 //! writes the terminal marker when the turn settles.
-//!
 //! The recorder is checkpoint-based rather than a streaming subscriber:
 //! native-tool events originate in a synchronous sandbox callback and are
 //! accumulated in `TurnStats`. Snapshotting at clean provider-round boundaries
@@ -78,7 +76,6 @@ impl SessionRecorder {
     /// Append everything completed since the previous checkpoint, without a
     /// terminal marker. Called after each provider/tool round so a long turn
     /// is durable before the whole agent loop settles.
-    ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn checkpoint(
@@ -95,7 +92,6 @@ impl SessionRecorder {
     /// Flush the remaining durable data and terminal marker for this turn.
     /// Messages/timings already written by [`checkpoint`](Self::checkpoint)
     /// are not duplicated.
-    ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn flush(

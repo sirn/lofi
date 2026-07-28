@@ -89,7 +89,6 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
 /// Fetch a provider's auto-discovered model list and map it to
 /// `(id, ModelConfig)` entries. When `auth` is false the request is sent
 /// without credentials (public list endpoints that reject auth headers).
-///
 /// The models endpoint URL is `am.models_url` when set, otherwise it is
 /// derived from the provider's default api-type mapping: the first path
 /// segment of the endpoint `path` (the API version prefix, e.g. `/v1`)

@@ -1,10 +1,3 @@
-//! Pure data shapes shared across `lofi`.
-//!
-//! This crate holds only serde-friendly data types plus small helper methods,
-//! with no behavior and no I/O. All enums use
-//! `#[serde(rename_all = "snake_case")]`; `ContentBlock` is internally tagged so
-//! it round-trips cleanly through JSON.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use std::collections::HashMap;
@@ -15,22 +8,17 @@ use serde::{Deserialize, Serialize};
 
 pub mod recall;
 
-/// Provider wire protocol used to talk to a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Api {
-    /// `OpenAI` Chat Completions (`/chat/completions`).
     #[serde(rename = "openai_completions", alias = "openai-completions")]
     OpenAiCompletions,
-    /// `OpenAI` Responses API (`/responses`).
     #[serde(rename = "openai_responses", alias = "openai-responses")]
     OpenAiResponses,
-    /// Anthropic Messages API (`/v1/messages`).
     #[serde(rename = "anthropic_messages", alias = "anthropic-messages")]
     AnthropicMessages,
 }
 
 impl Api {
-    /// Return the `snake_case` identifier used on the wire.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -58,10 +46,6 @@ impl Api {
         }
     }
 
-    /// Parse a config identifier back into an [`Api`]. Accepts both the
-    /// `snake_case` form used on the wire and the `kebab-case` form used in
-    /// config files (`openai-responses`).
-    ///
     /// Returns `None` for unrecognized strings rather than erroring, so callers
     /// can attach their own diagnostic context.
     #[must_use]
@@ -87,11 +71,6 @@ impl Api {
         }
     }
 
-    /// Default full endpoint path for this protocol, used as the
-    /// `api_type_mappings` entry's `path` when the user does not configure
-    /// one. The path is joined onto the provider's `base_url` to form the
-    /// model's request URL, and the provider POSTs to that URL verbatim
-    /// (no further suffix is appended in code).
     #[must_use]
     pub fn default_path(self) -> &'static str {
         match self {
@@ -102,13 +81,6 @@ impl Api {
     }
 }
 
-/// A reasoning/"thinking" effort level.
-///
-/// Declared per-model as `thinking_levels` and selectable per-run via
-/// `--model provider/model:level`. `Off` is a special level that disables
-/// thinking entirely; the others scale the reasoning budget the provider
-/// allocates. Serialization is lowercase (`off`, `low`, `medium`, `high`,
-/// `xhigh`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
@@ -117,8 +89,6 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
-    /// Highest reasoning effort. Providers without a native `xhigh` step
-    /// (`OpenAI`) clamp this down to their maximum.
     XHigh,
 }
 
@@ -157,7 +127,6 @@ pub enum Role {
 }
 
 impl Role {
-    /// Return the `snake_case` identifier used on the wire.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -169,8 +138,6 @@ impl Role {
     }
 }
 
-/// A single block of content within a [`Message`].
-///
 /// Internally tagged by `type` so each variant round-trips through JSON without
 /// ambiguity between text, tool calls, tool results, and reasoning traces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,10 +157,6 @@ pub enum ContentBlock {
         is_error: bool,
     },
     /// Chain-of-thought / reasoning trace (where the API exposes it).
-    ///
-    /// `signature` carries Anthropic's thinking-block signature, which must be
-    /// replayed verbatim on subsequent tool-use turns or the API rejects the
-    /// request.
     Thinking {
         text: String,
         signature: Option<String>,
@@ -210,20 +173,10 @@ pub struct Message {
 #[serde(rename_all = "snake_case")]
 pub enum StreamingEvent {
     TextDelta(String),
-    ToolUseStart {
-        id: String,
-        name: String,
-    },
-    ToolUseInputDelta {
-        id: String,
-        delta: String,
-    },
-    ToolUseEnd {
-        id: String,
-    },
+    ToolUseStart { id: String, name: String },
+    ToolUseInputDelta { id: String, delta: String },
+    ToolUseEnd { id: String },
     ThinkingDelta(String),
-    /// A thinking-block signature (Anthropic). Must be replayed on tool-use
-    /// turns, so it is captured onto the [`ContentBlock::Thinking`] block.
     ThinkingSignature(String),
     Done(Usage),
     Error(String),
@@ -256,9 +209,6 @@ pub struct NativeToolRecord {
     pub is_error: bool,
 }
 
-/// A compressed, normalized view of one conversation message, used as the
-/// intermediate representation for the compaction section extractors and the
-/// brief transcript builder.
 #[derive(Debug, Clone)]
 pub enum CompactBlock {
     User {
@@ -300,8 +250,6 @@ pub trait CompactionHook: Send + Sync {
         Vec::new()
     }
 
-    /// Compress a tool result string for the brief transcript.
-    ///
     /// Hooks that know the structure of their tool results (e.g. JSON
     /// format) can extract meaningful fields instead of just taking the
     /// first line. Default returns `None` (caller falls back to its own
@@ -310,8 +258,6 @@ pub trait CompactionHook: Send + Sync {
         None
     }
 
-    /// Extract a "full output" path from a tool result that was truncated.
-    ///
     /// Hooks that produce truncation notices (e.g. bash output redirected to
     /// a temp file) can return the path so the brief transcript can reference
     /// it. Default returns None.
@@ -323,8 +269,6 @@ pub trait CompactionHook: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventKind {
-    /// A conversation message: a user prompt, an assistant turn, or a tool
-    /// result. Serialized as `{"type":"message", <Message fields>}`.
     Message(Message),
     UserBash {
         command: String,
@@ -351,7 +295,9 @@ pub enum SessionEventKind {
     /// Wall-clock duration of a completed thinking block within a turn, so the
     /// "Thought for Ns" marker survives freeze/resume. Emitted in order, one
     /// per assistant thinking block.
-    ThinkingTiming { elapsed_ms: u64 },
+    ThinkingTiming {
+        elapsed_ms: u64,
+    },
     TurnEnd {
         #[serde(alias = "label", default)]
         model: RunModel,
@@ -401,23 +347,12 @@ pub enum SessionEventKind {
 }
 
 /// One append-only line in a session transcript log.
-///
 /// The first line of a session file is the session header (written by the
 /// store); every subsequent line is a `SessionEvent`. Events form a tree via
 /// `id`/`parent_id`: each entry points at its parent, the root entry's
 /// `parent_id` is `None`, and the "active leaf" is the current position in
 /// the tree. Branching appends a new child to an earlier entry instead of to
 /// the previous line, so alternatives coexist in one file.
-///
-/// The engine appends events as a turn commits — the conversation messages
-/// plus the run's own timing/cost metadata — and the UI replays them into its
-/// view. Putting timings and cost in the same log as the messages (rather
-/// than a sidecar) means a resumed session reconstructs identically to the
-/// live one, through a single replayer.
-///
-/// `id`/`parent_id` are `#[serde(default)]` so legacy v1 files (which have
-/// neither) still parse; the store migrates them by chaining each event to
-/// the previous one on load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEvent {
     #[serde(default)]
@@ -443,7 +378,6 @@ pub struct Model {
     pub id: String,
     pub name: String,
     pub provider: String,
-    /// Wire protocol to use for this model.
     pub api: Api,
     /// Whether the model exposes a reasoning/Thinking trace.
     #[serde(default)]
@@ -483,11 +417,6 @@ pub struct Model {
 /// (possibly switched) active one. Rendered to `provider/id:level` only at
 /// display time — never stored as a formatted string, so a later UI change
 /// can't strand stale text in old session files.
-///
-/// Deserializes from the new object form (`{provider, id, thinking}`) or a
-/// legacy rendered string (`provider/id:level`, `provider/id · level`, or
-/// bare `provider/id`), so pre-change session files still load. Serializes
-/// only as the object form.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct RunModel {
     pub provider: String,
@@ -511,9 +440,6 @@ impl RunModel {
         )
     }
 
-    /// Best-effort parse of a legacy rendered model string
-    /// (`provider/id[:level]` or `provider/id · level`) back into raw data.
-    /// Used to load pre-change session files and as a test convenience.
     #[must_use]
     pub fn parse(s: &str) -> Self {
         let (provider, rest) = match s.split_once('/') {
@@ -592,10 +518,6 @@ impl<'de> serde::Deserialize<'de> for RunModel {
 pub struct ModelConfig {
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional per-model api-type key override (an internal [`Api`] id,
-    /// e.g. `openai-responses`). Resolved against the provider's `api_types`
-    /// table exactly like a discovered model's `preferred_api`. Defaults to
-    /// the provider's `api_type`.
     #[serde(default)]
     pub api_type: Option<String>,
     /// Whether the model exposes a reasoning trace.
@@ -692,18 +614,11 @@ impl Default for FieldMappings {
     }
 }
 
-/// Auto-discovery of models from an OpenAI-style `/v1/models` endpoint.
-///
 /// When `enabled`, the provider's model list is fetched at startup from
 /// `models_url` (default `{base_url}/v1/models`), mapped into [`ModelConfig`]
 /// entries, and merged with the provider's static `models` (static wins on
 /// `id` collision). lofi has no built-in model catalog, so discovered models
 /// inherit thinking levels from this config rather than from a base model.
-///
-/// Endpoint paths and pricing-field mappings live on the provider
-/// ([`ProviderConfig`]) and apply to both static and discovered models; this
-/// block only governs the discovery fetch itself plus the translation from
-/// the endpoint's own api-type vocabulary to lofi's internal ids.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModelsConfig {
     #[serde(default)]
@@ -736,8 +651,6 @@ pub enum PricingConvention {
     PerMillion,
 }
 
-/// Dot-notation paths to the pricing fields in a remote model entry.
-///
 /// Configurable so a proxy whose pricing lives under non-standard keys can
 /// be mapped without code changes. An empty path means no remote source for
 /// that cost dimension.
@@ -769,38 +682,16 @@ impl Default for PricingFieldMappings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    /// Default api-type key (an internal [`Api`] id, e.g.
-    /// `openai-completions`) used by models that do not name their own.
-    /// Defaults to [`Api::OpenAiCompletions`] (`openai-completions`) when
-    /// unset. A per-model `api_type` override or an auto-discovered
-    /// `preferred_api` resolves against [`Self::api_types`] using the same
-    /// key.
     #[serde(default)]
     pub api_type: Option<Api>,
-    /// Per-api-type endpoint routing table, keyed by internal [`Api`] id.
-    /// Each entry carries the endpoint `path` (joined onto `base_url`) and
-    /// optional pricing-field overrides. Applies to **both** static and
-    /// auto-discovered models — resolution looks up `api_types[key]`, takes
-    /// its `path` (defaulting to [`Api::default_path`] for the key's [`Api`]),
-    /// and joins onto `base_url`. A minimal single-protocol provider can
-    /// omit this and rely on the defaults.
     #[serde(default)]
     pub api_types: IndexMap<String, ApiTypeMapping>,
-    /// Base URL (host root, e.g. `https://api.openai.com`) for the provider's
-    /// API. When omitted, defaults to [`Api::default_base_url`] for the
-    /// default api-type's [`Api`]. The full endpoint URL is built by joining
-    /// the mapping's `path` onto this root.
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
     pub pricing_convention: PricingConvention,
     #[serde(default)]
     pub pricing_field_mappings: PricingFieldMappings,
-    /// Name of the environment variable holding the API key (e.g.
-    /// `OPENAI_API_KEY`). Read lazily and *leniently*: if the variable is
-    /// unset the provider is left keyless and simply not available, rather
-    /// than aborting startup. This is the primary auth mechanism for the
-    /// built-in defaults.
     #[serde(default)]
     pub env_name: Option<String>,
     #[serde(default)]
@@ -820,17 +711,11 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
-    /// The default [`Api`] for this provider — the scalar `api_type` when
-    /// set, else [`Api::OpenAiCompletions`].
     #[must_use]
     pub fn default_api(&self) -> Api {
         self.api_type.unwrap_or(Api::OpenAiCompletions)
     }
 
-    /// The default api-type key (internal id string) for this provider — the
-    /// scalar `api_type`'s id when set, else the constant default
-    /// (`openai-completions`). Used to look up [`Self::api_types`] for models
-    /// that do not name their own api-type.
     #[must_use]
     pub fn default_api_type_key(&self) -> String {
         self.default_api().id().to_string()
@@ -872,22 +757,11 @@ pub struct AgentConfig {
     pub thinking_levels: Vec<ThinkingLevel>,
 }
 
-/// Compaction settings.
-///
-/// `reserved_context_tokens` is the **hard cap**: a run whose round input
-/// tokens exceed `context_window - reserved_context_tokens` is force-stopped
-/// mid-run, compacted, and silently continued. Consecutive force-compacts are
-/// gated by `min_messages_between_hard_compacts` — if the run crosses the
-/// hard cap again within that many agent messages of the last force-compact,
-/// it errors out (the kept tail itself is too big to compact further).
-///
 /// The optional `[compaction.auto]` **soft caps** are speculative: a run may
 /// cross them with no interruption, and when it reaches `agent_settled` with
 /// context above the soft threshold, it compacts. Soft compaction only runs
 /// when at least one soft cap is set; with defaults (reserved only) compaction
 /// is hard-cap-only.
-///
-/// The offline `/compact` is always available regardless of these settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionConfig {
     #[serde(default = "default_reserved_context_tokens")]
@@ -912,8 +786,6 @@ fn default_min_messages_between_hard_compacts() -> usize {
     6
 }
 
-/// Settings for the `bash` native tool's child-process environment.
-///
 /// By default the child env is *stripped* to a minimal baseline (`PATH`,
 /// `HOME`, locale, …) so inherited credentials never reach a model-run
 /// shell. `pass_env` and `env_file` opt specific variables back in; their
@@ -1027,9 +899,6 @@ impl Default for HeredocPolicy {
     }
 }
 
-/// Action returned by the policy engine.
-///
-/// Serialized as a string for config files (`"allow"`, `"ask"`, `"deny"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyAction {
@@ -1038,14 +907,6 @@ pub enum PolicyAction {
     Deny,
 }
 
-/// Auto-mode configuration for shell policy.
-///
-/// When enabled, commands that would normally require user confirmation
-/// (policy `ask` or unmatched `default`) are first evaluated by a small
-/// LLM. If the model returns "allow", the command runs without prompting
-/// the user. Any other outcome (or a timeout/failure) falls back to the
-/// normal confirmation flow.
-///
 /// This is distinct from YOLO mode: YOLO blindly allows anything not
 /// denied, while auto-mode makes a per-command safety judgment via an
 /// LLM call.
@@ -1053,7 +914,6 @@ pub enum PolicyAction {
 pub struct AutoModeConfig {
     #[serde(default)]
     pub enable: bool,
-    /// Provider key in the config (e.g. "openai").
     pub provider: String,
     pub model: String,
     #[serde(default)]
@@ -1138,10 +998,6 @@ impl CompactionConfig {
         (threshold > 0).then_some(threshold)
     }
 
-    /// Soft-cap threshold: the lesser of the set optional caps
-    /// (`max_context_tokens`, `floor(window * context_ratio)`). Returns
-    /// `None` when neither cap is set (or they are out of range) — in which
-    /// case there is no speculative compaction, only the hard cap.
     #[must_use]
     pub fn soft_threshold(&self, context_window: u64) -> Option<u64> {
         if !self.auto.enable {
@@ -1187,11 +1043,6 @@ impl Default for AutoCompactConfig {
 /// never mid-run — so prefix caching is preserved between compactions (the
 /// tail is append-only there; the edit rides the cache break compaction
 /// already pays).
-///
-/// Elided tool results and tool-call code are replaced with recall-
-/// recoverable stubs naming an event id the model can re-expand with
-/// `lofi.result`. Thinking blocks are dropped outright (scratchpad; the
-/// conclusion lives in the assistant text). Assistant prose is always kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditConfig {
     #[serde(default = "default_true")]
@@ -1532,7 +1383,6 @@ mod tests {
             ..CompactionConfig::default()
         };
         assert_eq!(bad_ratio.soft_threshold(200_000), None);
-        // Both caps -> the lesser.
         let both = CompactionConfig {
             auto: AutoCompactConfig {
                 max_context_tokens: Some(150_000),
@@ -1556,7 +1406,6 @@ mod tests {
 
     #[test]
     fn bash_config_serde_defaults() {
-        // [bash] omitted -> strip on, nothing passed, no env file.
         let cfg: BashConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.strip_env);
         assert!(cfg.pass_env.is_empty());

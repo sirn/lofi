@@ -1,10 +1,3 @@
-//! `OpenAI` Responses request-body builder + SSE-event mapper.
-//!
-//! The Responses API streams typed events keyed by a `type` field inside the
-//! JSON `data:` payload (e.g. `response.output_text.delta`,
-//! `response.function_call_arguments.delta`, `response.completed`). This module
-//! maps those to [`StreamingEvent`]s.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use std::collections::{HashMap, HashSet};
@@ -47,9 +40,6 @@ pub fn build_openai_responses_request(
         req["tools"] = json!(tools_arr);
     }
     if let Some(effort) = openai_effort(model.thinking) {
-        // Request a displayable reasoning summary whenever thinking is on.
-        // OpenAI does not expose raw chain-of-thought; `summary: auto`
-        // enables the summary delta events handled by the stream mapper.
         req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
     }
     req
@@ -79,8 +69,6 @@ fn prompt_cache_key(model: &Model, input: &[Value]) -> String {
     format!("lofi:{hash:016x}")
 }
 
-/// Map a thinking level to an `OpenAI` `reasoning.effort` value. `Off` returns
-/// `None` (field omitted); `XHigh` clamps to `high`.
 fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
         ThinkingLevel::Off => None,
@@ -97,17 +85,7 @@ pub struct ResponsesMapperState {
     pub(crate) saw_completed: bool,
 }
 
-/// Map a single Responses stream event payload to zero or more
-/// [`StreamingEvent`]s.
-///
-/// Recognized types: `response.output_item.added` (tool-use start),
-/// `response.function_call_arguments.delta` (tool input), `response.output_item.done`
-/// (tool-use end), `response.output_text.delta` (text), and `response.completed`
-/// (terminal usage). `response.failed`/`response.incomplete`/`error` become
-/// errors. Other event types are ignored.
-///
 /// # Errors
-///
 /// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
 /// or `error` events so a provider-reported failure fails the round trip.
 pub fn map_openai_responses_event(
@@ -179,8 +157,6 @@ pub fn map_openai_responses_event(
                 .to_string();
             if let Some(delta) = v.get("delta").and_then(Value::as_str) {
                 if !delta.is_empty() {
-                    // Translate the output-item id to the call id so
-                    // `assemble_message` correlates args with the right call.
                     let id = state.item_to_call.get(&item_id).cloned().unwrap_or(item_id);
                     out.push(StreamingEvent::ToolUseInputDelta {
                         id,

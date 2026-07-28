@@ -2,24 +2,10 @@
 
 use super::*;
 
-/// Build the '/tree' picker entries from a lightweight event index.
-///
-/// Uses the lightweight index from [`store::SessionCursor::tree_snapshot`]
-/// to build the tree shape, then loads labels on demand through that cursor.
-///
 /// The active path (root → `leaf_id`) is the trunk — rendered flat.
 /// `None` means the cursor is explicitly before every root event.
 /// (non-active sibling turns) create indentation, so the common case is two
 /// levels deep regardless of conversation length.
-///
-/// Node kinds:
-/// - `user:` — a user-prompt event. Selecting rolls back to BEFORE the
-///   prompt and prefills the input (edit and resend).
-/// - `agent:` — a `turn_end`/`turn_failed`. Selecting rolls back to AFTER
-///   the turn (inclusive), input empty (continue from here).
-///
-/// Shared context for tree-building functions — avoids passing many params
-/// through every recursive call.
 struct TreeCtx<'a> {
     indices: &'a [store::EventIndex],
     children_by_parent: &'a HashMap<&'a store::IndexId, Vec<usize>>,

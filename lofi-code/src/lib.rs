@@ -1,21 +1,3 @@
-//! Code-mode sandbox: `TypeScript` strip (swc) + `QuickJS` runtime.
-//!
-//! The agent's single tool is `exec`, which compiles a TypeScript snippet to
-//! JS (types stripped via swc) and runs it in an embedded `QuickJS` runtime.
-//! Tools are exposed as native methods on a global `lofi` object; top-level
-//! `await`/`return` work via an async-IIFE wrapper.
-//!
-//! ## Async bridge
-//!
-//! `rquickjs`'s `futures` feature gives us [`AsyncRuntime`]/[`AsyncContext`]
-//! and the `async_with!` macro. Native tool functions are `Async` closures
-//! returning an owned `ToolOutput`; rquickjs wraps each future in a promise.
-//! The guest's IIFE is
-//! evaluated to a promise and awaited with `Promise::into_future`; the
-//! `async_with!` driver polls both the guest future and rquickjs's internal
-//! spawner (which runs the tool futures) on each wake, so tokio-backed tools
-//! (e.g. `bash`) drive naturally on the host runtime.
-//!
 //! Tool closures return an owned `ToolOutput`. Its `IntoJs` implementation
 //! recursively converts successful JSON values and throws a genuine JavaScript
 //! `Error` for failures. This avoids rquickjs's generic Rust-conversion error
@@ -86,7 +68,6 @@ pub fn exec_tool_input_schema() -> serde_json::Value {
     })
 }
 
-/// Default wall-clock budget for a single `exec` call (120s).
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
 const GUEST_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
@@ -103,11 +84,6 @@ const INTR_RUNNING: u8 = 0;
 const INTR_TIMEOUT: u8 = 1;
 const INTR_CANCELLED: u8 = 2;
 
-/// Gap between interrupt-handler calls that distinguishes continuous
-/// interpreter execution (microseconds) from a suspended `await` (>= a
-/// tool round-trip). Gaps below this are accumulated as CPU time; gaps at
-/// or above it reset the accumulator, so long-running awaited tools don't
-/// count toward the CPU budget.
 const SUSPEND_THRESHOLD: Duration = Duration::from_millis(1);
 
 /// Sentinel object key used by the IIFE wrapper to surface an uncaught guest
@@ -115,8 +91,6 @@ const SUSPEND_THRESHOLD: Duration = Duration::from_millis(1);
 const SANDBOX_ERROR_KEY: &str = "__lofi_sandbox_error__";
 
 const MAX_LOG_BYTES: usize = 1024 * 1024;
-/// Depth and node caps for converting a guest value to `JSON`, guarding against
-/// self-referential or pathologically nested structures.
 const JS_TO_JSON_MAX_DEPTH: usize = 64;
 const JS_TO_JSON_MAX_NODES: usize = 10_000;
 /// Maximum cumulative bytes of converted strings and object keys, so a single
@@ -225,9 +199,6 @@ impl std::fmt::Debug for ExecCtx {
 
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
-    /// Maximum *CPU time* (not wall-clock) for synchronous guest code.
-    /// Awaited tool calls such as `lofi.bash` do not consume
-    /// this budget — only pure JS computation does. See [`exec`](fn.exec.html).
     pub timeout: Duration,
     /// Optional external cancellation flag. When set to `true`, the `QuickJS`
     /// interrupt handler breaks out of any running synchronous guest code and
@@ -249,8 +220,6 @@ impl Default for ExecOptions {
 
 #[derive(Debug, Clone)]
 pub struct ExecResult {
-    /// The value the guest IIFE resolved to (`null` if it resolved to
-    /// `undefined` or produced no `return`).
     pub value: Json,
     pub logs: String,
 }
@@ -322,14 +291,9 @@ pub fn compile_ts(src: &str) -> Result<String> {
     Ok(code)
 }
 
-/// Compile and run `src` in a fresh `QuickJS` runtime.
-///
-/// Execution is bounded on three fronts:
-///
 /// - **Memory & stack** — `JS_SetMemoryLimit` and `JS_SetMaxStackSize` cap
 ///   the guest heap and call depth so a runaway allocation or deep recursion
 ///   aborts with a JS exception instead of exhausting the host.
-///
 /// - **CPU budget** — the `QuickJS` interrupt handler (installed via
 ///   `set_interrupt_handler`) is called on every interpreter tick. It
 ///   measures *CPU time*, not wall-clock time: gaps between handler calls
@@ -339,20 +303,10 @@ pub fn compile_ts(src: &str) -> Result<String> {
 ///   the accumulated CPU time exceeds `opts.timeout` the handler returns
 ///   *abort*, breaking out of synchronous tight loops (`while (true) {}`)
 ///   that the cooperative `tokio` runtime cannot preempt.
-///
-///   This means a long-running awaited tool such as a slow `bash` command — does *not* consume the budget. Only pure
-///   synchronous guest code does. Individual tools carry their own
-///   timeouts; the exec-level CPU budget is a backstop for loops, not a
-///   wall-clock deadline on the whole call.
-///
 /// - **Cancellation** — if `opts.cancel` is provided, setting it to `true`
 ///   causes the same interrupt path and surfaces a distinct "cancelled"
 ///   error. This is how the UI's Ctrl+C breaks a sync loop that `handle
 ///   .abort()` alone cannot preempt.
-///
-/// `print` output and the returned value are always bounded (see
-/// [`MAX_LOG_BYTES`] and [`js_to_json`]).
-///
 /// # Errors
 /// Returns [`Error::Sandbox`] for compile failures, CPU-budget exhaustion,
 /// cancellation, guest exceptions, or tool errors that propagate as thrown
@@ -550,8 +504,6 @@ fn install_globals(
     Ok(())
 }
 
-/// Parse the optional `{ offset?, limit? }` argument object for `lofi.read`.
-/// Accepts either an object (`{ offset: 10, limit: 20 }`) or nothing.
 fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
     let Some(v) = opts.0 else {
         return (None, None);
@@ -599,9 +551,6 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
     cap_first_line(&s, 120)
 }
 
-/// Stringify a native tool's structured return for the UI. Plain strings
-/// (e.g. `read` content) pass through; structured objects serialize to JSON.
-/// The renderer interprets the result per tool — this never extracts fields.
 fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
     match res {
         Ok(v) => {
@@ -923,9 +872,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exec_sync_loop_can_be_cancelled() {
-        // Setting the external cancel flag must interrupt a synchronous tight
-        // loop and surface a distinct "cancelled" error (not "timeout").
-        //
         // The guest loop blocks inside native `ctx.eval` on this thread, so
         // the cancel flag must be set from a *separate* spawned task; the
         // QuickJS interrupt handler then sees it on the next interpreter tick
@@ -956,8 +902,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exec_works_after_cancelled_exec() {
-        // After a cancelled exec, a fresh exec on a new runtime must work —
-        // the interrupt did not leave the host in a bad state.
         let dir = tempdir().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let exec_ctx = ctx(dir.path());
@@ -1019,8 +963,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_deep_recursion_hits_stack_limit() {
-        // Unbounded recursion must hit the stack-size limit and throw rather
-        // than segfaulting the host.
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_secs(5),

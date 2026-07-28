@@ -1,20 +1,9 @@
-//! Terminal UI: ratatui + crossterm event loop.
-//!
-//! Renders the conversation as a sequence of turns, each a user prompt
-//! followed by a stream of blocks (assistant text, reasoning, tool calls,
-//! errors) — the block model. Tool-result bodies are folded to
-//! a 3-line preview by default and expanded in full by the `/verbose` toggle;
-//! the status strip shows the model, resolved thinking level, a context-usage
-//! gauge, and a spinner.
-//!
 //! Sessions: the append-only JSONL transcript and its shared logical cursor
 //! are durable state; an `Arc<Mutex<Vec<Message>>` holds the active agent
 //! context. The engine checkpoints each round through the cursor, while
 //! `--continue`/`--resume` rebuild only the indexed active lineage and the
 //! `/resume` picker can switch files mid-run.
-//!
 //! ## The `!Send` agent future
-//!
 //! `Agent::run` is not `Send`: the code-mode sandbox holds an `rquickjs`
 //! `AsyncContext` which is `!Send`/`!Sync`. The agent future cannot be
 //! `tokio::spawn`'d on the multi-thread runtime, so the whole loop runs inside
@@ -323,11 +312,6 @@ struct PickerState {
     generation: u64,
 }
 
-/// A read-only, scrollable information modal (e.g. `/help`, `/session`
-/// output): a centered box showing `title` over `lines`. Navigation uses
-/// the modal keys — `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/
-/// `PgDn`) scroll; `y` copies the body; `Esc`/`q`/`Enter` dismiss.
-///
 /// `scroll` is the top visible wrapped-line index; `total` and `view_h`
 /// are filled by the renderer each frame so the key handler can clamp and
 /// page without knowing the terminal size itself.
@@ -487,9 +471,6 @@ impl Modal for TreePickerState {
     }
 }
 
-/// State for the `/model` picker overlay. Owns a snapshot of the available
-/// models ([`App::model_choices`] at open time) so navigation shares the
-/// [`Modal`] dispatch with a correct `len`.
 struct ModelPickerState {
     choices: Vec<lofi_types::ModelChoice>,
     selected: usize,
@@ -698,8 +679,6 @@ pub(crate) struct App {
     session: SessionState,
     picker: Option<PickerState>,
     tree_picker: Option<TreePickerState>,
-    /// Lightweight full-tree index retained only while /tree is open. Event
-    /// bodies remain file-backed and are hydrated one visible window at a time.
     tree_picker_index: Option<Arc<Vec<store::EventIndex>>>,
     tree_picker_pending: std::collections::HashSet<usize>,
     picker_load_tx: Option<tokio::sync::mpsc::UnboundedSender<PickerLoad>>,
@@ -716,16 +695,9 @@ pub(crate) struct App {
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
     last_kill_was_kill: bool,
-    /// Timestamp of the last `C-c` on an empty prompt with no run active.
-    /// A second `C-c` within [`QUIT_DOUBLE_PRESS`] quits, mirroring shells.
     ctrl_c_at: Option<Instant>,
-    /// Screen rect of the log viewport, stashed at render time for hit-testing
-    /// mouse scroll / selection.
     log_rect: Rect,
     input_rect: Rect,
-    /// Plain text of each *visible* log line (the viewport window only),
-    /// stashed at render time so mouse selection can map screen coords to
-    /// text. Window-relative: index 0 is the top visible line.
     log_vis: Vec<view::VisLine>,
     log_off: usize,
     input_scroll: usize,
@@ -752,8 +724,6 @@ pub(crate) struct App {
     /// Total transcript line count (frozen + last turn + separators), stashed
     /// at render time so the Navigate cursor can be clamped between events.
     log_total: usize,
-    /// Line count of the live (last) turn, stashed at render time so turn
-    /// boundaries can be computed between events for `[`/`]` jumps.
     last_turn_height: usize,
     log_view_h: usize,
     frozen_render: FrozenCache,
@@ -833,8 +803,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Enter the interactive TUI.
-///
 /// `agent` is `None` when no model is configured: the UI still launches and
 /// shows `no_models_hint` in the log; submitting a prompt re-surfaces the
 /// hint instead of running.
@@ -1099,10 +1067,6 @@ async fn run_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
-                // Auto-mode may resolve and cancel its dialog without sending
-                // another UI event. Drop such stale requests on the regular
-                // animation tick; active evaluations also need redraws for
-                // their elapsed-time label.
                 let before = app.pending_confirms.len();
                 app.pending_confirms.retain(|req| {
                     req.active.load(std::sync::atomic::Ordering::Relaxed)

@@ -1,5 +1,3 @@
-//! The model registry.
-//!
 //! Builds a [`ModelRegistry`] from the parsed [`crate::Config`]: each
 //! provider's static `models` list is mapped to [`lofi_types::Model`] entries,
 //! and any provider with an enabled `auto_models` block fetches its model list
@@ -7,29 +5,12 @@
 //! entries into the provider's `models` map (static wins on id collision) and
 //! persisting them to the agent-owned state tree so they survive restarts and
 //! cover offline launches.
-//!
-//! ## Endpoint URL resolution
-//!
-//! A provider's `base_url` is the **host root** (e.g.
-//! `https://api.openai.com`). Each entry in the provider's `api_type` table
-//! carries a full endpoint `path` (e.g. `/v1/chat/completions`), defaulted to
-//! [`lofi_types::Api::default_path`] when unset. The registry joins the
-//! provider `base_url` with the selected mapping's `path` to form the model's
-//! `base_url`, and the provider POSTs to that URL verbatim — no path suffix
-//! is appended in the transport. The same routing table drives both static
-//! and auto-discovered models.
-//!
-//! ## Identifier representation
-//!
 //! [`lofi_types::Model`] carries a `provider` field, and the provider
 //! transports put `model.id` verbatim into the wire `"model"` field. To keep
 //! that wire contract intact, **`Model.id` stays the raw provider-local id**
 //! (e.g. `gpt-4o`), and the qualified `provider/id` form used for unambiguous
 //! resolution and `--list-models` is composed from `Model.provider` +
 //! `Model.id` at lookup/display time.
-//!
-//! ## Auto-models discovery
-//!
 //! A provider's `auto_models` block names a models endpoint plus optional
 //! field mappings. Each entry is parsed into a `ModelConfig` whose `api` and
 //! endpoint `base_url` are resolved from the provider's `api_type` routing
@@ -62,11 +43,6 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
-    /// Build a registry from the **static** model lists only — no network.
-    ///
-    /// Use this for tests and offline launches; [`Self::load_async`] adds
-    /// remote discovery on top.
-    ///
     /// # Errors
     /// Returns [`Error::Config`] only if a static model references an unknown
     /// provider (impossible in practice since models are nested under their
@@ -79,9 +55,6 @@ impl ModelRegistry {
         })
     }
 
-    /// Build a registry, refreshing each provider's `auto_models` block from
-    /// the network and persisting the result to the agent state cache.
-    ///
     /// Static models win on `provider/id` collision: a discovered entry that
     /// duplicates a static one only fills fields the static entry left unset.
     /// A successful refresh (even one yielding zero models) replaces that
@@ -89,7 +62,6 @@ impl ModelRegistry {
     /// resurrected by a later failure. If a fetch fails, the previously cached
     /// discovery for that provider is reused; with no cache the provider
     /// contributes only its static models.
-    ///
     /// # Errors
     /// Returns [`Error::Http`] on a transport failure that is not covered by
     /// the cache fallback, or [`Error::Io`] / [`Error::State`] on cache

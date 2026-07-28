@@ -1,5 +1,3 @@
-//! JS ↔ JSON conversion for the `QuickJS` sandbox.
-//!
 //! `js_to_json`/`json_to_js` move values between a guest `rquickjs::Value`
 //! and a `serde_json::Value`; `js_to_json_bounded` caps depth/nodes/bytes so
 //! a self-referential or pathologically nested structure surfaces as the
@@ -52,8 +50,6 @@ pub(super) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Valu
     Ok(val)
 }
 
-/// Convert a rquickjs value into a `serde_json::Value`.
-///
 /// `undefined` maps to `Null` so a guest `return;` (or no return) yields
 /// `Value::Null` rather than vanishing. Functions and symbols stringify.
 /// Convert a `QuickJS` value to `JSON`, bounded by [`JS_TO_JSON_MAX_DEPTH`] and
@@ -112,9 +108,6 @@ pub(super) fn js_to_json_bounded(
     }
     if v.is_array() {
         if let Some(arr) = v.as_array() {
-            // A huge sparse array is cheap to construct in QuickJS but would
-            // drive billions of host iterations; bail out before iterating if
-            // the length alone exceeds the remaining node budget.
             if *nodes + arr.len() > JS_TO_JSON_MAX_NODES {
                 *overflow = true;
                 return Json::Null;

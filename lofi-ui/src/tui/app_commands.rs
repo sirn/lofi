@@ -1064,8 +1064,6 @@ impl App {
         true
     }
 
-    /// Borrow whichever modal overlay is currently active, for shared
-    /// navigation. Only one slot is ever non-`None` at a time.
     pub(super) fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
         if self.picker.is_some() {
             self.picker.as_mut().map(|p| p as &mut dyn Modal)
@@ -1138,10 +1136,6 @@ impl App {
         }
     }
 
-    /// Rebuild a selected /tree lineage with the same bounded, file-backed
-    /// representation as /resume. Historical turn bodies are parsed only one
-    /// turn at a time and dropped as soon as the next turn begins; their exact
-    /// byte ranges remain available for viewport materialization.
     fn rollback_indexed(
         &mut self,
         cursor: &store::SessionCursor,

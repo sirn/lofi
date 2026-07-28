@@ -189,8 +189,6 @@ impl App {
             return;
         }
         let nl = after.find('\n').unwrap_or(after.len());
-        // Emacs kills the newline itself when invoked on an empty remainder,
-        // so repeated `C-k` on blank lines pulls them in one at a time.
         let end = if nl == 0 {
             self.input_cursor + 1
         } else {

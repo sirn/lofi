@@ -18,26 +18,11 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 impl BuiltinTools {
-    /// Run `cmd` via `sh -c` with cwd pinned to the root.
-    ///
-    /// stdout and stderr are merged. `timeoutMs` bounds the run (default
-    /// 120s); on timeout the child is killed and `status: "timeout"` is returned
-    /// (with `output: "<timeout>"`, `code: null`).
-    ///
-    /// The result is structured: `ok`, `output`, `code` (exit status, null on
-    /// signal/timeout), `command`, `directory` (cwd), `signal` (Unix signal
-    /// number, null unless killed by a signal), `duration_ms`, and `status`
-    /// (`"exited"`, `"signaled"`, or `"timeout"`).
-    ///
     /// Output is tail-truncated to 4 KB / 20 lines (whichever is hit
     /// first), keeping the end where errors and final results land. When
     /// truncated, the full captured output is written to a temp file under
     /// the session tmp dir and its absolute path is included in the notice
     /// so the model can `lofi.read` it in pages (the tmp dir is a read root).
-    ///
-    /// Evaluate `cmd` against the shell policy. Returns `Some(json)` if the
-    /// command is denied or needs confirmation, `None` if allowed.
-    ///
     /// Decision flow for `Ask`:
     /// 1. Auto-mode gets a three-second head start with no UI.
     /// 2. If it is still running, show a live confirmation dialog and race
@@ -313,7 +298,6 @@ impl BuiltinTools {
             Err(_) => "<temp file unavailable>".to_string(),
         };
         if t.output_lines == 0 {
-            // Single line exceeded the byte budget.
             let _ = write!(
             out,
             "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",

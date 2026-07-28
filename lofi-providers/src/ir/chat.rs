@@ -1,10 +1,3 @@
-//! `build_request` dispatch by [`Api`] to the per-provider request builders.
-//!
-//! [`ToolSchema`] is the minimal tool-description shape the `ir` layer needs:
-//! the agent loop (later step) builds the `exec` tool schema and passes it in
-//! here. Keeping it local avoids duplicating `lofi-types` data and keeps the
-//! `ir` layer self-contained.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use lofi_types::{Api, Message, Model};
@@ -22,10 +15,6 @@ pub struct ToolSchema {
     pub input_schema: Value,
 }
 
-/// Build a streaming request body for `api` carrying `messages` and `tools`.
-///
-/// Dispatches to the per-provider builder; each builder sets `stream: true`
-/// and any provider-specific streaming flags.
 #[must_use]
 pub fn build_request(api: Api, model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
     match api {

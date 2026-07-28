@@ -1,11 +1,3 @@
-//! Translation layer between `lofi_types` content and each provider's wire
-//! shape.
-//!
-//! HTTP transport lives in the crate root
-//! (`crate::anthropic_messages`, `crate::openai_*`, `crate::sse`);
-//! request/response mapping lives here. All functions in this module are pure
-//! — no HTTP, no async.
-
 pub mod anthropic_messages;
 pub mod block;
 pub mod chat;

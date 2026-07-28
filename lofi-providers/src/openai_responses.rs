@@ -13,11 +13,6 @@ use crate::ir::openai_responses::{map_openai_responses_event, ResponsesMapperSta
 use crate::sse::{map_sse_response, SseMapper};
 use lofi_error::{Error, Result};
 
-/// `OpenAI` Responses transport.
-///
-/// POSTs to `model.base_url` verbatim; see
-/// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
-/// resolution contract.
 pub(crate) struct OpenAiResponsesProvider {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
@@ -49,8 +44,6 @@ impl super::Provider for OpenAiResponsesProvider {
     }
 }
 
-/// Mapper that parses each Responses `data:` JSON and forwards it to
-/// [`map_openai_responses_event`].
 #[derive(Default)]
 struct OpenAiResponsesMapper {
     state: ResponsesMapperState,

@@ -10,13 +10,10 @@ use lofi_error::{Error, Result};
 #[cfg(test)]
 pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Resolve the agent-owned state directory.
-///
 /// Precedence: `$LOFI_STATE_HOME` (used as the base, with `lofi` appended),
 /// then `$XDG_STATE_HOME` on Linux via [`dirs::state_dir`], then a
 /// `~/.local/state` fallback. The directory is *not* created here — call
 /// [`ensure_state_dir`] before writing.
-///
 /// # Errors
 /// Returns [`Error::State`] only when no base state directory can be
 /// determined (e.g. `HOME` is unset and `dirs::state_dir` returns `None`).
@@ -35,8 +32,6 @@ pub fn state_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Path to the cached remote model-discovery file (`<state>/discovery.json`).
-///
 /// # Errors
 /// Propagates [`state_dir`]'s error if the base directory cannot be resolved.
 pub fn discovery_cache_path() -> Result<PathBuf> {
@@ -45,9 +40,6 @@ pub fn discovery_cache_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Ensure the state directory exists, creating it (and parents) if needed,
-/// and return it.
-///
 /// # Errors
 /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
 /// base directory cannot be resolved.
@@ -60,7 +52,6 @@ pub fn ensure_state_dir() -> Result<PathBuf> {
 /// Create a fresh per-session tmp directory under `<state>/tmp/` and return
 /// its path. Used as the backing store for bash full-output logs so the model
 /// can page through truncated output via `lofi.bash_read`.
-///
 /// # Errors
 /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
 /// base directory cannot be resolved.

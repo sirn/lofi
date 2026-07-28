@@ -1,5 +1,3 @@
-//! Anthropic Messages HTTP transport.
-//!
 //! POSTs to `model.base_url` (e.g. `https://api.anthropic.com/v1/messages`)
 //! with `x-api-key` + `anthropic-version` headers. Unlike the `OpenAI`
 //! transports, Anthropic SSE blocks carry an `event:` line, so the mapper
@@ -20,14 +18,8 @@ use crate::ir::codec::SseEvent;
 use crate::sse::{map_sse_response, SseMapper};
 use lofi_error::{Error, Result};
 
-/// Anthropic API version header value. Pinned to the documented stable date.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Anthropic Messages transport.
-///
-/// POSTs to `model.base_url` verbatim; see
-/// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
-/// resolution contract.
 pub(crate) struct AnthropicMessagesProvider {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
@@ -61,8 +53,6 @@ impl super::Provider for AnthropicMessagesProvider {
     }
 }
 
-/// Mapper that forwards each Anthropic `(event, data)` pair to
-/// [`map_anthropic_event`].
 #[derive(Default)]
 struct AnthropicMapper {
     state: AnthropicMapperState,

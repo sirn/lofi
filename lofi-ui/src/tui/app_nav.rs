@@ -262,9 +262,6 @@ impl App {
     /// be re-seated on the same content character after a re-wrap. The content
     /// text is unchanged by a width change, so a content offset is a stable
     /// anchor where an absolute line index is not.
-    ///
-    /// Must run *before* `ensure_frozen` clears the old-width frozen cache.
-    /// Used for both the Navigate cursor and the Select-mode selection anchor.
     fn content_anchor_for(&self, cursor: usize, col: usize) -> Option<(usize, usize)> {
         let n = self.turns.len();
         if n == 0 {
@@ -530,9 +527,6 @@ impl App {
         }
     }
 
-    /// Plain text of the current mouse selection, or `None` when the selection
-    /// is empty (a bare click with no drag).
-    ///
     /// Lines carrying a raw markdown position map ([`log_raw`]) are copied
     /// from the source — markers intact — by mapping the display selection
     /// `[cs, ce)` through the map to a source slice `source[map[cs]..map[ce]]`.
