@@ -1,53 +1,32 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
-fn active_index_path(index: &[store::EventIndex]) -> Vec<usize> {
-    use std::collections::HashMap;
-    let by_id: HashMap<&store::IndexId, usize> =
-        index.iter().enumerate().map(|(i, e)| (&e.id, i)).collect();
-    let mut out = Vec::new();
-    let mut cur = index.len().checked_sub(1);
-    while let Some(i) = cur {
-        out.push(i);
-        cur = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
-        if out.len() > index.len() {
-            return Vec::new();
-        }
-    }
-    out.reverse();
-    out
-}
-
 pub(super) fn visible_index_path(
     cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) -> Result<Vec<usize>> {
     use std::collections::HashSet;
-    let active = active_index_path(index);
     let mut hidden = HashSet::new();
-    for (pos, &i) in active.iter().enumerate() {
-        if index[i].kind != store::IndexKind::Compaction {
+    for (pos, event) in index.iter().enumerate() {
+        if event.kind != store::IndexKind::Compaction {
             continue;
         }
-        let ev = cursor.event_at(index[i].offset)?;
+        let ev = cursor.event_at(event.offset)?;
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             checkpointed_tail: true,
             ..
         } = ev.kind
         {
-            if let Some(start) = active[..pos]
+            if let Some(start) = index[..pos]
                 .iter()
-                .position(|&j| index[j].id.matches(&first_kept_entry_id))
+                .position(|event| event.id.matches(&first_kept_entry_id))
             {
-                hidden.extend(active[start..pos].iter().copied());
+                hidden.extend(start..pos);
             }
         }
     }
-    Ok(active.into_iter().filter(|i| !hidden.contains(i)).collect())
+    Ok((0..index.len()).filter(|i| !hidden.contains(i)).collect())
 }
 
 pub(super) fn history_from_index(
@@ -55,13 +34,12 @@ pub(super) fn history_from_index(
     index: &[store::EventIndex],
     edit: &lofi_types::EditConfig,
 ) -> Result<Vec<Message>> {
-    let active = active_index_path(index);
     let mut start = 0;
-    for (pos, &i) in active.iter().enumerate().rev() {
-        if index[i].kind != store::IndexKind::Compaction {
+    for (pos, event) in index.iter().enumerate().rev() {
+        if event.kind != store::IndexKind::Compaction {
             continue;
         }
-        let ev = cursor.event_at(index[i].offset)?;
+        let ev = cursor.event_at(event.offset)?;
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             ..
@@ -70,27 +48,25 @@ pub(super) fn history_from_index(
             start = if first_kept_entry_id.is_empty() {
                 pos
             } else {
-                active[..pos]
+                index[..pos]
                     .iter()
-                    .position(|&j| index[j].id.matches(first_kept_entry_id))
+                    .position(|event| event.id.matches(first_kept_entry_id))
                     .unwrap_or(pos)
             };
             break;
         }
     }
-    let offsets: Vec<u64> = active[start..]
+    let offsets: Vec<u64> = index[start..]
         .iter()
         .rev()
-        .map(|&i| index[i].offset)
+        .map(|event| event.offset)
         .collect();
     messages_from_cursor(cursor, &offsets, edit)
 }
 
 /// Rebuild provider history from leaf-first offsets while holding at most one
-/// complete transcript event at a time. Resume previously loaded the whole
-/// post-compaction range into a Vec before reducing it, so large historical
-/// tool results created a startup allocation peak that glibc retained even
-/// after the final compact history was small.
+/// complete transcript event at a time, avoiding a second transcript-sized
+/// allocation during resume.
 fn messages_from_cursor(
     cursor: &store::SessionCursor,
     leaf_first_offsets: &[u64],
@@ -248,7 +224,7 @@ pub(super) fn last_run_model_from_index(
     cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) -> Option<RunModel> {
-    for &i in active_index_path(index).iter().rev() {
+    for i in (0..index.len()).rev() {
         if !matches!(
             index[i].kind,
             store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
@@ -269,14 +245,13 @@ pub(super) fn restore_compaction_from_index(
     cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) {
-    let active = active_index_path(index);
     let mut last_compaction_pos = None;
     let mut last_usage = None;
-    for (pos, &i) in active.iter().enumerate() {
-        match index[i].kind {
+    for (pos, event) in index.iter().enumerate() {
+        match event.kind {
             store::IndexKind::Compaction => last_compaction_pos = Some(pos),
             store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => {
-                if let Ok(ev) = cursor.event_at(index[i].offset) {
+                if let Ok(ev) = cursor.event_at(event.offset) {
                     match ev.kind {
                         SessionEventKind::TurnEnd { usage, .. }
                         | SessionEventKind::TurnFailed { usage, .. } => {

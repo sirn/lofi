@@ -485,23 +485,7 @@ impl App {
             Ok((cursor, snapshot)) => {
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;
-                let loaded = history_from_index(&cursor, &index, &self.compaction.edit).and_then(
-                    |messages| {
-                        if let Ok(mut history) = self.history.lock() {
-                            *history = messages;
-                        }
-                        self.turns.clear();
-                        self.turn_byte_ranges.clear();
-                        self.turn_event_offsets.clear();
-                        self.cost = 0.0;
-                        self.total_in = 0;
-                        self.total_out = 0;
-                        self.reset_compaction_gauges();
-                        replay_indexed_session(self, &cursor, &index, file_size)?;
-                        restore_compaction_from_index(self, &cursor, &index);
-                        Ok(())
-                    },
-                );
+                let loaded = self.restore_indexed_session(&cursor, &index, file_size);
                 if let Err(e) = loaded {
                     self.push_turn(Turn {
                         prompt: "/resume".to_string(),
@@ -856,13 +840,8 @@ impl App {
         }
     }
 
-    /// Key dispatch for the read-only information modal ([`InfoModal`]).
-    /// `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/`PgDn`) scroll the
-    /// body; `y` copies the body to the clipboard (the modal stays open so
-    /// Whether a centered modal (info, `/resume` picker, `/tree` picker) is
-    /// open. While true the prompt cursor is hidden and paste is ignored.
-    /// The slash-complete popover is intentionally excluded — it's inline
-    /// and you're still typing into the prompt.
+    /// Whether a centered modal is open. The inline slash-complete popover is
+    /// excluded because input remains active beneath it.
     pub(super) fn modal_open(&self) -> bool {
         self.info.is_some()
             || self.picker.is_some()
@@ -958,9 +937,9 @@ impl App {
         true
     }
 
-    /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
-    /// swallowed. Returns `true` while the modal is open so keys don't fall
-    /// through to the prompt.
+    /// Handle keys for the read-only information modal. Copy leaves the modal
+    /// open; dismiss and navigation keys are consumed instead of reaching the
+    /// prompt.
     pub(super) fn handle_info_key(&mut self, k: &KeyEvent) -> bool {
         if self.info.is_none() {
             return false;
@@ -1244,19 +1223,7 @@ impl App {
         index: &[store::EventIndex],
         file_size: u64,
     ) -> Result<()> {
-        let messages = history_from_index(cursor, index, &self.compaction.edit)?;
-        if let Ok(mut history) = self.history.lock() {
-            *history = messages;
-        }
-        self.turns.clear();
-        self.turn_byte_ranges.clear();
-        self.turn_event_offsets.clear();
-        self.cost = 0.0;
-        self.total_in = 0;
-        self.total_out = 0;
-        self.reset_compaction_gauges();
-        replay_indexed_session(self, cursor, index, file_size)?;
-        restore_compaction_from_index(self, cursor, index);
+        self.restore_indexed_session(cursor, index, file_size)?;
         // Rollback leaves no live run. Unlike resume, even the selected final
         // turn is immutable and file-backed, so retaining its potentially huge
         // blocks would recreate the RSS spike this path is meant to prevent.

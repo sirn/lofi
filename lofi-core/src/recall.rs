@@ -1,22 +1,7 @@
 #![allow(clippy::unwrap_used)]
-//! Session-history recall: a searchable, scoped view of every message ever
-//! logged to a session — including the ones a compaction folded away.
-//!
-//! A port of pi-vcc's `vcc_recall` / `/pi-vcc-recall` surface, adapted to
-//! lofi's event model. lofi has one LLM-facing tool (`exec`) whose real
-//! file/shell actions are `NativeToolRecord` sidecar events keyed by the
-//! enclosing exec tool-call id; the renderer therefore attaches those
-//! records to their parent assistant message rather than reading per-tool
-//! messages. Compaction scoping resolves a `SessionEventKind::Compaction`'s
-//! `summarized_range` to global message indices, exactly as VCC resolves
-//! `details.messageRange`.
-//!
-//! Two entry points share this engine: the user-typed `/recall` slash
-//! command and the model-callable `lofi.recall(...)` native tool. Both read
-//! the session transcript (the App passes its in-memory events; the native
-//! tool reads the full tree through the shared `SessionCursor` in `ExecCtx`).
-//! The full transcript is lossless on disk, so recall sees messages the
-//! live history no longer carries after a compact.
+//! Searchable, scoped session-history recall, including messages folded away
+//! by compaction. The slash command and native tool share this engine and read
+//! transcripts through the session cursor.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -32,10 +17,7 @@ pub use lofi_types::recall::{CompactionTarget, RecallOutcome, RecallRequest, Rec
 mod file;
 pub use file::recall_cursor;
 
-/// Entries per search-results page. Matches VCC's `PAGE_SIZE`.
 const PAGE_SIZE: usize = 5;
-/// How many recent entries browse mode (no query) shows. Matches VCC's
-/// `DEFAULT_RECENT`.
 const DEFAULT_RECENT: usize = 25;
 /// Hard cap on total search results, so a broad query can't flood the turn.
 const MAX_SEARCH_RESULTS: usize = 50;
