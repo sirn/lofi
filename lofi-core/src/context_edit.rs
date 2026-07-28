@@ -1,29 +1,3 @@
-//! Tiered-retention context editing for the compaction kept tail.
-//!
-//! A no-LLM, in-place pass that shrinks the kept tail before it becomes the
-//! new prefix, so the next compaction fires far later. Applied at compaction
-//! boundaries only (see [`crate::compact`]) — never mid-run — which keeps it
-//! prefix-cache-safe: between compactions the tail is append-only and caches
-//! normally; the edit rides the cache break that compaction already pays.
-//!
-//! Three levers, each with a protected recent window counted from the end of
-//! the tail (so the model's working set stays intact):
-//!
-//! - **tool results** (the bulk): older than the last `keep_results` are
-//!   replaced with a stub naming an event id the model re-expands via
-//!   `lofi.result`. Non-destructive — unlike Anthropic's `clear_tool_uses` /
-//!   opencode's prune / Claude Code's microcompact, which discard outright.
-//! - **thinking**: older than the last `keep_thinking` are dropped. Thinking
-//!   is per-turn scratchpad; the conclusion lives in the assistant text,
-//!   which is always kept. (Older Anthropic models strip old thinking from
-//!   the cache anyway; `clear_thinking_20251015` makes it explicit.)
-//! - **tool-call code**: older than the last `keep_calls` keep their
-//!   `display` label (intent) but the verbatim `code` is stubbed, also
-//!   `lofi.result`-recoverable.
-//!
-//! Assistant prose (`Text`) is always kept verbatim — it is ~4% of bytes and
-//!   the actual signal.
-
 use lofi_types::{ContentBlock, EditConfig, Message, SessionEvent, SessionEventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

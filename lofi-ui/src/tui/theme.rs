@@ -1,11 +1,3 @@
-//! Semantic theme tokens backed by ANSI 256 colors.
-//!
-//! Everything in the UI reads from a [`Theme`] via semantic names —
-//! `primary`, `success`, `muted`, `surface`, … — never a raw color, so a
-//! different palette (dark vs light, 256 vs 16-color) is just a different
-//! `Theme` value. [`Theme::dark`] is the default and uses the xterm 256-color
-//! cube.
-
 use ratatui::style::Color;
 
 /// The resolved color palette. Colors are ANSI 256 values so the UI works
