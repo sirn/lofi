@@ -154,11 +154,7 @@ pub(super) fn handle_event(
             // (the event handler) for both live and resumed sessions.
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let history = Arc::clone(&app.history);
-            let commit = app
-                .session
-                .cursor
-                .clone()
-                .map(|cursor| SessionCommit { cursor });
+            let cursor = app.session.cursor.clone();
             let agent_clone = agent.clone();
             let err_tx = tx.clone();
             let cancel = Arc::new(AtomicBool::new(false));

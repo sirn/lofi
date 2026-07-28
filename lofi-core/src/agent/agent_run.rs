@@ -71,7 +71,7 @@ impl Agent {
         messages: &mut Vec<Message>,
         user_prompt: String,
         tx: Sender<AgentEvent>,
-        commit: Option<&SessionCommit>,
+        session: Option<&crate::session::store::SessionCursor>,
         continuation: bool,
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
@@ -117,18 +117,18 @@ impl Agent {
         // completed round checkpoints its new messages/timings immediately;
         // final flush only appends the remaining suffix and terminal marker.
         let mut recorder =
-            commit.map(|commit| SessionRecorder::new(commit.cursor.clone(), self.run_model()));
+            session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
-        let recall: Option<RecallFn> = commit.map(|c| {
-            let cursor = c.cursor.clone();
+        let recall: Option<RecallFn> = session.map(|cursor| {
+            let cursor = cursor.clone();
             Arc::new(move |req: &lofi_types::recall::RecallRequest| {
                 crate::recall::recall_cursor(&cursor, req)
             }) as RecallFn
         });
-        let result: Option<ResultFn> = commit.map(|c| {
-            let cursor = c.cursor.clone();
+        let result: Option<ResultFn> = session.map(|cursor| {
+            let cursor = cursor.clone();
             Arc::new(move |id: &str| -> String {
                 match cursor.event_by_id(id) {
                     Ok(Some(event)) => match event.kind {
@@ -403,11 +403,11 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         tx: Sender<AgentEvent>,
-        commit: Option<&SessionCommit>,
+        session: Option<&crate::session::store::SessionCursor>,
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, commit, true, cancel, preempt)
+        self.run_continuation(messages, String::new(), tx, session, true, cancel, preempt)
             .await
     }
 
