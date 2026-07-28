@@ -123,14 +123,6 @@ pub(super) fn handle_event(
                 spawn_user_bash(app, current_run, command, exclude_from_context);
                 return;
             }
-            // Lazily create the transcript file on the first persisted prompt.
-            if app.session.cursor.is_none() {
-                if let Some(store) = &app.session.store {
-                    if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
-                        app.session.cursor = Some(cursor);
-                    }
-                }
-            }
             // Keep the completed turn intact until the engine's TurnStart
             // arrives. TurnStart freezes it and pushes the new prompt in one
             // event-handler call, so an intervening redraw cannot expose an
@@ -149,50 +141,7 @@ pub(super) fn handle_event(
                 }
                 return;
             };
-            // The new turn is pushed by `AgentEvent::TurnStart` when the
-            // engine begins the run — keeping turn creation in one place
-            // (the event handler) for both live and resumed sessions.
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
-            let history = Arc::clone(&app.history);
-            let cursor = app.session.cursor.clone();
-            let agent_clone = agent.clone();
-            let err_tx = tx.clone();
-            let cancel = Arc::new(AtomicBool::new(false));
-            let cancel_clone = cancel.clone();
-            let preempt = Arc::new(AtomicBool::new(false));
-            let preempt_clone = preempt.clone();
-            let handle = tokio::task::spawn_local(async move {
-                let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-                // The engine owns the timers and cost, and writes the turn's
-                // events (messages + timings + turn-end) to the transcript.
-                let result = agent_clone
-                    .run_continuation(
-                        &mut messages,
-                        prompt,
-                        tx,
-                        cursor.as_ref(),
-                        false,
-                        Some(cancel_clone),
-                        Some(preempt_clone),
-                    )
-                    .await;
-                if let Ok(mut g) = history.lock() {
-                    *g = messages;
-                }
-                if let Err(e) = result {
-                    let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
-                }
-            });
-            *current_run = Some(RunHandle {
-                handle,
-                rx,
-                cancel,
-                preempt,
-                user_bash: None,
-            });
-            app.run = Some(0);
-            app.run_start = Some(Instant::now());
-            app.pinned = true;
+            spawn_agent_run(app, current_run, agent, Some(prompt));
         }
         KeyCode::Backspace if k.modifiers.contains(KeyModifiers::ALT) => app.kill_word_back(),
         KeyCode::Backspace => app.backspace(),
@@ -352,21 +301,74 @@ pub(super) fn finish_user_bash(
     }
 }
 
+fn install_run(
+    app: &mut App,
+    current_run: &mut Option<RunHandle>,
+    handle: JoinHandle<()>,
+    rx: Receiver<AgentEvent>,
+    cancel: Arc<AtomicBool>,
+    preempt: Arc<AtomicBool>,
+    user_bash: Option<(String, bool)>,
+) {
+    *current_run = Some(RunHandle {
+        handle,
+        rx,
+        cancel,
+        preempt,
+        user_bash,
+    });
+    app.run = Some(0);
+    app.run_start = Some(Instant::now());
+    app.pinned = true;
+}
+
+fn spawn_agent_run(
+    app: &mut App,
+    current_run: &mut Option<RunHandle>,
+    agent: &lofi_core::Agent,
+    prompt: Option<String>,
+) {
+    let cursor = app.session.cursor_or_create(&app.run_model());
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let history = Arc::clone(&app.history);
+    let agent = agent.clone();
+    let err_tx = tx.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+    let preempt = Arc::new(AtomicBool::new(false));
+    let preempt_clone = preempt.clone();
+    let continuation = prompt.is_none();
+    let prompt = prompt.unwrap_or_default();
+    let handle = tokio::task::spawn_local(async move {
+        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+        let result = agent
+            .run_continuation(
+                &mut messages,
+                prompt,
+                tx,
+                cursor.as_ref(),
+                continuation,
+                Some(cancel_clone),
+                Some(preempt_clone),
+            )
+            .await;
+        if let Ok(mut stored) = history.lock() {
+            *stored = messages;
+        }
+        if let Err(error) = result {
+            let _ = err_tx.send(AgentEvent::Error(error.to_string())).await;
+        }
+    });
+    install_run(app, current_run, handle, rx, cancel, preempt, None);
+}
+
 pub(super) fn spawn_user_bash(
     app: &mut App,
     current_run: &mut Option<RunHandle>,
     command: String,
     exclude_from_context: bool,
 ) {
-    // Bash input creates a transcript lazily just like an agent prompt, but
-    // never requires a configured model.
-    if app.session.cursor.is_none() {
-        if let Some(store) = &app.session.store {
-            if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
-                app.session.cursor = Some(cursor);
-            }
-        }
-    }
+    app.session.cursor_or_create(&app.run_model());
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
@@ -395,16 +397,15 @@ pub(super) fn spawn_user_bash(
         };
         let _ = tx.send(event).await;
     });
-    *current_run = Some(RunHandle {
+    install_run(
+        app,
+        current_run,
         handle,
         rx,
-        cancel: Arc::new(AtomicBool::new(false)),
-        preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: Some((command, exclude_from_context)),
-    });
-    app.run = Some(0);
-    app.run_start = Some(Instant::now());
-    app.pinned = true;
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Some((command, exclude_from_context)),
+    );
 }
 
 pub(super) fn spawn_prompt(
@@ -427,56 +428,7 @@ pub(super) fn spawn_prompt(
         });
         return;
     };
-    // Lazily create the transcript file on the first persisted prompt.
-    if app.session.cursor.is_none() {
-        if let Some(store) = &app.session.store {
-            if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
-                app.session.cursor = Some(cursor);
-            }
-        }
-    }
-    // Keep the completed turn intact until TurnStart atomically freezes it
-    // and appends this queued prompt. Clearing here permits a redraw between
-    // those operations and makes the transcript appear to jump backward.
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let history = Arc::clone(&app.history);
-    let cursor = app.session.cursor.clone();
-    let agent_clone = agent.clone();
-    let err_tx = tx.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel.clone();
-    let preempt = Arc::new(AtomicBool::new(false));
-    let preempt_clone = preempt.clone();
-    let handle = tokio::task::spawn_local(async move {
-        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        let result = agent_clone
-            .run_continuation(
-                &mut messages,
-                prompt,
-                tx,
-                cursor.as_ref(),
-                false,
-                Some(cancel_clone),
-                Some(preempt_clone),
-            )
-            .await;
-        if let Ok(mut g) = history.lock() {
-            *g = messages;
-        }
-        if let Err(e) = result {
-            let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
-        }
-    });
-    *current_run = Some(RunHandle {
-        handle,
-        rx,
-        cancel,
-        preempt,
-        user_bash: None,
-    });
-    app.run = Some(0);
-    app.run_start = Some(Instant::now());
-    app.pinned = true;
+    spawn_agent_run(app, current_run, agent, Some(prompt));
 }
 
 pub(super) fn spawn_continue(
@@ -484,45 +436,9 @@ pub(super) fn spawn_continue(
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
 ) {
-    let Some(agent) = agent else { return };
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let history = Arc::clone(&app.history);
-    // Compaction and continuation share the same logical cursor.
-    let cursor = app.session.cursor.clone();
-    let agent_clone = agent.clone();
-    let err_tx = tx.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel.clone();
-    let preempt = Arc::new(AtomicBool::new(false));
-    let preempt_clone = preempt.clone();
-    let handle = tokio::task::spawn_local(async move {
-        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        let result = agent_clone
-            .run_continue(
-                &mut messages,
-                tx,
-                cursor.as_ref(),
-                Some(cancel_clone),
-                Some(preempt_clone),
-            )
-            .await;
-        if let Ok(mut g) = history.lock() {
-            *g = messages;
-        }
-        if let Err(e) = result {
-            let _ = err_tx.send(AgentEvent::Error(e.to_string())).await;
-        }
-    });
-    *current_run = Some(RunHandle {
-        handle,
-        rx,
-        cancel,
-        preempt,
-        user_bash: None,
-    });
-    app.run = Some(0);
-    app.run_start = Some(Instant::now());
-    app.pinned = true;
+    if let Some(agent) = agent {
+        spawn_agent_run(app, current_run, agent, None);
+    }
 }
 
 pub(super) fn handle_ctrl_c(
