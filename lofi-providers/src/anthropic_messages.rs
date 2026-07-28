@@ -29,14 +29,9 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
 /// resolution contract.
 pub(crate) struct AnthropicMessagesProvider {
-    /// Provider host root, used as the fallback when a model does not carry
-    /// its own `base_url`.
     pub(crate) base_url: String,
-    /// Resolved `x-api-key` value.
     pub(crate) api_key: String,
-    /// Extra resolved headers from config.
     pub(crate) headers: HashMap<String, String>,
-    /// Shared HTTP client.
     pub(crate) client: reqwest::Client,
 }
 

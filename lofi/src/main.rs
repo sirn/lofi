@@ -1,7 +1,3 @@
-//! lofi process entry point.
-
-// The TUI and QuickJS sandbox run on a LocalSet. Network and process I/O
-// remain async; explicit spawn_blocking work still uses Tokio.s blocking pool.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // The TUI owns the alternate screen, so tracing stays opt-in to avoid

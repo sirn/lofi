@@ -18,9 +18,7 @@ use serde_json::Value;
 /// A single parsed SSE event block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
-    /// The value of the `event:` line, if any.
     pub event: Option<String>,
-    /// The `data:` payload, with multiple `data:` lines joined by `\n`.
     pub data: String,
 }
 
@@ -55,8 +53,6 @@ pub fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent
                 data_lines.clear();
                 have_data = false;
             } else {
-                // Clear a stale event name from an event-only block so it
-                // does not attach to the next data-bearing block.
                 event = None;
             }
             continue;
@@ -64,13 +60,10 @@ pub fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent
         if let Some(rest) = line.strip_prefix("event:") {
             event = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {
-            // A single optional leading space after the colon is part of the
-            // delimiter, not the payload.
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             data_lines.push(rest.to_string());
             have_data = true;
         }
-        // `id:`, `retry:`, and `:` comment lines are intentionally ignored.
     }
     if have_data {
         out.push(SseEvent {
@@ -105,8 +98,6 @@ struct ToolBuilder {
     ended: bool,
 }
 
-/// An in-order content-block builder. Streaming providers may interleave text,
-/// thinking, and tool-use blocks.
 enum Slot {
     Text(String),
     Thinking { text: String, sig: Option<String> },
@@ -191,7 +182,6 @@ impl MessageAssembler {
     }
 }
 
-/// Fold accumulated [`StreamingEvent`]s into a final assistant [`Message`].
 #[must_use]
 pub fn assemble_message(events: &[StreamingEvent]) -> Message {
     let mut assembler = MessageAssembler::new();
@@ -309,8 +299,6 @@ mod tests {
 
     #[test]
     fn tool_input_delta_correlates_by_id() {
-        // Mappers emit the real tool id on every delta; correlation is by id,
-        // not by positional fallback.
         let events = [
             StreamingEvent::ToolUseStart {
                 id: "tu_0".to_string(),

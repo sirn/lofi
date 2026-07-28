@@ -12,7 +12,6 @@ use super::block::to_openai_chat_messages;
 use super::chat::ToolSchema;
 use lofi_error::{Error, Result};
 
-/// Build the `POST /chat/completions` body for a streaming turn.
 #[must_use]
 pub fn build_openai_chat_request(
     model: &Model,
@@ -109,7 +108,6 @@ pub fn map_openai_chat_event(
             .map_or_else(|| err.to_string(), str::to_string);
         return Err(Error::Provider(format!("provider stream error: {msg}")));
     }
-    // The final usage chunk may carry an empty `choices` array; check it first.
     if let Some(usage) = v.get("usage") {
         if !usage.is_null() {
             out.push(StreamingEvent::Done(usage_from_openai_chat(usage)));
@@ -193,7 +191,6 @@ pub fn map_openai_chat_event(
     Ok(out)
 }
 
-/// Extract [`Usage`] from a Chat Completions `usage` object.
 fn usage_from_openai_chat(v: &Value) -> Usage {
     // Chat Completions reports `prompt_tokens` as the full prompt (cached +
     // non-cached) and the cached slice separately in `prompt_tokens_details`.
@@ -287,8 +284,6 @@ mod tests {
                 name: "exec".to_string()
             }]
         );
-        // Argument deltas carry `index` but not `id`; they must correlate to
-        // the real call id, not a placeholder.
         let args = json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"function":{"arguments":"{\"a\":"}}
         ]}}]});
@@ -303,8 +298,6 @@ mod tests {
 
     #[test]
     fn maps_parallel_tool_calls_in_one_chunk() {
-        // Two tool calls in a single delta: both starts and both argument
-        // fragments must be preserved (the old mapper returned at the first).
         let chunk = json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"call_a","type":"function","function":{"name":"exec","arguments":"{\"x\":"}},
             {"index":1,"id":"call_b","type":"function","function":{"name":"exec","arguments":"{\"y\":"}}
@@ -331,7 +324,6 @@ mod tests {
         let StreamingEvent::Done(u) = done.into_iter().next().unwrap() else {
             panic!("expected Done");
         };
-        // input_tokens excludes the cached slice: prompt_tokens(10) - cached(2)
         assert_eq!(u.input_tokens, 8);
         assert_eq!(u.output_tokens, 5);
         assert_eq!(u.cache_read_tokens, 2);

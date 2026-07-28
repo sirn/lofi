@@ -208,7 +208,6 @@ pub fn map_anthropic_event(
     Ok(out)
 }
 
-/// Handle a `content_block_delta` event: text, tool-input, or thinking.
 fn map_content_block_delta(
     data: &Value,
     state: &AnthropicMapperState,
@@ -261,8 +260,6 @@ fn map_content_block_delta(
     }
 }
 
-/// Merge `message_delta.usage` (cumulative output tokens) into the usage
-/// captured at `message_start`.
 fn merge_message_delta_usage(data: &Value, state: &mut AnthropicMapperState) {
     let Some(u) = data.get("usage") else {
         return;
@@ -486,8 +483,6 @@ mod tests {
                 name: "exec".to_string()
             }]
         );
-        // `input_json_delta` carries the block `index`, not the tool id; the
-        // mapper must translate index 0 -> `tu_0`.
         let delta = json!({
             "index": 0,
             "delta": {"type":"input_json_delta","partial_json":"{\"a\":"}

@@ -17,8 +17,6 @@ use lofi_types::{
     Role, StreamingEvent, Usage,
 };
 
-/// A minimal user message used to satisfy the provider's `messages` argument;
-/// the canned responses ignore it.
 fn user_msg() -> Message {
     Message {
         role: Role::User,
@@ -80,7 +78,6 @@ fn cfg(api: Api, base_url: String) -> ProviderConfig {
     }
 }
 
-/// Collect every event from a provider stream into a `Vec`.
 async fn collect(
     stream: futures::stream::BoxStream<'static, lofi_error::Result<StreamingEvent>>,
 ) -> Vec<StreamingEvent> {

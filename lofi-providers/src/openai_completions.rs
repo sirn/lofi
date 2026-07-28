@@ -27,14 +27,9 @@ use lofi_error::{Error, Result};
 /// load time from the provider's `base_url` joined with the api-type mapping's
 /// `path`. No path suffix is appended here.
 pub(crate) struct OpenAiCompletionsProvider {
-    /// Provider host root, used as the fallback when a model does not carry
-    /// its own `base_url`.
     pub(crate) base_url: String,
-    /// Resolved bearer token.
     pub(crate) api_key: String,
-    /// Extra resolved headers from config.
     pub(crate) headers: HashMap<String, String>,
-    /// Shared HTTP client.
     pub(crate) client: reqwest::Client,
 }
 
@@ -81,9 +76,6 @@ impl SseMapper for OpenAiChatMapper {
     }
 
     fn on_eof(&mut self) -> Result<()> {
-        // Reached only when no `data: [DONE]` sentinel was seen (the decoder
-        // sets `done` itself on `[DONE]`, skipping `on_eof`). A disconnect
-        // before the sentinel is an error, not a silent partial turn.
         Err(Error::Provider(
             "stream ended before [DONE] sentinel".into(),
         ))

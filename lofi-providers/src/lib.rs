@@ -38,7 +38,6 @@ use openai_responses::OpenAiResponsesProvider;
 /// trait, so there is no `list_models` method here.
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Stream a single assistant turn.
     async fn stream(
         &self,
         model: &Model,
@@ -137,9 +136,6 @@ fn http_client() -> Result<reqwest::Client> {
         .map_err(|e| Error::Http(e.to_string()))
 }
 
-/// Apply a provider's extra headers to a request builder.
-///
-/// Used by every concrete transport so header handling stays uniform.
 #[allow(clippy::must_use_candidate, clippy::implicit_hasher)]
 pub fn apply_headers(
     mut builder: reqwest::RequestBuilder,
@@ -164,7 +160,6 @@ pub(crate) fn with_bearer(
     }
 }
 
-/// Apply a single `name: <key>` header only when `key` is non-empty.
 pub(crate) fn with_key_header(
     builder: reqwest::RequestBuilder,
     name: &str,
@@ -220,7 +215,6 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
     Err(Error::Provider(msg))
 }
 
-/// Maximum bytes accepted for a discovery (model-list) response body.
 const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Read a JSON response body through a capped byte stream so a configurable
@@ -240,8 +234,6 @@ async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> 
     serde_json::from_slice(&buf).map_err(|e| Error::Provider(format!("json decode error: {e}")))
 }
 
-/// Build an authenticated GET request for `url` using the per-`Api` auth
-/// scheme. Mirrors the concrete transports' header wiring.
 fn authed_get(
     client: &reqwest::Client,
     api: Api,
@@ -421,9 +413,6 @@ mod tests {
 
     #[test]
     fn effective_credentials_suppresses_auth_when_no_auth() {
-        // no_auth must blank the api key and drop credential-bearing custom
-        // headers even when they are configured, while preserving unrelated
-        // custom headers.
         let mut c = cfg();
         c.no_auth = true;
         c.headers = Some(HashMap::from([
@@ -448,8 +437,6 @@ mod tests {
 
     #[test]
     fn open_trims_trailing_slash() {
-        // The factory accepts a base_url with a trailing slash; the trimmed
-        // host root round-trips through a manually-built provider.
         let mut c = cfg();
         c.base_url = Some("https://api.example.com/".to_string());
         assert!(open(Api::OpenAiCompletions, &c).is_ok());
@@ -470,8 +457,6 @@ mod tests {
             Api::AnthropicMessages,
         ] {
             let mut c = cfg();
-            // Set the provider's default api so `open` receives the matching
-            // `Api`.
             c.api_type = Some(api);
             assert!(open(api, &c).is_ok());
         }
@@ -482,8 +467,6 @@ mod tests {
         let mut c = cfg();
         c.api_key = None;
         let p = open(Api::OpenAiCompletions, &c).unwrap();
-        // Smoke: the factory succeeds; behavior with an empty key is the
-        // server's problem, not ours.
         let _ = p;
     }
 }
