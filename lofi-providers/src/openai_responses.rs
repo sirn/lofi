@@ -24,14 +24,9 @@ use lofi_error::{Error, Result};
 /// [`super::openai_completions::OpenAiCompletionsProvider`] for the URL
 /// resolution contract.
 pub(crate) struct OpenAiResponsesProvider {
-    /// Provider host root, used as the fallback when a model does not carry
-    /// its own `base_url`.
     pub(crate) base_url: String,
-    /// Resolved bearer token.
     pub(crate) api_key: String,
-    /// Extra resolved headers from config.
     pub(crate) headers: HashMap<String, String>,
-    /// Shared HTTP client.
     pub(crate) client: reqwest::Client,
 }
 

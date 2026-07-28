@@ -18,7 +18,6 @@ use lofi_types::StreamingEvent;
 use crate::ir::codec::{is_done_marker, parse_sse_lines, SseEvent};
 use lofi_error::{Error, Result};
 
-/// A boxed, owned stream of streaming events.
 pub(crate) type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<StreamingEvent>> + Send>>;
 
 /// Mapper from a parsed SSE event to zero or more [`StreamingEvent`]s.
@@ -70,7 +69,6 @@ where
 /// hostile provider stream.
 const MAX_SSE_PENDING_BYTES: usize = 1024 * 1024;
 
-/// Push a fatal decode error and stop the stream.
 fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
     state
         .queued
@@ -81,14 +79,12 @@ fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
 /// Unfold state holding the upstream byte stream plus partial decodings.
 struct SseState<M> {
     bytes: std::pin::Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
-    /// Undecoded bytes waiting for the rest of a split multibyte sequence.
     pending_bytes: Vec<u8>,
     /// Decoded text waiting for the blank line that closes an SSE block.
     pending_lines: String,
     /// A trailing `\r` carried across a chunk boundary so a split `\r\n`
     /// line ending is not mistaken for a `\n\n` block terminator.
     pending_cr: bool,
-    /// Parsed events not yet emitted (a single chunk can carry several).
     queued: std::collections::VecDeque<Result<StreamingEvent>>,
     /// Logical completion held until an `OpenAI` transport sentinel or accepted
     /// EOF has been consumed, so dropping the returned stream cannot cancel a
@@ -96,7 +92,6 @@ struct SseState<M> {
     pending_done: Option<StreamingEvent>,
     /// `true` once the upstream byte stream has ended.
     exhausted: bool,
-    /// `true` once a terminal sentinel or mapper terminal event was seen.
     done: bool,
     mapper: M,
 }
@@ -149,8 +144,6 @@ async fn step<M: SseMapper>(
                 state.exhausted = true;
                 flush_tail(&mut state);
                 if !state.done {
-                    // Require a provider terminal event; a disconnect before
-                    // one is an error, not a successful partial turn.
                     match state.mapper.on_eof() {
                         Ok(()) => {
                             if let Some(done) = state.pending_done.take() {
@@ -204,7 +197,6 @@ fn flush_tail<M: SseMapper>(state: &mut SseState<M>) {
     if state.done {
         return;
     }
-    // A deferred trailing `\r` at EOF is a lone-CR line ending.
     if state.pending_cr {
         state.pending_lines.push('\n');
         state.pending_cr = false;
@@ -219,7 +211,6 @@ fn flush_tail<M: SseMapper>(state: &mut SseState<M>) {
     flush_pending_lines(state, true);
 }
 
-/// Append decoded text, splitting out closed blocks as they appear.
 fn append_text<M: SseMapper>(state: &mut SseState<M>, text: &str) {
     // SSE lines may be terminated by `\r\n`, `\n`, or a lone `\r`; all are
     // normalized to `\n` so the `\n\n` block delimiter matches regardless of
@@ -259,9 +250,6 @@ fn append_text<M: SseMapper>(state: &mut SseState<M>, text: &str) {
     }
 }
 
-/// Extract any complete (`\n\n`-terminated) blocks from `pending_lines` and
-/// push their mapped events onto `queued`. When `final_flush` is set, the
-/// remaining text is treated as one trailing block.
 fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool) {
     if state.done {
         return;
@@ -334,8 +322,6 @@ fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
                 }
             }
             Err(e) => {
-                // A provider-reported error is terminal: discard any pending
-                // logical completion, surface the error, and stop.
                 state.pending_done = None;
                 state.queued.push_back(Err(e));
                 state.done = true;
@@ -364,7 +350,6 @@ mod tests {
             .unwrap_or_default())
     }
 
-    /// Drive the decoder over a sequence of byte chunks and collect events.
     async fn run_decoder(chunks: Vec<&'static [u8]>) -> Vec<Result<StreamingEvent>> {
         let chunk_iter = chunks.into_iter().map(|c| Ok(Bytes::copy_from_slice(c)));
         let byte_stream = futures::stream::iter(chunk_iter);
@@ -473,10 +458,6 @@ mod tests {
 
     #[tokio::test]
     async fn crlf_line_ending_split_before_data_line() {
-        // `event: ...\r\n` split between CR and LF, with a `data:` line after.
-        // The `\r\n` is a single line ending, not a `\n\n` block terminator:
-        // the block must contain both the event and data lines, not two
-        // separate empty-data blocks.
         let out = run_decoder(vec![b"event: foo\r", b"\ndata: {\"text\":\"z\"}\n\n"]).await;
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -504,9 +485,6 @@ mod tests {
 
     #[tokio::test]
     async fn large_chunk_of_many_small_events_decodes() {
-        // A single chunk larger than the cap, but composed of many small
-        // terminated events, must decode successfully; the cap applies only to
-        // an unfinished in-flight event, not the whole chunk.
         let event = b"data: {\"text\":\"a\"}\n\n";
         let mut chunk = Vec::new();
         let n = (2 * 1024 * 1024) / event.len() + 1;
@@ -679,8 +657,6 @@ mod tests {
     #[tokio::test]
     async fn keeps_event_field_for_mapper() {
         let body = b"event: delta\ndata: {\"text\":\"x\"}\n\n";
-        // text_mapper ignores the event field, but this confirms the block
-        // parses cleanly with an event line present.
         let out = run_decoder(vec![body.as_slice()]).await;
         assert_eq!(out.len(), 1);
         assert_eq!(

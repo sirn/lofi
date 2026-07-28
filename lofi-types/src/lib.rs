@@ -40,9 +40,6 @@ impl Api {
         }
     }
 
-    /// Return the `kebab-case` identifier used in config files and as the
-    /// `api_types` table key. [`Self::parse`] accepts both this and
-    /// [`Self::as_str`].
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
@@ -52,7 +49,6 @@ impl Api {
         }
     }
 
-    /// Return a short human-readable label for diagnostics and listings.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -116,14 +112,10 @@ impl Api {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
-    /// Thinking disabled.
     #[default]
     Off,
-    /// Lowest reasoning effort.
     Low,
-    /// Moderate reasoning effort (the agent default).
     Medium,
-    /// High reasoning effort.
     High,
     /// Highest reasoning effort. Providers without a native `xhigh` step
     /// (`OpenAI`) clamp this down to their maximum.
@@ -131,7 +123,6 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
-    /// Parse a level identifier; returns `None` for unrecognized strings.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -144,7 +135,6 @@ impl ThinkingLevel {
         }
     }
 
-    /// The lowercase identifier used in config files and `--model :level`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -157,7 +147,6 @@ impl ThinkingLevel {
     }
 }
 
-/// Conversational role of a [`Message`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -187,15 +176,14 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    /// A plain text span.
-    Text { text: String },
-    /// A request from the assistant to invoke a tool.
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// The result of a tool invocation, fed back to the assistant.
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -212,51 +200,43 @@ pub enum ContentBlock {
     },
 }
 
-/// A single message in the conversation log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
-    /// Who produced this message.
     pub role: Role,
-    /// Ordered content blocks.
     pub blocks: Vec<ContentBlock>,
 }
 
-/// Incremental events emitted while streaming a model response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingEvent {
-    /// A chunk of assistant text.
     TextDelta(String),
-    /// A tool call has begun.
-    ToolUseStart { id: String, name: String },
-    /// Incremental JSON for a tool call's `input`.
-    ToolUseInputDelta { id: String, delta: String },
-    /// A tool call has finished.
-    ToolUseEnd { id: String },
-    /// A chunk of reasoning text.
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
+    ToolUseInputDelta {
+        id: String,
+        delta: String,
+    },
+    ToolUseEnd {
+        id: String,
+    },
     ThinkingDelta(String),
     /// A thinking-block signature (Anthropic). Must be replayed on tool-use
     /// turns, so it is captured onto the [`ContentBlock::Thinking`] block.
     ThinkingSignature(String),
-    /// Stream complete with token usage.
     Done(Usage),
-    /// The provider reported an error.
     Error(String),
 }
 
-/// Token accounting for a single model round-trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
-    /// Tokens consumed by the prompt.
     #[serde(default)]
     pub input_tokens: u64,
-    /// Tokens produced by the model.
     #[serde(default)]
     pub output_tokens: u64,
-    /// Prompt tokens served from a cache.
     #[serde(default)]
     pub cache_read_tokens: u64,
-    /// Prompt tokens written to a cache.
     #[serde(default)]
     pub cache_write_tokens: u64,
 }
@@ -296,8 +276,6 @@ pub enum CompactBlock {
         label: Option<String>,
         native: Vec<NativeToolRecord>,
     },
-    /// The result of an exec call. `text` is the surfaced value (or the
-    /// error message); `is_error` marks failures.
     ToolResult {
         id: String,
         text: String,
@@ -305,43 +283,19 @@ pub enum CompactBlock {
     },
 }
 
-/// A named section produced by a compaction hook.
-///
-/// Each hook returns zero or more sections; each section is a title and a
-/// list of bullet items (`- item` lines). Sections are inserted into the
-/// summary between the stable built-in sections (Goal, Preferences, Files,
-/// Commits) and the volatile section (Outstanding Context).
 #[derive(Debug, Clone)]
 pub struct SummarySection {
-    /// The section title, shown as `[Title]` in the summary.
     pub title: String,
-    /// Bullet items, each shown as `- item`.
     pub items: Vec<String>,
 }
 
-/// Hook trait allowing external crates (lofi-code) to inject custom summary
-/// sections into the compaction output. The hook receives the normalized
-/// transcript blocks and returns additional sections.
-///
-/// This avoids hardcoding tool-specific knowledge (like API descriptions)
-/// in lofi-core; instead lofi-code registers a hook that knows its own tools.
 pub trait CompactionHook: Send + Sync {
-    /// Return additional summary sections for this compaction.
-    /// `blocks` is the normalized transcript of the summarized prefix.
     fn sections(&self, blocks: &[CompactBlock]) -> Vec<SummarySection>;
 
-    /// Return bullet items for the [Files And Changes] section.
-    ///
-    /// Inspects native tool calls to determine which files were modified,
-    /// created, or read. Default returns empty (no file tracking).
     fn file_changes(&self, _blocks: &[CompactBlock]) -> Vec<String> {
         Vec::new()
     }
 
-    /// Return bullet items for the [Commits] section.
-    ///
-    /// Inspects native tool calls for git commit commands. Default returns
-    /// empty (no commit tracking).
     fn commits(&self, _blocks: &[CompactBlock]) -> Vec<String> {
         Vec::new()
     }
@@ -366,15 +320,12 @@ pub trait CompactionHook: Send + Sync {
     }
 }
 
-/// The payload of a [`SessionEvent`], exclusive of tree linkage. See
-/// [`SessionEvent`] for the on-disk shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventKind {
     /// A conversation message: a user prompt, an assistant turn, or a tool
     /// result. Serialized as `{"type":"message", <Message fields>}`.
     Message(Message),
-    /// A direct user shell command (interactive `!command` / `!!command`).
     UserBash {
         command: String,
         output: String,
@@ -401,10 +352,6 @@ pub enum SessionEventKind {
     /// "Thought for Ns" marker survives freeze/resume. Emitted in order, one
     /// per assistant thinking block.
     ThinkingTiming { elapsed_ms: u64 },
-    /// A completed turn: the raw model identity that ran it, wall-clock
-    /// duration, accumulated USD cost, and the final round's token usage.
-    /// Rendered as the `◇ Done in Ns with <model>` block and folded into the
-    /// status bar totals.
     TurnEnd {
         #[serde(alias = "label", default)]
         model: RunModel,
@@ -431,35 +378,13 @@ pub enum SessionEventKind {
     /// A native tool call that ran inside an `exec` block, so the nested
     /// `lofi.<tool>` call list survives resume.
     NativeTool(NativeToolRecord),
-    /// Durable selection of the transcript's logical head. This record is
-    /// metadata, not part of the conversation tree: append and branch
-    /// operations write it in the same file-locked transaction as the state
-    /// change so restart never has to infer a cursor from physical EOF.
     Cursor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_id: Option<String>,
     },
-    /// An offline compaction marker: `summary` replaces the summarized
-    /// prefix (everything older than `first_kept_entry_id` on the active
-    /// path) and is injected as a single user message at the head of the
-    /// kept tail on resume. Appended to the active leaf by the `/compact`
-    /// command (and the auto-trigger); a resumed session rebuilds the
-    /// compacted history from it. Subsequent turns chain off this entry so
-    /// the active path runs root -> kept tail -> Compaction -> new turns.
     Compaction {
-        /// The full summary text (preamble + sections + brief transcript).
         summary: String,
-        /// Event id of the first kept message on the active path. The
-        /// agent-history walk on resume emits the summary, then the kept
-        /// tail, and stops at this id — everything older is already folded
-        /// into the summary. The empty string means compact-all (nothing
-        /// kept).
         first_kept_entry_id: String,
-        /// Event ids `[first, last]` of the summarized range on the active
-        /// path — every live message folded into this summary. `/recall`
-        /// with `scope:compaction:N` resolves these to global message
-        /// indices and searches within the range. Empty strings mean
-        /// compact-all collapsed the whole live list.
         summarized_range: [String; 2],
         /// True when the kept tail was copied immediately before this marker
         /// as a durable, context-edited checkpoint. UI replay suppresses those
@@ -468,15 +393,9 @@ pub enum SessionEventKind {
         /// layouts default to false.
         #[serde(default)]
         checkpointed_tail: bool,
-        /// How many live messages were folded by this compaction (for the
-        /// visible marker on resume).
         summarized: usize,
-        /// Total original messages represented by the merged summary. This
-        /// preserves compaction's minimum-history bookkeeping across resume
-        /// and repeated compactions. Older markers fall back to `summarized`.
         #[serde(default)]
         represented: usize,
-        /// How many messages were kept in the tail.
         kept: usize,
     },
 }
@@ -501,64 +420,40 @@ pub enum SessionEventKind {
 /// the previous one on load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEvent {
-    /// Short, low-entropy id unique within this file. Assigned by the store
-    /// on append.
     #[serde(default)]
     pub id: String,
-    /// Parent entry id, or `None` for the root entry (the first event after
-    /// the header).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    /// The payload (message / timing / turn marker / native tool).
     #[serde(flatten)]
     pub kind: SessionEventKind,
 }
 
-/// One selectable model in the `/model` picker. Built from a model
-/// registry's available models.
 #[derive(Debug, Clone)]
 pub struct ModelChoice {
-    /// Provider key in the config.
     pub provider: String,
-    /// Provider-local model identifier (e.g. `gpt-4o`).
     pub id: String,
-    /// Human-readable display name.
     pub name: String,
-    /// Declared reasoning/thinking levels (empty if the model has none).
     pub thinking_levels: Vec<ThinkingLevel>,
-    /// Whether the model accepts image inputs.
     pub supports_image: bool,
-    /// Context window in tokens, if known.
     pub context_window: Option<u64>,
 }
 
-/// A model entry as resolved by the registry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
-    /// Provider-local model identifier (e.g. `gpt-4o`).
     pub id: String,
-    /// Human-readable display name.
     pub name: String,
-    /// Owning provider key in the config.
     pub provider: String,
     /// Wire protocol to use for this model.
     pub api: Api,
     /// Whether the model exposes a reasoning/Thinking trace.
     #[serde(default)]
     pub reasoning: bool,
-    /// Effective reasoning/"thinking" level for this run. Resolved at agent
-    /// construction from the CLI `:level`, the model/provider/agent defaults,
-    /// and the model's declared `thinking_levels`. Encoded into the request
-    /// by the per-API IR builders.
     #[serde(default)]
     pub thinking: ThinkingLevel,
-    /// Whether the model accepts image inputs.
     #[serde(default)]
     pub supports_image: bool,
-    /// Context window size in tokens, if known.
     #[serde(default)]
     pub context_window: Option<u64>,
-    /// Max output tokens, if known.
     #[serde(default)]
     pub max_tokens: Option<u64>,
     /// Per-model endpoint base, set by auto-discovery when an api-type mapping
@@ -566,10 +461,8 @@ pub struct Model {
     /// upstream APIs). When `None`, the provider's `base_url` is used.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Input price per 1M tokens (USD), for the TUI cost estimate.
     #[serde(default)]
     pub input_price: Option<f64>,
-    /// Output price per 1M tokens (USD).
     #[serde(default)]
     pub output_price: Option<f64>,
     /// Cache-read price per 1M tokens (USD). When set, cached prompt tokens
@@ -580,8 +473,6 @@ pub struct Model {
     /// are billed at this rate instead of the input rate.
     #[serde(default)]
     pub cache_write_price: Option<f64>,
-    /// Flat per-request cost (USD). Billed once per turn regardless of token
-    /// counts.
     #[serde(default)]
     pub per_request_price: Option<f64>,
 }
@@ -606,8 +497,6 @@ pub struct RunModel {
 }
 
 impl RunModel {
-    /// Render the display label `provider/id` plus `:level` when thinking is
-    /// on (empty when off). The single place this presentation is produced.
     #[must_use]
     pub fn label(&self) -> String {
         format!(
@@ -631,7 +520,6 @@ impl RunModel {
             Some((p, r)) => (p.to_string(), r),
             None => (String::new(), s),
         };
-        // ` · level` (agent) and `:level` (app) both appeared in the wild.
         let (id, thinking) = if let Some((i, lvl)) = rest.split_once(" · ") {
             (
                 i.to_string(),
@@ -700,15 +588,8 @@ impl<'de> serde::Deserialize<'de> for RunModel {
     }
 }
 
-/// A model entry declared statically in TOML.
-///
-/// The model id is the key of the `models` map in [`ProviderConfig`], so it
-/// is not repeated here. Auto-discovery produces entries of the same shape,
-/// filling every field it can read from the `/v1/models` endpoint and
-/// leaving the rest `None`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// Optional display name; defaults to the id when absent.
     #[serde(default)]
     pub name: Option<String>,
     /// Optional per-model api-type key override (an internal [`Api`] id,
@@ -720,33 +601,20 @@ pub struct ModelConfig {
     /// Whether the model exposes a reasoning trace.
     #[serde(default)]
     pub reasoning: Option<bool>,
-    /// Whether the model accepts image inputs.
     #[serde(default)]
     pub supports_image: Option<bool>,
-    /// Context window size in tokens.
     #[serde(default)]
     pub context_window: Option<u64>,
-    /// Max output tokens.
     #[serde(default)]
     pub max_tokens: Option<u64>,
-    /// Reasoning levels the model accepts, in priority order. The effective
-    /// level (from CLI, model/provider/agent default) must be one of these or
-    /// [`ThinkingLevel::Off`]; an empty list means the model does not support
-    /// thinking and the effective level is forced to `Off`.
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
-    /// Optional per-model default thinking level.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    /// Per-model endpoint URL override. When unset the URL is resolved by
-    /// joining the provider `base_url` with the `api_types[key].path`.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Input price per 1M tokens (USD). When set, the TUI accumulates a cost
-    /// estimate from each turn's `Usage`.
     #[serde(default)]
     pub input_price: Option<f64>,
-    /// Output price per 1M tokens (USD).
     #[serde(default)]
     pub output_price: Option<f64>,
     /// Cache-read price per 1M tokens (USD). Billed against
@@ -759,8 +627,6 @@ pub struct ModelConfig {
     /// through to the input rate.
     #[serde(default)]
     pub cache_write_price: Option<f64>,
-    /// Flat per-request cost (USD). Billed once per turn regardless of token
-    /// counts; most token-priced models leave this unset.
     #[serde(default)]
     pub per_request_price: Option<f64>,
 }
@@ -781,15 +647,8 @@ fn default_true() -> bool {
 /// to **both** static and auto-discovered models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiTypeMapping {
-    /// Full endpoint path joined onto the provider `base_url` (e.g.
-    /// `/v1/chat/completions`). Defaults to [`Api::default_path`] for the
-    /// key's [`Api`] when unset. The provider POSTs to the joined URL
-    /// verbatim; no further suffix is appended in code.
     #[serde(default)]
     pub path: Option<String>,
-    /// Dot-notation paths to the per-model pricing fields in a discovered
-    /// model entry for this endpoint. When unset, the provider-level
-    /// `pricing_field_mappings` is used.
     #[serde(default)]
     pub pricing_field_mappings: Option<PricingFieldMappings>,
 }
@@ -801,23 +660,12 @@ pub struct ApiTypeMapping {
 /// models use the internal id directly.
 pub type ApiTypeMappings = HashMap<String, Api>;
 
-/// Where to read each non-pricing [`ModelConfig`] field from in a discovered
-/// `/v1/models` entry. All paths are dot-notation JSON pointers into the
-/// entry object. `reasoning` and `supports_image` are not mapped here — they
-/// are inferred from the entry's `supported_parameters` array (a model
-/// supports reasoning if the array contains `"reasoning"`, images if it
-/// contains `"image"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMappings {
-    /// Path to the display name. Defaults to `name`.
     #[serde(default = "default_field_name")]
     pub name: String,
-    /// Path to the context window size in tokens (u64). Defaults to
-    /// `context_length`.
     #[serde(default = "default_field_context_window")]
     pub context_window: String,
-    /// Path to the max output tokens (u64). Defaults to
-    /// `top_provider.max_completion_tokens`.
     #[serde(default = "default_field_max_tokens")]
     pub max_tokens: String,
 }
@@ -858,57 +706,33 @@ impl Default for FieldMappings {
 /// the endpoint's own api-type vocabulary to lofi's internal ids.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModelsConfig {
-    /// Master switch; when `false` the block is ignored.
     #[serde(default)]
     pub enabled: bool,
-    /// Send credentials on the models fetch. Defaults to `true`; set to
-    /// `false` for public endpoints that reject auth headers.
     #[serde(default = "default_true")]
     pub auth: bool,
-    /// Full models endpoint URL. When omitted, the fetch targets
-    /// `{base_url}/v1/models`.
     #[serde(default)]
     pub models_url: Option<String>,
-    /// JSON pointer-ish path (dot-separated) to the array of models in the
-    /// response; defaults to `data`.
     #[serde(default = "default_auto_models_path")]
     pub path: String,
-    /// Field name in each model entry naming the remote api-type (e.g.
-    /// `preferred_api`). The value is translated through
-    /// [`Self::api_type_mappings`] to an internal [`Api`] id and stored on
-    /// the discovered [`ModelConfig`] as its `api_type` key. When unset,
-    /// discovered models inherit the provider's default `api_type`.
     #[serde(default)]
     pub api_type_field: Option<String>,
-    /// Remote api-type vocabulary → internal [`Api`] id. Only consulted when
-    /// [`Self::api_type_field`] is set. A remote value with no mapping falls
-    /// back to the provider's default `api_type`.
     #[serde(default)]
     pub api_type_mappings: ApiTypeMappings,
-    /// Where to read each non-pricing [`ModelConfig`] field from in a
-    /// discovered entry. Defaults to the OpenRouter-style layout.
     #[serde(default)]
     pub field_mappings: FieldMappings,
-    /// Thinking levels exposed by discovered models.
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
-    /// Optional per-model default thinking level for discovered models.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    /// Cache freshness in seconds for the fetched model list. Defaults to
-    /// 300 (5 minutes) when unset.
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
 }
 
-/// How a remote `/v1/models` endpoint reports per-token pricing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingConvention {
-    /// Values are per-token; multiply by 1M for a per-1M-token cost.
     #[default]
     PerToken,
-    /// Values are already per-1M-token; use as-is.
     PerMillion,
 }
 
@@ -919,20 +743,14 @@ pub enum PricingConvention {
 /// that cost dimension.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PricingFieldMappings {
-    /// Path to the input/prompt cost (e.g. `pricing.prompt`).
     #[serde(default)]
     pub input: Option<String>,
-    /// Path to the output/completion cost (e.g. `pricing.completion`).
     #[serde(default)]
     pub output: Option<String>,
-    /// Path to the cache-read cost (e.g. `pricing.input_cache_read`).
     #[serde(default)]
     pub cache_read: Option<String>,
-    /// Path to the cache-write cost (e.g. `pricing.input_cache_write`).
     #[serde(default)]
     pub cache_write: Option<String>,
-    /// Path to a flat per-request cost (e.g. `pricing.request`). Most
-    /// token-priced models leave this unset.
     #[serde(default)]
     pub per_request: Option<String>,
 }
@@ -949,7 +767,6 @@ impl Default for PricingFieldMappings {
     }
 }
 
-/// A provider entry in the config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Default api-type key (an internal [`Api`] id, e.g.
@@ -975,16 +792,8 @@ pub struct ProviderConfig {
     /// the mapping's `path` onto this root.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// How the remote models endpoint reports pricing values. `per_token`
-    /// (default) multiplies each value by 1M for a per-1M-token cost;
-    /// `per_million` uses values as-is. Per-endpoint overrides live on each
-    /// [`ApiTypeMapping`].
     #[serde(default)]
     pub pricing_convention: PricingConvention,
-    /// Dot-notation paths to the per-model pricing fields in a discovered
-    /// model entry, used when an [`ApiTypeMapping`] does not carry its own.
-    /// Defaults to the OpenRouter-style `pricing.prompt` / `.completion` /
-    /// `.input_cache_read` / `.input_cache_write` layout.
     #[serde(default)]
     pub pricing_field_mappings: PricingFieldMappings,
     /// Name of the environment variable holding the API key (e.g.
@@ -994,35 +803,18 @@ pub struct ProviderConfig {
     /// built-in defaults.
     #[serde(default)]
     pub env_name: Option<String>,
-    /// Explicit API key or value-resolution expression (literal, `$ENV`,
-    /// `!cmd`). When set it overrides `env_name` and is resolved *strictly*
-    /// (a missing `$VAR` is an error, since the user authored it).
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Extra HTTP headers to send (values subject to resolution).
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
-    /// Statically declared models, keyed by provider-local model id. The
-    /// insertion order is preserved so "first available" selection is
-    /// deterministic and follows the config file.
     #[serde(default)]
     pub models: IndexMap<String, ModelConfig>,
-    /// Optional remote auto-models discovery (`/v1/models` style).
     #[serde(default)]
     pub auto_models: Option<AutoModelsConfig>,
-    /// Explicitly mark this provider as unauthenticated (e.g. a local
-    /// endpoint). When `true` the provider is selectable and requests omit
-    /// auth headers regardless of `env_name`/`api_key`/`headers`.
     #[serde(default)]
     pub no_auth: bool,
-    /// Optional per-provider default thinking level. Used when neither the
-    /// CLI `:level` nor the model's own `thinking_level` selects one.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    /// Per-provider thinking levels, in priority order. Models under this
-    /// provider without their own `thinking_levels` inherit this list. Empty
-    /// means the provider does not constrain levels (the agent default
-    /// applies).
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
 }
@@ -1044,10 +836,6 @@ impl ProviderConfig {
         self.default_api().id().to_string()
     }
 
-    /// Resolve a model's [`Api`] from an optional api-type key (a per-model
-    /// override or a discovered `preferred_api` already translated to an
-    /// internal id). Falls back to the provider's default [`Api`] when the
-    /// key is unset or unrecognized.
     #[must_use]
     pub fn resolve_api(&self, api_type: Option<&str>) -> Api {
         api_type
@@ -1055,9 +843,6 @@ impl ProviderConfig {
             .unwrap_or_else(|| self.default_api())
     }
 
-    /// Resolve a model's endpoint `path` for an api-type key (or the default),
-    /// defaulting to [`Api::default_path`] for the resolved [`Api`] when the
-    /// mapping does not set one.
     #[must_use]
     pub fn resolve_path(&self, api_type: Option<&str>) -> String {
         let default_key = self.default_api_type_key();
@@ -1068,8 +853,6 @@ impl ProviderConfig {
             .unwrap_or_else(|| self.resolve_api(api_type).default_path().to_string())
     }
 
-    /// Resolve the pricing-field mappings for an api-type key, falling back to
-    /// the provider-level default when the mapping does not carry its own.
     #[must_use]
     pub fn resolve_pricing_fields(&self, api_type: Option<&str>) -> &PricingFieldMappings {
         let default_key = self.default_api_type_key();
@@ -1081,18 +864,10 @@ impl ProviderConfig {
     }
 }
 
-/// Agent-level defaults.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Default thinking level applied when neither the CLI `:level`, the
-    /// model, nor the provider selects one. Defaults to `medium` at
-    /// resolution time when `None`.
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    /// Global thinking levels, in priority order. Providers and models
-    /// without their own `thinking_levels` inherit this list. Empty means
-    /// the agent does not constrain levels (the model/provider default
-    /// applies).
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
 }
@@ -1115,9 +890,6 @@ pub struct AgentConfig {
 /// The offline `/compact` is always available regardless of these settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionConfig {
-    /// Hard cap: tokens reserved for the model's response. A round whose
-    /// input tokens exceed `context_window - reserved_context_tokens`
-    /// triggers a force-compact. Defaults to `20_000`.
     #[serde(default = "default_reserved_context_tokens")]
     pub reserved_context_tokens: u64,
     /// Minimum agent messages that must elapse between two force-compacts.
@@ -1126,13 +898,8 @@ pub struct CompactionConfig {
     /// compacting again. Defaults to `6`.
     #[serde(default = "default_min_messages_between_hard_compacts")]
     pub min_messages_between_hard_compacts: usize,
-    /// Speculative auto-compaction (soft caps + master switch).
     #[serde(default)]
     pub auto: AutoCompactConfig,
-    /// Tiered-retention context editing applied to the kept tail at each
-    /// compaction (elide old tool results / thinking / tool-call code,
-    /// recoverable via `lofi.result`). Cache-safe: it rides the prefix
-    /// rebuild that compaction already pays.
     #[serde(default)]
     pub edit: EditConfig,
 }
@@ -1155,15 +922,8 @@ fn default_min_messages_between_hard_compacts() -> usize {
 /// the transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BashConfig {
-    /// Strip the inherited environment down to a minimal baseline before
-    /// running a command. `false` inherits the full parent environment (an
-    /// explicit trust opt-out; redaction of `pass_env`/`env_file` values still
-    /// applies). Defaults to `true`.
     #[serde(default = "default_true")]
     pub strip_env: bool,
-    /// Env var names to copy from the parent environment into the child on
-    /// top of the baseline (or the inherited env when `strip_env` is false).
-    /// Their values are redacted from output. Empty by default.
     #[serde(default)]
     pub pass_env: Vec<String>,
     /// Path to a `KEY=VALUE` file whose entries are loaded into the child
@@ -1184,12 +944,6 @@ impl Default for BashConfig {
     }
 }
 
-/// Shell policy enforcement mode.
-///
-/// - `ReadOnly` — only read-only commands (ls, cat, grep, git status, …).
-/// - `WorkspaceWrite` — read-only plus workspace mutations (cargo, make,
-///   mkdir, …); destructive ops denied or asked.
-/// - `Unrestricted` — everything allowed unless explicitly denied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellPolicyMode {
@@ -1199,64 +953,44 @@ pub enum ShellPolicyMode {
     Unrestricted,
 }
 
-/// How a [`CommandEntry`] matches against a parsed command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchMode {
-    /// Entire trimmed command string matches (case-insensitive).
     Exact,
-    /// Command starts with `match` followed by a word boundary.
     Prefix,
-    /// The exact contiguous token sequence exists anywhere in the command.
     Substring,
-    /// `programPrefix:arg1 arg2…` — prefix matches the command start, and
-    /// all listed args appear as tokens after the prefix.
     Args,
 }
 
-/// One rule in an allow/ask/deny list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandEntry {
-    /// The pattern to match. Meaning depends on [`MatchMode`].
     #[serde(rename = "match")]
     pub match_str: String,
-    /// How to interpret `match`.
     pub mode: MatchMode,
 }
 
-/// Wrapper kind for recursive command unwrapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WrapperKind {
-    /// `bash -c 'cmd'` — next operand after `-c` is the command string.
     ShellC,
-    /// `sudo cmd`, `time cmd`, `nohup cmd` — first non-option operand.
     UtilityOperand,
-    /// `env VAR=1 cmd` — skip env assignments, first remaining operand.
     Env,
-    /// `xargs cmd` — same as utility-operand.
     Xargs,
-    /// `docker run … image cmd` — skip flags + image name.
     DockerRun,
 }
 
-/// A wrapper rule mapping a command name to its unwrapping strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WrapperRuleConfig {
     pub name: String,
     pub kind: WrapperKind,
 }
 
-/// Policy for output redirects (`>`, `>>`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedirectPolicy {
-    /// Action for non-safe redirect targets.
     #[serde(default = "default_redirect_action")]
     pub action: PolicyAction,
-    /// Targets that are always allowed (e.g. `/dev/null`).
     #[serde(default)]
     pub safe_targets: Vec<String>,
-    /// Allow `>&N` file-descriptor duplication.
     #[serde(default)]
     pub allow_fd_dup: bool,
 }
@@ -1275,7 +1009,6 @@ impl Default for RedirectPolicy {
     }
 }
 
-/// Policy for heredocs (`<<`, `<<-`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeredocPolicy {
     #[serde(default = "default_heredoc_action")]
@@ -1318,71 +1051,41 @@ pub enum PolicyAction {
 /// LLM call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoModeConfig {
-    /// Master switch.
     #[serde(default)]
     pub enable: bool,
     /// Provider key in the config (e.g. "openai").
     pub provider: String,
-    /// Model id within the provider (e.g. "gpt-4o-mini").
     pub model: String,
-    /// Max output tokens for the evaluation response.
     #[serde(default)]
     pub max_tokens: Option<u64>,
 }
 
-/// Shell policy configuration, parsed from the `[shell_policy]` table.
-///
-/// The `mode` selects a built-in default policy; custom `allow`/`ask`/`deny`
-/// rules are merged on top. When `yolo` is true, `ask` and unmatched
-/// (`default`) commands are treated as `allow` — only explicit `deny`
-/// blocks execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ShellPolicyConfig {
-    /// Built-in policy preset. Defaults to `workspace_write`.
     #[serde(default)]
     pub mode: ShellPolicyMode,
-    /// Allow-unless-deny: skip confirmation for `ask`/`default` commands.
     #[serde(default)]
     pub yolo: bool,
-    /// Custom allow rules merged on top of the mode's defaults.
     #[serde(default)]
     pub allow: Vec<CommandEntry>,
-    /// Custom ask rules merged on top of the mode's defaults.
     #[serde(default)]
     pub ask: Vec<CommandEntry>,
-    /// Custom deny rules merged on top of the mode's defaults.
     #[serde(default)]
     pub deny: Vec<CommandEntry>,
-    /// Custom wrapper rules merged on top of the mode's defaults.
     #[serde(default)]
     pub wrappers: Vec<WrapperRuleConfig>,
-    /// Redirect policy. Defaults to allow.
     #[serde(default)]
     pub redirects: RedirectPolicy,
-    /// Heredoc policy. Defaults to ask.
     #[serde(default)]
     pub heredocs: HeredocPolicy,
-    /// Auto-mode: LLM-based pre-approval of `ask` commands. When `None`
-    /// or `enable: false`, the normal confirmation flow is used.
     #[serde(default)]
     pub auto_mode: Option<AutoModeConfig>,
 }
 
-/// Transient-error retry settings for provider/transport failures.
-///
-/// A failed round whose error matches a transient pattern (overloaded, rate
-/// limit, 429/5xx, network drops, stream truncation) is retried after an
-/// exponential backoff: attempt N waits `base_delay_ms * 2^(N-1)`, clamped to
-/// `max_delay_ms`. Non-transient errors (auth, quota/billing exhaustion,
-/// context overflow, bad requests) are never retried — the round surfaces them
-/// immediately. `max_retries: 0` disables retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryConfig {
-    /// Maximum retry attempts after the initial try. Defaults to `10`.
     #[serde(default = "default_retry_max_retries")]
     pub max_retries: u32,
-    /// Base delay (ms) for the first retry; later retries double it, clamped
-    /// by `max_delay_ms`. Defaults to `2000` (2s).
     #[serde(default = "default_retry_base_delay_ms")]
     pub base_delay_ms: u64,
     /// Per-retry delay ceiling (ms). Defaults to `60_000` (60s) so a long
@@ -1426,9 +1129,6 @@ impl Default for CompactionConfig {
 }
 
 impl CompactionConfig {
-    /// Hard-cap threshold: `context_window - reserved_context_tokens`. A run
-    /// crossing this mid-run is force-stopped and compacted. Returns `None`
-    /// when the window is zero or the reserve leaves no positive headroom.
     #[must_use]
     pub fn hard_threshold(&self, context_window: u64) -> Option<u64> {
         if context_window == 0 {
@@ -1461,25 +1161,12 @@ impl CompactionConfig {
     }
 }
 
-/// Speculative auto-compaction soft caps. These lower the compaction
-/// threshold below the reserve-based hard cap so large context windows
-/// compact earlier. They are "soft" — the trigger fires only at
-/// `agent_settled` (between turns), not mid-run. Both caps are optional
-/// and inert when unset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoCompactConfig {
-    /// Master switch. When `false` auto-compaction is disabled and only
-    /// manual `/compact` runs.
     #[serde(default = "default_true")]
     pub enable: bool,
-    /// Optional absolute cap. When set, the threshold is lowered to at most
-    /// this many tokens, so compaction fires earlier on large context
-    /// windows. Inert when unset.
     #[serde(default)]
     pub max_context_tokens: Option<u64>,
-    /// Optional fraction of the context window in (0, 1]. When set, the
-    /// threshold is lowered to at most `floor(context_window * ratio)`.
-    /// Inert when unset.
     #[serde(default)]
     pub context_ratio: Option<f64>,
 }
@@ -1507,24 +1194,12 @@ impl Default for AutoCompactConfig {
 /// conclusion lives in the assistant text). Assistant prose is always kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditConfig {
-    /// Master switch. When `false` the kept tail is carried verbatim (the
-    /// pre-edit behavior). Defaults to `true`.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Number of most-recent tool-result blocks kept verbatim in the tail.
-    /// Older results are replaced with a `lofi.result`-recoverable stub.
-    /// Defaults to `6`.
     #[serde(default = "default_edit_keep_results")]
     pub keep_results: usize,
-    /// Number of most-recent thinking blocks kept verbatim. Older thinking
-    /// blocks are dropped (the assistant text conclusion is kept). Defaults
-    /// to `2`.
     #[serde(default = "default_edit_keep_thinking")]
     pub keep_thinking: usize,
-    /// Number of most-recent tool-call (exec) blocks whose full `code` is
-    /// kept. Older calls keep their `display` label (intent) but the
-    /// verbatim code is replaced with a `lofi.result`-recoverable stub.
-    /// Defaults to `6`.
     #[serde(default = "default_edit_keep_calls")]
     pub keep_calls: usize,
 }
@@ -1550,39 +1225,22 @@ impl Default for EditConfig {
     }
 }
 
-/// Top-level config tree parsed from `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    /// Agent-level defaults.
     #[serde(default)]
     pub agent: AgentConfig,
-    /// Compaction settings (auto-compaction trigger). `/compact` itself is
-    /// always available regardless of this block.
     #[serde(default)]
     pub compaction: CompactionConfig,
-    /// `bash` native-tool environment settings.
     #[serde(default)]
     pub bash: BashConfig,
-    /// Shell policy enforcement for `lofi.bash`.
-    ///
-    /// Loaded from `policy.toml`, not from `config.toml`.
     #[serde(skip)]
     pub shell_policy: ShellPolicyConfig,
-    /// Transient-error retry budget and backoff schedule.
     #[serde(default)]
     pub retry: RetryConfig,
-    /// Default provider used when `--model` is omitted and no `default_model`
-    /// resolves. Overrides the "first available provider" fallback.
     #[serde(default)]
     pub default_provider: Option<String>,
-    /// Default model as `provider/id` (or a bare id resolved against
-    /// `default_provider`) used when `--model` is omitted. Takes precedence
-    /// over `default_provider`'s first model and the first-available fallback.
     #[serde(default)]
     pub default_model: Option<String>,
-    /// Named providers, in config-file order. The first provider with a
-    /// resolved key (or `no_auth`) supplies the default model when neither
-    /// `default_model`, `default_provider`, nor `--model` selects one.
     pub providers: IndexMap<String, ProviderConfig>,
 }
 
@@ -1650,7 +1308,6 @@ mod tests {
 
     #[test]
     fn retry_config_serde_omitted_uses_defaults() {
-        // An empty `[retry]` block (or none) yields the default policy.
         #[derive(serde::Deserialize)]
         struct Wrap {
             #[serde(default)]
@@ -1669,7 +1326,6 @@ mod tests {
         }
         let w: Wrap = serde_json::from_str("{\"retry\":{\"max_retries\":0}}").unwrap();
         assert_eq!(w.retry.max_retries, 0);
-        // Unset fields keep their defaults.
         assert_eq!(w.retry.base_delay_ms, 2000);
         assert_eq!(w.retry.max_delay_ms, 60_000);
     }
@@ -1815,16 +1471,13 @@ mod tests {
             Api::parse("anthropic-messages"),
             Some(Api::AnthropicMessages)
         );
-        // snake_case still works.
         assert_eq!(Api::parse("openai_responses"), Some(Api::OpenAiResponses));
     }
 
     #[test]
     fn compaction_hard_threshold_reserved() {
         let cfg = CompactionConfig::default();
-        // 200k window, 20k reserved -> 180k hard cap.
         assert_eq!(cfg.hard_threshold(200_000), Some(180_000));
-        // Caps do not affect the hard threshold.
         let with_caps = CompactionConfig {
             auto: AutoCompactConfig {
                 max_context_tokens: Some(100_000),
@@ -1834,7 +1487,6 @@ mod tests {
             ..CompactionConfig::default()
         };
         assert_eq!(with_caps.hard_threshold(200_000), Some(180_000));
-        // saturating sub when reserved >= window -> no positive threshold.
         assert_eq!(cfg.hard_threshold(10_000), None);
         assert_eq!(cfg.hard_threshold(0), None);
     }
@@ -1854,9 +1506,7 @@ mod tests {
 
     #[test]
     fn compaction_soft_threshold_caps() {
-        // No caps set -> no soft threshold (hard-cap-only).
         assert_eq!(CompactionConfig::default().soft_threshold(200_000), None);
-        // Absolute cap.
         let with_cap = CompactionConfig {
             auto: AutoCompactConfig {
                 max_context_tokens: Some(150_000),
@@ -1866,7 +1516,6 @@ mod tests {
         };
         assert_eq!(with_cap.soft_threshold(1_000_000), Some(150_000));
         assert_eq!(with_cap.soft_threshold(200_000), Some(150_000));
-        // Ratio cap; out-of-range ratio is ignored.
         let with_ratio = CompactionConfig {
             auto: AutoCompactConfig {
                 context_ratio: Some(0.5),
@@ -1897,7 +1546,6 @@ mod tests {
 
     #[test]
     fn compaction_config_serde_defaults() {
-        // [compaction] omitted -> reserved 20k, auto defaults.
         let cfg: CompactionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.reserved_context_tokens, 20_000);
         assert_eq!(cfg.min_messages_between_hard_compacts, 6);
@@ -1929,8 +1577,6 @@ mod tests {
 
     #[test]
     fn auto_compact_config_serde_defaults() {
-        // [compaction.auto] omitted -> enable=true, caps None (no reserved
-        // field here; it lives on the parent [compaction]).
         let cfg: AutoCompactConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.enable);
         assert!(cfg.max_context_tokens.is_none());
@@ -1939,7 +1585,6 @@ mod tests {
 
     #[test]
     fn auto_models_defaults() {
-        // `path` defaults to "data", `auth` to true, everything else optional.
         let json = "{}";
         let am: AutoModelsConfig = serde_json::from_str(json).unwrap();
         assert_eq!(am.path, "data");

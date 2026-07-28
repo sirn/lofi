@@ -16,7 +16,6 @@ use super::block::to_openai_responses_input;
 use super::chat::ToolSchema;
 use lofi_error::{Error, Result};
 
-/// Build the `POST /responses` body for a streaming turn.
 #[must_use]
 pub fn build_openai_responses_request(
     model: &Model,
@@ -29,13 +28,6 @@ pub fn build_openai_responses_request(
         "input": input,
         "stream": true,
     });
-    // GPT-5.6 and later use `prompt_cache_key` to route requests sharing an
-    // exact prefix to the same cache shard. Without it, an append-only agent
-    // history can still bounce between shards and intermittently report a
-    // complete cache miss. Derive a stable, non-identifying key from the
-    // model, the oldest input item, and the first user item. It stays fixed
-    // while a conversation is appended, partitions unrelated sessions, and
-    // naturally changes when compaction rebuilds the prefix.
     req["prompt_cache_key"] = json!(prompt_cache_key(model, &input));
     if let Some(mt) = model.max_tokens {
         req["max_output_tokens"] = json!(mt);
@@ -63,13 +55,6 @@ pub fn build_openai_responses_request(
     req
 }
 
-/// Stable cache-routing key for one append-only conversation prefix.
-///
-/// The rendered key contains no prompt text. The first input item captures
-/// the stable system/compaction prefix; the first user item partitions
-/// conversations that share the same system prompt. Both remain fixed across
-/// ordinary append-only turns. FNV-1a keeps the key stable across process
-/// restarts without adding a hashing dependency.
 fn prompt_cache_key(model: &Model, input: &[Value]) -> String {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -105,13 +90,6 @@ fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
-/// State accumulated across Responses events for tool-call correlation.
-///
-/// Tool *start*/*end* events carry `call_id`, but argument *delta* events
-/// carry the distinct output-item `item_id`. We record `item.id -> call_id`
-/// at `response.output_item.added` and translate subsequent `item_id` deltas
-/// through that map, so interleaved function calls don't have their arguments
-/// appended to the wrong tool.
 #[derive(Default, Debug, Clone)]
 pub struct ResponsesMapperState {
     item_to_call: HashMap<String, String>,
@@ -148,8 +126,6 @@ pub fn map_openai_responses_event(
                 }
             }
         }
-        // Reasoning summaries (o-series / GPT-5 with `reasoning.summary` set)
-        // arrive as their own delta stream; route them to a thinking block.
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             if let Some(delta) = v.get("delta").and_then(Value::as_str) {
                 if !delta.is_empty() {
@@ -163,9 +139,6 @@ pub fn map_openai_responses_event(
             }
         }
         "response.reasoning_summary_part.done" => {
-            // Preserve summary-part boundaries. Besides rendering paragraphs
-            // correctly, this lets the UI discard standalone empty placeholder
-            // parts without hiding literal comments embedded in real content.
             let item_id = v.get("item_id").and_then(Value::as_str).unwrap_or("");
             if state.reasoning_items_with_deltas.contains(item_id) {
                 out.push(StreamingEvent::ThinkingDelta("\n\n".to_string()));
@@ -242,7 +215,6 @@ pub fn map_openai_responses_event(
     Ok(out)
 }
 
-/// Map the event produced when an output item completes.
 fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Option<StreamingEvent> {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => item
@@ -281,11 +253,7 @@ fn reasoning_item_text(item: &Value) -> Option<String> {
     })
 }
 
-/// Extract [`Usage`] from a Responses `usage` object.
 fn usage_from_openai_responses(v: &Value) -> Usage {
-    // Responses reports `input_tokens` as the full prompt (cached + non-cached)
-    // and the cached slice in `input_tokens_details`. Store the non-cached
-    // portion in `input_tokens` so `input + cache_read` is the prompt size.
     let prompt = v
         .get("input_tokens")
         .and_then(serde_json::Value::as_u64)
@@ -432,8 +400,6 @@ mod tests {
                 name: "exec".to_string()
             }]
         );
-        // Argument deltas carry `item_id` (the output-item id), not `call_id`;
-        // the mapper must translate `fc_1` -> `call_1`.
         let d = json!({
             "type":"response.function_call_arguments.delta",
             "item_id":"fc_1",
@@ -569,7 +535,6 @@ mod tests {
         let StreamingEvent::Done(u) = done.into_iter().next().unwrap() else {
             panic!("expected Done");
         };
-        // input_tokens excludes the cached slice: input_tokens(3) - cached(1)
         assert_eq!(u.input_tokens, 2);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, 1);

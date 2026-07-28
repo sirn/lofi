@@ -15,17 +15,10 @@ use super::anthropic_messages::build_anthropic_request;
 use super::openai_completions::build_openai_chat_request;
 use super::openai_responses::build_openai_responses_request;
 
-/// A tool advertised to the model.
-///
-/// `input_schema` is a JSON Schema object describing the tool's arguments; the
-/// agent builds this for the `exec` tool and any future tools.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToolSchema {
-    /// Tool name as seen by the model.
     pub name: String,
-    /// Human-readable description.
     pub description: String,
-    /// JSON Schema describing the tool's input object.
     pub input_schema: Value,
 }
 

@@ -9,7 +9,6 @@
 use lofi_types::{ContentBlock, Message, Role};
 use serde_json::{json, Value};
 
-/// Concatenate all `Text` blocks in `blocks` into a single string.
 fn collect_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for b in blocks {
