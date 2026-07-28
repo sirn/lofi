@@ -680,9 +680,9 @@ impl App {
         }
         // At the bottom the viewport may contain only the live last turn. Keep
         // its nearest frozen neighbor as the scroll-up margin.
-        let visible = visible.or(Some((frozen - 1, frozen - 1)));
-        self.frozen_render.retain_near(visible, frozen);
-        let (first, last) = visible.expect("frozen turns are non-empty");
+        let visible = visible.unwrap_or((frozen - 1, frozen - 1));
+        self.frozen_render.retain_near(Some(visible), frozen);
+        let (first, last) = visible;
         let first = first.saturating_sub(1);
         let last = last.saturating_add(1).min(frozen - 1);
         for idx in first..=last {

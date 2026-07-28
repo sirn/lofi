@@ -799,7 +799,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(right)), rrect);
 }
 
-/// Full-width diagnostics bar shown as its own bottom-level VStack region.
+/// Full-width diagnostics bar shown as its own bottom-level `VStack` region.
 fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
     if let Some(line) = app.debug_memory_line() {
         f.render_widget(
