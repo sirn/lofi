@@ -331,7 +331,7 @@ pub(super) fn replay_session_events(events: &[SessionEvent], emit: impl FnMut(Ag
 }
 
 /// Replay events whose lineage and checkpoint-copy filtering was already
-/// established by a SessionCursor index. Re-running active-path discovery on
+/// established by a `SessionCursor` index. Re-running active-path discovery on
 /// one partial turn can lose its prompt when a compaction marker points to a
 /// deliberately omitted checkpoint-copy parent.
 pub(super) fn replay_selected_session_events(
@@ -365,7 +365,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             SessionEventKind::ThinkingTiming { elapsed_ms } => {
                 thinking_timing.push(*elapsed_ms);
             }
-            SessionEventKind::Cursor { .. } => {}
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent
                     .entry(rec.parent.as_str())
@@ -530,7 +529,8 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             }),
             SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
-            | SessionEventKind::ThinkingTiming { .. } => {}
+            | SessionEventKind::ThinkingTiming { .. }
+            | SessionEventKind::Cursor { .. } => {}
             SessionEventKind::Compaction {
                 summarized,
                 kept,
@@ -576,7 +576,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     usage: *usage,
                 });
             }
-            SessionEventKind::Cursor { .. } => {}
         }
     }
 }

@@ -1503,7 +1503,7 @@ fn json_string_field<'a>(raw: &'a str, field: &str) -> Option<&'a str> {
 }
 
 /// Read a small unsigned metadata field without parsing adjacent large JSON
-/// strings into an owned serde_json tree.
+/// strings into an owned `serde_json` tree.
 fn json_u64_field(raw: &str, field: &str) -> Option<u64> {
     let needle = format!("\"{field}\"");
     let key = raw.find(&needle)?;
@@ -1730,9 +1730,8 @@ impl ExecBlockBranch<'_> {
                                 // scans escape boundaries only; rendering decodes requested lines.
         let raw = result.as_str();
         let encoded_field = match self.nt.name.as_str() {
-            "write" => Some("content"),
             "bash" => Some("output"),
-            "read" | "view" | "bash_read" => Some("content"),
+            "write" | "read" | "view" | "bash_read" => Some("content"),
             _ => None,
         };
         let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
@@ -1950,7 +1949,8 @@ impl Component for UserBashLine<'_> {
         } else {
             format!("Exit {}", self.exit_code.unwrap_or(0))
         };
-        status.push_str(&format!(", took {}", prim::fmt_duration(self.duration)));
+        use std::fmt::Write as _;
+        let _ = write!(status, ", took {}", prim::fmt_duration(self.duration));
         if self.truncated {
             status.push_str(" · truncated");
         }
