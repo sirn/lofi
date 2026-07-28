@@ -21,27 +21,27 @@ pub(super) struct DebugState {
 
 #[derive(Clone, Copy)]
 struct SampleTotals {
-    rss_bytes: u64,
-    private_dirty_bytes: u64,
-    anonymous_bytes: u64,
-    allocator_allocated_bytes: Option<u64>,
-    component_bytes: u64,
+    rss: u64,
+    private_dirty: u64,
+    anonymous: u64,
+    allocator_allocated: Option<u64>,
+    components: u64,
 }
 
 #[derive(Default)]
 struct AllocatorMemory {
-    allocated_bytes: Option<u64>,
-    free_bytes: Option<u64>,
-    arena_bytes: Option<u64>,
-    mmap_bytes: Option<u64>,
-    releasable_bytes: Option<u64>,
+    allocated: Option<u64>,
+    free: Option<u64>,
+    arena: Option<u64>,
+    mmap: Option<u64>,
+    releasable: Option<u64>,
 }
 
 #[derive(Default)]
 struct MappingMemory {
-    rss_bytes: u64,
-    pss_bytes: u64,
-    private_dirty_bytes: u64,
+    rss: u64,
+    pss: u64,
+    private_dirty: u64,
 }
 
 #[derive(Default)]
@@ -249,6 +249,7 @@ impl DebugState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn write_sample(&mut self, app: &App, event: &str) -> std::io::Result<()> {
         self.ensure_file(app.session.path())?;
         let Some(file) = self.file.as_mut() else {
@@ -259,16 +260,16 @@ impl DebugState {
         let components = app.component_memory_json();
         let component_bytes = components["estimated_total_bytes"].as_u64().unwrap_or(0);
         let totals = SampleTotals {
-            rss_bytes: process.rss_bytes,
-            private_dirty_bytes: process.private_dirty_bytes,
-            anonymous_bytes: process.anonymous_bytes,
-            allocator_allocated_bytes: allocator.allocated_bytes,
-            component_bytes,
+            rss: process.rss_bytes,
+            private_dirty: process.private_dirty_bytes,
+            anonymous: process.anonymous_bytes,
+            allocator_allocated: allocator.allocated,
+            components: component_bytes,
         };
         let previous = self.previous_sample.replace(totals);
         self.latest_rss_bytes = (process.rss_bytes > 0).then_some(process.rss_bytes);
         self.latest_heap_bytes =
-            (process.mappings.heap.rss_bytes > 0).then_some(process.mappings.heap.rss_bytes);
+            (process.mappings.heap.rss > 0).then_some(process.mappings.heap.rss);
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis());
@@ -327,18 +328,18 @@ impl DebugState {
                 "rss_minus_measured_bytes": signed_delta(process.rss_bytes, component_bytes),
             },
             "allocator": {
-                "allocated_bytes": allocator.allocated_bytes,
-                "free_bytes": allocator.free_bytes,
-                "arena_bytes": allocator.arena_bytes,
-                "mmap_bytes": allocator.mmap_bytes,
-                "releasable_bytes": allocator.releasable_bytes,
+                "allocated_bytes": allocator.allocated,
+                "free_bytes": allocator.free,
+                "arena_bytes": allocator.arena,
+                "mmap_bytes": allocator.mmap,
+                "releasable_bytes": allocator.releasable,
             },
             "delta_from_previous": previous.map(|previous| serde_json::json!({
-                "rss_bytes": signed_delta(totals.rss_bytes, previous.rss_bytes),
-                "private_dirty_bytes": signed_delta(totals.private_dirty_bytes, previous.private_dirty_bytes),
-                "anonymous_bytes": signed_delta(totals.anonymous_bytes, previous.anonymous_bytes),
-                "allocator_allocated_bytes": option_delta(totals.allocator_allocated_bytes, previous.allocator_allocated_bytes),
-                "component_bytes": signed_delta(totals.component_bytes, previous.component_bytes),
+                "rss_bytes": signed_delta(totals.rss, previous.rss),
+                "private_dirty_bytes": signed_delta(totals.private_dirty, previous.private_dirty),
+                "anonymous_bytes": signed_delta(totals.anonymous, previous.anonymous),
+                "allocator_allocated_bytes": option_delta(totals.allocator_allocated, previous.allocator_allocated),
+                "component_bytes": signed_delta(totals.components, previous.components),
             })),
             "components": components,
             "context": {
@@ -467,9 +468,9 @@ fn render_line_heap_bytes(line: &view::RenderLine) -> usize {
 
 fn mapping_json(mapping: &MappingMemory) -> serde_json::Value {
     serde_json::json!({
-        "rss_bytes": mapping.rss_bytes,
-        "pss_bytes": mapping.pss_bytes,
-        "private_dirty_bytes": mapping.private_dirty_bytes,
+        "rss_bytes": mapping.rss,
+        "pss_bytes": mapping.pss,
+        "private_dirty_bytes": mapping.private_dirty,
     })
 }
 
@@ -533,9 +534,9 @@ fn read_mapping_breakdown() -> std::io::Result<MappingBreakdown> {
             mapping_bucket(&mut breakdown, &current_path)
         };
         match key {
-            "Rss" => bucket.rss_bytes += kib * 1024,
-            "Pss" => bucket.pss_bytes += kib * 1024,
-            "Private_Dirty" => bucket.private_dirty_bytes += kib * 1024,
+            "Rss" => bucket.rss += kib * 1024,
+            "Pss" => bucket.pss += kib * 1024,
+            "Private_Dirty" => bucket.private_dirty += kib * 1024,
             _ => {}
         }
     }
