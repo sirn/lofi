@@ -1,9 +1,3 @@
-//! Integration tests for `lofi_core::config_loader`.
-//!
-//! Exercises end-to-end TOML loading with `env_name` detection, `$VAR`///! `!cmd` value resolution, and the lenient-missing-env behavior. The
-//! user-config loader is read-only, so each test writes a throwaway TOML
-//! under a [`tempfile`] tempdir and points `load_config` at it.
-
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;

@@ -22,9 +22,6 @@ struct NativeSidecar {
     args: String,
 }
 
-/// Run recall over an on-disk transcript through its shared logical cursor,
-/// retaining only one parsed event at a time plus clipped entries / search
-/// statistics.
 #[must_use]
 pub fn recall_cursor(cursor: &store::SessionCursor, req: &RecallRequest) -> RecallOutcome {
     recall_cursor_inner(cursor, req).unwrap_or_else(|_| RecallOutcome {

@@ -1,15 +1,6 @@
-//! `lofi-core`: the agent domain layer.
-//!
-//! Owns the agent loop, model registry, config
-//! loading, and session/state bookkeeping. The provider transports live in
-//! [`lofi_providers`] and the code-mode sandbox in [`lofi_code`]; this crate
-//! coordinates them as a Service Layer. Presentation (TUI + `--print`) lives
-//! in `lofi-ui`.
-
 pub mod agent;
 mod bash_env;
 
-/// Re-export of [`lofi_code::docs`] for the CLI.
 pub use lofi_code::docs;
 pub mod compact;
 pub mod config_loader;
