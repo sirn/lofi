@@ -815,8 +815,9 @@ impl Default for BashConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellPolicyMode {
-    ReadOnly,
     #[default]
+    Confirm,
+    ReadOnly,
     WorkspaceWrite,
     Unrestricted,
 }
@@ -864,7 +865,7 @@ pub struct RedirectPolicy {
 }
 
 fn default_redirect_action() -> PolicyAction {
-    PolicyAction::Allow
+    PolicyAction::Ask
 }
 
 impl Default for RedirectPolicy {
@@ -1406,6 +1407,26 @@ mod tests {
         assert!(cfg.strip_env);
         assert!(cfg.pass_env.is_empty());
         assert!(cfg.env_file.is_none());
+    }
+
+    #[test]
+    fn shell_policy_defaults_require_confirmation() {
+        let cfg: ShellPolicyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.mode, ShellPolicyMode::Confirm);
+        assert_eq!(cfg.redirects.action, PolicyAction::Ask);
+    }
+
+    #[test]
+    fn shell_policy_presets_remain_deserializable() {
+        for (raw, expected) in [
+            ("read_only", ShellPolicyMode::ReadOnly),
+            ("workspace_write", ShellPolicyMode::WorkspaceWrite),
+            ("unrestricted", ShellPolicyMode::Unrestricted),
+        ] {
+            let json = format!(r#"{{"mode":"{raw}"}}"#);
+            let cfg: ShellPolicyConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(cfg.mode, expected);
+        }
     }
 
     #[test]

@@ -275,6 +275,40 @@ mod tests {
     }
 
     #[test]
+    fn confirm_mode_asks_for_every_non_denied_command() {
+        let p = policy_for(ShellPolicyMode::Confirm);
+        for command in [
+            "ls",
+            "cargo build",
+            "cat ~/.ssh/id_rsa",
+            "curl https://example.com",
+        ] {
+            assert_eq!(p.evaluate(command).action, PolicyAction::Ask, "{command}");
+        }
+        assert_eq!(p.evaluate("sudo ls").action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn redirects_ask_by_default() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        let d = p.evaluate("echo x > /tmp/outside-workspace");
+        assert_eq!(d.action, PolicyAction::Ask);
+    }
+
+    #[test]
+    fn network_clients_are_not_preset_allows() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        assert_eq!(
+            p.evaluate("curl https://example.com").action,
+            PolicyAction::Ask
+        );
+        assert_eq!(
+            p.evaluate("wget https://example.com").action,
+            PolicyAction::Ask
+        );
+    }
+
+    #[test]
     fn allow_ls() {
         let p = policy_for(ShellPolicyMode::WorkspaceWrite);
         let d = p.evaluate("ls -la");
