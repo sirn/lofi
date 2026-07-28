@@ -953,6 +953,30 @@ pub(crate) struct App {
     frozen_width: usize,
 }
 
+impl App {
+    fn restore_indexed_session(
+        &mut self,
+        cursor: &store::SessionCursor,
+        index: &[store::EventIndex],
+        file_size: u64,
+    ) -> Result<()> {
+        let messages = history_from_index(cursor, index, &self.compaction.edit)?;
+        if let Ok(mut history) = self.history.lock() {
+            *history = messages;
+        }
+        self.turns.clear();
+        self.turn_byte_ranges.clear();
+        self.turn_event_offsets.clear();
+        self.cost = 0.0;
+        self.total_in = 0;
+        self.total_out = 0;
+        self.reset_compaction_gauges();
+        replay_indexed_session(self, cursor, index, file_size)?;
+        restore_compaction_from_index(self, cursor, index);
+        Ok(())
+    }
+}
+
 struct RunHandle {
     handle: JoinHandle<()>,
     rx: Receiver<AgentEvent>,
@@ -1078,17 +1102,11 @@ async fn run_loop(
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
-    let edit = compaction.edit.clone();
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.model_choices = model_choices;
     app.session = SessionState { store, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
-        let messages = history_from_index(&cursor, &index, &edit)?;
-        if let Ok(mut history) = app.history.lock() {
-            *history = messages;
-        }
-        replay_indexed_session(&mut app, &cursor, &index, file_size)?;
-        restore_compaction_from_index(&mut app, &cursor, &index);
+        app.restore_indexed_session(&cursor, &index, file_size)?;
     }
     // The resume index is startup scratch. All persistent UI backing uses the
     // compact turn ranges/offsets built above and opens a fresh cursor snapshot

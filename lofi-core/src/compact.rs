@@ -1,26 +1,9 @@
 #![allow(clippy::doc_markdown)]
 //! Offline, no-LLM conversation compaction.
 //!
-//! A port of the pi-vcc algorithm: a purely algorithmic (no model call)
-//! pipeline that turns a slice of the conversation into a structured
-//! summary, so a long session can be folded back under the context window
-//! without losing the thread. The summary is a fixed set of sections —
-//! Session Goal, User Preferences, Files And Changes, Commits, Outstanding
-//! Context — followed by a compressed per-turn brief transcript. Repeated
-//! compactions merge into the prior summary so stable facts accumulate and
-//! only the volatile tail is recomputed each time.
-//!
-//! The compaction is near-lossless in the sense that every turn is
-//! represented in the brief transcript (clipped, not dropped), and the
-//! structured sections capture the durable facts (goals, preferences, file
-//! activity, commits, open problems). The full transcript stays on disk —
-//! this only shrinks the slice the model is asked to re-read.
-//!
-//! lofi's shape differs from pi-vcc in one way: there is a single LLM-facing
-//! tool (exec), and the real file/shell actions are native tool calls
-//! (lofi.read / lofi.edit / lofi.bash / ...) recorded inside each exec.
-//! The extractor therefore reads file activity and commits from the
-//! NativeToolRecords on the active path rather than from per-tool messages.
+//! Compaction creates a structured handoff plus a clipped turn transcript and
+//! merges stable facts across repeated passes. The full transcript remains on
+//! disk; only the context presented to the model is reduced.
 
 use std::collections::HashMap;
 use std::sync::Arc;
