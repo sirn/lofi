@@ -275,9 +275,9 @@ impl DebugState {
         let history_messages = app.history.lock().map_or(0, |messages| messages.len());
         let transcript_bytes = app
             .session
-            .path()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map_or(0, |metadata| metadata.len());
+            .cursor
+            .as_ref()
+            .map_or(0, store::SessionCursor::len);
         let context_tokens = app.status_usage.map_or(0, |usage| {
             usage.input_tokens
                 + usage.output_tokens
