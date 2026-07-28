@@ -1,23 +1,10 @@
-//! Resolution of [`BashConfig`] into a [`BashEnv`] for the code sandbox.
-//!
-//! The I/O — reading the parent environment and any configured env file —
-//! lives here in the service layer. `lofi-code` receives the resolved
-//! [`BashEnv`] as plain data so the sandbox crate stays free of config I/O.
-
 use lofi_code::BashEnv;
 use lofi_types::BashConfig;
 
-/// Names copied from the parent env into the stripped baseline. Anything not
-/// listed here (and not in `pass_env`/`env_file`) is dropped when `strip_env`
-/// is on. `LC_*` is matched by prefix.
 const BASELINE_NAMES: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "LANG", "TMPDIR",
 ];
 
-/// Resolve a [`BashConfig`] into a concrete [`BashEnv`] by reading the
-/// parent environment and (best-effort) the `env_file`. A missing or
-/// unreadable `env_file` is silently skipped so a transiently-absent secrets
-/// file does not break `bash` — only the listed extras are absent.
 #[must_use]
 pub fn resolve_bash_env(cfg: &BashConfig) -> BashEnv {
     let mut env = BashEnv {
@@ -29,14 +16,12 @@ pub fn resolve_bash_env(cfg: &BashConfig) -> BashEnv {
     if cfg.strip_env {
         env.baseline = baseline_from_parent();
     }
-    // pass_env: copy from the parent env, recording values for redaction.
     for name in &cfg.pass_env {
         if let Ok(val) = std::env::var(name) {
             env.extras.push((name.clone(), val.clone()));
             env.redact.push(val);
         }
     }
-    // env_file: override pass_env; redact its values too.
     if let Some(path) = &cfg.env_file {
         let expanded = expand_tilde(path);
         if let Ok(text) = std::fs::read_to_string(&expanded) {
@@ -52,7 +37,6 @@ pub fn resolve_bash_env(cfg: &BashConfig) -> BashEnv {
     env
 }
 
-/// Collect the baseline `(name, value)` pairs present in the parent env.
 fn baseline_from_parent() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for (k, v) in std::env::vars() {
@@ -63,8 +47,6 @@ fn baseline_from_parent() -> Vec<(String, String)> {
     out
 }
 
-/// Expand a leading `~` (alone or `~/...`) to `$HOME`. Other paths are
-/// returned unchanged (relative paths resolve against the process CWD).
 fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
     let s = p.to_string_lossy();
     if s == "~" {
@@ -83,9 +65,6 @@ fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
     p.to_path_buf()
 }
 
-/// Parse `KEY=VALUE` lines from an env file. Blank lines and `#` comments are
-/// skipped; a single surrounding layer of matching `"`/`'` quotes is stripped
-/// from the value. Lines without `=` are skipped.
 fn parse_env_file(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for raw in text.lines() {

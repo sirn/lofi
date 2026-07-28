@@ -55,11 +55,6 @@ use auto::{
     inject_discovered, read_auto_cache, write_auto_cache, CachedDiscovery, DEFAULT_AUTO_TTL_SECS,
 };
 
-/// The registry of models available to the agent.
-///
-/// `providers` holds the resolved provider configs (so [`Self::available`] can
-/// tell which providers have a key without re-reading the config); `models` is
-/// the merged static + discovered list, keyed logically by `provider/id`.
 #[derive(Debug, Default, Clone)]
 pub struct ModelRegistry {
     providers: IndexMap<String, ProviderConfig>,
@@ -67,15 +62,6 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
-    /// Build a registry from the **static** model lists only — no network.
-    ///
-    /// Use this for tests and offline launches; [`Self::load_async`] adds
-    /// remote discovery on top.
-    ///
-    /// # Errors
-    /// Returns [`Error::Config`] only if a static model references an unknown
-    /// provider (impossible in practice since models are nested under their
-    /// provider, but the mapping is fallible for symmetry).
     pub fn load(config: &Config) -> Result<Self> {
         let models = static_models(&config.providers);
         Ok(Self {
@@ -84,25 +70,7 @@ impl ModelRegistry {
         })
     }
 
-    /// Build a registry, refreshing each provider's `auto_models` block from
-    /// the network and persisting the result to the agent state cache.
-    ///
-    /// Static models win on `provider/id` collision: a discovered entry that
-    /// duplicates a static one only fills fields the static entry left unset.
-    /// A successful refresh (even one yielding zero models) replaces that
-    /// provider's cached entries, so a model the provider removed is not
-    /// resurrected by a later failure. If a fetch fails, the previously cached
-    /// discovery for that provider is reused; with no cache the provider
-    /// contributes only its static models.
-    ///
-    /// # Errors
-    /// Returns [`Error::Http`] on a transport failure that is not covered by
-    /// the cache fallback, or [`Error::Io`] / [`Error::State`] on cache
-    /// write failure.
     pub async fn load_async(config: &Config) -> Result<Self> {
-        // Augment a copy of the config with auto-discovered models so the
-        // registry (and thinking-level resolution) treats them identically to
-        // static entries. Static models always win on id collision.
         let mut augmented = config.clone();
         let cache_path = state::discovery_cache_path()?;
 
@@ -118,8 +86,6 @@ impl ModelRegistry {
             if !am.enabled {
                 continue;
             }
-            // Clone so the mutable borrow of `pcfg.auto_models` ends before
-            // `fetch_auto_models` takes an immutable borrow of `pcfg`.
             let am = am.clone();
             let ttl = Duration::from_secs(am.ttl_seconds.unwrap_or(DEFAULT_AUTO_TTL_SECS));
 
@@ -146,7 +112,6 @@ impl ModelRegistry {
                     inject_discovered(&mut pcfg.models, &entries);
                 }
                 Err(remote_err) => {
-                    // Fall back to whatever the cache holds for this provider.
                     if let Some(cd) = cached.get(name) {
                         inject_discovered(&mut pcfg.models, &cd.entries);
                     } else {
@@ -171,17 +136,11 @@ impl ModelRegistry {
         })
     }
 
-    /// The (possibly auto-discovery-augmented) provider configs the registry
-    /// was built from. Exposed so the agent layer can resolve per-model
-    /// settings (e.g. thinking levels) for discovered models that exist only
-    /// in the registry's augmented copy.
     #[must_use]
     pub(crate) fn providers(&self) -> &IndexMap<String, ProviderConfig> {
         &self.providers
     }
 
-    /// All models whose provider has a resolved (non-empty) `api_key`, a
-    /// credential-bearing custom header, or is explicitly `no_auth`.
     #[must_use]
     pub fn available(&self) -> Vec<Model> {
         self.models
@@ -200,9 +159,6 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// The available models as [`ModelChoice`] entries for the `/model`
-    /// picker, each carrying its declared thinking levels and image support.
-    /// Sorted by qualified `provider/id` to match `--list-models`.
     #[must_use]
     pub fn choices(&self) -> Vec<lofi_types::ModelChoice> {
         let mut out: Vec<lofi_types::ModelChoice> = self
@@ -222,13 +178,10 @@ impl ModelRegistry {
                 context_window: m.context_window,
             })
             .collect();
-        // Sort by qualified `provider/id` so the picker matches `--list-models`
-        // output and the current-model lookup is stable across runs.
         out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
         out
     }
 
-    /// Resolve an exact `provider/id` qualifier to a model.
     #[must_use]
     pub fn resolve(&self, qualified: &str) -> Option<&Model> {
         let (provider, id) = split_qualified(qualified)?;
@@ -237,16 +190,6 @@ impl ModelRegistry {
             .find(|m| m.provider == provider && m.id == id)
     }
 
-    /// Resolve a free-form query to a model using a small fallback ladder:
-    ///
-    /// 1. exact `provider/id` qualifier;
-    /// 2. exact raw `id`;
-    /// 3. exact display `name`;
-    /// 4. case-insensitive substring of the qualified form, raw id, or name
-    ///    (first match in registry order).
-    ///
-    /// Step 4 is a convenience for `--model gpt-4o`-style abbreviations; it is
-    /// intentionally prefix-free so a more specific qualifier always wins.
     #[must_use]
     pub fn resolve_by_pattern(&self, query: &str) -> Option<&Model> {
         self.resolve_by_pattern_in(query, None)
@@ -280,10 +223,6 @@ impl ModelRegistry {
             })
     }
 
-    /// Format the registry as `provider/id — name` lines for `--list-models`.
-    ///
-    /// Sorted by provider then id for stable output. Does **not** print — the
-    /// caller writes the returned string to stdout.
     #[must_use]
     pub fn list_models_print(&self) -> String {
         let mut lines: Vec<String> = self
@@ -302,13 +241,10 @@ impl ModelRegistry {
     }
 }
 
-/// Compose the qualified `provider/id` form of a model.
 fn qualified(m: &Model) -> String {
     format!("{}/{}", m.provider, m.id)
 }
 
-/// Split a `provider/id` qualifier; returns `None` if there is no `/` or
-/// either side is empty.
 fn split_qualified(s: &str) -> Option<(&str, &str)> {
     let (provider, id) = s.split_once('/')?;
     if provider.is_empty() || id.is_empty() {
@@ -317,7 +253,6 @@ fn split_qualified(s: &str) -> Option<(&str, &str)> {
     Some((provider, id))
 }
 
-/// Build the static model list from every provider's `models` block.
 fn static_models(providers: &IndexMap<String, ProviderConfig>) -> Vec<Model> {
     let mut out = Vec::new();
     for (name, pcfg) in providers {
@@ -328,16 +263,6 @@ fn static_models(providers: &IndexMap<String, ProviderConfig>) -> Vec<Model> {
     out
 }
 
-/// Map a [`ModelConfig`] into a resolved [`Model`] under provider `name`.
-///
-/// `id` is the map key from the provider's `models` table. The effective
-/// `api` is resolved from the model's `api_type` key override (or the
-/// provider's default `api_type`) via [`ProviderConfig::resolve_api`]. The
-/// `base_url` is the per-model override when set, else the endpoint URL
-/// resolved by joining the provider `base_url` with the `api_types[key].path`
-/// (defaulting to [`Api::default_path`]). The effective thinking level is
-/// left at the default ([`ThinkingLevel::Off`]); the agent resolves and
-/// overrides it at selection time.
 fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConfig) -> Model {
     let api = pcfg.resolve_api(mc.api_type.as_deref());
     let base_url = mc
@@ -363,11 +288,6 @@ fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConf
     }
 }
 
-/// Resolve a model's endpoint URL by joining the provider `base_url` (host
-/// root) with the `api_types[key].path` selected by `api_type` (or the
-/// provider's default). When the provider has no `base_url`, the default
-/// base URL for the resolved [`Api`] is used. The mapping `path` defaults
-/// to [`Api::default_path`] when unset.
 fn resolve_model_base_url(pcfg: &ProviderConfig, api_type: Option<&str>) -> String {
     let base = pcfg
         .base_url
@@ -377,9 +297,6 @@ fn resolve_model_base_url(pcfg: &ProviderConfig, api_type: Option<&str>) -> Stri
     join_base_url(Some(base), &path)
 }
 
-/// Join a provider `base_url` (host root) with an endpoint `path` from the
-/// selected `api_types` mapping, trimming the trailing/leading slash so the
-/// result is `base/path`.
 fn join_base_url(base: Option<&str>, path: &str) -> String {
     let base = base.unwrap_or("").trim_end_matches('/');
     let path = path.trim_start_matches('/');
@@ -495,9 +412,6 @@ mod tests {
 
     #[test]
     fn static_model_resolves_default_base_url() {
-        // A static model with no per-model base_url inherits the endpoint URL
-        // resolved from the provider's default api-type mapping path joined
-        // onto the provider base_url.
         let providers = IndexMap::from([(
             "openai".to_string(),
             pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])),
@@ -620,14 +534,11 @@ mod tests {
 
     #[test]
     fn choices_carry_thinking_levels_and_sort() {
-        // Insert in reverse so a missing sort is caught.
         let mut m = models(&["gpt-4o-mini", "gpt-4o"]);
         let gpt4o = m.get_mut("gpt-4o").unwrap();
         gpt4o.thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
         gpt4o.supports_image = Some(true);
         let mut providers = IndexMap::new();
-        // `anthropic` sorts before `openai`, so a provider-only sort would
-        // also misorder if we didn't compare within a provider.
         providers.insert(
             "anthropic".to_string(),
             pcfg(Api::AnthropicMessages, models(&["claude"])),
@@ -635,7 +546,6 @@ mod tests {
         providers.insert("openai".to_string(), pcfg(Api::OpenAiCompletions, m));
         let reg = ModelRegistry::load(&config_with(providers)).unwrap();
         let choices = reg.choices();
-        // Sorted by qualified `provider/id`.
         let qualified: Vec<String> = choices
             .iter()
             .map(|c| format!("{}/{}", c.provider, c.id))
@@ -740,8 +650,6 @@ mod tests {
         assert_eq!(models[0].1.api_type.as_deref(), Some("anthropic-messages"));
         assert_eq!(models[0].1.thinking_levels, vec![ThinkingLevel::Medium]);
         assert!(models[0].1.reasoning.unwrap_or(false));
-        // base_url resolved from the anthropic-messages mapping's default
-        // path (/v1/messages) joined onto the provider base_url.
         assert_eq!(
             models[0].1.base_url.as_deref(),
             Some("https://api.example.com/v1/messages")
@@ -814,8 +722,6 @@ mod tests {
 
     #[test]
     fn parse_auto_models_custom_pricing_paths_on_mapping() {
-        // A per-endpoint pricing-field override on the api-type mapping is
-        // used for models routed to that endpoint.
         let payload = serde_json::json!({
             "data": [
                 {"id": "m", "cost": {"in": "0.000002", "out": "0.000006"}}
@@ -855,8 +761,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn load_async_uses_cache_when_remote_unreachable() {
-        // Serialize against the state-dir tests that also mutate
-        // XDG_STATE_HOME (process-global env var).
         let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("XDG_STATE_HOME");
@@ -896,8 +800,6 @@ mod tests {
         let m = reg.resolve("anthropic/claude-opus-4").unwrap();
         assert_eq!(m.api, Api::AnthropicMessages);
 
-        // Restore the prior environment so the test does not leak
-        // XDG_STATE_HOME into sibling state-dir tests.
         match prev {
             Some(v) => std::env::set_var("XDG_STATE_HOME", v),
             None => std::env::remove_var("XDG_STATE_HOME"),
