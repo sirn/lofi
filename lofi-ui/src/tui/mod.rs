@@ -40,8 +40,6 @@ pub mod view;
 #[cfg(test)]
 mod tests;
 
-// Glob re-export so `view`, `tests`, and this module call the moved
-// helpers by bare name; the submodules are cohesive slices of `tui`.
 #[allow(clippy::wildcard_imports)]
 use {input::*, replay::*, resume::*, text::*, tree::*};
 
@@ -115,13 +113,10 @@ impl ModelSwitcher {
         }
     }
 
-    /// The selectable models, in registry order.
     pub(crate) fn choices(&self) -> &[lofi_types::ModelChoice] {
         &self.choices
     }
 
-    /// Rebuild the agent for `provider/model[:level]`, reusing `existing`'s
-    /// per-session tmp dir when given.
     pub(crate) fn rebuild(
         &self,
         existing: Option<&Agent>,
@@ -137,25 +132,14 @@ impl ModelSwitcher {
     }
 }
 
-/// Braille spinner frames, advanced on each tick while a run is active.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
-/// How long the "Copied to clipboard" badge stays on the footer rule.
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
-/// How long a slash-command notification stays on the rule line.
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
-/// Maximum height (content lines) the input box grows to before clipping.
 const MAX_INPUT_LINES: usize = 8;
-/// Window for a double `C-c` on an empty prompt to register as quit.
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
-/// Fallback context-window ceiling for the status gauge when a model
-/// reports no `context_window`. A reported non-zero value is always used as-is.
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
 
-/// The slash commands offered by the autocomplete popover, in display
-/// order. Kept in sync with [`App::slash_command`]. Each entry is
-/// `(command, short description)`; the description is shown muted to the
-/// right of the command in the popover.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
     ("/compact", "fold older history into a summary"),
@@ -184,11 +168,6 @@ struct NativeTool {
     done: bool,
 }
 
-/// A single tool call accumulated across ToolStart/ToolInput/ToolEnd.
-///
-/// For the `exec` tool, `input` holds the TypeScript `code`, `label` is the
-/// optional `display` name shown as `Exec <label>`, and `native` is the
-/// stream of native tool calls that ran inside it.
 #[derive(Debug, Clone)]
 struct ToolCall {
     id: String,
@@ -197,18 +176,12 @@ struct ToolCall {
     label: Option<String>,
     native: Vec<NativeTool>,
     result: Option<String>,
-    /// The successful outer-exec result is durable and can be released while
-    /// collapsed. /verbose restores it from the current turn's byte range.
     result_committed: bool,
     is_error: bool,
     done: bool,
-    /// Set when the call completes (engine-stamped duration).
     elapsed: Option<Duration>,
 }
 
-/// A reasoning block. `elapsed` is `None` while the model is still
-/// thinking and `Some(d)` once it moves on (or the run ends), which is what
-/// flips the "Thinking..." trailing line into "Thought for Ns".
 #[derive(Debug, Clone)]
 struct ThinkingBlock {
     text: String,
@@ -216,15 +189,12 @@ struct ThinkingBlock {
     elapsed: Option<Duration>,
 }
 
-/// A transient provider error is being retried. Shown in the notification
-/// area as `Retry: 1 of 3` until the next provider request settles.
 #[derive(Debug, Clone)]
 struct RetryState {
     attempt: u32,
     max_attempts: u32,
 }
 
-/// One block in a turn's response stream.
 #[derive(Debug, Clone)]
 enum Block {
     Text(String),
@@ -241,27 +211,15 @@ enum Block {
         exclude_from_context: bool,
     },
     Error(String),
-    /// Turn-end rule: `<label> done in Ns` followed by a dash
-    /// fill, appended when a run finishes.
     TurnEnd {
         label: String,
         elapsed: Duration,
     },
-    /// Turn-failed rule: `<label> failed in Ns · <error>` in the error
-    /// tint, appended when a run ends in a non-retryable error or is
-    /// cancelled. The turn's partial messages precede it; the marker is the
-    /// leaf of the failed branch.
     TurnFailed {
         label: String,
         elapsed: Duration,
         error: String,
     },
-    /// An offline compaction marker: `◇ Compacted N messages · kept M` in the
-    /// muted tint, appended to the current turn when `/compact` (or the
-    /// auto-trigger) folds the older history into a summary. The summary
-    /// text is carried along so `/verbose` can expand it inline; the default
-    /// (collapsed) view shows only the one-line marker. The summary is also
-    /// injected into the agent's history, not just the visible transcript.
     Compaction {
         summarized: usize,
         kept: usize,
@@ -269,19 +227,15 @@ enum Block {
     },
 }
 
-/// A user prompt and the blocks produced in response.
 #[derive(Debug, Clone)]
 pub(crate) struct Turn {
     prompt: String,
     blocks: Vec<Block>,
 }
 
-/// Session persistence state held by the App.
 #[derive(Debug, Clone)]
 struct SessionState {
     store: Option<SessionStore>,
-    /// Shared logical transcript cursor; absent until the first prompt creates
-    /// a fresh session or until a session is resumed.
     cursor: Option<store::SessionCursor>,
     cwd: PathBuf,
 }
@@ -302,19 +256,15 @@ impl SessionState {
     }
 }
 
-/// Resolved session handed to [`run`] by the binary.
 pub(crate) struct SessionConfig {
     store: Option<SessionStore>,
     cursor: Option<store::SessionCursor>,
-    /// Selected-lineage index loaded through the cursor on resume. Message and
-    /// tool bodies remain on disk and are parsed only for active history.
     index: Vec<store::EventIndex>,
     file_size: u64,
     cwd: PathBuf,
 }
 
 impl SessionConfig {
-    /// No persistence (--no-session).
     pub(crate) fn ephemeral(cwd: PathBuf) -> Self {
         Self {
             store: None,
@@ -325,7 +275,6 @@ impl SessionConfig {
         }
     }
 
-    /// A new session, created lazily on the first prompt.
     pub(crate) fn fresh(store: SessionStore, cwd: PathBuf) -> Self {
         Self {
             store: Some(store),
@@ -336,7 +285,6 @@ impl SessionConfig {
         }
     }
 
-    /// Resume an existing transcript file.
     pub(crate) fn resumed(
         store: SessionStore,
         cursor: store::SessionCursor,
@@ -353,9 +301,6 @@ impl SessionConfig {
         }
     }
 
-    /// The raw model+thinking of the last completed turn on the active path,
-    /// for restoring the model on resume (see [`store::last_run_model`]).
-    /// `None` for fresh/ephemeral sessions or sessions with no completed turn.
     #[must_use]
     pub(crate) fn last_run_model(&self) -> Option<RunModel> {
         self.cursor
@@ -364,7 +309,6 @@ impl SessionConfig {
     }
 }
 
-/// One progressively enriched row in the '/resume' picker.
 #[derive(Debug, Clone)]
 struct PickerEntry {
     file: store::SessionFile,
@@ -372,7 +316,6 @@ struct PickerEntry {
     details: Option<SessionEntry>,
 }
 
-/// State for the '/resume' session-picker overlay.
 #[derive(Debug, Clone)]
 struct PickerState {
     entries: Vec<PickerEntry>,
@@ -419,7 +362,6 @@ impl InfoModal {
     }
 }
 
-/// Section header for an info modal: bold, accent-colored.
 fn info_section(t: Theme, label: &str) -> Line<'static> {
     Line::from(Span::styled(
         label.to_string(),
@@ -441,12 +383,10 @@ fn info_kv(t: Theme, key: &str, value: &str) -> Line<'static> {
     ])
 }
 
-/// A plain muted note line (no key column, flush left).
 fn info_note(t: Theme, text: &str) -> Line<'static> {
     Line::from(Span::styled(text.to_string(), Style::new().fg(t.muted)))
 }
 
-/// Format a byte count as a human-readable string (e.g. `1.2 KB`, `3.4 MB`).
 fn format_bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = n as f64;
@@ -462,8 +402,6 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-/// Severity of a transient rule-line notification (see [`App::notify`]).
-/// Maps to a background color: Info → muted, Warn → warn, Error → error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotifyKind {
     Info,
@@ -471,8 +409,6 @@ pub(crate) enum NotifyKind {
     Error,
 }
 
-/// A transient slash-command notification shown on the rule line's left
-/// edge. Auto-expires after [`NOTIFY_TTL`].
 #[derive(Debug, Clone)]
 struct Notify {
     msg: String,
@@ -488,8 +424,6 @@ struct Notify {
 /// input, unlike a [`Modal`]).
 #[derive(Debug, Clone)]
 struct SlashComplete {
-    /// Indices into [`SLASH_COMMANDS`] of the matching candidates, in the
-    /// order they appear there.
     candidates: Vec<usize>,
     selected: usize,
 }
@@ -523,11 +457,6 @@ trait Modal {
     fn set_selected(&mut self, n: usize);
 }
 
-/// A list-style popover (the slash-command autocomplete). Unlike a
-/// [`Modal`], a popover floats over a text input, so its keymap excludes
-/// `j`/`k`/`q` (those must stay printable) and has no header. Navigation is
-/// `↑/↓` or `Ctrl+N`/`Ctrl+P`; `Tab` accepts; `Esc` dismisses. Dispatch
-/// lives in [`App::handle_popover_key`].
 trait Popover {
     fn len(&self) -> usize;
     fn selected(&self) -> usize;
@@ -578,9 +507,6 @@ impl Modal for ModelPickerState {
     }
 }
 
-/// State for the `/thinking` picker overlay. Owns the levels offered for the
-/// current model (`off` plus its declared `thinking_levels`, deduped) so
-/// navigation shares the [`Modal`] dispatch with a correct `len`.
 struct ThinkingPickerState {
     levels: Vec<ThinkingLevel>,
     selected: usize,
@@ -670,8 +596,6 @@ impl FrozenCache {
         }
     }
 
-    /// Drop rendered turns outside the viewport-local working set. A one-turn
-    /// margin on either side avoids re-rendering immediately on a small scroll.
     fn retain_near(&mut self, visible: Option<(usize, usize)>, frozen_turns: usize) {
         let Some((first, last)) = visible else {
             self.clear();
@@ -684,20 +608,11 @@ impl FrozenCache {
     }
 }
 
-/// The TUI's mutable state.
-/// Mouse selection in the log, in select-line + char-index space (absolute
-/// indices into `log_vis`).
 struct Selection {
     start: (usize, usize),
     end: (usize, usize),
 }
 
-/// Editor-style modal focus.
-///
-/// `Input` is the default prompt typing mode. `Navigate` and `Select` move a
-/// cursor over the transcript instead: `Navigate` scrolls, `Select` (entered
-/// with `v`) extends a selection from an anchor. Tab switches modes; `i`
-/// returns to `Input`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
     Input,
@@ -738,51 +653,24 @@ pub(crate) struct App {
     /// from the file on demand so the UI's memory stays bounded by the
     /// viewport, not the session length.
     turn_byte_ranges: Vec<Option<(u64, u64)>>,
-    /// Exact event offsets for indexed resume/tree turns. A byte range is
-    /// sufficient for newly appended linear turns, but an old branch can have
-    /// sibling events physically interleaved between two lineage events.
-    /// Keeping these tiny offset lists lets lazy materialization select only
-    /// the logical lineage. Parallel to `turns`; `None` uses the byte range.
     turn_event_offsets: Vec<Option<Vec<u64>>>,
     input: String,
     input_cursor: usize,
     history: Arc<Mutex<Vec<Message>>>,
     history_nav: Vec<String>,
-    /// Index into `history_nav` while recalling; `None` while editing live input.
     history_idx: Option<usize>,
-    /// Live input stashed while navigating history; restored on recall exit.
     input_stash: String,
     model_label: String,
-    /// ":medium"-style suffix, or None when thinking is off.
     thinking_label: Option<String>,
-    /// Current thinking level; the source of `thinking_label` and the
-    /// pre-selection for the `/thinking` picker.
     thinking: ThinkingLevel,
-    /// Most recent turn's usage, for the context-window gauge (input
-    /// + output + cache read/write of the latest round = current fill).
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
-    /// Queued prompts waiting for the current run to finish. FIFO when
-    /// auto-popping at turn end; LIFO when restoring via Alt+Up.
     prompt_queue: Vec<String>,
-    /// Accumulated USD cost across turns (engine-computed, fed by
-    /// `RoundUsage` per round and folded by `TurnEnd`).
     cost: f64,
-    /// Cumulative USD cost within the current turn, refreshed by each
-    /// `RoundUsage` event. Folded into `cost` at `TurnEnd` and reset, so
-    /// the footer can show a live running cost during a multi-round turn
-    /// without double-counting on the final `TurnEnd`.
     turn_cost: f64,
-    /// Whether the current turn has emitted any `RoundUsage` events. When
-    /// true, `TurnEnd` skips re-accumulating `total_in`/`total_out`/
-    /// `status_usage` (already applied per round) and only folds `turn_cost`;
-    /// when false (the resume path, which has no `RoundUsage` events),
-    /// `TurnEnd` applies its bundled totals as before.
     turn_has_round_usage: bool,
     ctx_limit: u64,
-    /// Compaction configuration (from `[compaction]`): the reserve hard cap
-    /// plus the speculative `[compaction.auto]` soft caps.
     compaction: lofi_types::CompactionConfig,
     /// Last observed context input-token count, for the auto-compaction
     /// hysteresis: the trigger fires only on the upward crossing of the
@@ -790,75 +678,40 @@ pub(crate) struct App {
     /// first round reports usage, and reset to `None` after a compaction
     /// or a session rollback so the baseline re-evaluates cleanly.
     prev_ctx_tokens: Option<u64>,
-    /// Set only after the active run reports provider usage. Cleared at each
-    /// run boundary and consumed by the settled compaction hook, preventing a
-    /// resumed/stale usage sample from triggering compaction after a run that
-    /// never reached the provider.
     settled_usage_fresh: bool,
-    /// Whether the current history was compacted more recently than its
-    /// latest measured provider usage. Drives a `c` prefix on the context
-    /// gauge until a post-compaction round reports the real, smaller fill.
     compacted: bool,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
     /// hard context cap. The run loop reads (and clears) it on channel close
     /// to drive the force-compact + silent continue, instead of the soft
     /// `agent_settled` path.
     context_pressure: bool,
-    /// Spinner frame while a run is active; None when idle.
     run: Option<usize>,
-    /// Wall-clock start of the active run; drives the live `working for Ns`
-    /// indicator only — the authoritative turn duration comes from the
-    /// engine's `TurnEnd` event.
     run_start: Option<Instant>,
-    /// In-flight retry count, shown in the notification area until the next
-    /// provider request settles.
     retry: Option<RetryState>,
-    /// When true the log follows the latest output (pinned to the bottom).
     pinned: bool,
-    /// Absolute index of the first visible log line while `pinned` is false.
     top_line: usize,
-    /// Bottom scroll offset from the last render; seeds `top_line` on un-pin.
     last_base: usize,
     verbose: bool,
-    /// Debug event to sample after the next completed frame. `/verbose`
-    /// schedules this so diagnostics capture the render/materialization cost,
-    /// not merely the cheap boolean toggle that precedes it.
     debug_after_draw: Option<&'static str>,
-    /// Opt-in process/component diagnostics writer enabled by `/debug`.
     debug: Option<debug_stats::DebugState>,
     should_quit: bool,
     session: SessionState,
     picker: Option<PickerState>,
-    /// '/tree' overlay state, when open. See [`TreePickerState`].
     tree_picker: Option<TreePickerState>,
     /// Lightweight full-tree index retained only while /tree is open. Event
     /// bodies remain file-backed and are hydrated one visible window at a time.
     tree_picker_index: Option<Arc<Vec<store::EventIndex>>>,
-    /// Display-row indices already queued for tree hydration.
     tree_picker_pending: std::collections::HashSet<usize>,
-    /// Background picker enrichment channel installed by the interactive run
-    /// loop. Unit tests leave it absent and use the synchronous fallback.
     picker_load_tx: Option<tokio::sync::mpsc::UnboundedSender<PickerLoad>>,
     picker_generation: Arc<AtomicU64>,
-    /// `/model` overlay state, when open. See [`ModelPickerState`].
     model_picker: Option<ModelPickerState>,
-    /// `/thinking` overlay state, when open. See [`ThinkingPickerState`].
     thinking_picker: Option<ThinkingPickerState>,
-    /// The available models for `/model`, snapshot at startup from the
-    /// retained registry. Empty when no provider has credentials.
     model_choices: Vec<lofi_types::ModelChoice>,
-    /// A `/model` confirmation hands a `provider/model` query here; the run
-    /// loop rebuilds the agent from the retained registry and clears it.
     pending_model_switch: Option<String>,
-    /// Read-only information modal (e.g. `/session` output), when open.
     info: Option<InfoModal>,
-    /// Slash-command autocomplete popover, active while the input is a
-    /// prefix of a known command.
     slash_complete: Option<SlashComplete>,
-    /// Hint shown in the log when no model is configured; `None` in normal runs.
     no_models_hint: Option<String>,
     theme: Theme,
-    /// Kill ring for emacs-style C-k / C-u / C-w / M-d, yanked back with C-y.
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
@@ -869,39 +722,20 @@ pub(crate) struct App {
     /// Screen rect of the log viewport, stashed at render time for hit-testing
     /// mouse scroll / selection.
     log_rect: Rect,
-    /// The prompt (input) area rect from the last render, so overlays like
-    /// the slash-complete popover can anchor above the cursor.
     input_rect: Rect,
     /// Plain text of each *visible* log line (the viewport window only),
     /// stashed at render time so mouse selection can map screen coords to
     /// text. Window-relative: index 0 is the top visible line.
     log_vis: Vec<view::VisLine>,
-    /// Absolute index of the top visible log line (`scroll` offset).
     log_off: usize,
-    /// Top visible select row of the prompt input when it overflows its
-    /// capped height ([`MAX_INPUT_LINES`]). Synced each frame to keep the
-    /// cursor on screen.
     input_scroll: usize,
-    /// Active mouse selection, if any.
     sel: Option<Selection>,
-    /// Current modal focus.
     mode: Mode,
-    /// Queue of pending shell-policy confirmation requests.
-    /// The first item is shown as a centered modal; when the user
-    /// responds, it is popped and the next one (if any) appears.
     pending_confirms: Vec<lofi_core::ConfirmRequest>,
-    /// Selected action in the permission dialog: 0 = Allow, 1 = Deny.
-    /// Navigation changes this; only Enter or an explicit action key resolves
-    /// the request, so stray key presses can never reject a command.
     confirm_selected: usize,
-    /// First wrapped command row visible in the permission dialog. Reset for
-    /// each queued request and clamped by the renderer to its viewport.
     confirm_scroll: usize,
-    /// Wrapped command row count and viewport height from the last render.
     confirm_total: usize,
     confirm_view_h: usize,
-    /// When the yank-to-clipboard badge was last triggered; shown on the
-    /// footer rule's left for a short window after a yank.
     yank_notify: Option<Instant>,
     /// Cursor position saved at yank time so the next `enter_nav` can jump
     /// back to it instead of the bottom of the viewport. `None` when the
@@ -912,13 +746,8 @@ pub(crate) struct App {
     /// command). Surfaced on the rule line's left edge instead of as a chat
     /// turn so command feedback doesn't pollute the transcript.
     notify: Option<Notify>,
-    /// Absolute index of the transcript line under the Navigate/Select cursor.
     nav_cursor: usize,
-    /// Character column (absolute char index in the cursor line) under the
-    /// Navigate/Select cursor.
     nav_col: usize,
-    /// (`line`, `col`) where `v` was pressed; the selection extends from here
-    /// to (`nav_cursor`, `nav_col`). Only meaningful in [`Mode::Select`].
     select_anchor: (usize, usize),
     /// Total transcript line count (frozen + last turn + separators), stashed
     /// at render time so the Navigate cursor can be clamped between events.
@@ -926,25 +755,14 @@ pub(crate) struct App {
     /// Line count of the live (last) turn, stashed at render time so turn
     /// boundaries can be computed between events for `[`/`]` jumps.
     last_turn_height: usize,
-    /// Log viewport height at last render, for cursor-follow scrolling.
     log_view_h: usize,
-    /// Rendered-line cache for frozen turns, restricted to turns intersecting
-    /// the viewport plus a one-turn margin. Turns outside the cache are
-    /// re-rendered on demand. Normally the mutable last turn is rebuilt fresh
-    /// each frame; an idle fully file-backed view may freeze it too.
     frozen_render: FrozenCache,
     /// Line count per frozen turn (all of them), so the viewport can be
     /// located and `total` computed without fetching rendered lines. Synced
     /// to the file-backed prefix (which may be all turns) for the active mode.
     frozen_heights: Vec<usize>,
-    /// Height index for the inactive verbose mode. `/verbose` swaps this
-    /// with `frozen_heights`, avoiding a full transcript reparse when
-    /// collapsing or revisiting a mode that has already been measured.
     frozen_heights_other_mode: Vec<usize>,
-    /// Bumped whenever `turns` is replaced wholesale (resume, `/new`,
-    /// `/clear`); a mismatch with `frozen_epoch` discards the cache.
     render_epoch: u64,
-    /// Epoch captured when `frozen_render` was last built.
     frozen_epoch: u64,
     /// Viewport width the frozen cache was last built at. A resize changes
     /// the wrap width, so a mismatch discards the cache just like an epoch
@@ -986,8 +804,6 @@ struct RunHandle {
     /// queued prompt at the earliest opportunity — between rounds, not after
     /// the entire multi-round turn.
     preempt: Arc<AtomicBool>,
-    /// Direct user shell commands share the run slot so input/cancellation and
-    /// queued prompts remain serialized with agent turns.
     user_bash: Option<(String, bool)>,
 }
 
@@ -1136,20 +952,11 @@ async fn run_loop(
         );
     }
 
-    // LOFI_DEBUG opts into the same diagnostics as /debug, but from process
-    // startup so resume/replay and subsequent activity are logged without an
-    // interactive command. Enable after session restoration. The immediate
-    // sample is the pre-draw baseline; schedule a second sample after the
-    // first frame so resume/replay cost is distinguishable from lazy layout
-    // and frozen-turn height materialization.
     app.enable_debug_from_env();
     if app.debug.is_some() {
         app.debug_after_draw = Some("initial_draw");
     }
 
-    // Create the confirmation channel for shell-policy `ask` decisions.
-    // The agent sends ConfirmRequests; the TUI shows a yes/no prompt and
-    // responds through the embedded oneshot.
     let (confirm_tx, mut confirm_rx) =
         tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
     if let Some(a) = agent.take() {
@@ -1243,7 +1050,6 @@ async fn run_loop(
                                 }
                             } else {
                                 app.maybe_auto_compact();
-                                // Auto-pop the next queued prompt (FIFO).
                                 if app.run.is_none() {
                                     if let Some(prompt) = app.prompt_queue.first().cloned() {
                                         app.prompt_queue.remove(0);
@@ -1310,9 +1116,6 @@ async fn run_loop(
                 } else if !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
-                // The spinner and the retry countdown both animate and need
-                // periodic redraw; an idle session has nothing to draw — except
-                // while the yank badge is on screen, which must expire.
                 if app.run.is_some() {
                     if let Some(s) = app.run.as_mut() {
                         *s = s.wrapping_add(1);
@@ -1328,14 +1131,12 @@ async fn run_loop(
                     }
                     dirty = true;
                 }
-                // The quit-confirmation badge must expire on its own.
                 if let Some(t) = app.ctrl_c_at {
                     if t.elapsed() >= QUIT_DOUBLE_PRESS {
                         app.ctrl_c_at = None;
                     }
                     dirty = true;
                 }
-                // Slash-command notifications expire on their own.
                 if let Some(n) = app.notify.as_ref() {
                     if n.at.elapsed() >= NOTIFY_TTL {
                         app.notify = None;
@@ -1349,12 +1150,8 @@ async fn run_loop(
                     dirty = true;
                 }
             }
-            // Shell-policy confirmation request from the agent.
             req = confirm_rx.recv() => {
                 if let Some(req) = req {
-                    // An auto approval can win after the callback enqueues its
-                    // request but before the UI receives it. Never flash that
-                    // already-settled dialog for a frame.
                     if req.active.load(std::sync::atomic::Ordering::Relaxed) {
                         if app.pending_confirms.is_empty() {
                             app.confirm_selected = 0;
@@ -1383,7 +1180,3 @@ async fn run_loop(
     }
     Ok(())
 }
-
-// A single large key dispatcher; splitting per-key handlers would fragment
-// the picker/submit/run-creation flow and hurt readability more than the line
-// count helps.

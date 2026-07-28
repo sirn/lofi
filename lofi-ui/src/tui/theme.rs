@@ -22,9 +22,7 @@ use ratatui::style::Color;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Theme {
     pub primary: Color,
-    /// User-role labels and indicators. Deliberately matches `primary`.
     pub user: Color,
-    /// Agent-role labels. Kept separate from generic informational blue.
     pub agent: Color,
     pub success: Color,
     pub warn: Color,
@@ -35,32 +33,24 @@ pub(crate) struct Theme {
     pub subtle: Color,
     pub surface: Color,
     pub inline_bg: Color,
-    /// Filled background of the footer panel (prompt + stats).
     pub panel_bg: Color,
 
-    /// Mouse-selection highlight background in the log.
     pub selection: Color,
-    /// Background of the Navigate cursor line in the log.
     pub cursor_line: Color,
-    /// Single-cell cursor marker in Select mode (distinct from `selection`).
     pub select_cursor: Color,
 }
 
-/// User-message left indicator (distinct from the assistant tone).
 pub(crate) fn user_indicator(t: Theme) -> Color {
     t.user
 }
-/// Agent-response left indicator.
 pub(crate) fn agent_indicator(t: Theme) -> Color {
     t.agent
 }
-/// Active (streaming / running) left indicator.
 pub(crate) fn active_indicator(t: Theme) -> Color {
     t.warn
 }
 
 impl Theme {
-    /// Dark background, xterm 256-color palette.
     pub(crate) fn dark() -> Self {
         Self {
             primary: Color::Indexed(44),  // teal (modus-vivendi accent)

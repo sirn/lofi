@@ -1,9 +1,3 @@
-//! Atomic rendering primitives shared by every component: line padding,
-//! truncation, word-wrap, duration formatting, and styled-span constructors.
-//!
-//! Components compose these into larger units; nothing here knows about
-//! turns or blocks.
-
 use std::sync::Arc;
 
 use ratatui::layout::Rect;
@@ -22,8 +16,6 @@ pub fn width(s: &str) -> usize {
     s.width()
 }
 
-/// Byte offset of the `char_idx`-th char of `s` (i.e. where the substring
-/// starting at that char begins). `char_idx == char_count` yields `s.len()`.
 fn char_byte_offset(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
 }
@@ -74,7 +66,6 @@ pub fn apply_selection(line: &mut Line<'static>, start: usize, end: usize, bg: C
     line.spans = out;
 }
 
-/// A blank gap line on the default background, used to separate components.
 pub fn blank() -> Line<'static> {
     Line::default()
 }
@@ -104,19 +95,12 @@ pub fn blank() -> Line<'static> {
 /// and a `\n` is inserted only at hard breaks (a new source line).
 #[derive(Clone, Debug)]
 pub struct RawLine {
-    /// The full source line (markdown markers intact).
     pub source: Arc<str>,
-    /// Content-relative display position (0..=`content_len`) → source byte
-    /// offset. Empty when no per-char mapping is available (whole-row yank
-    /// still uses `source`; partial falls back to rendered text).
     pub map: Vec<usize>,
-    /// `true` on the first visual row of a source line (begun at a hard
-    /// newline); `false` on soft-wrap continuations.
     pub hard_break: bool,
 }
 
 impl RawLine {
-    /// Build a raw line with a position map.
     pub fn new(source: Arc<str>, map: Vec<usize>, hard_break: bool) -> Self {
         Self {
             source,
@@ -125,10 +109,6 @@ impl RawLine {
         }
     }
 
-    /// Build a raw line whose entire source is one unbroken span (no
-    /// interior markers to skip): the map is the identity `0..=len`. Used
-    /// for code and other pre-formatted content where display chars map 1:1
-    /// to a contiguous source range starting at `start`.
     pub fn linear(source: Arc<str>, start: usize, display_len: usize, hard_break: bool) -> Self {
         let map = (0..=display_len).map(|k| start + k).collect();
         Self {
@@ -142,7 +122,6 @@ impl RawLine {
 pub struct RenderLine {
     pub line: Line<'static>,
     pub content: (usize, usize),
-    /// Raw source for yank; `None` when the rendered text is canonical.
     pub raw: Option<RawLine>,
 }
 
@@ -154,7 +133,6 @@ impl RenderLine {
         self.content.1.saturating_sub(self.content.0)
     }
 
-    /// Attach raw markdown source to this line for clipboard yank.
     pub fn with_raw(mut self, raw: RawLine) -> Self {
         self.raw = Some(raw);
         self
@@ -170,18 +148,11 @@ fn char_count(spans: &[Span<'static>]) -> usize {
 /// Populated at render time from [`RenderLine`] so mouse selection and
 /// cursor tracking can map screen coords back to text without re-rendering.
 pub struct VisLine {
-    /// Rendered plain text (all spans concatenated).
     pub rendered: String,
-    /// Selectable content char range (excludes decoration and padding).
     pub content: (usize, usize),
-    /// Raw markdown source for yank; `None` when the rendered text is
-    /// canonical (decoration, tool glyphs, etc.).
     pub raw: Option<RawLine>,
 }
 
-/// Build a line from `deco` + `content` + optional `suffix` (trailing
-/// decoration, e.g. a dash fill), recording the content char range. The
-/// suffix is rendered but excluded from selection.
 pub fn render(
     deco: Vec<Span<'static>>,
     content: Vec<Span<'static>>,
@@ -212,12 +183,10 @@ pub fn render(
     }
 }
 
-/// A plain line with no trailing decoration.
 pub fn rline(deco: Vec<Span<'static>>, content: Vec<Span<'static>>) -> RenderLine {
     render(deco, content, Vec::new())
 }
 
-/// A blank gap line: nothing selectable.
 pub fn rblank() -> RenderLine {
     RenderLine {
         line: Line::default(),
@@ -226,10 +195,6 @@ pub fn rblank() -> RenderLine {
     }
 }
 
-/// Wrapped plain lines: word-wraps pre-styled spans to fit within `width`
-/// minus the decoration width. The first row uses `deco`; continuations use
-/// `cont_deco`. Unlike [`rtile_wrapped`], this adds no background or trailing
-/// full-width padding.
 pub fn rline_wrapped(
     deco: Vec<Span<'static>>,
     cont_deco: &[Span<'static>],
@@ -271,13 +236,9 @@ pub fn rtile(
     rl
 }
 
-/// Display width of a sequence of spans (sum of each span's content width).
 fn span_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| width(&s.content)).sum()
 }
-/// Truncate `s` to at most `max_w` display cells, never splitting a wide
-/// character: if the next char would overflow, it is dropped entirely.
-/// Callers add `… (N hidden)` themselves when capping a list.
 pub fn truncate(s: &str, max_w: usize) -> String {
     let mut out = String::new();
     let mut w = 0;
@@ -292,14 +253,6 @@ pub fn truncate(s: &str, max_w: usize) -> String {
     out
 }
 
-/// Greedy word-wrap by display width so text fills the column exactly. A
-/// word wider than `max_w` (e.g. a long CJK run with no spaces) is broken
-/// mid-word on a wide-char boundary. Empty input yields a single empty
-/// string so callers always emit at least one line.
-///
-/// Whitespace is collapsed as flow text: runs of spaces become a single
-/// space and lines are trimmed. Styled, whitespace-preserving wrapping
-/// lives in [`wrap_line_styled`]; both share [`wrap_cells`].
 pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
     let mut out = Vec::new();
     for line in s.split('\n') {
@@ -307,8 +260,6 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
             out.push(line.to_string());
             continue;
         }
-        // Collapse whitespace runs (flow text): drop the empties that
-        // `split(' ')` yields for runs, then rejoin with single spaces.
         let cells: Vec<(char, Style)> = line
             .split(' ')
             .filter(|w| !w.is_empty())
@@ -341,7 +292,6 @@ pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
     wrap_pre_window(s, max_w, 0..usize::MAX).1
 }
 
-/// Count preformatted wrapped rows while retaining only the requested range.
 pub fn wrap_pre_window(
     s: &str,
     max_w: usize,
@@ -382,12 +332,6 @@ pub fn wrap_pre_window(
     (total, out)
 }
 
-/// Shared greedy word-wrap core: break a styled cell run into `max_w`-wide
-/// visual rows. Fills each row greedily, breaking at the last space that
-/// fits; a token wider than `max_w` is hard-broken on a char boundary
-/// (never splitting a wide char). The break space is dropped so
-/// continuation rows start flush. Returns slices into `cells`, one per
-/// row; empty input yields a single empty slice.
 fn wrap_cells(cells: &[(char, Style)], max_w: usize) -> Vec<&[(char, Style)]> {
     let n = cells.len();
     let mut out: Vec<&[(char, Style)]> = Vec::new();
@@ -460,8 +404,6 @@ pub fn wrap_line_styled(line: &Line<'static>, max_w: usize) -> Vec<Line<'static>
         .collect()
 }
 
-/// Merge a run of (char, style) cells into a [`Line`], fusing adjacent
-/// cells that share a style into one span.
 fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
@@ -485,7 +427,6 @@ fn cells_to_line(cells: &[(char, Style)]) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Format a duration compactly: `12s` past ten seconds, `3.4s` below.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn fmt_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
@@ -496,8 +437,6 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// A status icon: a spinner frame while `working`, `✗` on error, `✓` on done.
-/// `frame` is the current spinner frame index (from [`Cx::spinner`]).
 pub fn status_icon(t: Theme, working: bool, error: bool, frame: usize) -> Span<'static> {
     if working {
         Span::styled(
@@ -511,23 +450,14 @@ pub fn status_icon(t: Theme, working: bool, error: bool, frame: usize) -> Span<'
     }
 }
 
-/// Subtle foreground span.
 pub fn subtle(text: String, t: Theme) -> Span<'static> {
     Span::styled(text, Style::new().fg(t.subtle))
 }
 
-/// Total display width of a slice of spans.
 fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|s| s.content.width()).sum()
 }
 
-/// Horizontal arrangement of up to three span groups — left, center, right —
-/// within a fixed `width`, built as a single [`Line`] with the leftover
-/// space as padding. The line-level counterpart to the frame's `VStack`:
-/// the caller declares what goes on each edge and this owns the gutter
-/// between them. Left and right hug the edges; center sits in the middle of
-/// the remainder. Content is not truncated here — abbreviate before feeding
-/// in if it might overflow.
 pub(crate) struct HStack<'a> {
     width: usize,
     left: Vec<Span<'a>>,
@@ -565,10 +495,7 @@ impl<'a> HStack<'a> {
         let lw = spans_width(&self.left);
         let cw = spans_width(&self.center);
         let rw = spans_width(&self.right);
-        // Space between the left and right edges after the pinned content.
         let rem = self.width.saturating_sub(lw + rw);
-        // Center the center group within `rem`; the two half-gaps collapse
-        // into a single gutter when there is no center content.
         let mid_gap = rem.saturating_sub(cw);
         let mut out = self.left;
         if self.center.is_empty() {
@@ -595,10 +522,6 @@ pub struct ScrollArea {
     pub gutter: Rect,
 }
 
-/// Reserve the rightmost column of `area` as a scrollbar gutter. The gutter
-/// remains reserved when everything fits; in that case it is simply left
-/// blank. Keeping the split stable avoids re-wrapping content when a scrollbar
-/// appears or disappears.
 pub fn scroll_area(area: Rect) -> ScrollArea {
     let gutter_w = area.width.min(1);
     let content_w = area.width.saturating_sub(gutter_w);
@@ -700,14 +623,12 @@ mod tests {
 
     #[test]
     fn wrap_collapses_whitespace_and_wraps() {
-        // Flow text: runs of spaces collapse, lines wrap at word boundaries.
         let w = wrap("  aa   bb   cc dd", 7);
         assert_eq!(w, vec!["aa bb ", "cc dd"]);
     }
 
     #[test]
     fn wrap_breaks_long_word_at_width() {
-        // A spaceless token longer than the width breaks at max_w chunks.
         let w = wrap("abcdefghijklmnopqrstuvwxyz", 10);
         assert_eq!(w, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
     }
@@ -719,22 +640,18 @@ mod tests {
 
     #[test]
     fn wrap_pre_preserves_indent_on_every_row() {
-        // Indent is stripped before wrapping (so it is never broken inside)
-        // and prepended to every continuation row.
         let w = wrap_pre("    indented code here", 12);
         assert_eq!(w, vec!["    indented ", "    code ", "    here"]);
     }
 
     #[test]
     fn wrap_pre_breaks_long_word_at_width() {
-        // No spaces to break at: hard-break at max_w chunks.
         let w = wrap_pre("abcdefghijklmnopqrstuvwxyz", 10);
         assert_eq!(w, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
     }
 
     #[test]
     fn wrap_pre_keeps_blank_source_lines() {
-        // A blank line yields one empty row; surrounding lines wrap.
         let w = wrap_pre("a\n\nb", 10);
         assert_eq!(w, vec!["a", "", "b"]);
     }
@@ -757,7 +674,6 @@ mod tests {
             Span::styled("  hi    ".to_string(), key),
             Span::styled("hello world".to_string(), val),
         ]);
-        // Fits in 30: one line, both spans kept with their styles.
         let one = wrap_line_styled(&line, 30);
         assert_eq!(one.len(), 1);
         assert_eq!(spans_of(&one[0]), "  hi    hello world");
@@ -776,8 +692,6 @@ mod tests {
         assert_eq!(wrapped.len(), 2);
         assert_eq!(spans_of(&wrapped[0]), "  aa bb ");
         assert_eq!(spans_of(&wrapped[1]), "cc dd");
-        // each visual line fits the width; the trailing break space may
-        // overflow by one cell (clipped, invisible).
         for l in &wrapped {
             assert!(l.width() <= 8);
         }
@@ -793,8 +707,6 @@ mod tests {
 
     #[test]
     fn wrap_line_styled_breaks_long_word_at_width() {
-        // A spaceless value longer than the width must break at max_w
-        // chunks, not one char per line.
         let line = Line::from(vec![
             Span::raw("key ".to_string()),
             Span::raw("abcdefghijklmnopqrstuvwxyz".to_string()),

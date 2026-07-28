@@ -16,30 +16,22 @@ use crate::tui::App;
 
 use super::prim::{self, RenderLine};
 
-/// Render context handed to every component.
 pub struct Cx<'a> {
     pub app: &'a App,
     pub theme: Theme,
     pub width: usize,
-    /// Whether this turn is the live, in-progress one.
     pub active_turn: bool,
 }
 
 impl Cx<'_> {
-    /// Current spinner frame index, for working-status icons.
     pub fn spinner(&self) -> usize {
         self.app.spinner_frame() % crate::tui::SPINNER.len()
     }
 }
 
-/// A renderable log unit.
 pub trait Component {
-    /// Render this unit to an owned block of lines, each tagged with the
-    /// char range of its selectable content.
     fn lines(&self, cx: &Cx) -> Vec<RenderLine>;
 
-    /// Count visual rows. Large components override this so measuring the
-    /// scroll range does not materialize their rendered output.
     fn height(&self, cx: &Cx) -> usize {
         self.lines(cx).len()
     }
@@ -55,8 +47,6 @@ pub trait Component {
     }
 }
 
-/// A vertical stack of components joined by a blank line; children that
-/// render to zero lines are skipped, so no gap is left around them.
 pub struct Stack<'a> {
     children: Vec<Box<dyn Component + 'a>>,
 }

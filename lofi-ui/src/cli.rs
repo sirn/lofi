@@ -11,7 +11,6 @@ use anyhow::Context;
 use clap::Parser;
 use lofi_core::ModelRegistry;
 
-/// Command-line interface for lofi.
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)] // CLI flag struct
 #[command(
@@ -20,35 +19,24 @@ use lofi_core::ModelRegistry;
     about = "A minimal coding agent harness with a code-mode sandbox"
 )]
 struct Cli {
-    /// Run one non-interactive turn and stream the assistant text to stdout.
     #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
-    /// List configured models as `provider/id — name` (with a `·img` marker for image-capable models) and exit.
     #[arg(long)]
     list_models: bool,
-    /// List saved sessions for this workspace and exit.
     #[arg(long)]
     list_sessions: bool,
-    /// Select the model as `provider/model[:level]`.
     #[arg(long, value_name = "SPEC")]
     model: Option<String>,
-    /// Continue the most recent session for this workspace.
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
-    /// Resume a specific session by id prefix.
     #[arg(long, value_name = "ID")]
     resume: Option<String>,
-    /// Do not persist a transcript.
     #[arg(long)]
     no_session: bool,
-    /// Print the embedded API reference index and exit.
     #[arg(long)]
     docs: bool,
-    /// Search the embedded API reference and print matching entries.
     #[arg(long, value_name = "QUERY")]
     docs_search: Option<String>,
-    /// Dry-run: evaluate a command against the shell policy and print the
-    /// decision without executing anything.
     #[arg(long, value_name = "COMMAND")]
     policy_explain: Option<String>,
 }
@@ -80,8 +68,6 @@ pub async fn run_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Evaluate a command against the resolved shell policy and print the
-/// decision. Used by `--policy-explain` for dry-run diagnostics.
 fn policy_explain(cmd: &str) -> anyhow::Result<()> {
     let decision =
         lofi_core::config_loader::evaluate_shell_policy(cmd).context("evaluate shell policy")?;
@@ -102,7 +88,6 @@ fn policy_explain(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build [`PrintOptions`] from the parsed flags.
 fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> PrintOptions {
     let mut opts = PrintOptions::new(prompt, root);
     if let Some(m) = &cli.model {
@@ -111,7 +96,6 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
     opts
 }
 
-/// Build [`InteractiveOptions`] from the parsed flags.
 fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOptions {
     let mut opts = InteractiveOptions::new(root);
     if let Some(m) = &cli.model {
@@ -129,7 +113,6 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
     opts
 }
 
-/// List saved sessions for `root`, newest-first, as `id  created  model  (n msgs)`.
 fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
     let store = lofi_core::session::store::SessionStore::open().context("open session store")?;
     let entries = store.list_for_cwd(root).context("list sessions")?;
@@ -155,7 +138,6 @@ fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Print the API reference index (`name — summary` per line) to stdout.
 fn print_docs_index() -> anyhow::Result<()> {
     let idx = lofi_core::docs::docs_index();
     let entries = idx["entries"].as_array().context("malformed docs index")?;
@@ -173,7 +155,6 @@ fn print_docs_index() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Print search results (`name [score] — excerpt` per line) to stdout.
 fn print_docs_search(query: &str) -> anyhow::Result<()> {
     let res = lofi_core::docs::docs_search(query);
     let results = res["results"]
@@ -206,7 +187,6 @@ fn format_ts(ms: u64) -> String {
     let rem = secs % 86_400;
     let h = rem / 3600;
     let m = (rem % 3600) / 60;
-    // Civil calendar conversion (Howard Hinnant's algorithm), days -> date.
     let z = day + 719_468;
     let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
     let doe = z - era * 146_097;
@@ -220,8 +200,6 @@ fn format_ts(ms: u64) -> String {
     format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}")
 }
 
-/// Load config, build the registry (with remote discovery + static fallback),
-/// and write `provider/id — name` lines (with a `·img` marker for image-capable models) to stdout.
 async fn list_models() -> anyhow::Result<()> {
     let config_path =
         lofi_core::config_loader::user_config_path().context("resolve user config path")?;

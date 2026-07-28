@@ -12,11 +12,6 @@ enum ModalSlot {
 
 impl App {
     pub(super) fn toggle_verbose(&mut self) {
-        // Record the current state before invalidating/rendering, then schedule
-        // the same ordinary memory event after the next frame. The paired
-        // records are distinguished by context.verbose (false → true when
-        // expanding, true → false when collapsing), and their delta isolates
-        // the toggle from unrelated work since the previous debug sample.
         self.debug_sample("verbose");
         self.verbose = !self.verbose;
         if self.verbose {
@@ -100,20 +95,12 @@ impl App {
         }
     }
 
-    /// Recompute the slash-command autocomplete popover from the current
-    /// input. The popover is active while the input is a non-empty prefix
-    /// of one or more [`SLASH_COMMANDS`] entries (e.g. `/`, `/tr`). A bare
-    /// `/` matches everything; once the full command is typed exactly, the
-    /// popover dismisses (nothing left to complete). Preserves the selected
-    /// candidate when it's still in the new match set.
     pub(super) fn refresh_slash_complete(&mut self) {
         let input = self.input.as_str();
         if !input.starts_with('/') || input.is_empty() {
             self.slash_complete = None;
             return;
         }
-        // Don't offer completion once the user has typed a full command plus
-        // trailing text (e.g. `/help foo`) — there's nothing to complete.
         let candidates: Vec<usize> = SLASH_COMMANDS
             .iter()
             .enumerate()
@@ -140,8 +127,6 @@ impl App {
         });
     }
 
-    /// Accept the selected autocomplete candidate: replace the input with
-    /// the command, position the cursor at the end, and dismiss the popover.
     pub(super) fn slash_complete_accept(&mut self) {
         if let Some(sc) = self.slash_complete.take() {
             if let Some(&idx) = sc.candidates.get(sc.selected) {
@@ -286,8 +271,6 @@ impl App {
         });
     }
 
-    /// '/new': drop the transcript and start a fresh session file on the next
-    /// prompt. The store is retained; the cursor, history, and log are reset.
     pub(super) fn start_new_session(&mut self) {
         if let Ok(mut m) = self.history.lock() {
             m.clear();
@@ -307,7 +290,6 @@ impl App {
         self.bump_render_epoch();
     }
 
-    /// Populate the '/resume' picker with sessions for this workspace.
     pub(super) fn open_picker(&mut self) {
         let Some(store) = &self.session.store else {
             self.notify(NotifyKind::Warn, "sessions are disabled (--no-session)");
@@ -450,8 +432,6 @@ impl App {
                 };
                 for (index, mut entry) in rows {
                     self.tree_picker_pending.remove(&index);
-                    // Prompt bodies are fetched only if that row is confirmed;
-                    // retaining every full prompt defeats progressive loading.
                     entry.prefill.clear();
                     if let Some(row) = picker.entries.get_mut(index) {
                         *row = entry;
@@ -474,7 +454,6 @@ impl App {
         }
     }
 
-    /// Load the selected session into the transcript and close the picker.
     pub(super) fn picker_confirm_inner(&mut self, picker: PickerState) {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
         let entry = picker.entries.into_iter().nth(picker.selected);
@@ -520,12 +499,6 @@ impl App {
         }
     }
 
-    /// Whether resuming `events` should switch the active model: the
-    /// resumed session's last completed turn ran a different
-    /// `provider/model:level` than the current one, and at least one model
-    /// is available to switch to. Returns the query for
-    /// `pending_model_switch` (the run loop rebuilds off it, the same path
-    /// `/model` uses), or `None` when no switch is needed or possible.
     #[cfg(test)]
     pub(super) fn resume_model_switch(&self, events: &[SessionEvent]) -> Option<String> {
         if self.model_choices.is_empty() {
@@ -559,9 +532,6 @@ impl App {
         });
     }
 
-    /// Confirm: hand the selected `provider/model` query to the run loop via
-    /// `pending_model_switch` and close the overlay. The run loop rebuilds
-    /// the agent from the retained registry (it owns the switcher + agent).
     pub(super) fn model_picker_confirm(&mut self) {
         if let Some(picker) = self.model_picker.take() {
             if let Some(choice) = picker.choices.get(picker.selected) {
@@ -587,10 +557,6 @@ impl App {
         self.thinking_picker = Some(ThinkingPickerState { levels, selected });
     }
 
-    /// The thinking levels offered by `/thinking` for the current model:
-    /// `off` first, then the model's declared `thinking_levels` with any
-    /// duplicate `off` removed. An unknown current model (not in
-    /// `model_choices`) yields `[off]`.
     fn current_thinking_choices(&self) -> Vec<ThinkingLevel> {
         let mut out = vec![ThinkingLevel::Off];
         if let Some(c) = self
@@ -607,10 +573,6 @@ impl App {
         out
     }
 
-    /// Confirm: hand the selected level to the run loop as a
-    /// `provider/model:level` query via `pending_model_switch` (the same
-    /// channel `/model` uses) and close the overlay. `select_model`
-    /// validates the level against the model's `thinking_levels`.
     pub(super) fn thinking_picker_confirm(&mut self) {
         if let Some(picker) = self.thinking_picker.take() {
             if let Some(&level) = picker.levels.get(picker.selected) {
@@ -620,9 +582,6 @@ impl App {
         }
     }
 
-    /// Apply a completed model switch: update the label, thinking-level
-    /// suffix, and context-window gauge. Called by the run loop after it
-    /// rebuilds the agent.
     pub(super) fn apply_model_switch(&mut self, model: &lofi_types::Model, level: ThinkingLevel) {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
@@ -649,8 +608,6 @@ impl App {
     /// input (for editing) and moves the shared cursor so the next run starts
     /// as a sibling of that prompt rather than appending to the active leaf.
     pub(super) fn open_tree_picker(&mut self) {
-        // Full-tree index plus the selected head are snapshotted together by
-        // the cursor. Labels are still loaded lazily through that cursor.
         let Some(cursor) = self.session.cursor.as_ref() else {
             self.notify(
                 NotifyKind::Error,
@@ -691,8 +648,6 @@ impl App {
                     {
                         return;
                     }
-                    // Hydrate only the initial visible tail. Historical rows
-                    // stay file-backed until navigation brings them on screen.
                     let start = skeletons.len().saturating_sub(20);
                     hydrate_tree_entry_window(
                         &index,
@@ -797,9 +752,6 @@ impl App {
             self.notify(NotifyKind::Info, "selected tree row is still loading");
             return;
         }
-        // Persist the selected head first, then rebuild exclusively from a
-        // cursor snapshot. If replay fails, restore both the durable head and
-        // the previous view from the old cursor snapshot.
         let Some(cursor) = self.session.cursor.clone() else {
             return;
         };
@@ -851,11 +803,6 @@ impl App {
             || !self.pending_confirms.is_empty()
     }
 
-    /// Handle a key while a shell-policy permission dialog is open.
-    /// The dialog behaves like a two-button chooser: arrows/Tab move focus,
-    /// Enter confirms, and explicit action keys (`a`/`y`, `d`/`n`)
-    /// resolve immediately. Esc is an intentional deny. Every other key is
-    /// swallowed without resolving the request, preventing accidental denial.
     pub(super) fn handle_confirm_key(&mut self, k: &KeyEvent) -> bool {
         if self.pending_confirms.is_empty() {
             return false;
@@ -1029,9 +976,6 @@ impl App {
         if len == 0 && matches!(k.code, KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab) {
             return true;
         }
-        // Confirm/cancel (and the single-item Tab shortcut) take `&mut self`
-        // (or take the picker) and are handled before borrowing the modal for
-        // navigation.
         match k.code {
             KeyCode::Enter => match slot {
                 ModalSlot::Picker => {
@@ -1084,7 +1028,6 @@ impl App {
             || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
             || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
         {
-            // Confirm/cancel consumed the overlay; nothing left to navigate.
             return true;
         }
         let Some(m) = self.active_modal_mut() else {
@@ -1101,15 +1044,12 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 m.set_selected(if s + 1 < len { s + 1 } else { s });
             }
-            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
-            // popover and the Input-mode cursor keys.
             KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 m.set_selected(if s + 1 < len { s + 1 } else { s });
             }
             KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 m.set_selected(if s > 0 { s - 1 } else { 0 });
             }
-            // Tab/Shift+Tab cycle with wrap-around (last ↔ first).
             KeyCode::Tab => {
                 m.set_selected((s + 1) % len);
             }
@@ -1138,20 +1078,11 @@ impl App {
         }
     }
 
-    /// Unified key dispatch for the slash-command autocomplete popover.
-    /// `↑/↓` or `Ctrl+N`/`Ctrl+P` move the selection (clamped); `Tab`/
-    /// `Shift+Tab` cycle with wrap-around (last ↔ first); `Enter` accepts
-    /// the selection (auto-completes); `Esc` dismisses. Unlike
-    /// [`handle_modal_key`], `j`/`k`/`q` are not intercepted — the popover
-    /// floats over a text input, so those must stay printable. Returns
-    /// `true` if the popover handled the key.
     pub(super) fn handle_popover_key(&mut self, k: &KeyEvent) -> bool {
         if self.slash_complete.is_none() {
             return false;
         }
         let len = self.slash_complete.as_ref().map_or(0, super::Popover::len);
-        // Accept/dismiss (and the single-item Tab shortcut) take `&mut self`
-        // and are handled before borrowing the popover for navigation.
         match k.code {
             KeyCode::Enter => {
                 self.slash_complete_accept();
@@ -1183,15 +1114,12 @@ impl App {
             KeyCode::Down => {
                 popover.set_selected(if s + 1 < len { s + 1 } else { s });
             }
-            // Ctrl+N / Ctrl+P — readline-style next/previous, matching the
-            // Input-mode cursor keys.
             KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 popover.set_selected(if s + 1 < len { s + 1 } else { s });
             }
             KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 popover.set_selected(if s > 0 { s - 1 } else { 0 });
             }
-            // Tab/Shift+Tab cycle with wrap-around (last ↔ first).
             KeyCode::Tab => {
                 popover.set_selected((s + 1) % len);
             }
@@ -1203,9 +1131,6 @@ impl App {
         true
     }
 
-    /// Test helper: confirm the active tree picker. In production,
-    /// [`handle_modal_key`] dispatches Enter through the per-slot
-    /// `tree_picker_confirm_inner`.
     #[cfg(test)]
     pub(super) fn tree_picker_confirm(&mut self) {
         if let Some(picker) = self.tree_picker.take() {
