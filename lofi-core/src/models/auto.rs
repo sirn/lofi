@@ -24,13 +24,11 @@ use super::resolve_model_base_url;
 /// short-TTL provider's stale data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CachedDiscovery {
-    /// Epoch milliseconds when the entries were fetched.
     pub fetched_at: u64,
     /// `(id, ModelConfig)` pairs discovered for this provider.
     pub entries: Vec<(String, ModelConfig)>,
 }
 
-/// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
 /// Insert auto-discovered `(id, ModelConfig)` entries into a provider's
@@ -55,9 +53,6 @@ pub(super) fn inject_discovered(
     }
 }
 
-/// Copy each unset field of `dst` from `src`, so a static entry inherits
-/// metadata the remote endpoint reports without the user re-declaring it.
-/// Explicit static values are preserved.
 fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.name.is_none() {
         dst.name.clone_from(&src.name);
@@ -156,15 +151,11 @@ fn default_models_path(pcfg: &ProviderConfig) -> String {
     }
 }
 
-/// Read a JSON value as `f64`, accepting either a number or a numeric
-/// string (some providers return pricing as strings like `"5e-7"`).
 fn json_num(v: &Value) -> Option<f64> {
     v.as_f64()
         .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
-/// Read a JSON value as `u64`, accepting either a number or a numeric
-/// string. Floats are floored.
 fn json_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_f64().map(|f| f as u64))
@@ -296,7 +287,6 @@ fn navigate<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -353,8 +343,6 @@ pub(super) fn write_auto_cache(
     Ok(())
 }
 
-/// Read the cached auto-models map from `path`. A missing file yields an
-/// empty map (cache miss, not an error); parse failures propagate.
 pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, CachedDiscovery>> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(HashMap::new()),

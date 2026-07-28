@@ -21,22 +21,14 @@ use index::{
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
-/// Transcript format version. Bumped only on a breaking on-disk change;
-/// older files are rejected (no migration yet — lofi has no shipped sessions
-/// to migrate).
 pub const SESSION_VERSION: u32 = 3;
 
-/// The lowest version the store can still load (older files are migrated
-/// in-memory to [`SESSION_VERSION`]).
 pub const SESSION_MIN_VERSION: u32 = 1;
 
-/// Metadata written as the first JSONL line of every session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub version: u32,
-    /// Unix milliseconds at creation time.
     pub created: u64,
-    /// Absolute working directory the session belongs to.
     pub cwd: String,
     /// Raw model identity active when the session started (rendered to
     /// `provider/id:level` only at display; deserializes from a legacy
@@ -44,8 +36,6 @@ pub struct SessionMeta {
     pub model: RunModel,
 }
 
-/// The first-line wrapper. `type: "meta"` distinguishes it from message lines
-/// if a future format ever interleaves other entry kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Header {
     #[serde(rename = "type")]
@@ -54,9 +44,6 @@ struct Header {
     meta: SessionMeta,
 }
 
-/// A session file discovered using directory metadata only. This is cheap
-/// enough for an interactive picker to sort and draw before transcript
-/// metadata is indexed.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
     path: PathBuf,
@@ -64,50 +51,36 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
-    /// Wall-clock time of the file's last modification.
     #[must_use]
     pub fn last_active(&self) -> std::time::SystemTime {
         self.last_active
     }
 
-    /// Read a bounded provisional preview without exposing the transcript path.
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
     }
 
-    /// Enrich this discovered file with selected-lineage metadata.
     #[must_use]
     pub fn inspect(&self) -> Option<SessionEntry> {
         parse_entry(&self.path, self.last_active)
     }
 
-    /// Open this transcript and return its selected-lineage snapshot in the
-    /// same index pass.
-    ///
-    /// # Errors
-    /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
         SessionCursor::open_snapshot(self.path.clone())
     }
 }
 
-/// A discoverable session on disk: its metadata, file path, and message count.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
     pub meta: SessionMeta,
     file: SessionFile,
-    /// Number of message lines (excluding the header).
     pub message_count: usize,
-    /// Wall-clock time of the file's last modification (last activity).
     pub last_active: std::time::SystemTime,
-    /// One-line preview of the last meaningful event (user prompt,
-    /// assistant text, tool result, or compaction marker).
     pub last_message: String,
 }
 
 impl SessionEntry {
-    /// The session id — the file stem (`<ms>_<id>`), used by `--resume <id>`.
     #[must_use]
     pub fn id(&self) -> String {
         self.file
@@ -118,17 +91,11 @@ impl SessionEntry {
             .unwrap_or_default()
     }
 
-    /// Open this session and return its selected-lineage snapshot in one pass.
-    ///
-    /// # Errors
-    /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
         self.file.open_snapshot()
     }
 }
 
-/// A filesystem-safe slug for `cwd` (path separators -> `-`, leading `-`
-/// trimmed). Absolute paths collapse to a stable single-segment directory name.
 fn slug(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .replace('/', "-")
@@ -136,14 +103,12 @@ fn slug(cwd: &Path) -> String {
         .to_string()
 }
 
-/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Generate an opaque event/session identifier.
 fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -256,26 +221,21 @@ impl SessionCursor {
         ))
     }
 
-    /// Transcript path owned by this cursor.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Current transcript length in bytes. Keeping metadata access on the
-    /// cursor lets callers remain independent of the storage backend.
     #[must_use]
     pub fn len(&self) -> u64 {
         std::fs::metadata(&self.path).map_or(0, |metadata| metadata.len())
     }
 
-    /// Whether the transcript currently contains no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Stable session id derived from the store-owned transcript name.
     #[must_use]
     pub fn id(&self) -> String {
         self.path
@@ -285,7 +245,6 @@ impl SessionCursor {
             .unwrap_or_default()
     }
 
-    /// Snapshot the current logical leaf.
     #[must_use]
     pub fn leaf_id(&self) -> Option<String> {
         self.lock_leaf().clone()
@@ -302,8 +261,6 @@ impl SessionCursor {
         let mut leaf = self.lock_leaf();
         persist_cursor(&self.path, next.as_deref(), true)?;
         *leaf = next;
-        // The old suffix belongs to a different selected lineage. The next
-        // snapshot reseeds this with only the new branch's compactable tail.
         *self.lock_compaction_index() = None;
         Ok(())
     }
@@ -326,11 +283,6 @@ impl SessionCursor {
         })
     }
 
-    /// Atomically index the full transcript tree together with this cursor's
-    /// selected head. Intended only for branch/tree UI.
-    ///
-    /// # Errors
-    /// Returns an error when indexing fails or the selected head is absent.
     pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
@@ -351,19 +303,10 @@ impl SessionCursor {
         load_event_at(&self.path, offset)
     }
 
-    /// Read events for collapsed transcript display while skipping successful
-    /// result bodies that are not rendered in that mode.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
     pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
         load_collapsed_events_at(&self.path, offsets)
     }
 
-    /// Read events at byte offsets obtained from this cursor's snapshot.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
     pub fn events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
         load_events_at(&self.path, offsets)
     }
@@ -380,11 +323,6 @@ impl SessionCursor {
         load_event_by_id(&self.path, id)
     }
 
-    /// Visit complete events at snapshot-derived offsets one at a time. Unlike
-    /// `events_at`, this does not collect the selected payloads in memory.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_events(
         &self,
         offsets: &[u64],
@@ -393,12 +331,6 @@ impl SessionCursor {
         visit_events(&self.path, offsets, visit)
     }
 
-    /// Deserialize a small projection at snapshot-derived event offsets
-    /// without exposing the transcript path or allocating skipped payload
-    /// fields. Used by picker/recall metadata scans.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_event_values<T: serde::de::DeserializeOwned>(
         &self,
         offsets: &[u64],
@@ -407,13 +339,6 @@ impl SessionCursor {
         visit_event_values(&self.path, offsets, visit)
     }
 
-    /// Read only the display metadata for native calls at snapshot-derived
-    /// offsets. The native result field is skipped by serde's streaming
-    /// deserializer, so a large tool result is neither allocated nor retained
-    /// merely to render an exec summary.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures.
     pub fn native_tool_summaries(&self, offsets: &[u64]) -> Result<Vec<(String, String, String)>> {
         #[derive(Deserialize)]
         struct NativeToolSummary {
@@ -430,12 +355,6 @@ impl SessionCursor {
         Ok(summaries)
     }
 
-    /// Read only the first text block from user-message events. Assistant and
-    /// tool payloads in the same record shape are skipped without allocation;
-    /// startup replay uses this to build file-backed historical turn shells.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures.
     pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<String>> {
         #[derive(Deserialize)]
         struct PromptProjection {
@@ -498,27 +417,17 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Materialize this cursor's selected event lineage.
-    ///
-    /// # Errors
-    /// Propagates indexing and event parsing failures.
     pub fn load_events(&self) -> Result<Vec<SessionEvent>> {
         let leaf = self.lock_leaf();
         let (_meta, index, _size) = load_index(&self.path)?;
         load_indexed_path(&self.path, &index, leaf.as_deref())
     }
 
-    /// Materialize only the selected lineage suffix needed by compaction.
-    ///
-    /// # Errors
-    /// Propagates indexing and event parsing failures.
     pub fn load_compaction_events(&self) -> Result<Vec<SessionEvent>> {
         let leaf = self.lock_leaf();
         if let Some(index) = self.lock_compaction_index().as_ref() {
             return load_compaction_path(&self.path, index, leaf.as_deref());
         }
-        // Compatibility fallback for cursors manually constructed around an
-        // existing file. Production open/resume paths seed the suffix once.
         let (_meta, index, _size) = load_index(&self.path)?;
         let index = indexed_lineage(index, leaf.as_deref())?;
         let suffix = compaction_index_suffix(&self.path, &index)?;
@@ -527,10 +436,6 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Append one event batch to this cursor's lineage and advance its leaf.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
         let mut leaf = self.lock_leaf();
         let (start, end, next) = append_cursor_events(&self.path, events, leaf.as_deref())?;
@@ -545,10 +450,6 @@ impl SessionCursor {
         Ok((start, end))
     }
 
-    /// Append a complete compaction checkpoint and advance to its marker.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
     pub fn append_compaction(
         &self,
         kept_messages: &[Message],
@@ -719,7 +620,6 @@ impl SessionStore {
         Ok(Self { root: p })
     }
 
-    /// Construct a store at an explicit sessions root (tests / custom layouts).
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -750,8 +650,6 @@ impl SessionStore {
         Ok(cursor)
     }
 
-    /// Low-level path-returning creation helper for store tests. Active
-    /// session code must use [`Self::create_cursor`].
     fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
         let dir = self.dir_for_cwd(cwd);
         std::fs::create_dir_all(&dir)?;
@@ -817,18 +715,10 @@ impl SessionStore {
         Ok(files)
     }
 
-    /// The most recent session for `cwd`, or `None` if none exist.
-    ///
-    /// # Errors
-    /// Propagates [`list_for_cwd`](Self::list_for_cwd).
     pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
         Ok(self.list_for_cwd(cwd)?.into_iter().next())
     }
 
-    /// Find a session whose id starts with `prefix` (case-sensitive).
-    ///
-    /// # Errors
-    /// Returns [`Error::State`] if `prefix` matches more than one session.
     pub fn find(&self, cwd: &Path, prefix: &str) -> Result<Option<SessionEntry>> {
         let matches: Vec<_> = self
             .list_for_cwd(cwd)?
@@ -843,12 +733,6 @@ impl SessionStore {
     }
 }
 
-/// Load a session file: its metadata and the full event log.
-///
-/// # Errors
-/// Returns [`Error::State`] if the file is missing a header, has an
-/// unsupported version, or an event line fails to parse; [`Error::Io`] on a
-/// read failure.
 #[cfg(test)]
 fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> {
     use std::io::BufRead;
@@ -856,7 +740,6 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
     let mut reader = std::io::BufReader::new(file);
     let mut buf = String::new();
     let mut pos: u64 = 0;
-    // The first non-empty line is the session header.
     let header_line = loop {
         buf.clear();
         let n = reader.read_line(&mut buf)?;
@@ -1001,14 +884,10 @@ fn append_events_from(
     append_prepared_events(path, events)
 }
 
-/// Message-count bookkeeping persisted with a compaction checkpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct CompactionCounts {
-    /// Messages folded by this compaction, used by the visible marker.
     pub summarized: usize,
-    /// Original messages represented by the merged summary across compactions.
     pub represented: usize,
-    /// Messages retained verbatim in the tail.
     pub kept: usize,
 }
 
@@ -1076,8 +955,6 @@ fn append_compaction_from(
         kept: usize,
     }
 
-    // Keep the checkpoint batch contiguous with respect to every other lofi
-    // writer. This also makes the EOF fallback and append one transaction.
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1184,8 +1061,6 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
         .append(true)
         .create(true)
         .open(path)?;
-    // Serialize directly to disk. A complete payload buffer duplicated the
-    // whole checkpoint while its message bodies were already resident.
     for event in events {
         if let Err(error) = serde_json::to_writer(&mut file, event) {
             let _ = file.set_len(byte_start);
@@ -1204,13 +1079,6 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
     Ok((byte_start, byte_end))
 }
 
-/// Read the `id` of the last event line in `path`, or `None` if the file has
-/// no events (only a header, or empty). Used by [`append_events`] to chain a
-/// continuation onto the active leaf, and by the recorder to branch a
-/// `TurnFailed` marker off the turn's checkpoint.
-///
-/// # Errors
-/// Returns [`Error::Io`] on a read failure other than the file not existing.
 #[cfg(test)]
 fn last_event_id(path: &Path) -> Result<Option<String>> {
     use std::io::{BufRead, BufReader};
@@ -1228,7 +1096,6 @@ fn last_event_id(path: &Path) -> Result<Option<String>> {
             continue;
         }
         if first {
-            // Skip the header line.
             first = false;
             continue;
         }
@@ -1268,16 +1135,11 @@ pub fn parse_event(line: &str) -> Result<SessionEvent> {
         .map_err(|e| Error::State(format!("parse event: {e}")))
 }
 
-/// The id of the last event in `events` (the active leaf for a freshly
-/// loaded session), or `None` if there are no events.
 #[must_use]
 pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
     events.last().map(|e| e.id.as_str())
 }
 
-/// Indices of the events on the path from the leaf `leaf_id` to the root,
-/// in root-first order (oldest to newest). Returns an empty `Vec` if
-/// `leaf_id` is not found.
 #[must_use]
 pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
     let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -1302,13 +1164,11 @@ pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
     path
 }
 
-/// Active path ending at the last event.
 #[must_use]
 pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
     leaf_id(events).map_or_else(Vec::new, |id| active_path(events, id))
 }
 
-/// Raw model identity of the last completed turn on the active path.
 #[must_use]
 pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
     active_path_from_leaf(events)
@@ -1321,9 +1181,6 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
         })
 }
 
-/// Minimal owned shape used by the session picker. Unknown fields, including
-/// large tool-result and native-tool result bodies, are streamed past without
-/// allocating them.
 #[derive(Deserialize)]
 struct EntryPreview {
     #[serde(default, rename = "type")]
@@ -1352,7 +1209,6 @@ struct EntryPreviewBlock {
     text: String,
 }
 
-/// Truncate to one line without allocating a Vec containing every character.
 fn one_line(s: &str) -> String {
     let line = s.split('\n').next().unwrap_or("");
     line.char_indices()
@@ -1400,8 +1256,6 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut tail = Vec::with_capacity(usize::try_from(len - start).ok()?);
     file.read_to_end(&mut tail).ok()?;
-    // Reverse-split directly over the bounded buffer; no Vec of every line is
-    // needed. A partial record at the start simply fails projection.
     for line in tail.rsplit(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -1439,804 +1293,3 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
         .iter()
         .filter(|&&i| {
             matches!(
-                index[i].kind,
-                IndexKind::UserPrompt
-                    | IndexKind::AssistantMessage
-                    | IndexKind::ToolResult
-                    | IndexKind::SystemMessage
-            )
-        })
-        .count();
-    // Usually the first candidate is meaningful. Read newest-to-oldest and
-    // stop immediately instead of parsing every selected event.
-    let mut last_message = String::new();
-    for &i in selected.iter().rev() {
-        if matches!(index[i].kind, IndexKind::Cursor | IndexKind::Other) {
-            continue;
-        }
-        let offset = index[i].offset;
-        if visit_event_values::<EntryPreview>(path, &[offset], |event| {
-            last_message = entry_preview(&event);
-            Ok(())
-        })
-        .is_err()
-        {
-            return None;
-        }
-        if !last_message.is_empty() {
-            break;
-        }
-    }
-    Some(SessionEntry {
-        meta,
-        file: SessionFile {
-            path: path.to_path_buf(),
-            last_active,
-        },
-        message_count,
-        last_active,
-        last_message,
-    })
-}
-
-/// Write `contents` to `path` atomically: write a temp sibling, then rename.
-fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| Error::State("session path has no parent".into()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("session")
-    ));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    #![allow(clippy::expect_used)]
-
-    use super::*;
-    use lofi_types::{ContentBlock, Role, SessionEventKind, ThinkingLevel, Usage};
-
-    /// Wrap a message as a `Message` session event (`id/parent_id` left empty;
-    /// `append_events` assigns and chains them).
-    fn ev(msg: Message) -> SessionEvent {
-        SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::Message(msg),
-        }
-    }
-    use tempfile::tempdir;
-
-    fn user(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
-        }
-    }
-
-    fn assistant(text: &str) -> Message {
-        Message {
-            role: Role::Assistant,
-            blocks: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
-        }
-    }
-
-    /// A store rooted at a fresh temp dir, so tests never touch real state
-    /// and never race on the process-global `XDG_STATE_HOME` env var.
-    fn isolated_store() -> (tempfile::TempDir, SessionStore) {
-        let dir = tempdir().unwrap();
-        let store = SessionStore::new(dir.path().join("sessions"));
-        (dir, store)
-    }
-
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn collapsed_loader_skips_only_invisible_success_bodies() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/collapsed-projection"), &"p/m".into())
-            .unwrap();
-        let large = "x".repeat(128 * 1024);
-        let mut events = vec![
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text {
-                        text: "  raw prompt  \n".to_string(),
-                    }],
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::Assistant,
-                    blocks: vec![ContentBlock::ToolUse {
-                        id: "exec-1".to_string(),
-                        name: "exec".to_string(),
-                        input: serde_json::json!({"code": "x"}),
-                    }],
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::Tool,
-                    blocks: vec![ContentBlock::ToolResult {
-                        tool_use_id: "exec-1".to_string(),
-                        content: large.clone(),
-                        is_error: false,
-                    }],
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 0,
-                    name: "read".to_string(),
-                    args: "a.txt".to_string(),
-                    result: large.clone(),
-                    is_error: false,
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 1,
-                    name: "write".to_string(),
-                    args: "b.txt".to_string(),
-                    result: "visible write result".to_string(),
-                    is_error: false,
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 2,
-                    name: "read".to_string(),
-                    args: "missing".to_string(),
-                    result: "visible error".to_string(),
-                    is_error: true,
-                }),
-            },
-        ];
-        append_events(&path, &mut events, None).unwrap();
-        let (_, index, _) = load_index(&path).unwrap();
-        let offsets: Vec<_> = index
-            .iter()
-            .filter(|entry| entry.kind != IndexKind::Cursor)
-            .map(|entry| entry.offset)
-            .collect();
-        let collapsed = load_collapsed_events_at(&path, &offsets).unwrap();
-        let complete = load_events_at(&path, &offsets).unwrap();
-
-        let tool_result = match &collapsed[2].kind {
-            SessionEventKind::Message(message) => match &message.blocks[0] {
-                ContentBlock::ToolResult { content, .. } => content,
-                _ => panic!("expected tool result"),
-            },
-            _ => panic!("expected tool message"),
-        };
-        assert!(tool_result.is_empty());
-        let natives: Vec<_> = collapsed
-            .iter()
-            .filter_map(|event| match &event.kind {
-                SessionEventKind::NativeTool(record) => Some(record),
-                _ => None,
-            })
-            .collect();
-        assert!(natives[0].result.is_empty());
-        assert_eq!(natives[1].result, "visible write result");
-        assert_eq!(natives[2].result, "visible error");
-        let full_read = complete.iter().find_map(|event| match &event.kind {
-            SessionEventKind::NativeTool(record) if record.name == "read" && !record.is_error => {
-                Some(&record.result)
-            }
-            _ => None,
-        });
-        assert_eq!(full_read.map(String::len), Some(large.len()));
-        assert_eq!(
-            SessionCursor::new(path, None)
-                .prompt_texts(&[offsets[0]])
-                .unwrap(),
-            vec!["  raw prompt  \n".to_string()]
-        );
-    }
-
-    #[test]
-    fn create_load_round_trip() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/project");
-        let path = store.create(cwd, &"openai/gpt-5.6-sol".into()).unwrap();
-        let (meta, msgs, _, _) = load(&path).unwrap();
-        assert_eq!(meta.version, SESSION_VERSION);
-        assert_eq!(meta.cwd, "/tmp/project");
-        assert_eq!(meta.model, "openai/gpt-5.6-sol".into());
-        assert!(msgs.is_empty());
-    }
-
-    #[test]
-    fn turn_end_model_is_raw_not_rendered() {
-        // The session file must store the model as raw data (a `{provider, id,
-        // thinking}` object), never a rendered `provider/id:level` string —
-        // a later display-format change must not strand stale text in old files.
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/raw");
-        let path = store
-            .create(cwd, &"openai/gpt-5.6-sol:medium".into())
-            .unwrap();
-        let header = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            header.contains("\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\"}"),
-            "header model must be a raw object: {header}"
-        );
-        assert!(
-            !header.contains("\"model\":\""),
-            "header must not store a rendered model string: {header}"
-        );
-
-        let mut batch = [SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::TurnEnd {
-                model: "anthropic/claude:high".into(),
-                elapsed_ms: 5,
-                cost: 0.0,
-                usage: Usage::default(),
-            },
-        }];
-        append_events(&path, &mut batch, None).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        let turn_end_line = body.lines().last().unwrap();
-        assert!(
-            turn_end_line.contains(
-                "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"
-            ),
-            "turn-end model must be a raw object: {turn_end_line}"
-        );
-        assert!(
-            !turn_end_line.contains("\"label\""),
-            "turn-end must not carry a rendered label field: {turn_end_line}"
-        );
-        assert!(
-            !turn_end_line.contains("\"model\":\""),
-            "turn-end must not store a rendered model string: {turn_end_line}"
-        );
-    }
-
-    #[test]
-    fn compaction_checkpoint_round_trips_as_one_chain() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-checkpoint"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("old"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        let kept = [assistant("kept")];
-        let (_, _, checkpoint_leaf) = append_compaction(
-            &path,
-            &kept,
-            None,
-            "summary",
-            &["first".into(), "last".into()],
-            CompactionCounts {
-                summarized: 5,
-                represented: 5,
-                kept: 1,
-            },
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            summary,
-            ..
-        } = &events[2].kind
-        else {
-            panic!("expected compaction marker");
-        };
-        assert_eq!(summary, "summary");
-        assert_eq!(first_kept_entry_id, &events[1].id);
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-        assert_ne!(events[0].id, events[1].id);
-        assert_ne!(events[1].id, events[2].id);
-        assert_eq!(checkpoint_leaf, events[2].id);
-    }
-
-    #[test]
-    fn compaction_checkpoint_honors_branch_parent() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/compact-branch"), &"p/m".into())
-            .unwrap();
-        let mut original = [ev(user("root")), ev(assistant("latest sibling"))];
-        append_events(&path, &mut original, None).unwrap();
-
-        append_compaction(
-            &path,
-            &[assistant("checkpoint")],
-            Some(&original[0].id),
-            "summary",
-            &[original[0].id.clone(), original[0].id.clone()],
-            CompactionCounts {
-                summarized: 1,
-                represented: 1,
-                kept: 1,
-            },
-        )
-        .unwrap();
-
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
-        assert!(!active_path_from_leaf(&events).contains(&1));
-    }
-
-    #[test]
-    fn cursor_owns_lineage_across_clones_and_compaction() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-lineage"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path.clone(), None);
-
-        let mut root = [ev(user("root"))];
-        cursor.append_events(&mut root).unwrap();
-        let root_id = root[0].id.clone();
-        assert_eq!(cursor.leaf_id().as_deref(), Some(root_id.as_str()));
-
-        let clone = cursor.clone();
-        let mut reply = [ev(assistant("reply"))];
-        clone.append_events(&mut reply).unwrap();
-        assert_eq!(cursor.leaf_id().as_deref(), Some(reply[0].id.as_str()));
-
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &[root_id.clone(), reply[0].id.clone()],
-                CompactionCounts {
-                    summarized: 2,
-                    represented: 2,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-        let marker_id = cursor.leaf_id().unwrap();
-        let (_, events, _, _) = load(&path).unwrap();
-        let marker = events.iter().find(|event| event.id == marker_id).unwrap();
-        assert!(matches!(marker.kind, SessionEventKind::Compaction { .. }));
-    }
-
-    #[test]
-    fn cursor_compaction_cache_replaces_history_with_checkpoint_suffix() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-compaction-cache"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path, None);
-        let mut original = [ev(user("old")), ev(assistant("old reply"))];
-        cursor.append_events(&mut original).unwrap();
-        assert_eq!(cursor.load_compaction_events().unwrap().len(), 2);
-
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &[original[0].id.clone(), original[1].id.clone()],
-                CompactionCounts {
-                    summarized: 2,
-                    represented: 2,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-        let mut continuation = [ev(user("new")), ev(assistant("new reply"))];
-        cursor.append_events(&mut continuation).unwrap();
-
-        let events = cursor.load_compaction_events().unwrap();
-        assert_eq!(events.len(), 4);
-        assert!(matches!(
-            &events[0].kind,
-            SessionEventKind::Message(message)
-                if message.blocks.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::Text { text } if text == "kept"
-                ))
-        ));
-        assert!(matches!(
-            events[1].kind,
-            SessionEventKind::Compaction { .. }
-        ));
-        assert_eq!(events[2].id, continuation[0].id);
-        assert_eq!(events[3].id, continuation[1].id);
-        assert!(!events.iter().any(|event| event.id == original[0].id));
-        assert!(!events.iter().any(|event| event.id == original[1].id));
-    }
-
-    #[test]
-    fn cursor_selection_survives_restart_and_beats_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-restart"), &"p/m".into())
-            .unwrap();
-        let cursor = SessionCursor::new(path.clone(), None);
-        let mut trunk = [ev(user("root")), ev(assistant("old leaf"))];
-        cursor.append_events(&mut trunk).unwrap();
-        let root_id = trunk[0].id.clone();
-        let old_leaf = trunk[1].id.clone();
-
-        cursor.branch_from(root_id.clone()).unwrap();
-        drop(cursor);
-
-        let resumed = SessionCursor::open(path.clone()).unwrap();
-        assert_eq!(resumed.leaf_id().as_deref(), Some(root_id.as_str()));
-        let snapshot = resumed.snapshot().unwrap();
-        assert_eq!(snapshot.index.len(), 1);
-        assert!(snapshot.index[0].id.matches(&root_id));
-
-        let mut branch = [ev(user("new branch"))];
-        resumed.append_events(&mut branch).unwrap();
-        assert_eq!(branch[0].parent_id.as_deref(), Some(trunk[0].id.as_str()));
-        assert_ne!(branch[0].parent_id.as_deref(), Some(old_leaf.as_str()));
-
-        let reopened = SessionCursor::open(path).unwrap();
-        assert_eq!(reopened.leaf_id().as_deref(), Some(branch[0].id.as_str()));
-    }
-
-    #[test]
-    fn cursor_none_is_explicit_root_not_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-root"), &"p/m".into())
-            .unwrap();
-        let mut existing = [ev(user("existing"))];
-        append_events(&path, &mut existing, None).unwrap();
-
-        let cursor = SessionCursor::new(path.clone(), None);
-        let mut new_root = [ev(user("new root"))];
-        cursor.append_events(&mut new_root).unwrap();
-        assert!(new_root[0].parent_id.is_none());
-
-        let (_, index, _) = load_index(&path).unwrap();
-        let indexed_root = index
-            .iter()
-            .find(|event| event.id.matches(&new_root[0].id))
-            .unwrap();
-        assert!(indexed_root.parent_id.is_none());
-        assert!(load_compaction_path(&path, &index, None)
-            .unwrap()
-            .is_empty());
-        assert!(load_indexed_path(&path, &index, None).unwrap().is_empty());
-        let branch = load_indexed_path(&path, &index, Some(&new_root[0].id)).unwrap();
-        assert_eq!(branch.len(), 1);
-        assert_eq!(branch[0].id, new_root[0].id);
-    }
-
-    #[test]
-    fn cursor_compaction_none_is_explicit_root_not_physical_eof() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/cursor-compact-root"), &"p/m".into())
-            .unwrap();
-        let mut existing = [ev(user("existing"))];
-        append_events(&path, &mut existing, None).unwrap();
-
-        let cursor = SessionCursor::new(path.clone(), None);
-        cursor
-            .append_compaction(
-                &[assistant("kept")],
-                "summary",
-                &["first".into(), "last".into()],
-                CompactionCounts {
-                    summarized: 1,
-                    represented: 1,
-                    kept: 1,
-                },
-            )
-            .unwrap();
-
-        let (_, events, _, _) = load(&path).unwrap();
-        assert!(events[1].parent_id.is_none());
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-    }
-
-    #[test]
-    fn append_then_load_messages() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/proj2");
-        let path = store.create(cwd, &"openai/gpt-4o".into()).unwrap();
-        let mut batch = [ev(user("hello")), ev(assistant("hi there"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
-        );
-        // Linear chain: first event is root, second chains to first.
-        assert!(events[0].parent_id.is_none());
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
-    }
-
-    #[test]
-    fn events_round_trip_with_timings_and_cost() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/events");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::ToolTiming {
-                    tool_call_id: "t1".into(),
-                    elapsed_ms: 5,
-                },
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/m:medium".into(),
-                    elapsed_ms: 1234,
-                    cost: 0.01,
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 20,
-                        ..Usage::default()
-                    },
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-        assert!(
-            matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1")
-        );
-        assert!(
-            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
-            if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10)
-        );
-    }
-
-    #[test]
-    fn append_with_parent_hint_branches_off_target() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/branch");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        // Root chain: user -> assistant.
-        let mut first = [ev(user("a")), ev(assistant("b"))];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        // Branch a sibling user message off the root (not off the assistant).
-        let mut branch = [ev(user("alt"))];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        // 3 events total; the branch's parent is the root, not the assistant.
-        assert_eq!(events.len(), 3);
-        let branch_ev = events.iter().find(|e| {
-            matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
-                && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "alt")))
-        }).expect("branch event present");
-        assert_eq!(branch_ev.parent_id.as_deref(), Some(root_id.as_str()));
-        // active_path from the branch leaf is [root, branch] — the assistant
-        // is a sibling and excluded.
-        let path_idx = active_path(&events, &branch_ev.id);
-        assert_eq!(path_idx.len(), 2);
-        assert!(
-            matches!(&events[path_idx[0]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-        assert!(
-            matches!(&events[path_idx[1]].kind, SessionEventKind::Message(m) if m.role == Role::User)
-        );
-    }
-
-    #[test]
-    fn last_run_model_is_final_turn_on_active_path() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-final");
-        let path = store.create(cwd, &"p/orig:medium".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            ev(assistant("hey")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/switched:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-end marker is present");
-        assert_eq!(m.provider, "p");
-        assert_eq!(m.id, "switched");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn last_run_model_uses_turn_failed() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-failed");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [
-            ev(user("hi")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnFailed {
-                    model: "p/boom:low".into(),
-                    elapsed_ms: 1,
-                    error: "oops".into(),
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("a turn-failed marker is present");
-        assert_eq!(m.id, "boom");
-        assert_eq!(m.thinking, ThinkingLevel::Low);
-    }
-
-    #[test]
-    fn last_run_model_none_without_a_turn_marker() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-none");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        let mut batch = [ev(user("hi")), ev(assistant("partial"))];
-        append_events(&path, &mut batch, None).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert!(last_run_model(&events).is_none());
-    }
-
-    #[test]
-    fn last_run_model_skips_sibling_branch() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/lrm-branch");
-        let path = store.create(cwd, &"p/orig".into()).unwrap();
-        // Root chain ends with model A; a sibling branch off the root user
-        // ends with model B and is the active leaf, so B is restored (not A).
-        let mut first = [
-            ev(user("a")),
-            ev(assistant("b")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/A:medium".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut first, None).unwrap();
-        let (_meta, base, _, _) = load(&path).unwrap();
-        let root_id = base[0].id.clone();
-        let mut branch = [
-            ev(user("alt")),
-            ev(assistant("alt2")),
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::TurnEnd {
-                    model: "p/B:high".into(),
-                    elapsed_ms: 1,
-                    cost: 0.0,
-                    usage: Usage::default(),
-                },
-            },
-        ];
-        append_events(&path, &mut branch, Some(&root_id)).unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        let m = last_run_model(&events).expect("active leaf has a turn-end");
-        assert_eq!(m.id, "B");
-        assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn legacy_bare_message_lines_still_load() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/legacy");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        // Pre-event-log files stored bare Message JSON, one per line.
-        let legacy = serde_json::to_string(&user("old")).unwrap();
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(format!("{legacy}\n").as_bytes())
-            .unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-
-        let (_, index, _) = load_index(&path).unwrap();
-        assert!(index[0].id.matches(&events[0].id));
-        let recovered = load_event_by_id(&path, &index[0].id.to_event_id())
-            .unwrap()
-            .unwrap();
-        assert!(index[0].id.matches(&recovered.id));
-        assert!(matches!(&recovered.kind, SessionEventKind::Message(m) if m.role == Role::User));
-    }
-
-    #[test]
-    fn list_newest_first_and_counts() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/listy");
-        let p1 = store.create(cwd, &"m".into()).unwrap();
-        let mut batch = [ev(user("a"))];
-        append_events(&p1, &mut batch, None).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let list = store.list_for_cwd(cwd).unwrap();
-        assert_eq!(list.len(), 2);
-        // p2 was created after p1 was last written, so p2 is most recently
-        // active and should be listed first.
-        assert_eq!(list[0].file.path, p2);
-        assert_eq!(list[1].file.path, p1);
-        assert_eq!(list[1].message_count, 1);
-        assert_eq!(list[0].message_count, 0);
-    }
-
-    #[test]
-    fn most_recent_and_find_prefix() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/y");
-        let _p1 = store.create(cwd, &"m".into()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let mr = store.most_recent(cwd).unwrap().unwrap();
-        assert_eq!(mr.file.path, p2);
-        let id2 = p2.file_stem().unwrap().to_str().unwrap();
-        let prefix = &id2[..id2.find('_').unwrap()];
-        let found = store.find(cwd, prefix).unwrap().unwrap();
-        assert_eq!(found.file.path, p2);
-        assert!(store.find(cwd, "zzz").unwrap().is_none());
-    }
-
-    #[test]
-    fn slug_collapses_separators() {
-        assert_eq!(slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
-        assert_eq!(slug(Path::new("/")), "");
-    }
-}

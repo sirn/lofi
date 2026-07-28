@@ -1,14 +1,3 @@
-//! Agent-owned state tree.
-//!
-//! Resolves the one directory lofi is allowed to write to —
-//! `$LOFI_STATE_HOME/lofi/` if set, else `$XDG_STATE_HOME/lofi/` (via
-//! [`dirs::state_dir`], falling back to `~/.local/state/lofi/`) — and exposes
-//! the paths lofi cares about. `LOFI_STATE_HOME` is a direct stand-in for
-//! `XDG_STATE_HOME` (the base, with `lofi` appended), useful for hermetic
-//! tests. This is kept strictly separate from the read-only user config tree
-//! (see [`crate::config_loader`]) so that a config manager like Nix can own
-//! the config dir declaratively while lofi still has a writable home for its
-//! discovery cache, future sessions, and logs.
 
 use std::path::PathBuf;
 
@@ -98,9 +87,6 @@ mod tests {
     #[test]
     fn paths_under_xdg_state_home() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
-        // `dirs::state_dir` honors `XDG_STATE_HOME` on Linux; point it at a
-        // temp dir so the test is hermetic and does not touch the real state
-        // tree.
         let tmp = std::env::temp_dir().join("lofi_state_test_paths");
         std::env::set_var("XDG_STATE_HOME", &tmp);
 
@@ -115,13 +101,10 @@ mod tests {
         std::env::remove_var("XDG_STATE_HOME");
     }
 
-    /// `LOFI_STATE_HOME` overrides `XDG_STATE_HOME` (and the platform default),
-    /// acting as the base with `lofi` appended.
     #[test]
     fn lofi_state_home_overrides_xdg() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("lofi_state_test_lofi_override");
-        // Set both: LOFI_STATE_HOME must win.
         std::env::set_var("XDG_STATE_HOME", "/this/should/not/be/used");
         std::env::set_var("LOFI_STATE_HOME", &tmp);
 

@@ -97,11 +97,9 @@ pub struct EventIndex {
     /// instead of reading later sibling branches from the append-only file.
     pub end_offset: u64,
     pub kind: IndexKind,
-    /// Selected head carried only by cursor records.
     pub cursor_leaf: Option<IndexId>,
 }
 
-/// The kind discriminant extracted by the lightweight scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     UserPrompt,
@@ -115,22 +113,15 @@ pub enum IndexKind {
     /// non-`UserPrompt` children, but `Other` events were not tree nodes so the
     /// outcome was never displayed).
     ToolResult,
-    /// A native tool call inside an `exec` block (e.g. `lofi.read`).
-    /// Not a tree node — used to build the exec label's native-tool
-    /// summary in `/tree`.
     NativeTool,
     TurnEnd,
     TurnFailed,
-    /// An offline compaction marker. A tree node so `/tree` can revert to
-    /// the pre-compaction state (selecting it rolls back to its parent).
     Compaction,
     /// Durable logical-head metadata. Not a conversation-tree node.
     Cursor,
     Other,
 }
 
-/// Skeleton for the lightweight scan: serde ignores all fields except these
-/// (and skips `blocks`/`label`/`usage` content without allocating it).
 #[derive(Deserialize)]
 struct EventSkeleton {
     #[serde(default)]
@@ -145,9 +136,6 @@ struct EventSkeleton {
     leaf_id: Option<String>,
 }
 
-/// Deserialize one JSONL value directly from a buffered stream. Unknown fields
-/// are skipped by serde while they are read, so indexing a record with a huge
-/// tool-result body does not first copy that complete record into a String.
 fn read_jsonl_value<T, R>(reader: &mut std::io::BufReader<R>) -> Result<Option<(u64, u64, T)>>
 where
     T: serde::de::DeserializeOwned,
@@ -177,8 +165,6 @@ where
         .map_err(|error| Error::State(format!("json: {error}")))?
         .ok_or_else(|| Error::State("missing JSON value".to_string()))?;
 
-    // JSONL records may contain only whitespace after a value. Consume the
-    // separator so the exact end offset includes its trailing newline.
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -417,8 +403,6 @@ pub(super) fn visit_event_values<T: serde::de::DeserializeOwned>(
     Ok(())
 }
 
-/// Visit selected complete events one at a time without retaining their raw
-/// JSON lines or collecting the complete selected set.
 pub(super) fn visit_events(
     path: &Path,
     offsets: &[u64],
@@ -600,8 +584,6 @@ pub(super) fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<Session
     Ok(out)
 }
 
-/// Parse every non-cursor event whose line starts inside `[start, end)`.
-/// Used for lazy materialization of a committed turn range.
 pub(super) fn load_event_range(path: &Path, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
     use std::io::{Seek, SeekFrom};
 
@@ -705,9 +687,6 @@ pub(super) fn load_compaction_path(
             ..
         } = marker.kind
         {
-            // Include the marker in both cases: compact() needs its previous
-            // summary. For a non-empty checkpoint include the kept messages
-            // immediately before it as well.
             start = if first_kept_entry_id.is_empty() {
                 marker_pos
             } else {

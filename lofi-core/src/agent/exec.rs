@@ -20,12 +20,10 @@ pub(crate) fn cap_tool_result_to(content: &str, max: usize) -> String {
     )
 }
 
-/// Per-native-tool cap. See [`MAX_TOOL_RESULT_BYTES`].
 pub(crate) fn cap_tool_result(content: &str) -> String {
     cap_tool_result_to(content, MAX_TOOL_RESULT_BYTES)
 }
 
-/// Exec-level outer cap. See [`MAX_EXEC_RESULT_BYTES`].
 pub(crate) fn cap_exec_result(content: &str) -> String {
     cap_tool_result_to(content, MAX_EXEC_RESULT_BYTES)
 }
@@ -101,8 +99,6 @@ impl CodePrefixDecoder {
             }
         }
 
-        // Re-decode only the unfinished escape at the end. Normal deltas are
-        // consumed exactly once, avoiding a fresh full-prefix String per event.
         let suffix = &raw[self.processed..];
         let complete = complete_json_string_prefix(suffix);
         self.decoded

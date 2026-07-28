@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Build the initial message history (system + user).
 pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
     let mut messages = Vec::with_capacity(2);
     if !system.is_empty() {
@@ -63,18 +62,9 @@ pub async fn build_agent(
     };
 
     let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root)?;
-    // Fold any global (`<config_dir>/AGENTS.md`) and per-directory
-    // `AGENTS.md` (walked from `root` up to the git repo root) into the
-    // base system prompt after the agent is built. The `/model` switch
-    // reuses the existing agent's prompt, so the folded prompt is inherited
-    // without re-reading the files on every switch.
     let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
-    // Set the skills directory (`<config_dir>/skills`) so the agent can
-    // discover and read skill files via `lofi.skills()` / `lofi.skill(name)`.
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
     let agent = agent.with_skills_dir(skills_dir);
-    // Wire auto-mode (LLM-based pre-approval of `ask` commands) when enabled
-    // in the shell policy config.
     let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
         match super::auto_mode::build_auto_mode(&config, &registry, auto_cfg, root) {
             Ok(Some(fn_)) => agent.with_auto_mode(fn_),
@@ -134,8 +124,6 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
     out
 }
 
-/// Read an `AGENTS.md` file, returning its body only when it has
-/// non-whitespace content. Missing or unreadable files yield `None`.
 fn read_agents_md(path: &std::path::Path) -> Option<String> {
     let body = std::fs::read_to_string(path).ok()?;
     (!body.trim().is_empty()).then_some(body)
@@ -162,9 +150,6 @@ fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-/// Walk up from `start` to the first ancestor (inclusive) containing a
-/// `.git` entry — the git repo root. `None` when `start` is not inside a
-/// git repository.
 fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(d) = cur {
@@ -198,8 +183,6 @@ pub fn rebuild_agent(
     root: &std::path::Path,
 ) -> Result<(Agent, Model, ThinkingLevel)> {
     let (mut model_obj, level) = select_model(registry, config, model)?;
-    // The effective thinking level is resolved here, not in the registry, so
-    // the same cached registry serves runs at different levels.
     model_obj.thinking = level;
 
     let provider_cfg = config
@@ -241,8 +224,6 @@ pub(crate) struct ModelQuery {
 /// `:off`/`:low`/`:medium`/`:high`/`:xhigh` suffix; an unrecognized suffix is
 /// an error rather than silently ignored.
 pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
-    // Split off a trailing :level only when it parses as a level, so a model
-    // id that happens to contain : is not misread.
     let (qual, level) = match query.rsplit_once(':') {
         Some((head, tail)) if !tail.is_empty() => match ThinkingLevel::parse(tail) {
             Some(l) => (head, Some(l)),
@@ -340,10 +321,6 @@ pub fn select_model(
         )));
     }
 
-    // Use the registry's (possibly augmented) providers so auto-discovered
-    // models — which load_async injects only into the registry's copy — are
-    // resolvable here for thinking-level lookup. `config.agent` is unaffected
-    // by discovery and supplies the agent-level default.
     let pcfg = registry
         .providers()
         .get(&provider_name)
@@ -485,7 +462,6 @@ mod tests {
         fs::create_dir_all(&cfg).unwrap();
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         assert!(prompt.contains("root-only"));
-        // Only the root's section; no global (config dir has no AGENTS.md).
         assert_eq!(prompt.matches("<agents_md").count(), 1);
         assert_eq!(prompt.matches("</agents_md>").count(), 1);
     }

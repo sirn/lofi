@@ -100,9 +100,6 @@ impl ModelRegistry {
     /// the cache fallback, or [`Error::Io`] / [`Error::State`] on cache
     /// write failure.
     pub async fn load_async(config: &Config) -> Result<Self> {
-        // Augment a copy of the config with auto-discovered models so the
-        // registry (and thinking-level resolution) treats them identically to
-        // static entries. Static models always win on id collision.
         let mut augmented = config.clone();
         let cache_path = state::discovery_cache_path()?;
 
@@ -118,8 +115,6 @@ impl ModelRegistry {
             if !am.enabled {
                 continue;
             }
-            // Clone so the mutable borrow of `pcfg.auto_models` ends before
-            // `fetch_auto_models` takes an immutable borrow of `pcfg`.
             let am = am.clone();
             let ttl = Duration::from_secs(am.ttl_seconds.unwrap_or(DEFAULT_AUTO_TTL_SECS));
 
@@ -620,7 +615,6 @@ mod tests {
 
     #[test]
     fn choices_carry_thinking_levels_and_sort() {
-        // Insert in reverse so a missing sort is caught.
         let mut m = models(&["gpt-4o-mini", "gpt-4o"]);
         let gpt4o = m.get_mut("gpt-4o").unwrap();
         gpt4o.thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
@@ -814,8 +808,6 @@ mod tests {
 
     #[test]
     fn parse_auto_models_custom_pricing_paths_on_mapping() {
-        // A per-endpoint pricing-field override on the api-type mapping is
-        // used for models routed to that endpoint.
         let payload = serde_json::json!({
             "data": [
                 {"id": "m", "cost": {"in": "0.000002", "out": "0.000006"}}
@@ -855,8 +847,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn load_async_uses_cache_when_remote_unreachable() {
-        // Serialize against the state-dir tests that also mutate
-        // XDG_STATE_HOME (process-global env var).
         let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("XDG_STATE_HOME");
@@ -896,8 +886,6 @@ mod tests {
         let m = reg.resolve("anthropic/claude-opus-4").unwrap();
         assert_eq!(m.api, Api::AnthropicMessages);
 
-        // Restore the prior environment so the test does not leak
-        // XDG_STATE_HOME into sibling state-dir tests.
         match prev {
             Some(v) => std::env::set_var("XDG_STATE_HOME", v),
             None => std::env::remove_var("XDG_STATE_HOME"),

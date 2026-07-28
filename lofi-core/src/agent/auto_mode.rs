@@ -136,7 +136,6 @@ async fn evaluate_command(
     let prompt = auto_mode::build_prompt(command, &cwd.display().to_string());
 
     let mut model = model.clone();
-    // Disable thinking for the evaluation: we want a fast, cheap response.
     model.thinking = lofi_types::ThinkingLevel::Off;
     if let Some(mt) = max_tokens {
         model.max_tokens = Some(mt);

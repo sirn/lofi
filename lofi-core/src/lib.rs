@@ -9,7 +9,6 @@
 pub mod agent;
 mod bash_env;
 
-/// Re-export of [`lofi_code::docs`] for the CLI.
 pub use lofi_code::docs;
 pub mod compact;
 pub mod config_loader;
