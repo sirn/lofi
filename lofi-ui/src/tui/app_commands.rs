@@ -475,8 +475,6 @@ impl App {
                         self.cost = 0.0;
                         self.total_in = 0;
                         self.total_out = 0;
-                        self.total_cache_read = 0;
-                        self.total_cache_write = 0;
                         self.reset_compaction_gauges();
                         replay_indexed_session(self, &cursor, &index, file_size)?;
                         restore_compaction_from_index(self, &cursor, &index);
@@ -1236,8 +1234,6 @@ impl App {
         self.cost = 0.0;
         self.total_in = 0;
         self.total_out = 0;
-        self.total_cache_read = 0;
-        self.total_cache_write = 0;
         self.reset_compaction_gauges();
         replay_indexed_session(self, cursor, index, file_size)?;
         restore_compaction_from_index(self, cursor, index);

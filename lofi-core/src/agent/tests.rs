@@ -506,6 +506,7 @@ async fn run_retries_transient_provider_errors() {
     // Drain events and confirm a RetryStart then RetryEnd(success) fired.
     let mut got_start = false;
     let mut got_end_success = false;
+    let mut got_transcript_error = false;
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
         match ev {
             AgentEvent::RetryStart { attempt, .. } => {
@@ -520,11 +521,79 @@ async fn run_retries_transient_provider_errors() {
                     got_end_success = true;
                 }
             }
+            AgentEvent::Error(_) => got_transcript_error = true,
             _ => {}
         }
     }
     assert!(got_start, "expected a RetryStart event");
     assert!(got_end_success, "expected a RetryEnd(success) event");
+    assert!(
+        !got_transcript_error,
+        "a recovered transient error must not enter the transcript"
+    );
+}
+
+#[tokio::test]
+async fn successful_provider_round_resets_retry_attempt_count() {
+    // Retry once, recover with a successful tool-use request, then fail again
+    // on the following provider request. The second retry starts at 1 rather
+    // than carrying the previous request's count forward.
+    let dir = tempdir().unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let tool_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: tool_input,
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("recovered again".into()),
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let agent = agent_with(
+        vec![
+            vec![StreamingEvent::Error("HTTP 500 first".into())],
+            tool_round,
+            vec![StreamingEvent::Error("HTTP 500 second".into())],
+            final_round,
+        ],
+        dir.path(),
+    )
+    .with_retry(crate::retry::RetryPolicy {
+        max_retries: 3,
+        base_delay: Duration::from_millis(1),
+        ..Default::default()
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
+        .await
+        .unwrap();
+
+    let mut starts = Vec::new();
+    let mut successful_ends = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::RetryStart { attempt, .. } => starts.push(attempt),
+            AgentEvent::RetryEnd {
+                success: true,
+                attempt,
+                ..
+            } => successful_ends.push(attempt),
+            _ => {}
+        }
+    }
+    assert_eq!(starts, vec![1, 1]);
+    assert_eq!(successful_ends, vec![1, 1]);
 }
 
 #[tokio::test]

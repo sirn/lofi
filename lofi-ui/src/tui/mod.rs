@@ -213,22 +213,12 @@ struct ThinkingBlock {
     elapsed: Option<Duration>,
 }
 
-/// A transient provider error is being retried with exponential backoff.
-/// Shown in the status line as `⟳ retry 1/3 in 2.0s: <error>`.
+/// A transient provider error is being retried. Shown in the notification
+/// area as `Retry: 1 of 3` until the next provider request settles.
 #[derive(Debug, Clone)]
 struct RetryState {
     attempt: u32,
     max_attempts: u32,
-    /// Instant the backoff ends; the status line counts down to it.
-    deadline: Instant,
-    error: String,
-}
-
-impl RetryState {
-    /// Time remaining until the backoff elapses.
-    fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
-    }
 }
 
 /// One block in a turn's response stream.
@@ -750,10 +740,6 @@ pub(crate) struct App {
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
-    /// Cumulative prompt-cache read tokens across the session.
-    total_cache_read: u64,
-    /// Cumulative prompt-cache write tokens across the session.
-    total_cache_write: u64,
     /// Queued prompts waiting for the current run to finish. FIFO when
     /// auto-popping at turn end; LIFO when restoring via Alt+Up.
     prompt_queue: Vec<String>,
@@ -801,9 +787,8 @@ pub(crate) struct App {
     /// indicator only — the authoritative turn duration comes from the
     /// engine's `TurnEnd` event.
     run_start: Option<Instant>,
-    /// In-flight retry: the attempt number (1-indexed), the backoff deadline,
-    /// and the triggering error, shown in the status line while the agent
-    /// waits out an exponential backoff before retrying a transient failure.
+    /// In-flight retry count, shown in the notification area until the next
+    /// provider request settles.
     retry: Option<RetryState>,
     /// When true the log follows the latest output (pinned to the bottom).
     pinned: bool,

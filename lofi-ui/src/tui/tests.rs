@@ -4420,7 +4420,7 @@ fn footer_and_header_show_cost_and_usage() {
 }
 
 #[test]
-fn footer_shows_session_cache_metrics() {
+fn footer_shows_cache_percentage_without_cumulative_cache_counts() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
@@ -4440,7 +4440,37 @@ fn footer_shows_session_cache_metrics() {
         .iter()
         .map(|s| s.content.as_ref().to_string())
         .collect();
-    assert!(footer.contains("cache ↑800k ↓200k"), "footer: {footer}");
+    assert!(footer.contains("73% cached"), "footer: {footer}");
+    assert!(!footer.contains("cache ↑"), "footer: {footer}");
+}
+
+#[test]
+fn retry_notice_is_transient_status_and_resets_on_success() {
+    let mut a = app();
+    push_turn(&mut a);
+    let before = a.turns[0].blocks.len();
+
+    a.apply_event(AgentEvent::RetryStart {
+        attempt: 2,
+        max_attempts: 10,
+        delay_ms: 42_000,
+        error: "provider error: HTTP 500 Internal Server Error".to_string(),
+    });
+
+    assert_eq!(a.retry_badge().as_deref(), Some("Retry: 2 of 10"));
+    assert_eq!(
+        a.turns[0].blocks.len(),
+        before,
+        "retry status must not enter the transcript"
+    );
+
+    a.apply_event(AgentEvent::RetryEnd {
+        success: true,
+        attempt: 2,
+        final_error: None,
+    });
+    assert!(a.retry_badge().is_none());
+    assert_eq!(a.turns[0].blocks.len(), before);
 }
 
 #[test]

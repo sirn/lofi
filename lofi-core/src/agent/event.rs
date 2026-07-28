@@ -147,7 +147,9 @@ pub enum AgentEvent {
         /// Last round's token usage (the reading that crossed the hard cap).
         usage: Usage,
     },
-    /// A provider error was encountered mid-stream.
+    /// A provider error that ended the run after retry classification.
+    /// Transient errors that will be retried use RetryStart/RetryEnd instead,
+    /// so they never appear as fatal transcript rows.
     Error(String),
     /// The provider returned a transient error and the agent is waiting out
     /// the backoff before retrying the last assistant round. Emitted before

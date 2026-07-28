@@ -58,14 +58,6 @@ impl App {
                 compact_count(self.total_out)
             ));
         }
-        // Session-wide cache metrics: cumulative cache reads and writes.
-        if self.total_cache_read > 0 || self.total_cache_write > 0 {
-            segments.push(format!(
-                "cache ↑{} ↓{}",
-                compact_count(self.total_cache_read),
-                compact_count(self.total_cache_write)
-            ));
-        }
         // Context gauge: the latest turn's full prompt size (input + output +
         // cache read + cache write).
         // Cache tokens are included so the gauge reflects the real window usage
@@ -98,6 +90,14 @@ impl App {
             segments.join(sep),
             Style::new().fg(t.muted),
         )])
+    }
+
+    /// Retry badge for the mode line. Unlike ordinary notifications, this is
+    /// lifecycle-bound and remains visible until RetryEnd clears it.
+    pub(crate) fn retry_badge(&self) -> Option<String> {
+        self.retry
+            .as_ref()
+            .map(|retry| format!("Retry: {} of {}", retry.attempt, retry.max_attempts))
     }
 
     /// Queue badge for the mode line: shows a preview of the first queued

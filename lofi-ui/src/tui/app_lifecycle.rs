@@ -39,8 +39,6 @@ impl App {
 
             total_in: 0,
             total_out: 0,
-            total_cache_read: 0,
-            total_cache_write: 0,
             prompt_queue: Vec::new(),
             run: None,
             run_start: None,
@@ -174,14 +172,11 @@ impl App {
             AgentEvent::RetryStart {
                 attempt,
                 max_attempts,
-                delay_ms,
-                error,
+                ..
             } => {
                 self.retry = Some(RetryState {
                     attempt,
                     max_attempts,
-                    deadline: Instant::now() + Duration::from_millis(delay_ms),
-                    error,
                 });
                 return;
             }
@@ -227,8 +222,6 @@ impl App {
                 self.turn_has_round_usage = true;
                 self.total_in += usage.input_tokens;
                 self.total_out += usage.output_tokens;
-                self.total_cache_read += usage.cache_read_tokens;
-                self.total_cache_write += usage.cache_write_tokens;
                 self.status_usage = Some(usage);
                 self.settled_usage_fresh = true;
                 self.compacted = false;
@@ -246,8 +239,6 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
-                    self.total_cache_read += usage.cache_read_tokens;
-                    self.total_cache_write += usage.cache_write_tokens;
                     self.status_usage = Some(usage);
                 }
                 self.turn_cost = 0.0;
@@ -270,8 +261,6 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
-                    self.total_cache_read += usage.cache_read_tokens;
-                    self.total_cache_write += usage.cache_write_tokens;
                     self.status_usage = Some(usage);
                 }
                 self.turn_cost = 0.0;
@@ -290,8 +279,6 @@ impl App {
                     self.cost += cost;
                     self.total_in += usage.input_tokens;
                     self.total_out += usage.output_tokens;
-                    self.total_cache_read += usage.cache_read_tokens;
-                    self.total_cache_write += usage.cache_write_tokens;
                 }
                 self.status_usage = Some(usage);
                 self.turn_cost = 0.0;
@@ -629,12 +616,6 @@ impl App {
 
     pub(super) fn spinner_frame(&self) -> usize {
         self.run.unwrap_or(0)
-    }
-
-    /// The active retry state, if the agent is waiting out a backoff.
-    #[must_use]
-    pub(super) fn retry_state(&self) -> Option<&RetryState> {
-        self.retry.as_ref()
     }
 
     /// `model` or `model:level` — the label shown on the working / turn-end

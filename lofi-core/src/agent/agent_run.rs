@@ -158,7 +158,7 @@ impl Agent {
             if tx.is_closed() {
                 break;
             }
-            match self
+            let round = self
                 .run_once_inner(
                     &mut *messages,
                     Some(&tx),
@@ -167,22 +167,24 @@ impl Agent {
                     result.clone(),
                     cancel.as_ref(),
                 )
-                .await
-            {
+                .await;
+            // Retry budgets are per provider request, not per whole user
+            // turn. Any successful round — including one that calls a tool
+            // and continues — dismisses the retry notice and resets the next
+            // request to attempt 1.
+            if round.is_ok() && retry_attempt > 0 {
+                let _ = tx
+                    .send(AgentEvent::RetryEnd {
+                        success: true,
+                        attempt: retry_attempt,
+                        final_error: None,
+                    })
+                    .await;
+                retry_attempt = 0;
+            }
+            match round {
                 Ok(true) => {
                     finished_normally = true;
-                    // A successful assistant response concludes any in-flight
-                    // retry: a successful assistant response concludes any
-                    // in-flight retry.
-                    if retry_attempt > 0 {
-                        let _ = tx
-                            .send(AgentEvent::RetryEnd {
-                                success: true,
-                                attempt: retry_attempt,
-                                final_error: None,
-                            })
-                            .await;
-                    }
                     break;
                 }
                 Ok(false) if tx.is_closed() => {
@@ -564,9 +566,15 @@ impl Agent {
                                     }
                                 }
                                 StreamingEvent::Error(msg) => {
-                                    if !emit(tx, AgentEvent::Error(msg.clone())).await {
-                                        return Err(Error::Cancelled);
-                                    }
+                                    // Do not surface a provider error before the
+                                    // outer retry loop has classified it. A
+                                    // transient error is represented by
+                                    // RetryStart/RetryEnd only; emitting Error
+                                    // here would leave a fatal-looking row in
+                                    // the transcript even when the retry later
+                                    // succeeds. Unrecoverable errors are emitted
+                                    // by the run driver after run_continuation
+                                    // returns Err.
                                     return Err(Error::Provider(msg.clone()));
                                 }
                                 _ => {}

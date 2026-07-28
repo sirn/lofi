@@ -556,42 +556,23 @@ fn draw_scrollbar(
 }
 
 /// One-line working indicator above the prompt, shown only while a run is
-/// active. A spinner in the active tone plus a muted label. When a retry is
-/// in flight, switches to a `⟳ retry N/3 in Xs: <error>` line counting down
-/// to the backoff deadline.
+/// active. Retry progress belongs to the notification area, so this line
+/// remains stable throughout backoff and subsequent attempts.
 fn render_working(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let frame = SPINNER[app.spinner_frame() % SPINNER.len()];
-    let line = if let Some(r) = app.retry_state() {
-        let remaining = r.remaining();
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("⟳ ", Style::new().fg(active_indicator(t))),
-            Span::styled(
-                format!(
-                    "retry {}/{} in {}",
-                    r.attempt,
-                    r.max_attempts,
-                    prim::fmt_duration(remaining)
-                ),
-                Style::new().fg(t.muted),
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
+        Span::styled(
+            format!(
+                "Working for {} with ",
+                prim::fmt_duration(app.run_elapsed())
             ),
-            Span::styled(format!(": {}", r.error), Style::new().fg(t.subtle)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
-            Span::styled(
-                format!(
-                    "Working for {} with ",
-                    prim::fmt_duration(app.run_elapsed())
-                ),
-                Style::new().fg(t.subtle),
-            ),
-            Span::styled(app.run_label(), Style::new().fg(t.muted)),
-        ])
-    };
+            Style::new().fg(t.subtle),
+        ),
+        Span::styled(app.run_label(), Style::new().fg(t.muted)),
+    ]);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -733,6 +714,14 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         left.push(Span::styled(
             format!(" {badge} "),
             Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+        ));
+    } else if let Some(retry) = app.retry_badge() {
+        // Retry progress is live status, not transcript content. It remains
+        // visible until RetryEnd clears it after a successful request (or
+        // final failure).
+        left.push(Span::styled(
+            format!(" {retry} "),
+            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(queue) = app.queue_badge() {
         // Persistent queue badge (does not expire like transient badges).
