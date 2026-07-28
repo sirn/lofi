@@ -1,7 +1,4 @@
 #![allow(clippy::unwrap_used)]
-//! Searchable, scoped session-history recall, including messages folded away
-//! by compaction. The slash command and native tool share this engine and read
-//! transcripts through the session cursor.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -10,8 +7,6 @@ use lofi_types::{ContentBlock, Message, NativeToolRecord, Role, SessionEvent, Se
 
 use crate::session::store;
 
-// Re-export the public request/scope/outcome shapes so callers can reach
-// them as `lofi_core::recall::*` without depending on `lofi_types::recall`.
 pub use lofi_types::recall::{CompactionTarget, RecallOutcome, RecallRequest, RecallScope};
 
 mod file;
@@ -19,20 +14,15 @@ pub use file::recall_cursor;
 
 const PAGE_SIZE: usize = 5;
 const DEFAULT_RECENT: usize = 25;
-/// Hard cap on total search results, so a broad query can't flood the turn.
+// Hard cap on total search results, so a broad query can't flood the turn.
 const MAX_SEARCH_RESULTS: usize = 50;
-/// Don't let the agent page past this many pages; narrow the query instead.
+// Don't let the agent page past this many pages; narrow the query instead.
 const MAX_PAGES: usize = 5;
 
-/// Clip bound for the short `summary` (browse/search mode). Full content is
-/// returned on `expand`.
 const CLIP_SUMMARY: usize = 300;
 const CLIP_THINKING: usize = 150;
 const CLIP_TOOL_RESULT: usize = 200;
 
-/// A flat, rendered view of one message: the unit recall returns. `index` is
-/// the message's global index in file order (stable across scopes), so
-/// `expand` indices line up regardless of which scope produced them.
 #[derive(Debug, Clone)]
 pub struct RecallEntry {
     pub index: usize,
@@ -41,8 +31,6 @@ pub struct RecallEntry {
     pub files: Vec<String>,
 }
 
-/// A search hit: an entry plus a context snippet around the first match and
-/// the number of query terms that hit (for ranking).
 #[derive(Debug, Clone)]
 struct SearchHit {
     entry: RecallEntry,
@@ -50,13 +38,12 @@ struct SearchHit {
     match_count: usize,
 }
 
-/// Run recall over a full session event log and return the rendered output.
-///
-/// `events` is the entire transcript (every line after the header), in file
-/// order — the same slice `store::load` returns. Scoping filters *which*
-/// messages render, never the global indexing.
+// Run recall over a full session event log and return the rendered output.
+//
+// `events` is the entire transcript (every line after the header), in file
+// order — the same slice `store::load` returns. Scoping filters *which*
+// messages render, never the global indexing.
 #[must_use]
-// One cohesive transcript walk; extracting sub-steps would scatter the flow.
 #[allow(clippy::too_many_lines)]
 pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     let scope = resolve_scope(events, &req.scope);
@@ -65,8 +52,6 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         Scope::All => None,
     };
 
-    // Index native tool records by their parent exec id so the assistant
-    // renderer can attach them. Built once over the full event list.
     let mut native_by_parent: HashMap<String, Vec<&NativeToolRecord>> = HashMap::new();
     for e in events {
         if let SessionEventKind::NativeTool(rec) = &e.kind {
@@ -81,7 +66,6 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     let expand_set: std::collections::HashSet<usize> = req.expand.iter().copied().collect();
     let has_expand = !expand_set.is_empty();
 
-    // expand-without-query: render the requested indices at full content.
     if has_expand && !has_query {
         let entries = load_all_messages(events, true, allowed_ids.as_ref(), &native_by_parent);
         let by_index: HashMap<usize, RecallEntry> =
@@ -115,14 +99,9 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         };
     }
 
-    // Load clipped entries for display. Keep only borrowed references to raw
-    // messages for search/expand: cloning the full transcript here used to
-    // duplicate every tool result, and search then duplicated it a second time
-    // into a Vec<String>. On a 55 MiB session that created a ~165 MiB peak.
     let entries = load_all_messages(events, false, allowed_ids.as_ref(), &native_by_parent);
 
     if !has_query {
-        // Browse mode: most recent DEFAULT_RECENT entries, flat.
         let start = entries.len().saturating_sub(DEFAULT_RECENT);
         let recent = &entries[start..];
         let label = if matches!(scope, Scope::All) {
@@ -162,8 +141,6 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     let mut page_hits: Vec<SearchHit> =
         all_hits[start..(start + PAGE_SIZE).min(all_hits.len())].to_vec();
 
-    // Expand: swap the clipped snippet for full content on paged hits whose
-    // index is in expand_set. Re-render from the parallel raw message.
     let mut expanded: Vec<usize> = Vec::new();
     if has_expand {
         let raw_by_index: HashMap<usize, &Message> = raw_messages
@@ -241,10 +218,6 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
         format!("\n{}", footer.join("\n"))
     };
 
-    // format_recall_output takes entries; map hits back to entries (snippet
-    // carried separately). We render via the segment formatter by passing
-    // entries and letting it re-derive matches from the query — simpler to
-    // hand the hits to a dedicated formatter.
     let mut text = format_search_output(&page_hits, query, &header);
     text.push_str(&footer_text);
     RecallOutcome {
@@ -253,14 +226,9 @@ pub fn recall(events: &[SessionEvent], req: &RecallRequest) -> RecallOutcome {
     }
 }
 
-// ── scope resolution ──────────────────────────────────────────────────────
-
-/// A resolved scope: either a set of allowed event ids (lineage / compaction
-/// range) or the whole file (`All`).
 enum Scope {
     Lineage(std::collections::HashSet<String>),
     All,
-    /// `ids` is the summarized range's event ids; `label` is for display.
     Compaction {
         ids: std::collections::HashSet<String>,
         label: String,
@@ -277,8 +245,6 @@ fn resolve_scope(events: &[SessionEvent], scope: &RecallScope) -> Scope {
             Scope::Lineage(ids)
         }
         RecallScope::Compaction(target) => {
-            // Collect compaction markers on the active path, in root->leaf
-            // order, and resolve the target's summarized_range to event ids.
             let active = store::active_path_from_leaf(events);
             let compactions: Vec<&SessionEvent> = active
                 .iter()
@@ -297,10 +263,6 @@ fn resolve_scope(events: &[SessionEvent], scope: &RecallScope) -> Scope {
                 } => summarized_range.clone(),
                 _ => unreachable!(),
             };
-            // Map the [first, last] event ids to every message event id in
-            // the file between them (inclusive). On the active path this is
-            // exactly the folded range; off-path messages inside the span are
-            // excluded by intersecting with the lineage below.
             let ids = collect_range_ids(events, &range[0], &range[1]);
             Scope::Compaction {
                 ids,
@@ -323,10 +285,6 @@ fn default_lineage_ids(events: &[SessionEvent]) -> std::collections::HashSet<Str
         .collect()
 }
 
-/// Every message event id whose file position falls within `[first, last]`
-/// (inclusive). Scanning file order keeps the global-index alignment. If
-/// either endpoint id is absent (compact-all collapsed the whole live list,
-/// or a malformed marker), the range is empty.
 fn collect_range_ids(
     events: &[SessionEvent],
     first: &str,
@@ -367,11 +325,6 @@ fn scope_suffix(scope: &Scope) -> String {
     }
 }
 
-// ── loading & rendering ────────────────────────────────────────────────────
-
-/// Render every in-scope message to a flat entry, assigning global indices
-/// in file order. `full` controls clipping (search/browse = clipped, expand
-/// = full).
 fn load_all_messages(
     events: &[SessionEvent],
     full: bool,
@@ -387,18 +340,11 @@ fn load_all_messages(
                 out.push(render_message(m, message_index, full, native_by_parent));
             }
             message_index += 1;
-        } else if allowed && matches!(e.kind, SessionEventKind::NativeTool(_)) {
-            // NativeTool events are sidecars, not messages; they don't get
-            // their own index but are counted into the parent above.
-        } else if matches!(e.kind, SessionEventKind::NativeTool(_)) {
-            // not a message; index unaffected
         }
     }
     out
 }
 
-/// The raw messages parallel to `load_all_messages`'s output (same scope,
-/// same order, same global indices), kept for full-text search and expand.
 fn raw_messages<'a>(
     events: &'a [SessionEvent],
     allowed_ids: Option<&std::collections::HashSet<String>>,
@@ -413,9 +359,6 @@ fn raw_messages<'a>(
         .collect()
 }
 
-/// Render one message to a flat entry. Native tool records whose parent is
-/// a `ToolUse` id in this assistant message are attached as the tool-call
-/// surface (lofi's exec wrapper is the only LLM-facing tool).
 fn render_message(
     msg: &Message,
     index: usize,
@@ -460,8 +403,6 @@ fn render_assistant(
         match b {
             ContentBlock::ToolUse { id, name, input } => {
                 exec_ids.push(id.clone());
-                // The exec call itself; show a short code clip so recall can
-                // match against what the agent ran, not just native tools.
                 if let Some(code) = input.get("code").and_then(|v| v.as_str()) {
                     let clip_len = if full { 200 } else { 80 };
                     tools.push(format!("{name}({})", clip(code, clip_len)));
@@ -474,7 +415,6 @@ fn render_assistant(
             ContentBlock::ToolResult { .. } => {}
         }
     }
-    // Attach native tool calls (the real file/shell actions) keyed by exec id.
     for eid in &exec_ids {
         if let Some(recs) = native_by_parent.get(eid) {
             for rec in recs {
@@ -527,7 +467,6 @@ fn render_tool_result(msg: &Message, full: bool) -> String {
     parts.join("\n")
 }
 
-/// First text block's text (for user/system messages, which carry one).
 fn text_of(msg: &Message) -> String {
     msg.blocks
         .iter()
@@ -539,8 +478,6 @@ fn text_of(msg: &Message) -> String {
         .join("\n")
 }
 
-/// A short, single-line summary of a native tool's args, for the tool-call
-/// line. Shows the most informative scalar arg per tool.
 fn summarize_native_args(name: &str, args_json: &str) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args_json) else {
         return clip(args_json, 60);
@@ -564,7 +501,6 @@ fn summarize_native_args(name: &str, args_json: &str) -> String {
     s.unwrap_or_default()
 }
 
-/// Extract a path-like arg from a native tool's args for the `files` list.
 fn extract_path(name: &str, args_json: &str) -> Option<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args_json) else {
         return None;
@@ -585,10 +521,8 @@ fn extract_path(name: &str, args_json: &str) -> Option<String> {
     None
 }
 
-// ── search (BM25-lite + regex fallback) ─────────────────────────────────────
-
-/// Search the rendered entries. A query with regex metacharacters is treated
-/// as one pattern; otherwise it's tokenized into terms and ranked by BM25.
+// Search the rendered entries. A query with regex metacharacters is treated
+// as one pattern; otherwise it's tokenized into terms and ranked by BM25.
 #[allow(clippy::too_many_lines)]
 fn search_entries(entries: &[RecallEntry], messages: &[&Message], query: &str) -> Vec<SearchHit> {
     debug_assert_eq!(entries.len(), messages.len());
@@ -626,9 +560,6 @@ fn search_entries(entries: &[RecallEntry], messages: &[&Message], query: &str) -
         .map(|term| regex::Regex::new(&regex::escape(term)).unwrap())
         .collect();
 
-    // Compute BM25 statistics directly over borrowed block strings. The old
-    // path assembled a full String for every message and retained all of them
-    // in a docs Vec, duplicating the complete transcript during every recall.
     let n = messages.len();
     let lengths: Vec<usize> = messages
         .iter()
@@ -755,8 +686,6 @@ fn looks_like_regex(s: &str) -> bool {
     "|*+?{}()[]\\^$.".chars().any(|c| s.contains(c))
 }
 
-/// Try the string as a regex; fall back to an escaped literal. Caps the
-/// source length to refuse pathological patterns.
 fn safe_regex(pattern: &str) -> regex::Regex {
     if pattern.len() > 256 {
         let head: String = pattern.chars().take(64).collect();
@@ -766,12 +695,6 @@ fn safe_regex(pattern: &str) -> regex::Regex {
         .unwrap_or_else(|_| regex::Regex::new(&regex::escape(pattern)).unwrap())
 }
 
-/// ±2 lines around the first regex match, with elision markers.
-///
-/// Each included line is bounded independently. Tool outputs are commonly a
-/// single JSON line, so line-count context alone is not a size bound: copying
-/// one 100 KiB matching line used to make a five-result recall return hundreds
-/// of KiB and leave that output capacity retained by the sandbox.
 fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
     const CONTEXT_LINES: usize = 2;
     const MAX_LINE_CHARS: usize = 500;
@@ -820,7 +743,6 @@ fn line_snippet(text: &str, re: &regex::Regex) -> Option<String> {
     Some(parts.join("\n"))
 }
 
-/// Clip one long matching line while keeping the first match in view.
 fn clip_line_around_match(line: &str, re: &regex::Regex, max: usize) -> String {
     let Some(found) = re.find(line) else {
         return clip(line, max);
@@ -872,9 +794,6 @@ fn filter_stopwords<'a>(terms: &[&'a str]) -> Vec<&'a str> {
     }
 }
 
-// ── output formatting ──────────────────────────────────────────────────────
-
-/// Browse mode: one flat block per entry.
 fn format_recall_output(
     entries: &[RecallEntry],
     _query: Option<&str>,
@@ -900,9 +819,9 @@ fn format_recall_output(
     format!("{header}\n\n{body}")
 }
 
-/// Search mode: segment by turn (a segment starts at a user/assistant
-/// boundary and runs through its tool calls/results), mark matched entries,
-/// and show one segment of context on each side of the first match.
+// Search mode: segment by turn (a segment starts at a user/assistant
+// boundary and runs through its tool calls/results), mark matched entries,
+// and show one segment of context on each side of the first match.
 fn format_search_output(hits: &[SearchHit], query: &str, header: &str) -> String {
     if hits.is_empty() {
         return format!("No matches for \"{query}\".");
@@ -941,8 +860,6 @@ fn format_search_output(hits: &[SearchHit], query: &str, header: &str) -> String
     lines.join("\n")
 }
 
-/// A segment spans from the first hit to the last contiguous run sharing a
-/// turn. For a single page of hits this is just `#first-#last`.
 fn count_segments(hits: &[SearchHit]) -> usize {
     if hits.is_empty() {
         return 0;
@@ -975,9 +892,7 @@ fn segment_range(hits: &[SearchHit]) -> String {
     }
 }
 
-// ── helpers ────────────────────────────────────────────────────────────────
-
-/// Clip a string to `max` chars on a char boundary, appending `…`.
+// Clip a string to `max` chars on a char boundary, appending `…`.
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -1033,7 +948,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Last 25 entries.
         assert!(out.text.contains("#5 [user]"));
         assert!(out.text.contains("#29 [user]"));
         assert!(!out.text.contains("#4 [user]"));
@@ -1083,8 +997,6 @@ mod tests {
 
     #[test]
     fn compaction_scope_resolves_summarized_range() {
-        // Four messages, a compaction marker folding the first two into a
-        // summary, keeping the last two. summarized_range = [a, b].
         let events = vec![
             user("a", "old prompt one"),
             assistant("b", "old reply one"),
@@ -1115,7 +1027,6 @@ mod tests {
             out.text
         );
         assert!(out.text.contains("#1 [assistant]"));
-        // Kept messages are outside the compaction range.
         assert!(!out.text.contains("#2 [user]"));
     }
 
@@ -1170,7 +1081,6 @@ mod tests {
             ..Default::default()
         };
         let out = recall(&events, &req);
-        // Full content (no ellipsis clip at 300).
         assert!(!out.text.contains('…'));
         assert!(out.text.contains(&long));
     }

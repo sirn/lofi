@@ -1,5 +1,3 @@
-//! Direct, user-invoked shell execution for interactive `!command` input.
-
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt;
@@ -16,7 +14,6 @@ const CAPTURE_TAIL_BYTES: usize = 64 * 1024;
 const CONTEXT_MAX_BYTES: usize = 16 * 1024;
 const CONTEXT_MAX_LINES: usize = 40;
 
-/// Completed direct shell command, suitable for display and model context.
 #[derive(Debug, Clone)]
 pub struct UserBashResult {
     pub command: String,
@@ -50,7 +47,6 @@ impl UserBashResult {
         }
     }
 
-    /// Textual representation injected into subsequent model context.
     #[must_use]
     pub fn context_text(&self) -> String {
         let mut text = format!("Ran `{}`\n", self.command);
@@ -83,7 +79,6 @@ impl UserBashResult {
     }
 }
 
-/// Construct a cancelled result when the UI aborts an in-flight command.
 #[must_use]
 pub fn cancelled_user_bash(command: String, duration_ms: u64) -> UserBashResult {
     UserBashResult {
@@ -97,12 +92,12 @@ pub fn cancelled_user_bash(command: String, duration_ms: u64) -> UserBashResult 
     }
 }
 
-/// Run a command via `sh -c` in `root`, with no wall-clock timeout.
-/// Dropping/aborting the future kills the command's entire process group.
-///
-/// # Errors
-/// Returns an error if the shell cannot be spawned, its pipes are unavailable,
-/// or command output/status cannot be read.
+// Run a command via `sh -c` in `root`, with no wall-clock timeout.
+// Dropping/aborting the future kills the command's entire process group.
+//
+// # Errors
+// Returns an error if the shell cannot be spawned, its pipes are unavailable,
+// or command output/status cannot be read.
 pub async fn run_user_bash(root: &Path, command_text: String) -> Result<UserBashResult> {
     let mut command = Command::new("sh");
     command

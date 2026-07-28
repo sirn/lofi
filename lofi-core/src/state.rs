@@ -1,37 +1,15 @@
-//! Agent-owned state tree.
-//!
-//! Resolves the one directory lofi is allowed to write to —
-//! `$LOFI_STATE_HOME/lofi/` if set, else `$XDG_STATE_HOME/lofi/` (via
-//! [`dirs::state_dir`], falling back to `~/.local/state/lofi/`) — and exposes
-//! the paths lofi cares about. `LOFI_STATE_HOME` is a direct stand-in for
-//! `XDG_STATE_HOME` (the base, with `lofi` appended), useful for hermetic
-//! tests. This is kept strictly separate from the read-only user config tree
-//! (see [`crate::config_loader`]) so that a config manager like Nix can own
-//! the config dir declaratively while lofi still has a writable home for its
-//! discovery cache, future sessions, and logs.
-
 use std::path::PathBuf;
 
 use lofi_error::{Error, Result};
 
-/// Tests that mutate the process-global `XDG_STATE_HOME` / `LOFI_STATE_HOME`
-/// env vars acquire this lock for their whole duration. The vars are
-/// process-global, so parallel test threads otherwise interleave their
-/// `set_var`/`remove_var` and race on the assertions. Shared with the
-/// `models` tests that also point `XDG_STATE_HOME` at a temp dir.
+// Tests that mutate the process-global `XDG_STATE_HOME` / `LOFI_STATE_HOME`
+// env vars acquire this lock for their whole duration. The vars are
+// process-global, so parallel test threads otherwise interleave their
+// `set_var`/`remove_var` and race on the assertions. Shared with the
+// `models` tests that also point `XDG_STATE_HOME` at a temp dir.
 #[cfg(test)]
 pub(crate) static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Resolve the agent-owned state directory.
-///
-/// Precedence: `$LOFI_STATE_HOME` (used as the base, with `lofi` appended),
-/// then `$XDG_STATE_HOME` on Linux via [`dirs::state_dir`], then a
-/// `~/.local/state` fallback. The directory is *not* created here — call
-/// [`ensure_state_dir`] before writing.
-///
-/// # Errors
-/// Returns [`Error::State`] only when no base state directory can be
-/// determined (e.g. `HOME` is unset and `dirs::state_dir` returns `None`).
 pub fn state_dir() -> Result<PathBuf> {
     let mut base = std::env::var_os("LOFI_STATE_HOME").map(PathBuf::from);
     if base.is_none() {
@@ -47,35 +25,35 @@ pub fn state_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Path to the cached remote model-discovery file (`<state>/discovery.json`).
-///
-/// # Errors
-/// Propagates [`state_dir`]'s error if the base directory cannot be resolved.
+// Path to the cached remote model-discovery file (`<state>/discovery.json`).
+//
+// # Errors
+// Propagates [`state_dir`]'s error if the base directory cannot be resolved.
 pub fn discovery_cache_path() -> Result<PathBuf> {
     let mut path = state_dir()?;
     path.push("discovery.json");
     Ok(path)
 }
 
-/// Ensure the state directory exists, creating it (and parents) if needed,
-/// and return it.
-///
-/// # Errors
-/// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
-/// base directory cannot be resolved.
+// Ensure the state directory exists, creating it (and parents) if needed,
+// and return it.
+//
+// # Errors
+// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
+// base directory cannot be resolved.
 pub fn ensure_state_dir() -> Result<PathBuf> {
     let path = state_dir()?;
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }
 
-/// Create a fresh per-session tmp directory under `<state>/tmp/` and return
-/// its path. Used as the backing store for bash full-output logs so the model
-/// can page through truncated output via `lofi.bash_read`.
-///
-/// # Errors
-/// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
-/// base directory cannot be resolved.
+// Create a fresh per-session tmp directory under `<state>/tmp/` and return
+// its path. Used as the backing store for bash full-output logs so the model
+// can page through truncated output via `lofi.bash_read`.
+//
+// # Errors
+// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
+// base directory cannot be resolved.
 pub fn create_session_tmp_dir() -> Result<PathBuf> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut path = ensure_state_dir()?;
@@ -98,9 +76,6 @@ mod tests {
     #[test]
     fn paths_under_xdg_state_home() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
-        // `dirs::state_dir` honors `XDG_STATE_HOME` on Linux; point it at a
-        // temp dir so the test is hermetic and does not touch the real state
-        // tree.
         let tmp = std::env::temp_dir().join("lofi_state_test_paths");
         std::env::set_var("XDG_STATE_HOME", &tmp);
 
@@ -115,13 +90,10 @@ mod tests {
         std::env::remove_var("XDG_STATE_HOME");
     }
 
-    /// `LOFI_STATE_HOME` overrides `XDG_STATE_HOME` (and the platform default),
-    /// acting as the base with `lofi` appended.
     #[test]
     fn lofi_state_home_overrides_xdg() {
         let _env = super::STATE_ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join("lofi_state_test_lofi_override");
-        // Set both: LOFI_STATE_HOME must win.
         std::env::set_var("XDG_STATE_HOME", "/this/should/not/be/used");
         std::env::set_var("LOFI_STATE_HOME", &tmp);
 

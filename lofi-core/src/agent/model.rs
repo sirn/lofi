@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// Build the initial message history (system + user).
 pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
     let mut messages = Vec::with_capacity(2);
     if !system.is_empty() {
@@ -22,21 +21,6 @@ pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
     messages
 }
 
-/// Build an [`Agent`] and its selected [`Model`] from the user config and
-/// an optional `--model provider/model[:level]` query.
-///
-/// Shared by the `lofi-ui` presentation drivers (`run_print`, `run_interactive`)
-/// so the resolution ladder (config load, registry + discovery, model +
-/// thinking-level resolution, transport construction) stays in one place.
-/// With no `--model`, the first available model (config order) is selected; if
-/// no provider has credentials (or the selected provider is disabled),
-/// [`Error::NoModels`] is returned so the interactive UI can launch and show
-/// a friendly message. Remote discovery failures
-/// fall back to static-only [`ModelRegistry::load`].
-///
-/// # Errors
-/// Propagates [`Error`] from config load, model resolution, thinking-level
-/// validation, or provider construction.
 pub async fn build_agent(
     config_path: Option<&std::path::Path>,
     model: Option<&str>,
@@ -63,18 +47,9 @@ pub async fn build_agent(
     };
 
     let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root)?;
-    // Fold any global (`<config_dir>/AGENTS.md`) and per-directory
-    // `AGENTS.md` (walked from `root` up to the git repo root) into the
-    // base system prompt after the agent is built. The `/model` switch
-    // reuses the existing agent's prompt, so the folded prompt is inherited
-    // without re-reading the files on every switch.
     let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
-    // Set the skills directory (`<config_dir>/skills`) so the agent can
-    // discover and read skill files via `lofi.skills()` / `lofi.skill(name)`.
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
     let agent = agent.with_skills_dir(skills_dir);
-    // Wire auto-mode (LLM-based pre-approval of `ask` commands) when enabled
-    // in the shell policy config.
     let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
         match super::auto_mode::build_auto_mode(&config, &registry, auto_cfg, root) {
             Ok(Some(fn_)) => agent.with_auto_mode(fn_),
@@ -90,23 +65,23 @@ pub async fn build_agent(
     Ok((agent, model_obj, level, config, registry))
 }
 
-/// Assemble the agent's system prompt: the shipped [`SYSTEM_PROMPT`] followed
-/// by any `AGENTS.md` that applies to this run.
-///
-/// Two sources, ordered least to most specific so the most specific file is
-/// last and most prominent:
-/// - **Global** — `<config_dir>/AGENTS.md`, user-wide instructions kept next
-///   to the config file. Skipped when `config_dir` is `None`.
-/// - **Per-directory** — every `AGENTS.md` found walking from the workspace
-///   `root` up to the enclosing git repo root (inclusive). Walking stops at
-///   the repo boundary so unrelated ancestor directories never contribute;
-///   when `root` is not inside a git repository only `root`'s own
-///   `AGENTS.md` is considered. Files are ordered outermost-first.
-///
-/// Missing or whitespace-only files are skipped. When none are found the base
-/// [`SYSTEM_PROMPT`] is returned unchanged. Otherwise each found file is
-/// appended as an `agents_md` XML block (with a `source` attribute naming
-/// its origin) after the unwrapped base prompt.
+// Assemble the agent's system prompt: the shipped [`SYSTEM_PROMPT`] followed
+// by any `AGENTS.md` that applies to this run.
+//
+// Two sources, ordered least to most specific so the most specific file is
+// last and most prominent:
+// - **Global** — `<config_dir>/AGENTS.md`, user-wide instructions kept next
+//   to the config file. Skipped when `config_dir` is `None`.
+// - **Per-directory** — every `AGENTS.md` found walking from the workspace
+//   `root` up to the enclosing git repo root (inclusive). Walking stops at
+//   the repo boundary so unrelated ancestor directories never contribute;
+//   when `root` is not inside a git repository only `root`'s own
+//   `AGENTS.md` is considered. Files are ordered outermost-first.
+//
+// Missing or whitespace-only files are skipped. When none are found the base
+// [`SYSTEM_PROMPT`] is returned unchanged. Otherwise each found file is
+// appended as an `agents_md` XML block (with a `source` attribute naming
+// its origin) after the unwrapped base prompt.
 fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
 
@@ -134,17 +109,15 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
     out
 }
 
-/// Read an `AGENTS.md` file, returning its body only when it has
-/// non-whitespace content. Missing or unreadable files yield `None`.
 fn read_agents_md(path: &std::path::Path) -> Option<String> {
     let body = std::fs::read_to_string(path).ok()?;
     (!body.trim().is_empty()).then_some(body)
 }
 
-/// Collect `(origin, body)` pairs for every `AGENTS.md` from `root` up to
-/// the enclosing git repo root (inclusive), ordered outermost-first. When
-/// `root` is not inside a git repository only `root`'s own `AGENTS.md` is
-/// considered, so the walk never escapes into unrelated ancestor directories.
+// Collect `(origin, body)` pairs for every `AGENTS.md` from `root` up to
+// the enclosing git repo root (inclusive), ordered outermost-first. When
+// `root` is not inside a git repository only `root`'s own `AGENTS.md` is
+// considered, so the walk never escapes into unrelated ancestor directories.
 fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     let boundary = git_boundary(root).unwrap_or_else(|| root.to_path_buf());
     let mut found: Vec<(String, String)> = Vec::new();
@@ -162,9 +135,6 @@ fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-/// Walk up from `start` to the first ancestor (inclusive) containing a
-/// `.git` entry — the git repo root. `None` when `start` is not inside a
-/// git repository.
 fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(d) = cur {
@@ -176,20 +146,20 @@ fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-/// Build an [`Agent`] for a selected model from an already-loaded
-/// [`ModelRegistry`] and [`Config`], reusing an existing agent's per-session
-/// tmp directory, root, system prompt, retry budget, and bash policy when
-/// `existing` is given.
-///
-/// The startup path passes `None` and gets a fresh agent (a new tmp dir).
-/// The `/model` selector passes the live agent so the switch doesn't orphan
-/// `lofi.bash` full-output logs or `lofi.bash_read` state. This is sync and
-/// side-effect-free beyond provider construction, so a switch never blocks
-/// the UI on remote discovery — the registry is retained from startup.
-///
-/// # Errors
-/// Propagates [`Error`] from model resolution, thinking-level validation,
-/// or provider construction.
+// Build an [`Agent`] for a selected model from an already-loaded
+// [`ModelRegistry`] and [`Config`], reusing an existing agent's per-session
+// tmp directory, root, system prompt, retry budget, and bash policy when
+// `existing` is given.
+//
+// The startup path passes `None` and gets a fresh agent (a new tmp dir).
+// The `/model` selector passes the live agent so the switch doesn't orphan
+// `lofi.bash` full-output logs or `lofi.bash_read` state. This is sync and
+// side-effect-free beyond provider construction, so a switch never blocks
+// the UI on remote discovery — the registry is retained from startup.
+//
+// # Errors
+// Propagates [`Error`] from model resolution, thinking-level validation,
+// or provider construction.
 pub fn rebuild_agent(
     existing: Option<&Agent>,
     registry: &ModelRegistry,
@@ -198,8 +168,6 @@ pub fn rebuild_agent(
     root: &std::path::Path,
 ) -> Result<(Agent, Model, ThinkingLevel)> {
     let (mut model_obj, level) = select_model(registry, config, model)?;
-    // The effective thinking level is resolved here, not in the registry, so
-    // the same cached registry serves runs at different levels.
     model_obj.thinking = level;
 
     let provider_cfg = config
@@ -227,22 +195,19 @@ pub fn rebuild_agent(
     Ok((agent, model_obj, level))
 }
 
-/// A parsed --model query: provider/model[:level].
 pub(crate) struct ModelQuery {
     provider: String,
     model: String,
     level: Option<ThinkingLevel>,
 }
 
-/// Parse a `--model` argument of the form `provider/model[:level]`.
-///
-/// The provider qualifier is mandatory: bare ids are rejected so a prompt
-/// always names the endpoint it runs against. `level` is an optional
-/// `:off`/`:low`/`:medium`/`:high`/`:xhigh` suffix; an unrecognized suffix is
-/// an error rather than silently ignored.
+// Parse a `--model` argument of the form `provider/model[:level]`.
+//
+// The provider qualifier is mandatory: bare ids are rejected so a prompt
+// always names the endpoint it runs against. `level` is an optional
+// `:off`/`:low`/`:medium`/`:high`/`:xhigh` suffix; an unrecognized suffix is
+// an error rather than silently ignored.
 pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
-    // Split off a trailing :level only when it parses as a level, so a model
-    // id that happens to contain : is not misread.
     let (qual, level) = match query.rsplit_once(':') {
         Some((head, tail)) if !tail.is_empty() => match ThinkingLevel::parse(tail) {
             Some(l) => (head, Some(l)),
@@ -271,20 +236,20 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
 
 pub(crate) const NO_MODELS_HINT: &str = "No models configured.";
 
-/// Pick the model to run against and resolve its thinking level.
-///
-/// With a `model_query` of `provider/model[:level]`, the named model is resolved
-/// within the named provider and must be available (its provider
-/// authenticated or `no_auth`). Without a query, the first available model in
-/// registry (config) order is chosen. The thinking level resolves from the
-/// CLI `:level`, then the model/provider/agent defaults, then `medium`; it must
-/// be `off` or one of the model's declared `thinking_levels`.
-///
-/// # Errors
-/// Returns [`Error::NoModels`] when no model is available, or when the named
-/// model's provider is disabled (no credentials); [`Error::Config`] for an
-/// unresolvable query, an unknown model/provider, or an unsupported thinking
-/// level.
+// Pick the model to run against and resolve its thinking level.
+//
+// With a `model_query` of `provider/model[:level]`, the named model is resolved
+// within the named provider and must be available (its provider
+// authenticated or `no_auth`). Without a query, the first available model in
+// registry (config) order is chosen. The thinking level resolves from the
+// CLI `:level`, then the model/provider/agent defaults, then `medium`; it must
+// be `off` or one of the model's declared `thinking_levels`.
+//
+// # Errors
+// Returns [`Error::NoModels`] when no model is available, or when the named
+// model's provider is disabled (no credentials); [`Error::Config`] for an
+// unresolvable query, an unknown model/provider, or an unsupported thinking
+// level.
 pub fn select_model(
     registry: &ModelRegistry,
     config: &lofi_types::Config,
@@ -295,12 +260,9 @@ pub fn select_model(
         let mq = parse_model_query(q)?;
         (mq.provider, mq.model, mq.level)
     } else if let Some(default) = config.default_model.as_deref() {
-        // `default_model` wins: parse it as a `provider/model[:level]` query
-        // so a bare id is rejected the same way an explicit `--model` is.
         let mq = parse_model_query(default)?;
         (mq.provider, mq.model, mq.level)
     } else if let Some(provider) = config.default_provider.as_deref() {
-        // `default_provider` selects that provider's first available model.
         let m = available
             .iter()
             .find(|a| a.provider == provider)
@@ -340,10 +302,6 @@ pub fn select_model(
         )));
     }
 
-    // Use the registry's (possibly augmented) providers so auto-discovered
-    // models — which load_async injects only into the registry's copy — are
-    // resolvable here for thinking-level lookup. `config.agent` is unaffected
-    // by discovery and supplies the agent-level default.
     let pcfg = registry
         .providers()
         .get(&provider_name)
@@ -357,14 +315,6 @@ pub fn select_model(
     Ok((model, level))
 }
 
-/// Resolve the effective thinking level for a run.
-///
-/// Precedence: explicit CLI `:level`, then model default, then provider
-/// default, then agent default, then `medium`. `off` is always allowed. A
-/// non-`off` level must appear in the model's declared `thinking_levels`; if
-/// the model declares none it does not support thinking and a non-`off`
-/// explicit request is an error (an implicit default is silently clamped to
-/// `off`).
 pub(crate) fn resolve_thinking_level(
     explicit: Option<ThinkingLevel>,
     mc: &lofi_types::ModelConfig,
@@ -485,7 +435,6 @@ mod tests {
         fs::create_dir_all(&cfg).unwrap();
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         assert!(prompt.contains("root-only"));
-        // Only the root's section; no global (config dir has no AGENTS.md).
         assert_eq!(prompt.matches("<agents_md").count(), 1);
         assert_eq!(prompt.matches("</agents_md>").count(), 1);
     }

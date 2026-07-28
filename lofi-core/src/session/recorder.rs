@@ -1,18 +1,18 @@
-//! Durable-event recorder: translates a finished turn into the
-//! [`SessionEvent`] subset that gets appended to the transcript.
-//!
-//! This is the single place that shapes `SessionEvent`s, so the agent loop
-//! (`agent::run_continuation`) is free of on-disk-format concerns — it emits
-//! `AgentEvent`s to the live channel and, at turn end, hands the recorder the
-//! growing message slice plus a [`TurnSummary`] of the engine's accumulators.
-//! The recorder appends the newly completed suffix after each round, then
-//! writes the terminal marker when the turn settles.
-//!
-//! The recorder is checkpoint-based rather than a streaming subscriber:
-//! native-tool events originate in a synchronous sandbox callback and are
-//! accumulated in `TurnStats`. Snapshotting at clean provider-round boundaries
-//! keeps complete assistant/tool-result cycles durable without duplicating the
-//! live event fan-out machinery.
+// Durable-event recorder: translates a finished turn into the
+// [`SessionEvent`] subset that gets appended to the transcript.
+//
+// This is the single place that shapes `SessionEvent`s, so the agent loop
+// (`agent::run_continuation`) is free of on-disk-format concerns — it emits
+// `AgentEvent`s to the live channel and, at turn end, hands the recorder the
+// growing message slice plus a [`TurnSummary`] of the engine's accumulators.
+// The recorder appends the newly completed suffix after each round, then
+// writes the terminal marker when the turn settles.
+//
+// The recorder is checkpoint-based rather than a streaming subscriber:
+// native-tool events originate in a synchronous sandbox callback and are
+// accumulated in `TurnStats`. Snapshotting at clean provider-round boundaries
+// keeps complete assistant/tool-result cycles durable without duplicating the
+// live event fan-out machinery.
 
 use std::{collections::HashSet, path::Path};
 
@@ -21,62 +21,37 @@ use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEvent
 use crate::session::store;
 use lofi_error::Result;
 
-/// How a turn ended, for [`SessionRecorder::flush`]. Determines whether a
-/// `TurnEnd`, `TurnFailed`, or no terminal marker is written.
 #[derive(Debug, Clone)]
 pub enum TurnOutcome {
-    /// The turn completed normally — write a `TurnEnd` marker.
     Finished,
-    /// The turn ended in a non-retryable error or was cancelled — write a
-    /// `TurnFailed` marker carrying the error message. The turn's messages
-    /// and timings are still written so the failed attempt is visible in the
-    /// tree and its consumed tokens are honestly accounted for;
-    /// `messages_from_events` then skips the failed turn's messages when
-    /// building the agent's history on resume (so the model is not fed
-    /// partial/errored content) while the UI still renders them.
     Failed(String),
-    /// The run was force-stopped at the hard context cap mid-turn. The
-    /// partial turn's messages and timings are written (so a following
-    /// compaction can keep the latest turn verbatim and `messages_from_events`
-    /// includes them), but NO terminal marker is written — the turn did not
-    /// finish or fail, and the UI is signaled via a live `ContextPressure`
-    /// event instead. Behaves like [`Cancelled`] for the empty-input
-    /// short-circuit (no terminal marker).
+    // The run was force-stopped at the hard context cap mid-turn. The
+    // partial turn's messages and timings are written (so a following
+    // compaction can keep the latest turn verbatim and `messages_from_events`
+    // includes them), but NO terminal marker is written — the turn did not
+    // finish or fail, and the UI is signaled via a live `ContextPressure`
+    // event instead. Behaves like [`Cancelled`] for the empty-input
+    // short-circuit (no terminal marker).
     ContextPressure,
-    /// The turn was abandoned before it produced anything worth recording —
-    /// write no terminal marker (and the flush's empty-input short-circuit
-    /// applies).
     Cancelled,
 }
 
-/// A finished turn's engine-side accumulators, snapshotted at commit time and
-/// handed to [`SessionRecorder::flush`]. Built from the agent's private
-/// `TurnStats` so the recorder only depends on public data.
 #[derive(Debug, Clone)]
 pub struct TurnSummary {
-    /// Wall-clock duration of the whole turn in milliseconds.
     pub elapsed_ms: u64,
-    /// Accumulated USD cost across the turn's rounds.
     pub cost: f64,
-    /// Final round's token usage (drives the context gauge).
     pub usage: Usage,
-    /// `(tool_call_id, elapsed_ms)` for each tool call this turn, so the
-    /// exec block's `took Ns` marker survives resume.
     pub tool_elapsed: Vec<(String, u64)>,
-    /// Wall-clock duration of each assistant thinking block this turn, in
-    /// emission order, so the "Thought for Ns" marker survives resume.
     pub thinking_elapsed: Vec<u64>,
-    /// Native tool calls (`lofi.<tool>`) that ran inside `exec` blocks this
-    /// turn, in the order they were captured.
     pub native_tools: Vec<NativeToolRecord>,
 }
 
-/// Writes one turn's durable [`SessionEvent`]s to the transcript.
-///
-/// Construct one per persisted turn when a session cursor is available
-/// and call [`flush`](Self::flush) once when the turn is done. `flush` is
-/// idempotent — a second call writes nothing — so it is safe to call after
-/// both a normal `TurnEnd` and an error path.
+// Writes one turn's durable [`SessionEvent`]s to the transcript.
+//
+// Construct one per persisted turn when a session cursor is available
+// and call [`flush`](Self::flush) once when the turn is done. `flush` is
+// idempotent — a second call writes nothing — so it is safe to call after
+// both a normal `TurnEnd` and an error path.
 #[derive(Debug)]
 pub struct SessionRecorder {
     cursor: store::SessionCursor,
@@ -91,8 +66,6 @@ pub struct SessionRecorder {
 }
 
 impl SessionRecorder {
-    /// Wrap a shared transcript cursor + the raw model identity used for the
-    /// `SessionEvent::TurnEnd` marker.
     #[must_use]
     pub fn new(cursor: store::SessionCursor, model: RunModel) -> Self {
         Self {
@@ -108,12 +81,12 @@ impl SessionRecorder {
         }
     }
 
-    /// Append everything completed since the previous checkpoint, without a
-    /// terminal marker. Called after each provider/tool round so a long turn
-    /// is durable before the whole agent loop settles.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
+    // Append everything completed since the previous checkpoint, without a
+    // terminal marker. Called after each provider/tool round so a long turn
+    // is durable before the whole agent loop settles.
+    //
+    // # Errors
+    // Propagates transcript serialization and I/O failures.
     pub fn checkpoint(
         &mut self,
         messages: &[Message],
@@ -125,12 +98,12 @@ impl SessionRecorder {
         self.append_pending(messages, summary, None)
     }
 
-    /// Flush the remaining durable data and terminal marker for this turn.
-    /// Messages/timings already written by [`checkpoint`](Self::checkpoint)
-    /// are not duplicated.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
+    // Flush the remaining durable data and terminal marker for this turn.
+    // Messages/timings already written by [`checkpoint`](Self::checkpoint)
+    // are not duplicated.
+    //
+    // # Errors
+    // Propagates transcript serialization and I/O failures.
     pub fn flush(
         &mut self,
         messages: &[Message],
@@ -233,7 +206,6 @@ impl SessionRecorder {
         }
     }
 
-    /// The transcript path this recorder writes to.
     #[must_use]
     pub fn path(&self) -> &Path {
         self.cursor.path()
@@ -314,14 +286,11 @@ mod tests {
             .flush(&messages, &TurnOutcome::Finished, &summary(100))
             .unwrap()
             .expect("wrote something");
-        // Second flush is a no-op.
         assert!(rec
             .flush(&messages, &TurnOutcome::Finished, &summary(100))
             .unwrap()
             .is_none());
         let events = cursor.load_tree_events().unwrap();
-        // Expected order: 3 messages, native tool, tool timing, thinking
-        // timing, turn end.
         let mut i = 0;
         assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
@@ -368,8 +337,6 @@ mod tests {
             other => panic!("expected turn end, got {other:?}"),
         }
         assert_eq!(events.len(), i + 1);
-        // Every flushed event got an id and chains to the previous one
-        // (first event's parent is None — root of the file).
         assert!(!events[0].id.is_empty());
         assert!(events[0].parent_id.is_none());
         for w in events.windows(2) {
@@ -461,8 +428,6 @@ mod tests {
             .unwrap();
         let first_leaf = cursor.leaf_id().unwrap();
 
-        // Simulate another resumed process appending a sibling after our
-        // checkpoint, making its event physical EOF.
         let mut sibling = [SessionEvent {
             id: String::new(),
             parent_id: None,
@@ -534,7 +499,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, header()).unwrap();
-        // Both turns share one cursor, which advances after the first flush.
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut rec1 = SessionRecorder::new(cursor.clone(), "m".into());
         rec1.flush(
@@ -551,10 +515,6 @@ mod tests {
         )
         .unwrap();
 
-        // Second turn: failed. Its messages + TurnFailed marker chain
-        // linearly off the first turn's TurnEnd (same shape as a successful
-        // turn), so the failed turn's content stays on the active path and
-        // remains visible on resume.
         let mut rec2 = SessionRecorder::new(cursor.clone(), "m".into());
         rec2.flush(
             &[user_msg("second"), assistant_text("partial")],

@@ -7,7 +7,6 @@ use futures::{stream, StreamExt};
 use lofi_types::{Api, SessionEventKind, Usage};
 use tempfile::tempdir;
 
-/// A canned provider that pops one `Vec<StreamingEvent>` per call.
 struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamingEvent>>>,
 }
@@ -160,7 +159,6 @@ fn cap_exec_result_uses_larger_outer_limit() {
     assert!(mid.len() < MAX_EXEC_RESULT_BYTES);
     assert_eq!(cap_exec_result(&mid), mid);
     assert_ne!(cap_tool_result(&mid), mid);
-    // And the outer cap still truncates when exceeded.
     let huge = "x".repeat(MAX_EXEC_RESULT_BYTES + 5000);
     let capped = cap_exec_result(&huge);
     assert!(capped.contains("[output truncated:"));
@@ -284,7 +282,6 @@ async fn run_once_tool_call_executes_and_appends_result() {
 
     let finished = agent.run_once(&mut messages).await.unwrap();
     assert!(!finished);
-    // assistant turn + tool-role tool results.
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[2].role, Role::Tool);
     let ContentBlock::ToolResult {
@@ -379,9 +376,6 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
 
 #[tokio::test]
 async fn run_continuation_force_stops_at_hard_cap() {
-    // A tool-use loop whose second round crosses the hard context cap must
-    // force-stop with `ContextPressure` (no `TurnEnd`) and leave the partial
-    // turn's messages in place (ending in a tool result, a matched cycle).
     let dir = tempdir().unwrap();
     let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
     let tool_round = |input_tokens| {
@@ -445,7 +439,6 @@ async fn run_continuation_force_stops_at_hard_cap() {
     }
     assert!(saw_pressure, "expected a ContextPressure event");
     assert!(!saw_turn_end, "hard-cap stop must not emit TurnEnd");
-    // The partial turn ends in a tool result (matched cycle), kept verbatim.
     assert_eq!(messages.last().unwrap().role, Role::Tool);
 }
 
@@ -481,8 +474,6 @@ async fn run_once_tool_error_marks_result_error() {
 
 #[tokio::test]
 async fn run_retries_transient_provider_errors() {
-    // First round: a transient 429. Second round: success. The agent
-    // should emit RetryStart/RetryEnd and recover.
     let dir = tempdir().unwrap();
     let round1 = vec![StreamingEvent::Error("HTTP 429 Too Many Requests".into())];
     let round2 = vec![
@@ -501,7 +492,6 @@ async fn run_retries_transient_provider_errors() {
         .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
         .await;
     assert!(result.is_ok(), "should recover: {result:?}");
-    // Drain events and confirm a RetryStart then RetryEnd(success) fired.
     let mut got_start = false;
     let mut got_end_success = false;
     let mut got_transcript_error = false;
@@ -533,9 +523,6 @@ async fn run_retries_transient_provider_errors() {
 
 #[tokio::test]
 async fn successful_provider_round_resets_retry_attempt_count() {
-    // Retry once, recover with a successful tool-use request, then fail again
-    // on the following provider request. The second retry starts at 1 rather
-    // than carrying the previous request's count forward.
     let dir = tempdir().unwrap();
     let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
     let tool_round = vec![
@@ -596,8 +583,6 @@ async fn successful_provider_round_resets_retry_attempt_count() {
 
 #[tokio::test]
 async fn run_does_not_retry_non_transient_errors() {
-    // A 401 Unauthorized is not retryable: the run should surface the error
-    // immediately without consuming a second round.
     let dir = tempdir().unwrap();
     let round1 = vec![StreamingEvent::Error("401 Unauthorized".into())];
     let round2 = vec![
@@ -629,7 +614,6 @@ async fn run_exits_when_receiver_dropped() {
         dir.path(),
     );
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentEvent>(8);
-    // Drop the receiver before running so the channel is closed.
     drop(rx);
     // The run should exit gracefully (Ok) rather than hang or surface an
     // error: a dropped receiver is a cancellation, not a provider fault.
@@ -645,7 +629,6 @@ use lofi_types::{
     PricingFieldMappings, ProviderConfig, ThinkingLevel,
 };
 
-/// A model config declaring the full low/medium/high/xhigh set, no default.
 fn mc() -> ModelConfig {
     ModelConfig {
         name: None,
@@ -881,7 +864,6 @@ fn select_model_uses_default_model_when_no_query() {
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
-    // default_model wins over first-available.
     assert_eq!(m.provider, "anthropic");
     assert_eq!(m.id, "claude");
 }
@@ -919,7 +901,6 @@ fn select_model_uses_default_provider_when_no_query() {
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
-    // default_provider selects that provider's first available model.
     assert_eq!(m.provider, "anthropic");
     assert_eq!(m.id, "claude");
 }
@@ -957,7 +938,6 @@ fn select_model_default_model_overrides_default_provider() {
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
-    // default_model wins over default_provider.
     assert_eq!(m.provider, "openai");
     assert_eq!(m.id, "gpt-4o");
 }
@@ -995,7 +975,6 @@ fn select_model_explicit_query_overrides_defaults() {
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, Some("anthropic/claude")).unwrap();
-    // Explicit --model wins over both defaults.
     assert_eq!(m.provider, "anthropic");
     assert_eq!(m.id, "claude");
 }
@@ -1093,8 +1072,6 @@ fn add_usage_bills_cache_tokens_at_their_own_rate() {
         },
         &model,
     );
-    // 1M input @ $1 + 2M cache-read @ $0.1 + 1M cache-write @ $0.5 + 1M output @ $2
-    // = 1 + 0.2 + 0.5 + 2 = $3.70
     assert!((stats.cost - 3.70).abs() < 1e-9, "cost was {}", stats.cost);
 }
 
@@ -1127,6 +1104,5 @@ fn add_usage_falls_back_to_input_rate_when_cache_prices_unset() {
         },
         &model,
     );
-    // 1M input + 2M cache-read + 1M cache-write all @ $1 = $4, plus 1M output @ $2 = $6
     assert!((stats.cost - 6.0).abs() < 1e-9, "cost was {}", stats.cost);
 }

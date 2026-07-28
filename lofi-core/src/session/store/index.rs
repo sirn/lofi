@@ -1,8 +1,8 @@
-//! Lightweight session-file index: scan an event log for just the tree
-//! shape (ids, parent ids, kinds, byte offsets) without deserializing
-//! message content, and random-access a single event by offset.
-//!
-//! Used by the `/tree` picker to avoid a full [`super::load`].
+// Lightweight session-file index: scan an event log for just the tree
+// shape (ids, parent ids, kinds, byte offsets) without deserializing
+// message content, and random-access a single event by offset.
+//
+// Used by the `/tree` picker to avoid a full [`super::load`].
 
 use std::path::Path;
 
@@ -11,10 +11,10 @@ use lofi_types::{SessionEvent, SessionEventKind};
 use serde::Deserialize;
 
 use super::{Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION};
-/// Compact event identifier used by the file index. Current transcript IDs are
-/// 32 hexadecimal UUID digits, so keeping them as inline integers avoids two
-/// heap allocations per event (id + parent id). Legacy and unusual external
-/// IDs remain supported without changing the on-disk format.
+// Compact event identifier used by the file index. Current transcript IDs are
+// 32 hexadecimal UUID digits, so keeping them as inline integers avoids two
+// heap allocations per event (id + parent id). Legacy and unusual external
+// IDs remain supported without changing the on-disk format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexId(IndexIdRepr);
 
@@ -82,55 +82,43 @@ impl IndexId {
     }
 }
 
-/// Lightweight per-event index entry: just enough to build the event tree
-/// structure (id, `parent_id`, offset) and identify tree-node kinds, without
-/// deserializing message content. Used by `/tree` to avoid a full `load`.
+// Lightweight per-event index entry: just enough to build the event tree
+// structure (id, `parent_id`, offset) and identify tree-node kinds, without
+// deserializing message content. Used by `/tree` to avoid a full `load`.
 #[derive(Debug, Clone)]
 pub struct EventIndex {
     pub id: IndexId,
     pub parent_id: Option<IndexId>,
-    /// Byte offset of this event's line in the file — for random-access
-    /// label loading via [`load_event_at`].
     pub offset: u64,
-    /// Byte offset immediately after this event line. Keeping the exact line
-    /// end lets file-backed branch replay stop at the selected lineage event
-    /// instead of reading later sibling branches from the append-only file.
+    // Byte offset immediately after this event line. Keeping the exact line
+    // end lets file-backed branch replay stop at the selected lineage event
+    // instead of reading later sibling branches from the append-only file.
     pub end_offset: u64,
     pub kind: IndexKind,
-    /// Selected head carried only by cursor records.
     pub cursor_leaf: Option<IndexId>,
 }
 
-/// The kind discriminant extracted by the lightweight scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     UserPrompt,
     UserBash,
     AssistantMessage,
     SystemMessage,
-    /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
-    /// so the tree can show it as a `tool:` node and `find_turn_outcome` can
-    /// follow it (it was previously `Other`, which caused `find_turn_outcome`
-    /// to miss turn outcomes for turns with tool calls — the function follows
-    /// non-`UserPrompt` children, but `Other` events were not tree nodes so the
-    /// outcome was never displayed).
+    // A tool-result message (`role: tool`). Distinguished from `UserPrompt`
+    // so the tree can show it as a `tool:` node and `find_turn_outcome` can
+    // follow it (it was previously `Other`, which caused `find_turn_outcome`
+    // to miss turn outcomes for turns with tool calls — the function follows
+    // non-`UserPrompt` children, but `Other` events were not tree nodes so the
+    // outcome was never displayed).
     ToolResult,
-    /// A native tool call inside an `exec` block (e.g. `lofi.read`).
-    /// Not a tree node — used to build the exec label's native-tool
-    /// summary in `/tree`.
     NativeTool,
     TurnEnd,
     TurnFailed,
-    /// An offline compaction marker. A tree node so `/tree` can revert to
-    /// the pre-compaction state (selecting it rolls back to its parent).
     Compaction,
-    /// Durable logical-head metadata. Not a conversation-tree node.
     Cursor,
     Other,
 }
 
-/// Skeleton for the lightweight scan: serde ignores all fields except these
-/// (and skips `blocks`/`label`/`usage` content without allocating it).
 #[derive(Deserialize)]
 struct EventSkeleton {
     #[serde(default)]
@@ -145,9 +133,6 @@ struct EventSkeleton {
     leaf_id: Option<String>,
 }
 
-/// Deserialize one JSONL value directly from a buffered stream. Unknown fields
-/// are skipped by serde while they are read, so indexing a record with a huge
-/// tool-result body does not first copy that complete record into a String.
 fn read_jsonl_value<T, R>(reader: &mut std::io::BufReader<R>) -> Result<Option<(u64, u64, T)>>
 where
     T: serde::de::DeserializeOwned,
@@ -177,8 +162,6 @@ where
         .map_err(|error| Error::State(format!("json: {error}")))?
         .ok_or_else(|| Error::State("missing JSON value".to_string()))?;
 
-    // JSONL records may contain only whitespace after a value. Consume the
-    // separator so the exact end offset includes its trailing newline.
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -197,9 +180,9 @@ where
     Ok(Some((start, end, value)))
 }
 
-/// Deserialize a current event directly from the stream, falling back to the
-/// pre-event-log bare Message shape only when the tagged form fails. Current
-/// transcripts stay single-pass and never retain a complete raw JSON line.
+// Deserialize a current event directly from the stream, falling back to the
+// pre-event-log bare Message shape only when the tagged form fails. Current
+// transcripts stay single-pass and never retain a complete raw JSON line.
 fn read_session_event<R>(
     reader: &mut std::io::BufReader<R>,
 ) -> Result<Option<(u64, u64, SessionEvent)>>
@@ -232,16 +215,16 @@ where
     }
 }
 
-/// Lightweight scan: reads the session file and extracts only `id`,
-/// `parent_id`, and the kind discriminant per event, skipping all
-/// `ContentBlock` deserialization. This is much cheaper than [`load`] for
-/// tree-structure purposes (the `/tree` picker only needs the shape, not
-/// message content).
-///
-/// # Errors
-///
-/// Returns the underlying IO error if the session file cannot be read or
-/// an event line cannot be parsed.
+// Lightweight scan: reads the session file and extracts only `id`,
+// `parent_id`, and the kind discriminant per event, skipping all
+// `ContentBlock` deserialization. This is much cheaper than [`load`] for
+// tree-structure purposes (the `/tree` picker only needs the shape, not
+// message content).
+//
+// # Errors
+//
+// Returns the underlying IO error if the session file cannot be read or
+// an event line cannot be parsed.
 fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
     match kind_type {
         "message" | "" => match role {
@@ -321,9 +304,9 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     Ok((header.meta, indices, pos))
 }
 
-/// Index only a known append range. Active cursors use this after each durable
-/// write, so compaction can retain a small suffix index instead of rebuilding
-/// an index for the complete append-only transcript.
+// Index only a known append range. Active cursors use this after each durable
+// write, so compaction can retain a small suffix index instead of rebuilding
+// an index for the complete append-only transcript.
 pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<EventIndex>> {
     use std::io::{BufReader, Seek, SeekFrom};
 
@@ -356,13 +339,13 @@ pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<
     Ok(indices)
 }
 
-/// Parse a single event at a known byte offset. Used for lazy label loading
-/// after [`load_index`] has built the tree structure.
-///
-/// # Errors
-///
-/// Returns the underlying IO error if the session file cannot be read or the
-/// event at `offset` cannot be parsed.
+// Parse a single event at a known byte offset. Used for lazy label loading
+// after [`load_index`] has built the tree structure.
+//
+// # Errors
+//
+// Returns the underlying IO error if the session file cannot be read or the
+// event at `offset` cannot be parsed.
 pub(super) fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
     let mut events = load_events_at(path, &[offset])?;
     events
@@ -370,13 +353,13 @@ pub(super) fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
         .ok_or_else(|| Error::State(format!("no event at offset {offset} in {}", path.display())))
 }
 
-/// Find and parse one event by id without deserializing unrelated message
-/// bodies. Resolution goes through the lightweight index so deterministic
-/// IDs synthesized for legacy records work exactly like persisted v2 IDs.
-///
-/// # Errors
-/// Returns an error when the transcript cannot be indexed or the selected
-/// event cannot be read or parsed.
+// Find and parse one event by id without deserializing unrelated message
+// bodies. Resolution goes through the lightweight index so deterministic
+// IDs synthesized for legacy records work exactly like persisted v2 IDs.
+//
+// # Errors
+// Returns an error when the transcript cannot be indexed or the selected
+// event cannot be read or parsed.
 pub(super) fn load_event_by_id(path: &Path, id: &str) -> Result<Option<SessionEvent>> {
     let (_meta, index, _size) = load_index(path)?;
     let Some(entry) = index.iter().find(|entry| entry.id.matches(id)) else {
@@ -388,14 +371,14 @@ pub(super) fn load_event_by_id(path: &Path, id: &str) -> Result<Option<SessionEv
     Ok(Some(event))
 }
 
-/// Deserialize a small caller-defined projection at selected event offsets.
-/// Unknown JSON fields are skipped directly from the buffered file stream, so
-/// a projection does not allocate a complete backing line merely because an
-/// unrelated field (such as a native-tool result) is huge.
-///
-/// # Errors
-/// Returns an error when the transcript/offset cannot be read, projected JSON
-/// is invalid, or the visitor rejects a value.
+// Deserialize a small caller-defined projection at selected event offsets.
+// Unknown JSON fields are skipped directly from the buffered file stream, so
+// a projection does not allocate a complete backing line merely because an
+// unrelated field (such as a native-tool result) is huge.
+//
+// # Errors
+// Returns an error when the transcript/offset cannot be read, projected JSON
+// is invalid, or the visitor rejects a value.
 pub(super) fn visit_event_values<T: serde::de::DeserializeOwned>(
     path: &Path,
     offsets: &[u64],
@@ -417,8 +400,6 @@ pub(super) fn visit_event_values<T: serde::de::DeserializeOwned>(
     Ok(())
 }
 
-/// Visit selected complete events one at a time without retaining their raw
-/// JSON lines or collecting the complete selected set.
 pub(super) fn visit_events(
     path: &Path,
     offsets: &[u64],
@@ -478,10 +459,10 @@ struct CollapsedBlockMeta {
     is_error: bool,
 }
 
-/// Load selected events for collapsed transcript rendering without allocating
-/// payloads that the collapsed renderer never reads. Full errors and visible
-/// mutating-tool previews remain lossless; verbose rendering uses the ordinary
-/// complete-event loader instead.
+// Load selected events for collapsed transcript rendering without allocating
+// payloads that the collapsed renderer never reads. Full errors and visible
+// mutating-tool previews remain lossless; verbose rendering uses the ordinary
+// complete-event loader instead.
 pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     use std::collections::HashSet;
     use std::io::{BufReader, Seek, SeekFrom};
@@ -584,13 +565,13 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
     Ok(events)
 }
 
-/// Parse selected event values in one file pass. Offsets must be in ascending
-/// order. Values are deserialized directly from the file, so peak memory is
-/// the returned event payload rather than payload plus a complete JSON line.
-///
-/// # Errors
-/// Returns an error when the transcript/offset cannot be read or a selected
-/// event cannot be parsed.
+// Parse selected event values in one file pass. Offsets must be in ascending
+// order. Values are deserialized directly from the file, so peak memory is
+// the returned event payload rather than payload plus a complete JSON line.
+//
+// # Errors
+// Returns an error when the transcript/offset cannot be read or a selected
+// event cannot be parsed.
 pub(super) fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     let mut out = Vec::with_capacity(offsets.len());
     visit_events(path, offsets, |event| {
@@ -600,8 +581,6 @@ pub(super) fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<Session
     Ok(out)
 }
 
-/// Parse every non-cursor event whose line starts inside `[start, end)`.
-/// Used for lazy materialization of a committed turn range.
 pub(super) fn load_event_range(path: &Path, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
     use std::io::{Seek, SeekFrom};
 
@@ -625,8 +604,8 @@ pub(super) fn load_event_range(path: &Path, start: u64, end: u64) -> Result<Vec<
     Ok(out)
 }
 
-/// Retain only the selected-lineage suffix required by the next compaction.
-/// The input must already be projected root-to-leaf (as `SessionSnapshot` is).
+// Retain only the selected-lineage suffix required by the next compaction.
+// The input must already be projected root-to-leaf (as `SessionSnapshot` is).
 pub(super) fn compaction_index_suffix(
     path: &Path,
     lineage: &[EventIndex],
@@ -651,14 +630,14 @@ pub(super) fn compaction_index_suffix(
     Ok(lineage[start..].to_vec())
 }
 
-/// Materialize only the lineage suffix needed by compaction. Once a
-/// compaction marker exists, everything before its checkpointed kept tail is
-/// represented by the marker summary and must not be deserialized again.
-/// A `None` leaf is the explicit root cursor and therefore yields no events.
-///
-/// # Errors
-/// Returns an error when the requested leaf is absent, the lineage is cyclic,
-/// or an indexed event cannot be read or parsed.
+// Materialize only the lineage suffix needed by compaction. Once a
+// compaction marker exists, everything before its checkpointed kept tail is
+// represented by the marker summary and must not be deserialized again.
+// A `None` leaf is the explicit root cursor and therefore yields no events.
+//
+// # Errors
+// Returns an error when the requested leaf is absent, the lineage is cyclic,
+// or an indexed event cannot be read or parsed.
 pub(super) fn load_compaction_path(
     path: &Path,
     index: &[EventIndex],
@@ -705,9 +684,6 @@ pub(super) fn load_compaction_path(
             ..
         } = marker.kind
         {
-            // Include the marker in both cases: compact() needs its previous
-            // summary. For a non-empty checkpoint include the kept messages
-            // immediately before it as well.
             start = if first_kept_entry_id.is_empty() {
                 marker_pos
             } else {
@@ -721,14 +697,14 @@ pub(super) fn load_compaction_path(
     load_index_entries(path, index, &lineage[start..])
 }
 
-/// Materialize only one indexed lineage from a session file. The lightweight
-/// index owns the tree shape; large event bodies are parsed only for nodes on
-/// the selected path, avoiding a full transcript-sized allocation. A `None`
-/// leaf is the explicit root cursor and therefore yields no events.
-///
-/// # Errors
-/// Returns an error when the requested leaf is absent, the lineage is cyclic,
-/// or an indexed event cannot be read or parsed.
+// Materialize only one indexed lineage from a session file. The lightweight
+// index owns the tree shape; large event bodies are parsed only for nodes on
+// the selected path, avoiding a full transcript-sized allocation. A `None`
+// leaf is the explicit root cursor and therefore yields no events.
+//
+// # Errors
+// Returns an error when the requested leaf is absent, the lineage is cyclic,
+// or an indexed event cannot be read or parsed.
 pub(super) fn load_indexed_path(
     path: &Path,
     index: &[EventIndex],

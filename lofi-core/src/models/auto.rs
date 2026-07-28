@@ -1,11 +1,3 @@
-//! Auto-model discovery: fetch, parse, inject, and cache remote model lists.
-//!
-//! See the parent module docs for the full design. Each provider with an
-//! `auto_models` block fetches an OpenAI-style models endpoint at startup;
-//! entries are parsed into `ModelConfig`s, injected into the provider's
-//! `models` map (static wins on id collision), and cached under
-//! `<state>/discovery.json` with a per-block TTL.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -18,27 +10,18 @@ use lofi_error::{Error, Result};
 
 use super::resolve_model_base_url;
 
-/// One provider's cached auto-discovery result with the wall-clock timestamp
-/// it was fetched at, so freshness is evaluated per-provider rather than by
-/// a single shared file mtime (which would let a long-TTL provider mask a
-/// short-TTL provider's stale data).
+// One provider's cached auto-discovery result with the wall-clock timestamp
+// it was fetched at, so freshness is evaluated per-provider rather than by
+// a single shared file mtime (which would let a long-TTL provider mask a
+// short-TTL provider's stale data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CachedDiscovery {
-    /// Epoch milliseconds when the entries were fetched.
     pub fetched_at: u64,
-    /// `(id, ModelConfig)` pairs discovered for this provider.
     pub entries: Vec<(String, ModelConfig)>,
 }
 
-/// Default cache freshness for auto-discovered model lists (5 minutes).
 pub(super) const DEFAULT_AUTO_TTL_SECS: u64 = 300;
 
-/// Insert auto-discovered `(id, ModelConfig)` entries into a provider's
-/// `models` map. A static entry wins on id collision, but any field it leaves
-/// unset is filled from the discovered entry — so a static entry that only
-/// pins `thinking_levels` still inherits `context_window`, pricing, and other
-/// metadata the remote endpoint reports. New ids are appended in discovery
-/// order.
 pub(super) fn inject_discovered(
     models: &mut IndexMap<String, ModelConfig>,
     entries: &[(String, ModelConfig)],
@@ -55,9 +38,9 @@ pub(super) fn inject_discovered(
     }
 }
 
-/// Copy each unset field of `dst` from `src`, so a static entry inherits
-/// metadata the remote endpoint reports without the user re-declaring it.
-/// Explicit static values are preserved.
+// Copy each unset field of `dst` from `src`, so a static entry inherits
+// metadata the remote endpoint reports without the user re-declaring it.
+// Explicit static values are preserved.
 fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.name.is_none() {
         dst.name.clone_from(&src.name);
@@ -103,16 +86,16 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     }
 }
 
-/// Fetch a provider's auto-discovered model list and map it to
-/// `(id, ModelConfig)` entries. When `auth` is false the request is sent
-/// without credentials (public list endpoints that reject auth headers).
-///
-/// The models endpoint URL is `am.models_url` when set, otherwise it is
-/// derived from the provider's default api-type mapping: the first path
-/// segment of the endpoint `path` (the API version prefix, e.g. `/v1`)
-/// joined onto the provider `base_url` with `/models` appended — so a
-/// provider whose chat endpoint is `/v1/chat/completions` discovers at
-/// `/v1/models` without an explicit `models_url`.
+// Fetch a provider's auto-discovered model list and map it to
+// `(id, ModelConfig)` entries. When `auth` is false the request is sent
+// without credentials (public list endpoints that reject auth headers).
+//
+// The models endpoint URL is `am.models_url` when set, otherwise it is
+// derived from the provider's default api-type mapping: the first path
+// segment of the endpoint `path` (the API version prefix, e.g. `/v1`)
+// joined onto the provider `base_url` with `/models` appended — so a
+// provider whose chat endpoint is `/v1/chat/completions` discovers at
+// `/v1/models` without an explicit `models_url`.
 pub(super) async fn fetch_auto_models(
     pcfg: &ProviderConfig,
     am: &AutoModelsConfig,
@@ -143,9 +126,6 @@ pub(super) async fn fetch_auto_models(
     Ok(parse_auto_models(pcfg, am, &body))
 }
 
-/// Default models-endpoint path derived from the provider's default api-type
-/// mapping: the first segment of the endpoint `path` (the version prefix)
-/// plus `/models`. For the built-in defaults this yields `/v1/models`.
 fn default_models_path(pcfg: &ProviderConfig) -> String {
     let path = pcfg.resolve_path(None);
     let first = path.split('/').nth(1).unwrap_or("");
@@ -156,38 +136,17 @@ fn default_models_path(pcfg: &ProviderConfig) -> String {
     }
 }
 
-/// Read a JSON value as `f64`, accepting either a number or a numeric
-/// string (some providers return pricing as strings like `"5e-7"`).
 fn json_num(v: &Value) -> Option<f64> {
     v.as_f64()
         .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
-/// Read a JSON value as `u64`, accepting either a number or a numeric
-/// string. Floats are floored.
 fn json_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_f64().map(|f| f as u64))
         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
 }
 
-/// Navigate `body` to the array at `am.path` and map each entry to an
-/// `(id, ModelConfig)` pair. The per-model `api_type` is read from the
-/// field named by `am.api_type_field` (e.g. `preferred_api`), translated
-/// through `am.api_type_mappings` (remote vocabulary → internal [`lofi_types::Api`] id),
-/// and stored as the model's `api_type` key so it resolves through the
-/// provider's `api_types` table exactly like a static model's override.
-/// When `api_type_field` is unset or the remote value has no mapping, the
-/// model inherits the provider's default `api_type`.
-///
-/// Pricing is read via the resolved api-type's `pricing_field_mappings`
-/// (falling back to the provider-level default) and scaled by the provider's
-/// `pricing_convention`. Non-pricing fields are read via `am.field_mappings`.
-/// `reasoning` and `supports_image` are inferred from the entry's
-/// `supported_parameters` array; discovered models inherit
-/// `thinking_levels`/`thinking_level` from the `auto_models` config (lofi
-/// has no built-in model catalog), defaulting to the standard four-level
-/// ladder when the endpoint reports `reasoning` support.
 pub(super) fn parse_auto_models(
     pcfg: &ProviderConfig,
     am: &AutoModelsConfig,
@@ -216,8 +175,6 @@ pub(super) fn parse_auto_models(
                         .map(str::to_string)
                 })
             });
-        // Translate the remote vocabulary to an internal api id; an
-        // unmapped value falls back to the provider's default.
         let api_type = remote_api
             .as_deref()
             .and_then(|r| am.api_type_mappings.get(r))
@@ -284,8 +241,6 @@ pub(super) fn parse_auto_models(
     out
 }
 
-/// Join a mapping `path` (e.g. `/v1/chat/completions`) onto a provider
-/// Walk a dot-separated path through a JSON object (`data.models`, etc.).
 fn navigate<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
     for segment in path.split('.') {
         if segment.is_empty() {
@@ -296,16 +251,15 @@ fn navigate<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
-/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Write the per-provider auto-discovered model lists to `path` as pretty
-/// JSON. Each entry carries its fetch timestamp so freshness is checked
-/// per-provider rather than by a single shared file mtime.
+// Write the per-provider auto-discovered model lists to `path` as pretty
+// JSON. Each entry carries its fetch timestamp so freshness is checked
+// per-provider rather than by a single shared file mtime.
 pub(super) fn write_auto_cache(
     path: &Path,
     cache: &HashMap<String, CachedDiscovery>,
@@ -353,8 +307,6 @@ pub(super) fn write_auto_cache(
     Ok(())
 }
 
-/// Read the cached auto-models map from `path`. A missing file yields an
-/// empty map (cache miss, not an error); parse failures propagate.
 pub(super) fn read_auto_cache(path: &Path) -> Result<HashMap<String, CachedDiscovery>> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(HashMap::new()),

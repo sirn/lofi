@@ -1,19 +1,19 @@
-//! User-config loading and value resolution.
-//!
-//! Reads the user config file (default `$XDG_CONFIG_HOME/lofi/config.toml`,
-//! overridable via `$LOFI_CONFIG`) and parses it into a
-//! [`lofi_types::Config`], resolving `api_key` and `header` values along the
-//! way. This tree is treated as **read-only**: lofi never creates, writes, or
-//! modifies files under the user config dir. That separation lets an external
-//! config manager (Nix, stow, etc.) own the tree declaratively while lofi
-//! limits its writes to the agent-owned state dir (see [`crate::state`]).
-//!
-//! Value resolution syntax:
-//! - `!cmd`  -> run `sh -c cmd` and take the trimmed stdout;
-//! - `$VAR` / `${VAR}` -> read the env var (missing is an error);
-//! - `$$` -> a literal `$`, `$!` -> a literal `!` (escapes so a value that
-//!   would otherwise look like a command or env ref can be expressed);
-//! - anything else is taken literally.
+// User-config loading and value resolution.
+//
+// Reads the user config file (default `$XDG_CONFIG_HOME/lofi/config.toml`,
+// overridable via `$LOFI_CONFIG`) and parses it into a
+// [`lofi_types::Config`], resolving `api_key` and `header` values along the
+// way. This tree is treated as **read-only**: lofi never creates, writes, or
+// modifies files under the user config dir. That separation lets an external
+// config manager (Nix, stow, etc.) own the tree declaratively while lofi
+// limits its writes to the agent-owned state dir (see [`crate::state`]).
+//
+// Value resolution syntax:
+// - `!cmd`  -> run `sh -c cmd` and take the trimmed stdout;
+// - `$VAR` / `${VAR}` -> read the env var (missing is an error);
+// - `$$` -> a literal `$`, `$!` -> a literal `!` (escapes so a value that
+//   would otherwise look like a command or env ref can be expressed);
+// - anything else is taken literally.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,16 +21,16 @@ use std::path::{Path, PathBuf};
 use lofi_error::{Error, Result};
 use lofi_types::Config;
 
-/// Resolve the path to the user config file.
-///
-/// Precedence: `$LOFI_CONFIG` (used verbatim as the full file path), then the
-/// platform default via [`dirs::config_dir`] (which honors `$XDG_CONFIG_HOME`
-/// on Linux and falls back to `~/.config`) with `lofi/config.toml` appended.
-/// If the platform's config dir cannot be resolved, fall back to `~/.config`.
-///
-/// # Errors
-/// Returns [`Error::Config`] only when no config base directory can be
-/// determined at all (e.g. `HOME` is unset) and `$LOFI_CONFIG` is not set.
+// Resolve the path to the user config file.
+//
+// Precedence: `$LOFI_CONFIG` (used verbatim as the full file path), then the
+// platform default via [`dirs::config_dir`] (which honors `$XDG_CONFIG_HOME`
+// on Linux and falls back to `~/.config`) with `lofi/config.toml` appended.
+// If the platform's config dir cannot be resolved, fall back to `~/.config`.
+//
+// # Errors
+// Returns [`Error::Config`] only when no config base directory can be
+// determined at all (e.g. `HOME` is unset) and `$LOFI_CONFIG` is not set.
 pub fn user_config_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("LOFI_CONFIG") {
         return Ok(PathBuf::from(p));
@@ -47,14 +47,6 @@ pub fn user_config_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Resolve the path to the shell policy file.
-///
-/// Precedence: `$LOFI_POLICY` (used verbatim as the full file path), then
-/// the same directory as the config file with `policy.toml` appended.
-///
-/// # Errors
-/// Returns [`Error::Config`] only when no config base directory can be
-/// determined and `$LOFI_POLICY` is not set.
 pub fn policy_config_path(config_path: &Path) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("LOFI_POLICY") {
         return Ok(PathBuf::from(p));
@@ -67,12 +59,12 @@ pub fn policy_config_path(config_path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Load the shell policy from `policy.toml` if it exists, otherwise return
-/// the default. The file is parsed as [`lofi_types::ShellPolicyConfig`] at
-/// root level (no `[shell_policy]` wrapper).
-///
-/// # Errors
-/// [`Error::Config`] when the file exists but fails to read or parse.
+// Load the shell policy from `policy.toml` if it exists, otherwise return
+// the default. The file is parsed as [`lofi_types::ShellPolicyConfig`] at
+// root level (no `[shell_policy]` wrapper).
+//
+// # Errors
+// [`Error::Config`] when the file exists but fails to read or parse.
 pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConfig> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
@@ -91,11 +83,11 @@ pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConf
     }
 }
 
-/// Load the configured shell policy and evaluate `command` without executing it.
-///
-/// # Errors
-/// Returns configuration errors when the config or policy path cannot be
-/// resolved, read, or parsed.
+// Load the configured shell policy and evaluate `command` without executing it.
+//
+// # Errors
+// Returns configuration errors when the config or policy path cannot be
+// resolved, read, or parsed.
 pub fn evaluate_shell_policy(command: &str) -> Result<lofi_code::policy::Decision> {
     let config_path = user_config_path()?;
     let policy_path = policy_config_path(&config_path)?;
@@ -103,15 +95,15 @@ pub fn evaluate_shell_policy(command: &str) -> Result<lofi_code::policy::Decisio
     Ok(lofi_code::policy::defaults::resolve(&config).evaluate(command))
 }
 
-/// Resolve a single config value (see module docs for the syntax).
-///
-/// This is the low-level primitive used by [`load_config`]; callers may also
-/// use it directly to resolve ad-hoc values. It is `async` because the `!cmd`
-/// form spawns a subprocess via tokio.
-///
-/// # Errors
-/// - [`Error::Config`] if an env var is missing or a shell command fails /
-///   cannot be spawned.
+// Resolve a single config value (see module docs for the syntax).
+//
+// This is the low-level primitive used by [`load_config`]; callers may also
+// use it directly to resolve ad-hoc values. It is `async` because the `!cmd`
+// form spawns a subprocess via tokio.
+//
+// # Errors
+// - [`Error::Config`] if an env var is missing or a shell command fails /
+//   cannot be spawned.
 pub async fn resolve_value(s: &str) -> Result<String> {
     if let Some(cmd) = s.strip_prefix('!') {
         run_shell(cmd).await
@@ -126,7 +118,6 @@ pub async fn resolve_value(s: &str) -> Result<String> {
     }
 }
 
-/// Extract `VAR` from `$VAR` or `${VAR}`; returns `None` for anything else.
 fn parse_env_name(s: &str) -> Option<&str> {
     let rest = s.strip_prefix('$')?;
     if let Some(inner) = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
@@ -149,11 +140,11 @@ fn is_env_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// Default timeout for a `!cmd` credential helper (30s). A hung helper
-/// must not block startup indefinitely.
+// Default timeout for a `!cmd` credential helper (30s). A hung helper
+// must not block startup indefinitely.
 const CRED_CMD_TIMEOUT_MS: u64 = 30_000;
-/// Cap captured credential-helper output so a misbehaving command can't
-/// fill memory within the timeout window.
+// Cap captured credential-helper output so a misbehaving command can't
+// fill memory within the timeout window.
 const CRED_CMD_MAX_BYTES: usize = 64 * 1024;
 
 async fn run_shell(cmd: &str) -> Result<String> {
@@ -224,13 +215,11 @@ async fn run_shell(cmd: &str) -> Result<String> {
             Ok(stdout)
         }
         Ok(Err(e)) => {
-            // A read/wait error may leave the group running; kill and reap.
             drop(guard);
             let _ = child.wait().await;
             Err(Error::Config(format!("shell command failed: {e}")))
         }
         Err(_) => {
-            // Timeout: kill the whole group and reap the leader.
             drop(guard);
             let _ = child.wait().await;
             Err(Error::Config(format!(
@@ -240,39 +229,38 @@ async fn run_shell(cmd: &str) -> Result<String> {
     }
 }
 
-/// Load and parse the user config from `path`, resolving `api_key` and header
-/// values in place.
-///
-/// The returned [`Config`] has every `api_key` and header value replaced by
-/// its resolved form; downstream code can treat them as literals.
-///
-/// # Errors
-/// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, or
-///   any value fails to resolve.
+// Load and parse the user config from `path`, resolving `api_key` and header
+// values in place.
+//
+// The returned [`Config`] has every `api_key` and header value replaced by
+// its resolved form; downstream code can treat them as literals.
+//
+// # Errors
+// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, or
+//   any value fails to resolve.
 pub async fn load_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
     let mut cfg: Config =
         toml::from_str(&content).map_err(|e| Error::Config(format!("parse error: {e}")))?;
-    // Load shell policy from policy.toml (alongside config.toml).
     let policy_path = policy_config_path(path)?;
     cfg.shell_policy = load_policy_or_default(&policy_path)?;
     resolve_config(&mut cfg).await?;
     Ok(cfg)
 }
 
-/// Resolve every provider's credentials and headers inside `cfg` in place.
-///
-/// Resolution is **lenient** so a missing environment variable never aborts
-/// startup: a provider whose key cannot be resolved is left keyless (and
-/// therefore not available for selection). An explicit `api_key` (literal,
-/// `$VAR`, or `!cmd`) overrides `env_name`; otherwise `env_name` names the
-/// environment variable to read. Header values that fail to resolve are
-/// dropped rather than fatal.
-///
-/// # Errors
-/// Never errors in the current lenient implementation; the `Result` is kept
-/// for signature stability and future strict modes.
+// Resolve every provider's credentials and headers inside `cfg` in place.
+//
+// Resolution is **lenient** so a missing environment variable never aborts
+// startup: a provider whose key cannot be resolved is left keyless (and
+// therefore not available for selection). An explicit `api_key` (literal,
+// `$VAR`, or `!cmd`) overrides `env_name`; otherwise `env_name` names the
+// environment variable to read. Header values that fail to resolve are
+// dropped rather than fatal.
+//
+// # Errors
+// Never errors in the current lenient implementation; the `Result` is kept
+// for signature stability and future strict modes.
 pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
     for provider in cfg.providers.values_mut() {
         if let Some(key) = provider.api_key.take() {
@@ -295,15 +283,15 @@ pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
     Ok(())
 }
 
-/// The built-in default configuration, shipped as TOML so the default
-/// provider/model set is expressed in the same format the user edits.
-///
-/// Defines `openai` (Responses API) and `anthropic` (Messages API) providers,
-/// each keyed off an environment variable (`OPENAI_API_KEY` /
-/// `ANTHROPIC_API_KEY`). Both are resolved *leniently* by [`resolve_config`]:
-/// if the variable is unset the provider is left keyless and simply not
-/// available, so a fresh checkout with no keys starts up and reports "no
-/// models configured" rather than aborting.
+// The built-in default configuration, shipped as TOML so the default
+// provider/model set is expressed in the same format the user edits.
+//
+// Defines `openai` (Responses API) and `anthropic` (Messages API) providers,
+// each keyed off an environment variable (`OPENAI_API_KEY` /
+// `ANTHROPIC_API_KEY`). Both are resolved *leniently* by [`resolve_config`]:
+// if the variable is unset the provider is left keyless and simply not
+// available, so a fresh checkout with no keys starts up and reports "no
+// models configured" rather than aborting.
 const DEFAULT_CONFIG_TOML: &str = r#"
 [agent]
 thinking_level = "medium"
@@ -335,17 +323,6 @@ thinking_levels = ["low", "medium", "high", "xhigh"]
 thinking_levels = ["low", "medium", "high", "xhigh"]
 "#;
 
-/// The built-in configuration used when no user config file exists.
-///
-/// Returns the parsed (but not yet resolved) [`Config`] from
-/// [`DEFAULT_CONFIG_TOML`]; [`load_config_or_default`] resolves the env keys
-/// on top. Parsing the embedded default is infallible — a panic here means
-/// the shipped default TOML is malformed and is a bug, not a runtime
-/// condition.
-///
-/// # Panics
-/// The shipped [`DEFAULT_CONFIG_TOML`] is a compile-time constant; this
-/// panics only if it is malformed, which is a bug, not a runtime condition.
 #[must_use]
 pub fn default_config() -> Config {
     toml::from_str(DEFAULT_CONFIG_TOML).unwrap_or_else(|e| {
@@ -353,24 +330,23 @@ pub fn default_config() -> Config {
     })
 }
 
-/// Load the user config from `path`, or fall back to [`default_config`] when
-/// the file does not exist.
-///
-/// An existing file is parsed and resolved (leniently — see
-/// [`resolve_config`]); a missing file yields the built-in default config.
-/// In both cases a provider whose key is unset is left keyless, so the call
-/// itself never fails for a missing environment variable — that surfaces
-/// downstream as "no models configured".
-///
-/// # Errors
-/// [`Error::Config`] only when an existing file fails to read or parse as
-/// TOML.
+// Load the user config from `path`, or fall back to [`default_config`] when
+// the file does not exist.
+//
+// An existing file is parsed and resolved (leniently — see
+// [`resolve_config`]); a missing file yields the built-in default config.
+// In both cases a provider whose key is unset is left keyless, so the call
+// itself never fails for a missing environment variable — that surfaces
+// downstream as "no models configured".
+//
+// # Errors
+// [`Error::Config`] only when an existing file fails to read or parse as
+// TOML.
 pub async fn load_config_or_default(path: &Path) -> Result<Config> {
     // Fall back to defaults only when the path is genuinely absent. A
     // permission error or dangling symlink must surface as an error, not
     // silently activate the built-in configuration.
     match std::fs::symlink_metadata(path) {
-        // `load_config` parses and resolves in one step.
         Ok(_) => load_config(path).await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut cfg = default_config();
@@ -391,21 +367,19 @@ mod tests {
     use super::*;
     use lofi_types::Api;
 
-    /// Serializes tests that mutate process-global environment variables and
-    /// restores the prior value on drop, so they neither race with each other
-    /// nor leak into the caller's environment. The mutex guard is held until
-    /// after the value is restored (custom `Drop` runs before field teardown).
+    // Serializes tests that mutate process-global environment variables and
+    // restores the prior value on drop, so they neither race with each other
+    // nor leak into the caller's environment. The mutex guard is held until
+    // after the value is restored (custom `Drop` runs before field teardown).
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Acquire the serialization mutex once for tests that need to capture
-    /// several env keys; pair with [`capture_env`] (which does not lock) so a
-    /// multi-key test does not self-deadlock on the non-reentrant mutex.
+    // Acquire the serialization mutex once for tests that need to capture
+    // several env keys; pair with [`capture_env`] (which does not lock) so a
+    // multi-key test does not self-deadlock on the non-reentrant mutex.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         ENV_MUTEX.lock().unwrap()
     }
 
-    /// Record the current value of `key` and restore it on drop. Does NOT
-    /// acquire [`ENV_MUTEX`]; the caller must hold it via [`env_lock`].
     fn capture_env(key: &'static str) -> EnvRestore {
         EnvRestore {
             key,
@@ -476,8 +450,6 @@ mod tests {
 
     #[tokio::test]
     async fn literal_with_embedded_dollar_stays_literal() {
-        // `pa$$word` is not a valid env ref, so it stays literal (the `$$`
-        // escape only applies when it is the *entire* value).
         assert_eq!(resolve_value("pa$$word").await.unwrap(), "pa$$word");
     }
 
@@ -489,7 +461,6 @@ mod tests {
 
     #[tokio::test]
     async fn empty_braces_not_an_env_ref() {
-        // `${}` is rejected as an env ref and treated as a literal.
         assert_eq!(resolve_value("${}").await.unwrap(), "${}");
     }
 
@@ -536,14 +507,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("config.toml");
 
-        // No keys set: both providers keyless, selection reports none later.
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("ANTHROPIC_API_KEY");
         let cfg = load_config_or_default(&missing).await.unwrap();
         assert!(cfg.providers.get("openai").unwrap().api_key.is_none());
         assert!(cfg.providers.get("anthropic").unwrap().api_key.is_none());
 
-        // OPENAI_API_KEY set: openai is keyed, anthropic stays keyless.
         std::env::set_var("OPENAI_API_KEY", "sk-test-openai");
         let cfg = load_config_or_default(&missing).await.unwrap();
         assert_eq!(
@@ -554,7 +523,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `LOFI_CONFIG` overrides the platform-default config path verbatim.
     #[test]
     fn lofi_config_overrides_user_config_path() {
         let _g = env_lock();

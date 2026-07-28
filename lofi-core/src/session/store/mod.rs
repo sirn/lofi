@@ -1,9 +1,9 @@
-//! JSONL transcript store for interactive sessions.
-//!
-//! Files live at '<state>/sessions/<cwd-slug>/<ms>_<id>.jsonl' and are
-//! append-only after the header line. Sessions are scoped to the working
-//! directory they were created
-//! in.
+// JSONL transcript store for interactive sessions.
+//
+// Files live at '<state>/sessions/<cwd-slug>/<ms>_<id>.jsonl' and are
+// append-only after the header line. Sessions are scoped to the working
+// directory they were created
+// in.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,31 +21,21 @@ use index::{
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
-/// Transcript format version. Bumped only on a breaking on-disk change;
-/// older files are rejected (no migration yet — lofi has no shipped sessions
-/// to migrate).
 pub const SESSION_VERSION: u32 = 3;
 
-/// The lowest version the store can still load (older files are migrated
-/// in-memory to [`SESSION_VERSION`]).
 pub const SESSION_MIN_VERSION: u32 = 1;
 
-/// Metadata written as the first JSONL line of every session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub version: u32,
-    /// Unix milliseconds at creation time.
     pub created: u64,
-    /// Absolute working directory the session belongs to.
     pub cwd: String,
-    /// Raw model identity active when the session started (rendered to
-    /// `provider/id:level` only at display; deserializes from a legacy
-    /// `provider/id[:level]` string too).
+    // Raw model identity active when the session started (rendered to
+    // `provider/id:level` only at display; deserializes from a legacy
+    // `provider/id[:level]` string too).
     pub model: RunModel,
 }
 
-/// The first-line wrapper. `type: "meta"` distinguishes it from message lines
-/// if a future format ever interleaves other entry kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Header {
     #[serde(rename = "type")]
@@ -54,9 +44,6 @@ struct Header {
     meta: SessionMeta,
 }
 
-/// A session file discovered using directory metadata only. This is cheap
-/// enough for an interactive picker to sort and draw before transcript
-/// metadata is indexed.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
     path: PathBuf,
@@ -64,50 +51,36 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
-    /// Wall-clock time of the file's last modification.
     #[must_use]
     pub fn last_active(&self) -> std::time::SystemTime {
         self.last_active
     }
 
-    /// Read a bounded provisional preview without exposing the transcript path.
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
     }
 
-    /// Enrich this discovered file with selected-lineage metadata.
     #[must_use]
     pub fn inspect(&self) -> Option<SessionEntry> {
         parse_entry(&self.path, self.last_active)
     }
 
-    /// Open this transcript and return its selected-lineage snapshot in the
-    /// same index pass.
-    ///
-    /// # Errors
-    /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
         SessionCursor::open_snapshot(self.path.clone())
     }
 }
 
-/// A discoverable session on disk: its metadata, file path, and message count.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
     pub meta: SessionMeta,
     file: SessionFile,
-    /// Number of message lines (excluding the header).
     pub message_count: usize,
-    /// Wall-clock time of the file's last modification (last activity).
     pub last_active: std::time::SystemTime,
-    /// One-line preview of the last meaningful event (user prompt,
-    /// assistant text, tool result, or compaction marker).
     pub last_message: String,
 }
 
 impl SessionEntry {
-    /// The session id — the file stem (`<ms>_<id>`), used by `--resume <id>`.
     #[must_use]
     pub fn id(&self) -> String {
         self.file
@@ -118,17 +91,11 @@ impl SessionEntry {
             .unwrap_or_default()
     }
 
-    /// Open this session and return its selected-lineage snapshot in one pass.
-    ///
-    /// # Errors
-    /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
         self.file.open_snapshot()
     }
 }
 
-/// A filesystem-safe slug for `cwd` (path separators -> `-`, leading `-`
-/// trimmed). Absolute paths collapse to a stable single-segment directory name.
 fn slug(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .replace('/', "-")
@@ -136,31 +103,29 @@ fn slug(cwd: &Path) -> String {
         .to_string()
 }
 
-/// Wall-clock milliseconds since the Unix epoch; 0 if the clock is before it.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Generate an opaque event/session identifier.
 fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-/// Stable in-memory ID for a legacy event that had no persisted tree ID.
-/// Byte offsets are unique within one append-only transcript and remain
-/// identical across full-load and lightweight-index scans.
+// Stable in-memory ID for a legacy event that had no persisted tree ID.
+// Byte offsets are unique within one append-only transcript and remain
+// identical across full-load and lightweight-index scans.
 #[cfg(test)]
 fn legacy_event_id(offset: u64) -> String {
     format!("legacy-{offset:016x}")
 }
 
-/// One consistent read snapshot of a cursor's selected lineage.
-///
-/// The index is already projected root-to-leaf. Callers never need to infer a
-/// head from physical JSONL order, and all cursor-sensitive resume/replay code
-/// consumes this shape.
+// One consistent read snapshot of a cursor's selected lineage.
+//
+// The index is already projected root-to-leaf. Callers never need to infer a
+// head from physical JSONL order, and all cursor-sensitive resume/replay code
+// consumes this shape.
 #[derive(Debug)]
 pub struct SessionSnapshot {
     pub meta: SessionMeta,
@@ -168,9 +133,9 @@ pub struct SessionSnapshot {
     pub file_size: u64,
 }
 
-/// A full-tree snapshot for branch selection. Unlike a lineage snapshot,
-/// this retains sibling nodes, but its selected head still comes exclusively
-/// from the cursor rather than physical file order.
+// A full-tree snapshot for branch selection. Unlike a lineage snapshot,
+// this retains sibling nodes, but its selected head still comes exclusively
+// from the cursor rather than physical file order.
 #[derive(Debug)]
 pub struct SessionTreeSnapshot {
     pub meta: SessionMeta,
@@ -179,27 +144,27 @@ pub struct SessionTreeSnapshot {
     pub file_size: u64,
 }
 
-/// A shared logical cursor for one append-only transcript.
-///
-/// Clones share the active leaf. Every durable append holds the cursor lock,
-/// writes one file-locked batch, persists the selected head, and advances the
-/// in-memory leaf before releasing it. Reads snapshot that same leaf. Physical
-/// EOF is consulted only once when opening a legacy transcript that has no
-/// durable cursor head yet.
+// A shared logical cursor for one append-only transcript.
+//
+// Clones share the active leaf. Every durable append holds the cursor lock,
+// writes one file-locked batch, persists the selected head, and advances the
+// in-memory leaf before releasing it. Reads snapshot that same leaf. Physical
+// EOF is consulted only once when opening a legacy transcript that has no
+// durable cursor head yet.
 #[derive(Debug, Clone)]
 pub struct SessionCursor {
     path: PathBuf,
     leaf_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Active-lineage suffix from the latest compaction checkpoint onward.
-    /// Shared by cursor clones and extended from known append byte ranges, so
-    /// ordinary compaction never indexes the complete append-only transcript.
+    // Active-lineage suffix from the latest compaction checkpoint onward.
+    // Shared by cursor clones and extended from known append byte ranges, so
+    // ordinary compaction never indexes the complete append-only transcript.
     compaction_index: std::sync::Arc<std::sync::Mutex<Option<Vec<EventIndex>>>>,
 }
 
 impl SessionCursor {
-    /// Construct a cursor at a known logical leaf for a newly created
-    /// transcript. Existing transcripts must be opened with `open` so their
-    /// durable selected head is restored.
+    // Construct a cursor at a known logical leaf for a newly created
+    // transcript. Existing transcripts must be opened with `open` so their
+    // durable selected head is restored.
     #[must_use]
     pub fn new(path: PathBuf, leaf_id: Option<String>) -> Self {
         Self {
@@ -211,24 +176,24 @@ impl SessionCursor {
         }
     }
 
-    /// Open an existing transcript at its durable selected head. Legacy files
-    /// without a cursor record fall back once to their physically last event.
-    ///
-    /// # Errors
-    /// Returns an error when the transcript cannot be indexed or its selected
-    /// head no longer exists.
+    // Open an existing transcript at its durable selected head. Legacy files
+    // without a cursor record fall back once to their physically last event.
+    //
+    // # Errors
+    // Returns an error when the transcript cannot be indexed or its selected
+    // head no longer exists.
     pub fn open(path: PathBuf) -> Result<Self> {
         Self::open_snapshot(path).map(|(cursor, _snapshot)| cursor)
     }
 
-    /// Open an existing transcript and return its selected-lineage snapshot
-    /// from the same index scan. Resume callers need both values; keeping this
-    /// operation together avoids scanning a large append-only transcript twice
-    /// and avoids a second allocator high-water mark during startup.
-    ///
-    /// # Errors
-    /// Returns an error when the transcript cannot be indexed or its selected
-    /// head no longer exists.
+    // Open an existing transcript and return its selected-lineage snapshot
+    // from the same index scan. Resume callers need both values; keeping this
+    // operation together avoids scanning a large append-only transcript twice
+    // and avoids a second allocator high-water mark during startup.
+    //
+    // # Errors
+    // Returns an error when the transcript cannot be indexed or its selected
+    // head no longer exists.
     pub fn open_snapshot(path: PathBuf) -> Result<(Self, SessionSnapshot)> {
         let (meta, index, file_size) = load_index(&path)?;
         let cursor_record = index
@@ -256,26 +221,21 @@ impl SessionCursor {
         ))
     }
 
-    /// Transcript path owned by this cursor.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Current transcript length in bytes. Keeping metadata access on the
-    /// cursor lets callers remain independent of the storage backend.
     #[must_use]
     pub fn len(&self) -> u64 {
         std::fs::metadata(&self.path).map_or(0, |metadata| metadata.len())
     }
 
-    /// Whether the transcript currently contains no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Stable session id derived from the store-owned transcript name.
     #[must_use]
     pub fn id(&self) -> String {
         self.path
@@ -285,35 +245,32 @@ impl SessionCursor {
             .unwrap_or_default()
     }
 
-    /// Snapshot the current logical leaf.
     #[must_use]
     pub fn leaf_id(&self) -> Option<String> {
         self.lock_leaf().clone()
     }
 
-    /// Move the cursor to an explicit branch point selected by the user and
-    /// persist that selection before returning.
-    ///
-    /// # Errors
-    /// Returns an error when the selected event is absent or the cursor record
-    /// cannot be written durably.
+    // Move the cursor to an explicit branch point selected by the user and
+    // persist that selection before returning.
+    //
+    // # Errors
+    // Returns an error when the selected event is absent or the cursor record
+    // cannot be written durably.
     pub fn branch_from(&self, id: String) -> Result<()> {
         let next = (!id.is_empty()).then_some(id);
         let mut leaf = self.lock_leaf();
         persist_cursor(&self.path, next.as_deref(), true)?;
         *leaf = next;
-        // The old suffix belongs to a different selected lineage. The next
-        // snapshot reseeds this with only the new branch's compactable tail.
         *self.lock_compaction_index() = None;
         Ok(())
     }
 
-    /// Atomically index the transcript and project it onto this cursor's
-    /// selected lineage.
-    ///
-    /// # Errors
-    /// Returns an error when the transcript cannot be indexed or the selected
-    /// head is absent/cyclic.
+    // Atomically index the transcript and project it onto this cursor's
+    // selected lineage.
+    //
+    // # Errors
+    // Returns an error when the transcript cannot be indexed or the selected
+    // head is absent/cyclic.
     pub fn snapshot(&self) -> Result<SessionSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
@@ -326,11 +283,6 @@ impl SessionCursor {
         })
     }
 
-    /// Atomically index the full transcript tree together with this cursor's
-    /// selected head. Intended only for branch/tree UI.
-    ///
-    /// # Errors
-    /// Returns an error when indexing fails or the selected head is absent.
     pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
@@ -343,48 +295,38 @@ impl SessionCursor {
         })
     }
 
-    /// Read one event at a byte offset obtained from this cursor's snapshot.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
+    // Read one event at a byte offset obtained from this cursor's snapshot.
+    //
+    // # Errors
+    // Propagates transcript seek, read, and parsing failures.
     pub fn event_at(&self, offset: u64) -> Result<SessionEvent> {
         load_event_at(&self.path, offset)
     }
 
-    /// Read events for collapsed transcript display while skipping successful
-    /// result bodies that are not rendered in that mode.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
     pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
         load_collapsed_events_at(&self.path, offsets)
     }
 
-    /// Read events at byte offsets obtained from this cursor's snapshot.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
+    // Read events at byte offsets obtained from this cursor's snapshot.
+    //
+    // # Errors
+    // Propagates transcript seek, read, and parsing failures.
     pub fn events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
         load_events_at(&self.path, offsets)
     }
 
-    /// Read an event by its durable ID from this transcript.
-    ///
-    /// This intentionally searches the complete append-only tree, not only the
-    /// selected lineage: result recovery may target compacted or abandoned
-    /// content by an immutable transcript ID.
-    ///
-    /// # Errors
-    /// Propagates transcript indexing and event parsing failures.
+    // Read an event by its durable ID from this transcript.
+    //
+    // This intentionally searches the complete append-only tree, not only the
+    // selected lineage: result recovery may target compacted or abandoned
+    // content by an immutable transcript ID.
+    //
+    // # Errors
+    // Propagates transcript indexing and event parsing failures.
     pub fn event_by_id(&self, id: &str) -> Result<Option<SessionEvent>> {
         load_event_by_id(&self.path, id)
     }
 
-    /// Visit complete events at snapshot-derived offsets one at a time. Unlike
-    /// `events_at`, this does not collect the selected payloads in memory.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_events(
         &self,
         offsets: &[u64],
@@ -393,12 +335,6 @@ impl SessionCursor {
         visit_events(&self.path, offsets, visit)
     }
 
-    /// Deserialize a small projection at snapshot-derived event offsets
-    /// without exposing the transcript path or allocating skipped payload
-    /// fields. Used by picker/recall metadata scans.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_event_values<T: serde::de::DeserializeOwned>(
         &self,
         offsets: &[u64],
@@ -407,13 +343,6 @@ impl SessionCursor {
         visit_event_values(&self.path, offsets, visit)
     }
 
-    /// Read only the display metadata for native calls at snapshot-derived
-    /// offsets. The native result field is skipped by serde's streaming
-    /// deserializer, so a large tool result is neither allocated nor retained
-    /// merely to render an exec summary.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures.
     pub fn native_tool_summaries(&self, offsets: &[u64]) -> Result<Vec<(String, String, String)>> {
         #[derive(Deserialize)]
         struct NativeToolSummary {
@@ -430,12 +359,6 @@ impl SessionCursor {
         Ok(summaries)
     }
 
-    /// Read only the first text block from user-message events. Assistant and
-    /// tool payloads in the same record shape are skipped without allocation;
-    /// startup replay uses this to build file-backed historical turn shells.
-    ///
-    /// # Errors
-    /// Propagates transcript seek/read/parse failures.
     pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<String>> {
         #[derive(Deserialize)]
         struct PromptProjection {
@@ -464,24 +387,24 @@ impl SessionCursor {
         Ok(prompts)
     }
 
-    /// Read all non-cursor events physically contained in one committed byte
-    /// range. The range is a durable handle recorded by this same cursor.
-    ///
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
+    // Read all non-cursor events physically contained in one committed byte
+    // range. The range is a durable handle recorded by this same cursor.
+    //
+    // # Errors
+    // Propagates transcript seek, read, and parsing failures.
     pub fn events_in_range(&self, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
         load_event_range(&self.path, start, end)
     }
 
-    /// Materialize every non-cursor event in the append-only transcript tree.
-    ///
-    /// This is intentionally distinct from `load_events`, which only returns
-    /// the selected lineage. Full-tree consumers still read through the cursor
-    /// so path access and legacy ID migration cannot diverge from the rest of
-    /// the session API.
-    ///
-    /// # Errors
-    /// Propagates indexing and event parsing failures.
+    // Materialize every non-cursor event in the append-only transcript tree.
+    //
+    // This is intentionally distinct from `load_events`, which only returns
+    // the selected lineage. Full-tree consumers still read through the cursor
+    // so path access and legacy ID migration cannot diverge from the rest of
+    // the session API.
+    //
+    // # Errors
+    // Propagates indexing and event parsing failures.
     pub fn load_tree_events(&self) -> Result<Vec<SessionEvent>> {
         let _leaf = self.lock_leaf();
         let (_meta, index, _size) = load_index(&self.path)?;
@@ -498,27 +421,17 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Materialize this cursor's selected event lineage.
-    ///
-    /// # Errors
-    /// Propagates indexing and event parsing failures.
     pub fn load_events(&self) -> Result<Vec<SessionEvent>> {
         let leaf = self.lock_leaf();
         let (_meta, index, _size) = load_index(&self.path)?;
         load_indexed_path(&self.path, &index, leaf.as_deref())
     }
 
-    /// Materialize only the selected lineage suffix needed by compaction.
-    ///
-    /// # Errors
-    /// Propagates indexing and event parsing failures.
     pub fn load_compaction_events(&self) -> Result<Vec<SessionEvent>> {
         let leaf = self.lock_leaf();
         if let Some(index) = self.lock_compaction_index().as_ref() {
             return load_compaction_path(&self.path, index, leaf.as_deref());
         }
-        // Compatibility fallback for cursors manually constructed around an
-        // existing file. Production open/resume paths seed the suffix once.
         let (_meta, index, _size) = load_index(&self.path)?;
         let index = indexed_lineage(index, leaf.as_deref())?;
         let suffix = compaction_index_suffix(&self.path, &index)?;
@@ -527,10 +440,6 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Append one event batch to this cursor's lineage and advance its leaf.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
         let mut leaf = self.lock_leaf();
         let (start, end, next) = append_cursor_events(&self.path, events, leaf.as_deref())?;
@@ -545,10 +454,6 @@ impl SessionCursor {
         Ok((start, end))
     }
 
-    /// Append a complete compaction checkpoint and advance to its marker.
-    ///
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
     pub fn append_compaction(
         &self,
         kept_messages: &[Message],
@@ -698,28 +603,27 @@ fn append_cursor_events(
     }
 }
 
-/// Owns the sessions root directory and scopes all per-cwd listings/creates
-/// under it. Carrying the root explicitly (rather than re-resolving the state
-/// dir via an env var on every call) keeps tests parallel-safe and lets the
-/// TUI construct one store up front.
+// Owns the sessions root directory and scopes all per-cwd listings/creates
+// under it. Carrying the root explicitly (rather than re-resolving the state
+// dir via an env var on every call) keeps tests parallel-safe and lets the
+// TUI construct one store up front.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
 }
 
 impl SessionStore {
-    /// Open the default store at `<state>/sessions` (see [`crate::state`]).
-    ///
-    /// # Errors
-    /// Propagates [`crate::state::state_dir`] if the base state dir cannot be
-    /// resolved.
+    // Open the default store at `<state>/sessions` (see [`crate::state`]).
+    //
+    // # Errors
+    // Propagates [`crate::state::state_dir`] if the base state dir cannot be
+    // resolved.
     pub fn open() -> Result<Self> {
         let mut p = crate::state::state_dir()?;
         p.push("sessions");
         Ok(Self { root: p })
     }
 
-    /// Construct a store at an explicit sessions root (tests / custom layouts).
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -729,16 +633,16 @@ impl SessionStore {
         self.root.join(slug(cwd))
     }
 
-    /// Create a new session and return its shared logical cursor at the root.
-    ///
-    /// The directory is created if needed; the header is written atomically via
-    /// a temp file + rename so a partial file is never visible. Returning the
-    /// cursor directly prevents active callers from constructing independent
-    /// head state around the same path.
-    ///
-    /// # Errors
-    /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
-    /// header-serialization failure.
+    // Create a new session and return its shared logical cursor at the root.
+    //
+    // The directory is created if needed; the header is written atomically via
+    // a temp file + rename so a partial file is never visible. Returning the
+    // cursor directly prevents active callers from constructing independent
+    // head state around the same path.
+    //
+    // # Errors
+    // Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
+    // header-serialization failure.
     pub fn create_cursor(&self, cwd: &Path, model: &RunModel) -> Result<SessionCursor> {
         let path = self.create(cwd, model)?;
         persist_cursor(&path, None, false)?;
@@ -750,8 +654,6 @@ impl SessionStore {
         Ok(cursor)
     }
 
-    /// Low-level path-returning creation helper for store tests. Active
-    /// session code must use [`Self::create_cursor`].
     fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
         let dir = self.dir_for_cwd(cwd);
         std::fs::create_dir_all(&dir)?;
@@ -772,11 +674,11 @@ impl SessionStore {
         Ok(path)
     }
 
-    /// List sessions for `cwd`, newest-first (by file stem's leading timestamp).
-    ///
-    /// # Errors
-    /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
-    /// other than not existing.
+    // List sessions for `cwd`, newest-first (by file stem's leading timestamp).
+    //
+    // # Errors
+    // Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
+    // other than not existing.
     pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
         let mut entries = Vec::new();
         for file in self.list_files_for_cwd(cwd)? {
@@ -787,12 +689,12 @@ impl SessionStore {
         Ok(entries)
     }
 
-    /// Discover session files using directory metadata only, newest first.
-    /// No transcript contents are read or indexed.
-    ///
-    /// # Errors
-    /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
-    /// other than not existing.
+    // Discover session files using directory metadata only, newest first.
+    // No transcript contents are read or indexed.
+    //
+    // # Errors
+    // Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
+    // other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
         let dir = self.dir_for_cwd(cwd);
         let mut files = Vec::new();
@@ -817,18 +719,10 @@ impl SessionStore {
         Ok(files)
     }
 
-    /// The most recent session for `cwd`, or `None` if none exist.
-    ///
-    /// # Errors
-    /// Propagates [`list_for_cwd`](Self::list_for_cwd).
     pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
         Ok(self.list_for_cwd(cwd)?.into_iter().next())
     }
 
-    /// Find a session whose id starts with `prefix` (case-sensitive).
-    ///
-    /// # Errors
-    /// Returns [`Error::State`] if `prefix` matches more than one session.
     pub fn find(&self, cwd: &Path, prefix: &str) -> Result<Option<SessionEntry>> {
         let matches: Vec<_> = self
             .list_for_cwd(cwd)?
@@ -843,12 +737,6 @@ impl SessionStore {
     }
 }
 
-/// Load a session file: its metadata and the full event log.
-///
-/// # Errors
-/// Returns [`Error::State`] if the file is missing a header, has an
-/// unsupported version, or an event line fails to parse; [`Error::Io`] on a
-/// read failure.
 #[cfg(test)]
 fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> {
     use std::io::BufRead;
@@ -856,7 +744,6 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
     let mut reader = std::io::BufReader::new(file);
     let mut buf = String::new();
     let mut pos: u64 = 0;
-    // The first non-empty line is the session header.
     let header_line = loop {
         buf.clear();
         let n = reader.read_line(&mut buf)?;
@@ -883,7 +770,6 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
     }
     let legacy_v1 = header.meta.version == 1;
     let mut events = Vec::new();
-    // Byte offset of each event's line in the file (parallel to `events`).
     let mut offsets = Vec::new();
     let mut i = 0usize;
     // V1 had no event tree, so migrate it to one linear chain. V2
@@ -920,10 +806,10 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
     Ok((header.meta, events, offsets, pos))
 }
 
-/// Internal parent selection for a durable append.
-///
-/// Active session cursors always use `Explicit`, where `None` means root.
-/// The physical-EOF mode is retained only for low-level legacy callers.
+// Internal parent selection for a durable append.
+//
+// Active session cursors always use `Explicit`, where `None` means root.
+// The physical-EOF mode is retained only for low-level legacy callers.
 enum AppendParent<'a> {
     Explicit(Option<&'a str>),
     #[cfg(test)]
@@ -941,19 +827,19 @@ impl AppendParent<'_> {
     }
 }
 
-/// Append session events to a transcript file (one JSON line each). The
-/// file is synchronized before returning so a crash after the turn still has
-/// the data.
-///
-/// Each event is stamped with a fresh `id` (any incoming `id` is
-/// overwritten) and chained to the previous one. A supplied `parent_hint`
-/// selects an explicit branch parent; otherwise this low-level compatibility
-/// helper continues from physical EOF. Active apps use [`SessionCursor`],
-/// which always supplies its explicit logical parent instead.
-///
-/// # Errors
-/// Returns [`Error::Io`] on open/write failure or [`Error::State`] on a
-/// serialization failure.
+// Append session events to a transcript file (one JSON line each). The
+// file is synchronized before returning so a crash after the turn still has
+// the data.
+//
+// Each event is stamped with a fresh `id` (any incoming `id` is
+// overwritten) and chained to the previous one. A supplied `parent_hint`
+// selects an explicit branch parent; otherwise this low-level compatibility
+// helper continues from physical EOF. Active apps use [`SessionCursor`],
+// which always supplies its explicit logical parent instead.
+//
+// # Errors
+// Returns [`Error::Io`] on open/write failure or [`Error::State`] on a
+// serialization failure.
 #[cfg(test)]
 pub(crate) fn append_events(
     path: &Path,
@@ -1001,23 +887,19 @@ fn append_events_from(
     append_prepared_events(path, events)
 }
 
-/// Message-count bookkeeping persisted with a compaction checkpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct CompactionCounts {
-    /// Messages folded by this compaction, used by the visible marker.
     pub summarized: usize,
-    /// Original messages represented by the merged summary across compactions.
     pub represented: usize,
-    /// Messages retained verbatim in the tail.
     pub kept: usize,
 }
 
-/// Append a compaction checkpoint as one batch: edited kept-tail messages
-/// followed by the marker. A failed write is rolled back to the original file
-/// length so the transcript cannot expose a partial checkpoint as its leaf.
-///
-/// # Errors
-/// Propagates transcript read, serialization, and write failures.
+// Append a compaction checkpoint as one batch: edited kept-tail messages
+// followed by the marker. A failed write is rolled back to the original file
+// length so the transcript cannot expose a partial checkpoint as its leaf.
+//
+// # Errors
+// Propagates transcript read, serialization, and write failures.
 #[cfg(test)]
 pub(crate) fn append_compaction(
     path: &Path,
@@ -1076,8 +958,6 @@ fn append_compaction_from(
         kept: usize,
     }
 
-    // Keep the checkpoint batch contiguous with respect to every other lofi
-    // writer. This also makes the EOF fallback and append one transaction.
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1184,8 +1064,6 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
         .append(true)
         .create(true)
         .open(path)?;
-    // Serialize directly to disk. A complete payload buffer duplicated the
-    // whole checkpoint while its message bodies were already resident.
     for event in events {
         if let Err(error) = serde_json::to_writer(&mut file, event) {
             let _ = file.set_len(byte_start);
@@ -1204,13 +1082,6 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
     Ok((byte_start, byte_end))
 }
 
-/// Read the `id` of the last event line in `path`, or `None` if the file has
-/// no events (only a header, or empty). Used by [`append_events`] to chain a
-/// continuation onto the active leaf, and by the recorder to branch a
-/// `TurnFailed` marker off the turn's checkpoint.
-///
-/// # Errors
-/// Returns [`Error::Io`] on a read failure other than the file not existing.
 #[cfg(test)]
 fn last_event_id(path: &Path) -> Result<Option<String>> {
     use std::io::{BufRead, BufReader};
@@ -1228,7 +1099,6 @@ fn last_event_id(path: &Path) -> Result<Option<String>> {
             continue;
         }
         if first {
-            // Skip the header line.
             first = false;
             continue;
         }
@@ -1241,24 +1111,20 @@ fn last_event_id(path: &Path) -> Result<Option<String>> {
     Ok(last)
 }
 
-/// Parse a single transcript body line into a [`SessionEvent`].
-///
-/// Current files are tagged (`{"type":"message", ...}`); older files written
-/// before the event-log format stored bare `Message` JSON per line. Those are
-/// tolerated by falling back to `Message` and wrapping it, so legacy sessions
-/// still resume (without timings/cost, as before).
-///
-/// # Errors
-/// Returns [`Error::State`] if the line is neither a tagged event nor a
-/// legacy `Message` object.
+// Parse a single transcript body line into a [`SessionEvent`].
+//
+// Current files are tagged (`{"type":"message", ...}`); older files written
+// before the event-log format stored bare `Message` JSON per line. Those are
+// tolerated by falling back to `Message` and wrapping it, so legacy sessions
+// still resume (without timings/cost, as before).
+//
+// # Errors
+// Returns [`Error::State`] if the line is neither a tagged event nor a
+// legacy `Message` object.
 pub fn parse_event(line: &str) -> Result<SessionEvent> {
     if let Ok(ev) = serde_json::from_str::<SessionEvent>(line) {
         return Ok(ev);
     }
-    // Legacy pre-event-log files stored bare `Message` JSON per line; wrap
-    // it so those sessions still resume (without timings/cost, as before).
-    // `id`/`parent_id` are left empty and resolved by the caller (the load
-    // loop chains them into a linear v1 migration).
     serde_json::from_str::<Message>(line)
         .map(|m| SessionEvent {
             id: String::new(),
@@ -1268,16 +1134,11 @@ pub fn parse_event(line: &str) -> Result<SessionEvent> {
         .map_err(|e| Error::State(format!("parse event: {e}")))
 }
 
-/// The id of the last event in `events` (the active leaf for a freshly
-/// loaded session), or `None` if there are no events.
 #[must_use]
 pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
     events.last().map(|e| e.id.as_str())
 }
 
-/// Indices of the events on the path from the leaf `leaf_id` to the root,
-/// in root-first order (oldest to newest). Returns an empty `Vec` if
-/// `leaf_id` is not found.
 #[must_use]
 pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
     let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -1302,13 +1163,11 @@ pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
     path
 }
 
-/// Active path ending at the last event.
 #[must_use]
 pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
     leaf_id(events).map_or_else(Vec::new, |id| active_path(events, id))
 }
 
-/// Raw model identity of the last completed turn on the active path.
 #[must_use]
 pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
     active_path_from_leaf(events)
@@ -1321,9 +1180,6 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
         })
 }
 
-/// Minimal owned shape used by the session picker. Unknown fields, including
-/// large tool-result and native-tool result bodies, are streamed past without
-/// allocating them.
 #[derive(Deserialize)]
 struct EntryPreview {
     #[serde(default, rename = "type")]
@@ -1352,7 +1208,6 @@ struct EntryPreviewBlock {
     text: String,
 }
 
-/// Truncate to one line without allocating a Vec containing every character.
 fn one_line(s: &str) -> String {
     let line = s.split('\n').next().unwrap_or("");
     line.char_indices()
@@ -1400,8 +1255,6 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut tail = Vec::with_capacity(usize::try_from(len - start).ok()?);
     file.read_to_end(&mut tail).ok()?;
-    // Reverse-split directly over the bounded buffer; no Vec of every line is
-    // needed. A partial record at the start simply fails projection.
     for line in tail.rsplit(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -1479,7 +1332,7 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     })
 }
 
-/// Write `contents` to `path` atomically: write a temp sibling, then rename.
+// Write `contents` to `path` atomically: write a temp sibling, then rename.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     let dir = path
         .parent()
@@ -1508,8 +1361,6 @@ mod tests {
     use super::*;
     use lofi_types::{ContentBlock, Role, SessionEventKind, ThinkingLevel, Usage};
 
-    /// Wrap a message as a `Message` session event (`id/parent_id` left empty;
-    /// `append_events` assigns and chains them).
     fn ev(msg: Message) -> SessionEvent {
         SessionEvent {
             id: String::new(),
@@ -1537,8 +1388,8 @@ mod tests {
         }
     }
 
-    /// A store rooted at a fresh temp dir, so tests never touch real state
-    /// and never race on the process-global `XDG_STATE_HOME` env var.
+    // A store rooted at a fresh temp dir, so tests never touch real state
+    // and never race on the process-global `XDG_STATE_HOME` env var.
     fn isolated_store() -> (tempfile::TempDir, SessionStore) {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
@@ -1983,7 +1834,6 @@ mod tests {
         assert!(
             matches!(&events[1].kind, SessionEventKind::Message(m) if m.role == Role::Assistant)
         );
-        // Linear chain: first event is root, second chains to first.
         assert!(events[0].parent_id.is_none());
         assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
     }
@@ -2036,24 +1886,19 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/branch");
         let path = store.create(cwd, &"m".into()).unwrap();
-        // Root chain: user -> assistant.
         let mut first = [ev(user("a")), ev(assistant("b"))];
         append_events(&path, &mut first, None).unwrap();
         let (_meta, base, _, _) = load(&path).unwrap();
         let root_id = base[0].id.clone();
-        // Branch a sibling user message off the root (not off the assistant).
         let mut branch = [ev(user("alt"))];
         append_events(&path, &mut branch, Some(&root_id)).unwrap();
         let (_meta, events, _, _) = load(&path).unwrap();
-        // 3 events total; the branch's parent is the root, not the assistant.
         assert_eq!(events.len(), 3);
         let branch_ev = events.iter().find(|e| {
             matches!(&e.kind, SessionEventKind::Message(m) if m.role == Role::User
                 && m.blocks.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "alt")))
         }).expect("branch event present");
         assert_eq!(branch_ev.parent_id.as_deref(), Some(root_id.as_str()));
-        // active_path from the branch leaf is [root, branch] — the assistant
-        // is a sibling and excluded.
         let path_idx = active_path(&events, &branch_ev.id);
         assert_eq!(path_idx.len(), 2);
         assert!(
@@ -2133,8 +1978,6 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/lrm-branch");
         let path = store.create(cwd, &"p/orig".into()).unwrap();
-        // Root chain ends with model A; a sibling branch off the root user
-        // ends with model B and is the active leaf, so B is restored (not A).
         let mut first = [
             ev(user("a")),
             ev(assistant("b")),
@@ -2178,7 +2021,6 @@ mod tests {
         let (_guard, store) = isolated_store();
         let cwd = Path::new("/tmp/legacy");
         let path = store.create(cwd, &"m".into()).unwrap();
-        // Pre-event-log files stored bare Message JSON, one per line.
         let legacy = serde_json::to_string(&user("old")).unwrap();
         std::fs::OpenOptions::new()
             .append(true)
@@ -2210,8 +2052,6 @@ mod tests {
         let p2 = store.create(cwd, &"m".into()).unwrap();
         let list = store.list_for_cwd(cwd).unwrap();
         assert_eq!(list.len(), 2);
-        // p2 was created after p1 was last written, so p2 is most recently
-        // active and should be listed first.
         assert_eq!(list[0].file.path, p2);
         assert_eq!(list[1].file.path, p1);
         assert_eq!(list[1].message_count, 1);
