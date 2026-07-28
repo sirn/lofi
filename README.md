@@ -39,6 +39,10 @@ With no flags, `lofi` launches the interactive TUI against the current working d
 | `Esc` | Clear the input box. |
 | `Up` / `Down` | Scroll the message log. |
 
+### Shell commands
+
+Prefix input with `!` to run it directly through `sh -c` in the workspace. The captured output is included in subsequent model context; use `!!` instead to run it without adding it to context. Direct shell commands have no wall-clock timeout, are persisted in session transcripts, and can be cancelled with `Ctrl+C`.
+
 ### Slash commands
 
 | Command | Action |

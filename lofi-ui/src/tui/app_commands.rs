@@ -175,6 +175,16 @@ impl App {
             "cancel · clear · 2× quit (Input); back (Nav)",
         ));
         lines.push(info_kv(t, "Ctrl+D", "delete char; quit on empty"));
+        lines.push(info_kv(
+            t,
+            "!command",
+            "run shell command; include in context",
+        ));
+        lines.push(info_kv(
+            t,
+            "!!command",
+            "run shell command; omit from context",
+        ));
         lines.push(Line::from(""));
         lines.push(info_section(t, "Navigate"));
         lines.push(info_kv(t, "j/k ↑↓", "scroll"));

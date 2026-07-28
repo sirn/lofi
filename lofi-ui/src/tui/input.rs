@@ -102,7 +102,7 @@ pub(super) fn handle_event(
             app.history_idx = None;
             app.slash_complete = None;
             // Slash commands run immediately even while the agent is busy;
-            // only real prompts are queued.
+            // shell commands and real prompts are serialized in the same queue.
             if app.slash_command(&prompt) {
                 return;
             }
@@ -119,6 +119,10 @@ pub(super) fn handle_event(
                 return;
             }
             app.history_nav.push(prompt.clone());
+            if let Some((command, exclude_from_context)) = parse_user_bash(&prompt) {
+                spawn_user_bash(app, current_run, command, exclude_from_context);
+                return;
+            }
             // Lazily create the transcript file on the first persisted prompt.
             if app.session.cursor.is_none() {
                 if let Some(store) = &app.session.store {
@@ -188,6 +192,7 @@ pub(super) fn handle_event(
                 rx,
                 cancel,
                 preempt,
+                user_bash: None,
             });
             app.run = Some(0);
             app.run_start = Some(Instant::now());
@@ -263,6 +268,34 @@ pub(super) fn handle_event(
     app.refresh_slash_complete();
 }
 
+fn parse_user_bash(prompt: &str) -> Option<(String, bool)> {
+    if let Some(command) = prompt.strip_prefix("!!") {
+        let command = command.trim_start();
+        return (!command.is_empty()).then(|| (command.to_string(), true));
+    }
+    let command = prompt.strip_prefix('!')?.trim_start();
+    (!command.is_empty()).then(|| (command.to_string(), false))
+}
+
+#[cfg(test)]
+mod user_bash_tests {
+    use super::parse_user_bash;
+
+    #[test]
+    fn parses_context_modes() {
+        assert_eq!(
+            parse_user_bash("!  printf ok"),
+            Some(("printf ok".to_string(), false))
+        );
+        assert_eq!(
+            parse_user_bash("!! printf ok"),
+            Some(("printf ok".to_string(), true))
+        );
+        assert_eq!(parse_user_bash("!   "), None);
+        assert_eq!(parse_user_bash("ordinary prompt"), None);
+    }
+}
+
 /// Ctrl+C: cancel an active run; otherwise clear a non-empty draft, or quit
 /// on a double press within [`QUIT_DOUBLE_PRESS`] when the prompt is empty.
 /// Mode-independent — works the same in Input, Navigate, and Select.
@@ -276,13 +309,128 @@ pub(super) fn handle_event(
 /// Start a new run with a queued prompt (FIFO pop at turn end). Shares
 /// the session-file creation and turn-freezing logic with the Enter
 /// handler but skips UI-only concerns (history nav, slash completion).
+pub(super) fn finish_user_bash(
+    app: &mut App,
+    result: lofi_core::UserBashResult,
+    exclude_from_context: bool,
+) {
+    if !exclude_from_context {
+        if let Ok(mut history) = app.history.lock() {
+            history.push(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text {
+                    text: result.context_text(),
+                }],
+            });
+        }
+    }
+    let byte_range = app.session.cursor.as_ref().and_then(|cursor| {
+        let mut events = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::UserBash {
+                command: result.command.clone(),
+                output: result.output.clone(),
+                exit_code: result.exit_code,
+                signal: result.signal,
+                duration_ms: result.duration_ms,
+                truncated: result.truncated,
+                cancelled: result.cancelled,
+                exclude_from_context,
+            },
+        }];
+        cursor.append_events(&mut events).ok()
+    });
+    app.apply_event(AgentEvent::UserBash {
+        command: result.command,
+        output: result.output,
+        exit_code: result.exit_code,
+        signal: result.signal,
+        duration_ms: result.duration_ms,
+        truncated: result.truncated,
+        cancelled: result.cancelled,
+        exclude_from_context,
+    });
+    if let (Some(range), Some(slot)) = (byte_range, app.turn_byte_ranges.last_mut()) {
+        *slot = Some(range);
+    }
+}
+
+pub(super) fn spawn_user_bash(
+    app: &mut App,
+    current_run: &mut Option<RunHandle>,
+    command: String,
+    exclude_from_context: bool,
+) {
+    // Bash input creates a transcript lazily just like an agent prompt, but
+    // never requires a configured model.
+    if app.session.cursor.is_none() {
+        if let Some(store) = &app.session.store {
+            if let Ok(cursor) = store.create_cursor(&app.session.cwd, &app.run_model()) {
+                app.session.cursor = Some(cursor);
+            }
+        }
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let cwd = app.session.cwd.clone();
+    let command_for_run = command.clone();
+    let handle = tokio::task::spawn_local(async move {
+        let event = match lofi_core::run_user_bash(&cwd, command_for_run.clone()).await {
+            Ok(result) => AgentEvent::UserBash {
+                command: result.command,
+                output: result.output,
+                exit_code: result.exit_code,
+                signal: result.signal,
+                duration_ms: result.duration_ms,
+                truncated: result.truncated,
+                cancelled: result.cancelled,
+                exclude_from_context,
+            },
+            Err(error) => AgentEvent::UserBash {
+                command: command_for_run,
+                output: error.to_string(),
+                exit_code: Some(1),
+                signal: None,
+                duration_ms: 0,
+                truncated: false,
+                cancelled: false,
+                exclude_from_context,
+            },
+        };
+        let _ = tx.send(event).await;
+    });
+    *current_run = Some(RunHandle {
+        handle,
+        rx,
+        cancel: Arc::new(AtomicBool::new(false)),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: Some((command, exclude_from_context)),
+    });
+    app.run = Some(0);
+    app.run_start = Some(Instant::now());
+    app.pinned = true;
+}
+
 pub(super) fn spawn_prompt(
     app: &mut App,
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
     prompt: String,
 ) {
-    let Some(agent) = agent else { return };
+    if let Some((command, exclude_from_context)) = parse_user_bash(&prompt) {
+        spawn_user_bash(app, current_run, command, exclude_from_context);
+        return;
+    }
+    let Some(agent) = agent else {
+        app.push_turn(Turn {
+            prompt,
+            blocks: app
+                .no_models_hint
+                .clone()
+                .map_or_else(Vec::new, |hint| vec![Block::Error(hint)]),
+        });
+        return;
+    };
     // Lazily create the transcript file on the first persisted prompt.
     if app.session.cursor.is_none() {
         if let Some(store) = &app.session.store {
@@ -332,6 +480,7 @@ pub(super) fn spawn_prompt(
         rx,
         cancel,
         preempt,
+        user_bash: None,
     });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
@@ -381,6 +530,7 @@ pub(super) fn spawn_continue(
         rx,
         cancel,
         preempt,
+        user_bash: None,
     });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
@@ -393,12 +543,17 @@ pub(super) fn handle_ctrl_c(
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(r) = current_run.take() {
+        let user_bash = r.user_bash.clone();
         // Signal the QuickJS interrupt handler to break any synchronous
-        // guest loop *before* aborting the task — `handle.abort()` alone
-        // cannot preempt code blocked inside native `ctx.eval`.
+        // guest loop *before* aborting the task — handle.abort() alone cannot
+        // preempt code blocked inside native guest execution.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         r.handle.abort();
-        if let Some(turn) = app.turns.last_mut() {
+        if let Some((command, exclude_from_context)) = user_bash {
+            let result =
+                lofi_core::cancelled_user_bash(command, app.run_elapsed().as_millis() as u64);
+            finish_user_bash(app, result, exclude_from_context);
+        } else if let Some(turn) = app.turns.last_mut() {
             turn.blocks.push(Block::Error("cancelled".to_string()));
         }
         app.run_finished();

@@ -124,6 +124,25 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                     stack.push(ToolLine { tool });
                 }
             }
+            Block::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration,
+                truncated,
+                cancelled,
+                exclude_from_context,
+            } => stack.push(UserBashLine {
+                command,
+                output,
+                exit_code: *exit_code,
+                signal: *signal,
+                duration: *duration,
+                truncated: *truncated,
+                cancelled: *cancelled,
+                exclude_from_context: *exclude_from_context,
+            }),
             Block::Error(msg) => stack.push(ErrorLine { msg }),
             Block::TurnEnd { label, elapsed } => {
                 stack.push(TurnEnd {
@@ -1849,6 +1868,109 @@ impl Component for ToolLine<'_> {
 }
 
 // ── Fatal error ─────────────────────────────────────────────────────────
+
+// Direct user shell command.
+struct UserBashLine<'a> {
+    command: &'a str,
+    output: &'a str,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    duration: Duration,
+    truncated: bool,
+    cancelled: bool,
+    exclude_from_context: bool,
+}
+
+impl Component for UserBashLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let failed =
+            self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0);
+        let status_color = if failed { t.error } else { t.success };
+        let command_style = Style::new().fg(t.fg);
+        let mut out = Vec::new();
+
+        // Shell prompt: only `$` carries the shell green. The command itself
+        // remains ordinary transcript text, including on a failed command.
+        let command_avail = cx.width.saturating_sub(4);
+        for (i, seg) in prim::wrap_pre(self.command, command_avail)
+            .into_iter()
+            .enumerate()
+        {
+            let prompt = if i == 0 {
+                Span::styled("$ ", Style::new().fg(t.success))
+            } else {
+                Span::raw("  ")
+            };
+            out.push(prim::rline(
+                vec![Span::raw("  "), prompt],
+                vec![Span::styled(seg, command_style)],
+            ));
+        }
+
+        // Match Exec output: a subtle tree rail on every row, muted output on
+        // success, and error-colored output on failure. Collapsed mode keeps
+        // the same three-logical-line preview as tool results.
+        let lines: Vec<&str> = self.output.trim_end_matches('\n').split('\n').collect();
+        let limit = if cx.app.verbose {
+            lines.len()
+        } else {
+            PREVIEW_LINES
+        };
+        let rail = vec![
+            Span::raw("  "),
+            Span::styled("│ ", Style::new().fg(t.subtle)),
+        ];
+        if !self.output.is_empty() {
+            let body_style = Style::new().fg(if failed { t.error } else { t.muted });
+            for raw in lines.iter().take(limit) {
+                for seg in prim::wrap_pre(raw, cx.width.saturating_sub(4)) {
+                    out.push(prim::rline(
+                        rail.clone(),
+                        vec![Span::styled(seg, body_style)],
+                    ));
+                }
+            }
+            let hidden = lines.len().saturating_sub(limit);
+            if hidden > 0 {
+                out.push(prim::rline(
+                    rail,
+                    vec![Span::styled(
+                        format!("… ({hidden} lines hidden)"),
+                        Style::new().fg(t.subtle),
+                    )],
+                ));
+            }
+        }
+
+        let mut status = if self.cancelled {
+            "Cancelled".to_string()
+        } else if let Some(signal) = self.signal {
+            format!("Signal {signal}")
+        } else {
+            format!("Exit {}", self.exit_code.unwrap_or(0))
+        };
+        status.push_str(&format!(", took {}", prim::fmt_duration(self.duration)));
+        if self.truncated {
+            status.push_str(" · truncated");
+        }
+        if self.exclude_from_context {
+            status.push_str(" · not in context");
+        }
+        out.push(prim::rline(
+            vec![
+                Span::raw("  "),
+                Span::styled("└ ", Style::new().fg(t.subtle)),
+                Span::styled(
+                    if failed { "✗ " } else { "✓ " },
+                    Style::new().fg(status_color),
+                ),
+            ],
+            vec![Span::styled(status, Style::new().fg(t.fg))],
+        ));
+        out
+    }
+}
 
 /// A fatal error line: `✗ <message>`.
 struct ErrorLine<'a> {
