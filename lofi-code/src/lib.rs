@@ -517,6 +517,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         async_with!(&actx => |ctx| {
             install_globals(&ctx, &tools, &strings, recall, result, skills_dir, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
+            ctx.eval::<(), _>("Error.stackTraceLimit = 0")
+                .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
                 .eval(js.as_str())
                 .map_err(|e| Error::Sandbox(format!("eval: {e}")))?;
