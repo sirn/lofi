@@ -2,6 +2,10 @@
 
 Lofi is a minimal coding-agent harness written in Rust.
 
+## Platform support
+
+The initial release targets Unix-like systems with POSIX shell and process semantics. Linux is the primary tested platform; macOS and other Unix targets are best effort. Windows is not currently supported.
+
 ## Building
 
 ```sh
@@ -27,6 +31,8 @@ target/release/lofi
 | `--policy-explain` | Evaluate a command against the shell policy (dry-run). |
 
 With no flags, `lofi` launches the interactive TUI against the current working directory as the workspace root.
+
+Model-generated shell commands run on the host through `sh -c`; QuickJS isolation does not sandbox native commands. The default policy asks for confirmation before every such command. See [Shell policy](docs/configuration.md#shell-policy) before selecting a more permissive approval mode.
 
 ### TUI keybindings
 

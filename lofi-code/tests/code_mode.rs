@@ -27,6 +27,15 @@ fn ctx(root: &Path) -> ExecCtx {
     }
 }
 
+fn trusted_ctx(root: &Path) -> ExecCtx {
+    let mut ctx = ctx(root);
+    ctx.shell_policy = lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig {
+        mode: lofi_types::ShellPolicyMode::Unrestricted,
+        ..lofi_types::ShellPolicyConfig::default()
+    });
+    ctx
+}
+
 #[test]
 fn compile_ts_strips_type_annotations() {
     let js = compile_ts("const x: number = 42; return x;").unwrap();
@@ -120,7 +129,7 @@ async fn every_native_api_result_can_be_returned_as_is() {
         return { read, ls, find, grep, write, edit, bash, skills, skill,
                  docs, docsSearch, hasLegacyDocsSearch, recall, result };
     "#;
-    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
 
@@ -235,7 +244,7 @@ async fn strings_exposed_as_lofi_strings() {
 async fn exec_bash_echo() {
     let dir = tempfile::tempdir().unwrap();
     let src = "const r = await lofi.bash({ cmd: 'echo hi' }); return r.output.trim();";
-    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let s: &str = res.value.as_str().unwrap();
@@ -246,7 +255,7 @@ async fn exec_bash_echo() {
 async fn exec_bash_read_pages_bash_log() {
     let dir = tempfile::tempdir().unwrap();
     let src = "const r = await lofi.bash({ cmd: 'for i in $(seq 1 5000); do echo \"output line number $i with some padding text to make it longer\"; done' }); return r.output;";
-    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let out: &str = res.value.as_str().unwrap();

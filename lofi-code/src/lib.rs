@@ -606,6 +606,15 @@ mod tests {
         }
     }
 
+    fn trusted_ctx(root: &std::path::Path) -> ExecCtx {
+        let mut ctx = ctx(root);
+        ctx.shell_policy = crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig {
+            mode: lofi_types::ShellPolicyMode::Unrestricted,
+            ..lofi_types::ShellPolicyConfig::default()
+        });
+        ctx
+    }
+
     #[test]
     fn compile_ts_strips_type_annotations() {
         let js = compile_ts("const x: number = 42; return x;").unwrap();
@@ -785,7 +794,7 @@ mod tests {
     async fn exec_bash_echo() {
         let dir = tempdir().unwrap();
         let src = "const r = await lofi.bash({ cmd: 'echo hi' }); return r.output.trim();";
-        let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
             .await
             .unwrap();
         assert_eq!(res.value, json!("hi"));
@@ -825,7 +834,7 @@ mod tests {
     async fn exec_escaped_unicode_in_tool_arg() {
         let dir = tempdir().unwrap();
         let src = r#"const r = await lofi.bash({ cmd: "echo \u00E9" }); return r.output.trim();"#;
-        let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
             .await
             .unwrap();
         assert_eq!(res.value, json!("é"));

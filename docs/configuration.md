@@ -416,18 +416,23 @@ Later delays use exponential backoff. Overload responses, HTTP 429/5xx, network 
 
 Shell policy lives in `policy.toml`, alongside `config.toml` by default. Every `lofi.bash` command is parsed structurally and evaluated against allow, ask, and deny rules. Unmatched commands fail closed to `ask`.
 
+`lofi.bash` runs through host `sh -c`. The policy controls approval; it is not a filesystem or network sandbox. A command approved by the user can read or modify anything available to that user. The default therefore requires confirmation for every model-generated shell command. Filesystem tools such as `lofi.read`, `lofi.write`, and `lofi.edit` remain confined to their registered roots.
+
 ### Modes
 
 | Mode | Behaviour |
 | --- | --- |
-| `read_only` | Allows only read-only commands such as `ls`, `cat`, `grep`, and `git status`. |
-| `workspace_write` | Read-only plus workspace mutations such as builds and directory creation. This is the default. |
+| `confirm` | Requires confirmation for every command except universal denials. This is the default. |
+| `read_only` | Automatically approves a command-classification allowlist such as `ls`, `cat`, `grep`, and `git status`. It does not confine paths. |
+| `workspace_write` | Adds builds, interpreters, package managers, and mutation commands to the automatic-approval allowlist. It does not confine writes to the workspace. |
 | `unrestricted` | Allows everything unless an explicit rule denies it. |
 
 ```toml
-mode = "workspace_write"
+mode = "confirm"
 yolo = false
 ```
+
+Network clients are not automatically approved by the built-in restricted modes. Output redirects require confirmation by default. Both can be opted into with custom rules and redirect settings.
 
 `yolo = true` skips confirmation for `ask` and unmatched commands, but does not bypass explicit deny rules.
 

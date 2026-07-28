@@ -218,8 +218,6 @@ fn workspace_write_allow() -> Vec<CommandEntry> {
         entry("tee", MatchMode::Prefix),
         entry("sed -i", MatchMode::Prefix),
         entry("cd", MatchMode::Prefix),
-        entry("curl", MatchMode::Prefix),
-        entry("wget", MatchMode::Prefix),
     ]
 }
 
@@ -233,6 +231,9 @@ fn entry(match_str: &str, mode: MatchMode) -> CommandEntry {
 #[must_use]
 pub fn resolve(config: &lofi_types::ShellPolicyConfig) -> ResolvedPolicy {
     let (mut allow, mut ask, mut deny) = match config.mode {
+        ShellPolicyMode::Confirm | ShellPolicyMode::Unrestricted => {
+            (Vec::new(), Vec::new(), universal_deny())
+        }
         ShellPolicyMode::ReadOnly => (read_only_allow(), destructive_ask(), {
             let mut d = universal_deny();
             d.extend(workspace_write_allow().into_iter().filter(|e| {
@@ -248,7 +249,6 @@ pub fn resolve(config: &lofi_types::ShellPolicyConfig) -> ResolvedPolicy {
             a.extend(workspace_write_allow());
             (a, destructive_ask(), universal_deny())
         }
-        ShellPolicyMode::Unrestricted => (Vec::new(), Vec::new(), universal_deny()),
     };
 
     allow.extend(config.allow.clone());

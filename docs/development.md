@@ -2,7 +2,7 @@
 
 ## Session transcripts
 
-`lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-slug>/`, with one `.jsonl` file per session. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.
+`lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-name>-<path-hash>/`, with one `.jsonl` file per session. The hash isolates workspaces whose readable names collide; legacy slug-only directories remain readable. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.
 
 Non-metadata events form a **tree** through `id` and `parent_id`. Each new event points to its parent, and branching appends a new child without removing existing siblings. The selected logical head is stored separately in append-only `cursor` records; physical end-of-file order is not the authoritative active branch. Resuming walks from that selected head to the root and rebuilds history from the resulting active path, so sibling branches do not enter the model's context.
 
