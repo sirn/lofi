@@ -648,14 +648,14 @@ impl Agent {
 
         collect.await?;
 
+        let assistant_index = messages.len();
         messages.push(assembler.finish());
-
         let results = {
-            let assistant = messages.last().expect("assistant was just appended");
+            let assistant = &messages[assistant_index];
             let tool_uses: Vec<(&str, &str, &serde_json::Value)> = assistant
                 .blocks
                 .iter()
-                .filter_map(|b| match b {
+                .filter_map(|block| match block {
                     ContentBlock::ToolUse { id, name, input } => {
                         Some((id.as_str(), name.as_str(), input))
                     }
@@ -664,9 +664,6 @@ impl Agent {
                 .collect();
 
             if tool_uses.is_empty() {
-                // The turn-end marker (and cost/usage) is emitted once by the
-                // outer `run_continuation` from the accumulated `TurnStats`, not
-                // per round, so a multi-round turn produces a single summary.
                 return Ok(true);
             }
 

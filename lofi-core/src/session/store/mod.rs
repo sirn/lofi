@@ -789,6 +789,10 @@ impl SessionStore {
 
     /// Discover session files using directory metadata only, newest first.
     /// No transcript contents are read or indexed.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
+    /// other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
         let dir = self.dir_for_cwd(cwd);
         let mut files = Vec::new();
@@ -927,7 +931,7 @@ enum AppendParent<'a> {
 }
 
 impl AppendParent<'_> {
-    #[allow(unused_variables)]
+    #[cfg_attr(not(test), allow(unused_variables, clippy::unnecessary_wraps))]
     fn resolve(self, path: &Path) -> Result<Option<String>> {
         match self {
             Self::Explicit(parent) => Ok(parent.map(str::to_string)),
@@ -1019,8 +1023,8 @@ pub(crate) fn append_compaction(
     path: &Path,
     kept_messages: &[Message],
     parent_hint: Option<&str>,
-    summary: String,
-    summarized_range: [String; 2],
+    summary: &str,
+    summarized_range: &[String; 2],
     counts: CompactionCounts,
 ) -> Result<(u64, u64, String)> {
     let parent = parent_hint.map_or(AppendParent::PhysicalEof, |id| {
@@ -1030,8 +1034,8 @@ pub(crate) fn append_compaction(
         path,
         kept_messages,
         parent,
-        &summary,
-        &summarized_range,
+        summary,
+        summarized_range,
         counts,
         false,
     )
@@ -1739,8 +1743,8 @@ mod tests {
             &path,
             &kept,
             None,
-            "summary".into(),
-            ["first".into(), "last".into()],
+            "summary",
+            &["first".into(), "last".into()],
             CompactionCounts {
                 summarized: 5,
                 represented: 5,
@@ -1781,8 +1785,8 @@ mod tests {
             &path,
             &[assistant("checkpoint")],
             Some(&original[0].id),
-            "summary".into(),
-            [original[0].id.clone(), original[0].id.clone()],
+            "summary",
+            &[original[0].id.clone(), original[0].id.clone()],
             CompactionCounts {
                 summarized: 1,
                 represented: 1,
