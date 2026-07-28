@@ -2,10 +2,6 @@
 
 use super::*;
 
-/// Borrow the last Tool block matching id (newest-first).
-/// Stamp the elapsed duration on the trailing thinking block, if any is
-/// still open. Called whenever the stream moves on to a different block
-/// kind or the run ends.
 pub(super) fn finalize_open_thinking(turn: &mut Turn) {
     if let Some(Block::Thinking(t)) = turn.blocks.last_mut() {
         if t.elapsed.is_none() {
@@ -21,8 +17,6 @@ pub(super) fn tool_mut<'a>(blocks: &'a mut [Block], id: &str) -> Option<&'a mut 
     })
 }
 
-/// Active-path event indices used for visible transcript replay. Context-edited
-/// kept-tail copies are model-history checkpoints, not additional UI turns.
 fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
     use std::collections::HashSet;
     let path = store::active_path_from_leaf(events);
@@ -45,11 +39,6 @@ fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
     path.into_iter().filter(|i| !hidden.contains(i)).collect()
 }
 
-/// Build per-turn byte ranges from a transcript event log and the byte
-/// offset of each event's line. A turn starts at a `User` message that isn't
-/// a tool-result (mirroring [`turns_from_events`]); its byte range runs from
-/// that line's offset to the next turn's start, or to `file_size` for the
-/// last turn. Parallel to the `Vec<Turn>` returned by [`turns_from_events`].
 #[cfg(test)]
 pub(super) fn turn_byte_ranges_from_events(
     events: &[SessionEvent],
@@ -183,9 +172,6 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         }
         AgentEvent::ToolInput { id, code, label } => {
             if let Some(t) = tool_mut(&mut turn.blocks, &id) {
-                // Streamed deltas already grew `input`; the finalized event
-                // replaces it with the authoritative full code and stamps the
-                // label. Falls back to `code` when nothing streamed.
                 t.input = code;
                 if t.label.is_none() {
                     t.label = label;
@@ -197,7 +183,12 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 t.input.push_str(&delta);
             }
         }
-        AgentEvent::ToolEnd { id, result, is_error, elapsed_ms } => {
+        AgentEvent::ToolEnd {
+            id,
+            result,
+            is_error,
+            elapsed_ms,
+        } => {
             if let Some(t) = tool_mut(&mut turn.blocks, &id) {
                 if is_error {
                     // A rejected exec promise cancels sibling native-tool
@@ -249,14 +240,21 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 }
             }
         }
-        AgentEvent::TurnEnd { model, elapsed_ms, .. } => {
+        AgentEvent::TurnEnd {
+            model, elapsed_ms, ..
+        } => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::TurnEnd {
                 label: model.label(),
                 elapsed: Duration::from_millis(elapsed_ms),
             });
         }
-        AgentEvent::TurnFailed { model, elapsed_ms, error, .. } => {
+        AgentEvent::TurnFailed {
+            model,
+            elapsed_ms,
+            error,
+            ..
+        } => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::TurnFailed {
                 label: model.label(),
@@ -268,11 +266,17 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::Error(msg));
         }
-        AgentEvent::Compaction { summarized, kept, summary } => {
-            turn.blocks.push(Block::Compaction { summarized, kept, summary });
+        AgentEvent::Compaction {
+            summarized,
+            kept,
+            summary,
+        } => {
+            turn.blocks.push(Block::Compaction {
+                summarized,
+                kept,
+                summary,
+            });
         }
-        // Status-only events are handled by `App::apply_event` before
-        // reaching this builder; they are no-ops here.
         AgentEvent::RetryStart { .. }
         | AgentEvent::RetryEnd { .. }
         | AgentEvent::RoundCommitted { .. }
@@ -280,16 +284,11 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. }
         | AgentEvent::UserBash { .. }
-        // Live-only signals handled by `App::apply_event`; no block here.
         | AgentEvent::TurnContinue
         | AgentEvent::ContextPressure { .. } => {}
     }
 }
 
-/// Build a `Vec<Turn>` from a transcript event log by replaying each converted
-/// event directly through [`apply_event_to_turns`]. Used to materialize a frozen turn from its byte
-/// range on demand (`materialize_turn`); the live path and full-session
-/// resume go through `App::apply_event` instead, which also updates totals.
 pub(super) fn turns_from_session_events(events: &[SessionEvent]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     replay_session_events(events, |ev| apply_event_to_turns(&mut turns, ev));
@@ -346,13 +345,8 @@ pub(super) fn replay_selected_session_events(
 fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEvent)) {
     use std::collections::HashMap as Map;
 
-    // These indexes borrow the durable events. Cloning native records here
-    // used to duplicate every captured tool result during resume (several MiB
-    // in large sessions) before replay had even started.
     let mut tool_elapsed: Map<&str, u64> = Map::new();
     let mut native_by_parent: Map<&str, Vec<&NativeToolRecord>> = Map::new();
-    // Thinking-block durations in emission order, matched positionally to
-    // assistant `Thinking` blocks as they are replayed.
     let mut thinking_timing: Vec<u64> = Vec::new();
     for &ev in visible {
         match &ev.kind {
@@ -379,8 +373,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
         match &ev.kind {
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
-                    // ToolResult blocks attach to the current turn's pending
-                    // tool calls as deferred `ToolEnd` events.
                     if msg
                         .blocks
                         .iter()
@@ -441,9 +433,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                                     id: id.clone(),
                                     name: name.clone(),
                                 });
-                                // For a restored `exec`, split the stored
-                                // input JSON back into the code (shown with
-                                // line numbers) and the `display` label.
                                 let (code, label) = if name == "exec" {
                                     lofi_core::exec_input_code_and_label(input)
                                 } else {
@@ -454,10 +443,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                                     code,
                                     label,
                                 });
-                                // Replay the native tool calls that ran inside
-                                // this exec, in order, before the `ToolEnd`
-                                // (which is deferred to the tool-result
-                                // message below).
                                 if let Some(natives) = native_by_parent.get(id.as_str()) {
                                     for rec in natives {
                                         emit(AgentEvent::NativeToolStart {
@@ -479,9 +464,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                         }
                     }
                 }
-                // The engine writes tool results as `Role::Tool`; replay
-                // them as deferred `ToolEnd` events, matching the live
-                // stream's inline-result semantics.
                 Role::Tool => {
                     for b in &msg.blocks {
                         if let ContentBlock::ToolResult {
@@ -537,9 +519,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 summary,
                 ..
             } => {
-                // The summary is injected into the agent history by
-                // `messages_from_events`; carry it on the marker block too
-                // so `/verbose` can expand it inline.
                 emit(AgentEvent::Compaction {
                     summarized: *summarized,
                     kept: *kept,
@@ -586,8 +565,6 @@ pub(super) fn messages_from_events(
     _edit: &lofi_types::EditConfig,
 ) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
-    // Kept tail as (event_id, message) pairs so `edit_tail` can embed the
-    // event id in its recall-recoverable stubs.
     let mut out: Vec<(String, Message)> = Vec::new();
     let mut skipping = false;
     // The compaction summary, captured when the Compaction marker is seen
@@ -597,9 +574,6 @@ pub(super) fn messages_from_events(
     // summary after the kept tail once reversed, and mid-stream when a
     // force-continued turn follows the marker.
     let mut summary_msg: Option<Message> = None;
-    // The compaction boundary: once a Compaction marker is seen leaf-first,
-    // the walk stops at this event id, folding everything older into the
-    // summary. `None` while no compaction is in effect on the active path.
     let mut boundary: Option<String> = None;
     // Iterate leaf-first so the `TurnFailed` boundary is seen before its
     // ancestors; `path` is root-first, so reverse.
@@ -619,9 +593,6 @@ pub(super) fn messages_from_events(
                     });
                 }
                 if first_kept_entry_id.is_empty() {
-                    // Compact-all has no kept-tail boundary. Everything older
-                    // than this marker is represented by the summary; retain
-                    // only messages already collected after the marker.
                     break;
                 }
                 boundary = Some(first_kept_entry_id.clone());
@@ -681,8 +652,6 @@ pub(super) fn messages_from_events(
     // in-memory edit_tail is needed here.
     out.reverse();
     let mut messages: Vec<Message> = out.into_iter().map(|(_, m)| m).collect();
-    // The summary leads: it is the oldest context (the folded prefix), so it
-    // must come before the kept tail and any post-compaction continuation.
     if let Some(s) = summary_msg {
         messages.insert(0, s);
     }

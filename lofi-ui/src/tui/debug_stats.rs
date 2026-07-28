@@ -1,5 +1,3 @@
-//! Opt-in process and component memory diagnostics for the TUI.
-
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -63,9 +61,6 @@ struct ProcessMemory {
     rss_anon_bytes: u64,
     rss_file_bytes: u64,
     swap_bytes: u64,
-    // Proportional/private breakdown from /proc/self/smaps_rollup. Unlike RSS,
-    // PSS divides shared mappings between processes and private dirty memory is
-    // a useful approximation for allocator-owned pages.
     pss_bytes: u64,
     pss_anon_bytes: u64,
     pss_file_bytes: u64,
@@ -84,9 +79,6 @@ struct ProcessMemory {
 }
 
 impl App {
-    /// Enable debug logging at startup when `LOFI_DEBUG` is present. This is
-    /// intentionally silent: the dedicated debug status line makes the mode
-    /// visible without showing a startup notification.
     pub(super) fn enable_debug_from_env(&mut self) {
         if std::env::var_os("LOFI_DEBUG").is_none() || self.debug.is_some() {
             return;
@@ -375,10 +367,6 @@ fn option_delta(current: Option<u64>, previous: Option<u64>) -> Option<i128> {
 }
 
 fn read_allocator_memory() -> AllocatorMemory {
-    // Direct glibc allocator counters require unsafe FFI, which this workspace
-    // forbids. Keep the schema portable and report null on unsupported builds;
-    // private/anonymous retention proxies below remain available everywhere
-    // Linux exposes procfs.
     AllocatorMemory::default()
 }
 

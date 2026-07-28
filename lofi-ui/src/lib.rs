@@ -24,23 +24,15 @@ pub use cli::run_cli;
 /// prompts come from the TUI input box at runtime.
 #[derive(Debug, Clone)]
 pub struct InteractiveOptions {
-    /// Workspace root file operations are confined to.
     pub root: PathBuf,
-    /// Optional override for the config file path.
     pub config_path: Option<PathBuf>,
-    /// Optional `--model provider/model[:level]` selection.
     pub model: Option<String>,
-    /// Resume the most recent session for this workspace (`-c`/`--continue`).
     pub continue_last: bool,
-    /// Resume a specific session by id prefix (`--resume <id>`).
     pub resume: Option<String>,
-    /// Disable transcript persistence (`--no-session`).
     pub no_session: bool,
 }
 
 impl InteractiveOptions {
-    /// Construct an `InteractiveOptions` with a workspace root, leaving the
-    /// flag-style fields at their defaults.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -53,35 +45,30 @@ impl InteractiveOptions {
         }
     }
 
-    /// Override the config file path.
     #[must_use]
     pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_path = Some(path.into());
         self
     }
 
-    /// Override the model (`provider/model[:level]`).
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// Resume the most recent session (`--continue`).
     #[must_use]
     pub fn with_continue(mut self) -> Self {
         self.continue_last = true;
         self
     }
 
-    /// Resume a specific session by id prefix (`--resume`).
     #[must_use]
     pub fn with_resume(mut self, id: impl Into<String>) -> Self {
         self.resume = Some(id.into());
         self
     }
 
-    /// Disable transcript persistence (`--no-session`).
     #[must_use]
     pub fn with_no_session(mut self) -> Self {
         self.no_session = true;
@@ -89,26 +76,15 @@ impl InteractiveOptions {
     }
 }
 
-/// Options for the non-interactive `--print` path.
-///
-/// `config_path` defaults to the user config file
-/// ([`lofi_core::config_loader::user_config_path`]) when `None`; `model`
-/// mirrors the `--model` flag.
 #[derive(Debug, Clone)]
 pub struct PrintOptions {
-    /// The user prompt to send.
     pub prompt: String,
-    /// Workspace root file operations are confined to.
     pub root: PathBuf,
-    /// Optional override for the config file path.
     pub config_path: Option<PathBuf>,
-    /// Optional `--model provider/model[:level]` selection.
     pub model: Option<String>,
 }
 
 impl PrintOptions {
-    /// Construct a `PrintOptions` with a prompt and workspace root, leaving
-    /// all flag-style fields at their defaults.
     #[must_use]
     pub fn new(prompt: impl Into<String>, root: impl Into<PathBuf>) -> Self {
         Self {
@@ -119,14 +95,12 @@ impl PrintOptions {
         }
     }
 
-    /// Override the config file path.
     #[must_use]
     pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_path = Some(path.into());
         self
     }
 
-    /// Override the model (`provider/model[:level]`).
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
@@ -150,10 +124,6 @@ impl PrintOptions {
 /// session. Model-resolution failures that reduce to "no active model" are
 /// swallowed into the no-model TUI mode described above.
 pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
-    // Resolve the session up front so it is available in both the normal and
-    // the no-model launch paths: --resume <id>, else --continue (most recent),
-    // else a fresh session created lazily on the first prompt. --no-session
-    // skips persistence entirely. A missing most-recent falls back to fresh.
     let session = resolve_session(&opts)?;
 
     // Restore the model+thinking the user last ran with unless --model was
@@ -185,8 +155,6 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                     Some(switcher),
                 )
             }
-            // No provider has credentials (or the selected provider is
-            // disabled): launch the TUI anyway and show the hint in the log.
             StartupAgent::NoModel(hint) => (
                 None,
                 "(no model)".to_string(),
@@ -218,7 +186,6 @@ enum StartupAgent {
             lofi_core::ModelRegistry,
         )>,
     ),
-    /// No provider has credentials — launch the TUI model-less with `hint`.
     NoModel(String),
 }
 
@@ -335,36 +302,20 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
             };
             let write_res: std::io::Result<()> = match ev {
                 AgentEvent::Text(delta) => stdout.write_all(delta.as_bytes()),
-                // Reasoning is folded out of the piped stdout stream (the
-                // interactive TUI surfaces it), and a completed tool call
-                // writes nothing to stdout — both keep `--print` pipe-clean.
                 AgentEvent::Thinking(_)
                 | AgentEvent::ThinkingEnd { .. }
                 | AgentEvent::ToolEnd { .. }
                 | AgentEvent::NativeToolStart { .. }
                 | AgentEvent::NativeToolEnd { .. }
                 | AgentEvent::ToolInputDelta { .. }
-                // Storage signals (round/turn appended to the transcript);
-                // the `--print` pipe has no use for them.
                 | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
-                // Per-round usage is a status signal for the TUI; the pipe
-                // has no use for it (the final `TurnEnd` ends the run).
                 | AgentEvent::RoundUsage { .. }
-                // Retry lifecycle is invisible on the pipe; a transient
-                // error that retries will surface as normal text if it
-                // recovers, or as `Error` if it doesn't.
                 | AgentEvent::RetryStart { .. }
                 | AgentEvent::RetryEnd { .. }
-                // Turn boundaries carry no piped output; the prompt itself
-                // is not echoed (the user typed it).
                 | AgentEvent::TurnStart { .. }
-                // Live-only TUI signals; never produced in --print mode
-                // (headless uses `Agent::run`, which has no hard-cap stop).
                 | AgentEvent::TurnContinue
                 | AgentEvent::ContextPressure { .. }
-                // Compaction is a TUI-only marker; never produced in
-                // --print mode.
                 | AgentEvent::Compaction { .. }
                 | AgentEvent::UserBash { .. } => Ok(()),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
@@ -401,7 +352,6 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
         consumer_res = &mut consumer => {
             match consumer_res {
                 Ok(()) => {
-                    // Consumer saw rx close (agent dropped tx); it is done.
                     (&mut agent_run).await?;
                     Ok(())
                 }
@@ -452,9 +402,6 @@ mod tests {
         );
     }
 
-    /// Temp config with two `no_auth` providers so model resolution needs no
-    /// environment variables or network access. `alpha` is first and thus the
-    /// default; `beta` is the non-default that `--model` must select.
     fn dual_provider_config(dir: &std::path::Path) -> std::path::PathBuf {
         let cfg = dir.join("config.toml");
         std::fs::write(&cfg, "[providers.alpha]\nno_auth = true\n\n[providers.alpha.models]\na1 = {}\n\n[providers.beta]\nno_auth = true\n\n[providers.beta.models]\nb1 = {}\n").unwrap();
@@ -482,8 +429,6 @@ mod tests {
         }
     }
 
-    /// With no `--model` and no restored session model, the config default
-    /// (first available provider's first model) is selected.
     #[tokio::test]
     async fn startup_default_model_when_no_flag() {
         let tmp = tempfile::TempDir::new().unwrap();

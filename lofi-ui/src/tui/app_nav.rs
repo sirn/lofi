@@ -29,12 +29,10 @@ impl App {
                 .saturating_add(self.log_view_h)
                 .saturating_sub(1);
             self.nav_cursor = last.min(self.log_total.saturating_sub(1));
-            // Park the column at the content start; h/l snap it into range.
             self.nav_col = 0;
         }
     }
 
-    /// Return to Input mode, dropping any selection.
     pub(super) fn enter_input(&mut self) {
         self.mode = Mode::Input;
         self.sel = None;
@@ -299,11 +297,6 @@ impl App {
         let intra = cursor.saturating_sub(self.turn_start_line(k));
         let last = k + 1 == n;
         let live = last && self.frozen_heights.len() < n;
-        // Old-width lines: use the frozen cache (rendered with
-        // `active_turn = false`) whenever this turn is file-backed. Normally
-        // only the prefix is frozen, but an idle /tree rollback may freeze the
-        // selected final turn too. Only a genuinely live final turn renders
-        // with the current active state.
         let char_pos = if live {
             let v = self.render_turn_at(k, self.frozen_width, self.run_active());
             cursor_char_pos(&v, intra, col)
@@ -321,7 +314,6 @@ impl App {
         self.content_anchor_for(self.nav_cursor, self.nav_col)
     }
 
-    /// Capture the Select-mode selection anchor's content anchor.
     pub(super) fn sel_content_anchor(&self) -> Option<(usize, usize)> {
         self.content_anchor_for(self.select_anchor.0, self.select_anchor.1)
     }
@@ -374,8 +366,6 @@ impl App {
         }
     }
 
-    /// Re-seat the Select-mode selection anchor on its previous content
-    /// character after a re-wrap, then rebuild the selection.
     pub(super) fn reseat_sel_anchor(
         &mut self,
         anchor: (usize, usize),
@@ -388,9 +378,6 @@ impl App {
         }
     }
 
-    /// First transcript line of turn `i` (0-based). Turns are laid out as
-    /// `turn0, blank, turn1, blank, ...`, so turn `i` starts at the sum of all
-    /// preceding turn heights plus one blank separator per preceding turn.
     pub(super) fn turn_start_line(&self, i: usize) -> usize {
         let n = self.turns.len();
         if i == 0 || n == 0 {
@@ -478,7 +465,6 @@ impl App {
         }
     }
 
-    /// Copy the current selection to the system clipboard via OSC 52.
     pub(super) fn yank_selection(&mut self) {
         if let Some(text) = self.selection_text() {
             self.save_yank_cursor();
@@ -507,8 +493,6 @@ impl App {
         }
     }
 
-    /// Copy `text` to the system clipboard via OSC 52 and arm the
-    /// "Copied to clipboard" rule-line badge.
     pub(super) fn yank_text(&mut self, text: &str) {
         Self::osc52(text);
         self.yank_notify = Some(Instant::now());
@@ -628,7 +612,6 @@ impl App {
             let (cstart, cend) = vl.content;
             let cs = (if li_abs == sl { sc } else { 0 }).clamp(cstart, cend);
             let ce = (if li_abs == el { ec } else { n }).clamp(cstart, cend);
-            // Raw markdown: map the content-relative selection to a source slice.
             if let Some(rl) = vl.raw.as_ref() {
                 if rl.map.len() >= 2 {
                     let start_rel = cs.saturating_sub(cstart).min(rl.map.len() - 1);
@@ -640,9 +623,6 @@ impl App {
                             rl.map[start_rel]
                         };
                         let end = rl.map[end_rel];
-                        // A soft-wrap continuation of the same source line
-                        // concatenates without a separator; anything else
-                        // starts a new line.
                         let cont = !rl.hard_break
                             && prev_src
                                 .as_ref()
@@ -654,10 +634,6 @@ impl App {
                         prev_src = Some(rl.source.clone());
                         continue;
                     }
-                    // Empty contribution — still track the source for
-                    // contiguity.  A hard-break blank line in the middle
-                    // of a selection must emit a separator so it is not
-                    // silently collapsed into the next line.
                     if rl.hard_break && !out.is_empty() {
                         out.push('\n');
                     }
@@ -668,9 +644,6 @@ impl App {
                     };
                     continue;
                 }
-                // Degenerate raw (no per-char map): table data/header rows
-                // carry the full markdown source; border rows carry an
-                // empty source and are suppressed.
                 if !rl.source.is_empty() && cs < ce {
                     let cont = !rl.hard_break
                         && prev_src
@@ -694,7 +667,6 @@ impl App {
                 }
                 continue;
             }
-            // Decoration-only line: rendered content slice, hard break.
             let chars: Vec<(usize, char)> = s.char_indices().collect();
             let b0 = if cs == 0 || cs >= ce {
                 0
@@ -729,8 +701,6 @@ impl App {
     }
 }
 
-/// Cumulative selectable-content char offset of line `intra`'s start within a
-/// turn's rendered lines. Blanks contribute zero, so separators don't shift it.
 fn content_offset(lines: &[view::RenderLine], intra: usize) -> usize {
     lines
         .iter()
@@ -754,9 +724,6 @@ pub(super) fn cursor_char_pos(lines: &[view::RenderLine], intra: usize, nav_col:
     }
 }
 
-/// Re-seat onto `char_pos`: the line whose cumulative content start is the
-/// largest not exceeding it, and the display column (decoration + offset into
-/// that line) that lands on the character. Returns `None` only for empty input.
 fn reseat_at(lines: &[view::RenderLine], char_pos: usize) -> Option<(usize, usize)> {
     let j = line_at_content_offset(lines, char_pos)?;
     let start = content_offset(lines, j);
@@ -766,9 +733,6 @@ fn reseat_at(lines: &[view::RenderLine], char_pos: usize) -> Option<(usize, usiz
     Some((j, rl.content.0 + col))
 }
 
-/// Index of the line whose cumulative content start offset is the largest not
-/// exceeding `c` — i.e. the line containing the `c`-th content char. This is
-/// the same content line across a re-wrap.
 fn line_at_content_offset(lines: &[view::RenderLine], c: usize) -> Option<usize> {
     let mut acc = 0usize;
     let mut found = None;

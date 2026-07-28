@@ -276,7 +276,6 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     };
     let t = app.theme;
     let n_max = sc.candidates.len().min(8);
-    // Width: longest rich row or help footer, plus border and padding.
     let row_w = SLASH_COMMANDS
         .iter()
         .map(|(cmd, desc)| prim::width(cmd) + 2 + prim::width(desc))
@@ -368,8 +367,6 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Pre-wrap each styled line to `width` cells (span-aware, whitespace-
-/// preserving) and flatten into the visible row list.
 fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in lines {
@@ -547,9 +544,6 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// `/thinking` picker: a centered list of thinking levels offered for the
-/// current model (`off` plus its declared levels). The current level is
-/// highlighted; `↑/↓` or `j`/`k` move, `Enter` switches, `Esc`/`q` cancels.
 pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.thinking_picker else {
@@ -695,8 +689,6 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Shell-policy permission dialog with explicit selectable actions. Unrelated
-/// keys leave the request unresolved.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     const MAX_COMMAND_ROWS: usize = 12;
 
@@ -706,8 +698,6 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Dim the application beneath the dialog. This changes only the rendered
-    // frame; the transcript and its semantic styles remain untouched.
     f.buffer_mut()
         .set_style(area, Style::new().fg(t.subtle).bg(t.panel_bg));
 

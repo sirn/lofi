@@ -3,7 +3,6 @@
 use super::*;
 
 impl App {
-    /// Footer mode tag shown at the far left of the status line.
     pub(crate) fn mode_badge(&self) -> (&'static str, Color) {
         let t = self.theme;
         match self.mode {
@@ -13,16 +12,11 @@ impl App {
         }
     }
 
-    /// Header line: `lofi` wordmark at the left, the working directory
-    /// (abbreviated to fit) right-aligned. The model and cost live in the
-    /// footer; the header carries no status tag.
     pub(crate) fn render_header_line(&self, width: usize) -> Line<'static> {
         let t = self.theme;
         let wordmark = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
         let muted = Style::new().fg(t.muted);
         let lofi_w = unicode_width::UnicodeWidthStr::width("lofi");
-        // Model label sits at the right edge; the cwd follows the wordmark
-        // on the left, abbreviated to whatever the model leaves behind.
         let model = self.render_footer_right();
         let model_w: usize = model
             .spans
@@ -45,8 +39,6 @@ impl App {
             .build()
     }
 
-    /// Bottom-left footer: `↑in ↓out · context used/limit · N% cached`.
-    /// separately on the right via [`render_footer_cost`].
     pub(crate) fn render_footer_left(&self, _width: usize) -> Line<'static> {
         let t = self.theme;
         let sep = " · ";
@@ -92,17 +84,12 @@ impl App {
         )])
     }
 
-    /// Retry badge for the mode line. Unlike ordinary notifications, this is
-    /// lifecycle-bound and remains visible until `RetryEnd` clears it.
     pub(crate) fn retry_badge(&self) -> Option<String> {
         self.retry
             .as_ref()
             .map(|retry| format!("Retry: {} of {}", retry.attempt, retry.max_attempts))
     }
 
-    /// Queue badge for the mode line: shows a preview of the first queued
-    /// prompt and a count of remaining items. Returns `None` when the queue
-    /// is empty.
     pub(crate) fn queue_badge(&self) -> Option<String> {
         if self.prompt_queue.is_empty() {
             return None;
@@ -123,8 +110,6 @@ impl App {
         })
     }
 
-    /// Text for the transient "Copied to clipboard" badge, or `None` if the
-    /// yank notification has expired.
     pub(crate) fn yank_badge(&self) -> Option<&'static str> {
         match self.yank_notify {
             Some(t) if t.elapsed() < YANK_NOTIFY => Some("Copied to clipboard"),
@@ -132,9 +117,6 @@ impl App {
         }
     }
 
-    /// Text for the transient "Press Ctrl-C again to quit" badge shown after a
-    /// first `C-c` on an empty prompt, or `None` once the double-press window
-    /// has elapsed.
     pub(crate) fn quit_badge(&self) -> Option<&'static str> {
         match self.ctrl_c_at {
             Some(t) if t.elapsed() < QUIT_DOUBLE_PRESS => Some("Press Ctrl-C again to quit"),
@@ -142,8 +124,6 @@ impl App {
         }
     }
 
-    /// The active notification's message and severity, or `None` once it has
-    /// expired ([`NOTIFY_TTL`]).
     pub(crate) fn notify_badge(&self) -> Option<(&str, NotifyKind)> {
         match &self.notify {
             Some(n) if n.at.elapsed() < NOTIFY_TTL => Some((&n.msg, n.kind)),
@@ -161,7 +141,6 @@ impl App {
         )])
     }
 
-    /// Bottom-right footer: the model badge (with thinking level).
     pub(crate) fn render_footer_right(&self) -> Line<'static> {
         let mut label = self.model_label.clone();
         if let Some(tl) = &self.thinking_label {

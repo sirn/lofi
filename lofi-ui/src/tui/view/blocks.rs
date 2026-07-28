@@ -1,11 +1,5 @@
 #![allow(clippy::needless_lifetimes)]
 
-//! Concrete log components and the turn-log orchestrator.
-//!
-//! Each component renders to an owned block of lines via [`Component`]; the
-//! primitives in [`super::prim`] supply padding, rails, and styled spans.
-//! [`render_turns`] builds a [`Stack`] per turn and joins turns with blanks.
-
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,12 +13,8 @@ use crate::tui::{App, Block, NativeTool, ThinkingBlock, ToolCall, Turn};
 use super::component::{Component, Cx, Stack};
 use super::prim::{self, RawLine, RenderLine};
 
-/// Lines of preview/output shown before truncating with `… (N hidden)`.
 const PREVIEW_LINES: usize = 3;
 
-/// Counts every visual row but retains only the requested component-relative
-/// window. This lets verbose tool bodies participate in layout without
-/// building a styled line for every row in the transcript.
 struct RenderWindow {
     range: std::ops::Range<usize>,
     total: usize,
@@ -65,7 +55,6 @@ impl RenderWindow {
     }
 }
 
-/// Build the whole turn log as a single [`Text`], turns separated by blanks.
 #[allow(dead_code)] // reference renderer; used as a test oracle (view.rs uses the cached viewport path)
 pub fn render_turns(app: &App, width: u16) -> Text<'static> {
     let theme = app.theme;
@@ -97,12 +86,10 @@ pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
     turn_stack(turn).lines(cx)
 }
 
-/// Count a turn's visual rows without retaining its rendered output.
 pub fn render_turn_height(cx: &Cx, turn: &Turn) -> usize {
     turn_stack(turn).height(cx)
 }
 
-/// Render only a component-relative row window from a turn.
 pub fn render_turn_window(cx: &Cx, turn: &Turn, range: std::ops::Range<usize>) -> Vec<RenderLine> {
     turn_stack(turn).lines_window(cx, range)
 }
@@ -156,12 +143,6 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 elapsed,
                 error,
             } => {
-                // A provider stream error is emitted twice: once as
-                // AgentEvent::Error (rendered as a fatal line via ErrorLine)
-                // and again here as the turn's `error` ("provider error:
-                // <msg>"). When the turn already carries a fatal-error
-                // block the message is already on screen, so drop it here to
-                // avoid duplicating it below the `failed in Ns` header.
                 let has_fatal = turn.blocks.iter().any(|b| matches!(b, Block::Error(_)));
                 let error = if has_fatal {
                     String::new()
@@ -190,11 +171,6 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
     stack
 }
 
-// ── User message ─────────────────────────────────────────────────────────
-
-/// A user message marked by a user-colored rail on every visual row.
-/// It has no tile background or internal top/bottom padding; separation from
-/// adjacent response blocks remains the enclosing Stack's responsibility.
 struct UserMessage<'a> {
     prompt: &'a str,
 }
@@ -216,14 +192,6 @@ impl Component for UserMessage<'_> {
     }
 }
 
-// ── Assistant text ───────────────────────────────────────────────────────
-
-/// Assistant response text marked by an agent-colored rail on every visual
-/// row. Thinking and tool-call components deliberately do not use this rail.
-/// Markdown-lite: headings bold (all six levels),
-/// blockquotes dim, inline `code` on a tile, `**bold**`, `*italic*`,
-/// `_underline_`, `~~strike~~`, fenced code as a plain triple-backtick fence
-/// on a full-width surface tile, and `|`-delimited tables as box-drawn grids.
 struct AssistantText<'a> {
     text: &'a str,
 }
@@ -244,12 +212,6 @@ impl Component for AssistantText<'_> {
     }
 }
 
-/// Shared markdown-lite renderer used by both user prompts and assistant
-/// text. `lead_fn(i)` produces the decoration spans for each output row
-/// (for example, the role-colored message rail). Markdown
-/// parsing: headings, blockquotes, fenced code blocks, `|`-delimited tables,
-/// and inline formatting (`code`, `**bold**`, `*italic*`, `_underline_`,
-/// `~~strike~~`).
 fn render_markdown_body(
     text: &str,
     t: Theme,
@@ -304,7 +266,6 @@ fn render_markdown_body(
             let src: Arc<str> = Arc::from(raw);
             let indent_len = raw.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
             let body = &raw[indent_len..];
-            // Byte offsets of each body char boundary (0, after 1st, …, end).
             let body_offs: Vec<usize> = std::iter::once(0)
                 .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
                 .collect();
@@ -331,7 +292,6 @@ fn render_markdown_body(
             idx += 1;
             continue;
         }
-        // Markdown table: a `|`-row whose next line is a separator.
         if trimmed.starts_with('|')
             && idx + 1 < lines.len()
             && is_table_separator(lines[idx + 1].trim())
@@ -347,8 +307,6 @@ fn render_markdown_body(
                 .map(|c| parse_align(c))
                 .collect();
             let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
-            // Source lines for raw markdown yank: header, separator,
-            // then data rows.
             let src_lines: Vec<&str> = tlines.to_vec();
             let before = out.len();
             out.extend(render_table(
@@ -376,7 +334,6 @@ fn render_markdown_body(
                 row += 1;
             }
         } else if trimmed == ">" || trimmed.starts_with("> ") {
-            // Group consecutive blockquote lines.
             let start = idx;
             while idx < lines.len()
                 && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
@@ -388,7 +345,6 @@ fn render_markdown_body(
             let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
             for qraw in q_lines {
                 let qtrimmed = qraw.trim_end();
-                // Strip "> " or treat a bare ">" as an empty body line.
                 let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
                 let src: Arc<str> = Arc::from(qtrimmed);
                 if body.is_empty() {
@@ -460,12 +416,6 @@ fn render_markdown_body(
     out
 }
 
-/// Split a line into styled spans, parsing inline markdown: `` `code` ``
-/// (literal content on an inline-bg tile), `**bold**`, `__bold__`,
-/// `*italic*`, `_underline_`, `~~strike~~`. Code spans are extracted first
-/// (their content is literal); remaining text is recursively scanned for
-/// marker pairs. Underscore markers are suppressed inside words so
-/// identifiers like `my_var_name` stay literal.
 fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
     inline_spans_mapped(line, t, base)
         .into_iter()
@@ -486,8 +436,6 @@ struct MappedSpan {
     boundary_start: usize,
 }
 
-/// [`inline_spans`] with source-offset tracking. Returns mapped spans whose
-/// styles and content are identical to [`inline_spans`]' output.
 fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
     let mut out = Vec::new();
@@ -578,7 +526,6 @@ fn parse_markers_mapped(
     }
 }
 
-/// Ensure at least one span so empty input still produces a renderable row.
 fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
     if spans.is_empty() {
         spans.push(MappedSpan {
@@ -590,12 +537,6 @@ fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
     spans
 }
 
-/// Build a content-relative display-position → source-byte-offset map from
-/// mapped spans. Position 0 is the first selectable content char (after any
-/// leading whitespace, which [`prim::render`] excludes from the content
-/// range); position `len` is the source end. Marker gaps make the map
-/// non-linear: e.g. for source `**bold**` the map is `[0, 3, 4, 5, 8]`, so
-/// selecting the whole display "bold" slices `source[0..8]` = `**bold**`.
 fn build_content_map(source_len: usize, spans: &[MappedSpan]) -> Vec<usize> {
     let mut full = Vec::new();
     for m in spans {
@@ -603,8 +544,6 @@ fn build_content_map(source_len: usize, spans: &[MappedSpan]) -> Vec<usize> {
         full.push(m.boundary_start);
         let chars: Vec<(usize, char)> = m.span.content.char_indices().collect();
         for k in 1..c {
-            // Boundary before the k-th char (0-indexed) = content_start +
-            // the byte offset of that char within the span.
             let off = chars.get(k).map_or(m.span.content.len(), |(b, _)| *b);
             full.push(m.content_start + off);
         }
@@ -623,13 +562,6 @@ fn build_content_map(source_len: usize, spans: &[MappedSpan]) -> Vec<usize> {
     full
 }
 
-/// Split a full-line content map into per-row maps. `full_map` is
-/// content-relative (leading whitespace already dropped) with
-/// `content_len + 1` entries. `lead_ws` is the leading-whitespace char
-/// count that [`prim::render`] excludes from row 0's selectable range;
-/// subsequent rows have none. Each row's map is a contiguous slice of
-/// `full_map`, so soft-wrap continuation rows are contiguous with their
-/// neighbors (`row[i].map[last] == row[i+1].map[0]`).
 fn split_map_by_rows(
     full_map: &[usize],
     lead_ws: usize,
@@ -650,10 +582,6 @@ fn split_map_by_rows(
     out
 }
 
-/// Mirror [`prim::wrap`]'s whitespace collapsing: split on `' '`, drop empty
-/// fragments, rejoin with single spaces. Returns the collapsed text and a
-/// map from each collapsed char index to its source byte offset (the join
-/// space maps to the first source space after the preceding word).
 fn collapse(source: &str) -> (String, Vec<usize>) {
     let mut out = String::new();
     let mut map = Vec::new();
@@ -679,10 +607,6 @@ fn collapse(source: &str) -> (String, Vec<usize>) {
     (out, map)
 }
 
-/// Wrap `content` like [`prim::wrap`] (whitespace-collapsing) and return each
-/// row's text plus a content-relative position map. `prefix_len` offsets the
-/// map so positions address `source` (which prefixes `content`, e.g. `## `);
-/// `source_len` is the fallback for the final boundary.
 fn wrap_with_map(
     content: &str,
     prefix_len: usize,
@@ -701,8 +625,6 @@ fn wrap_with_map(
             map.push(prefix_len + src);
         }
         let last = cmap.get(offset + len).copied().unwrap_or(content.len());
-        // `last` is a byte offset within `content`; offset by `prefix_len`
-        // to address `source`, clamped to its end.
         map.push((prefix_len + last).min(source_len));
         // The first row's start boundary snaps to the source start so the
         // prefix (e.g. `## `, `> `) is included in whole-row yank — the
@@ -717,9 +639,6 @@ fn wrap_with_map(
     out
 }
 
-// ── Markdown table ───────────────────────────────────────────────────────
-
-/// Column alignment inferred from the separator row (`:--`, `--:`, `:--:`).
 #[derive(Clone, Copy)]
 enum Align {
     Left,
@@ -727,13 +646,10 @@ enum Align {
     Center,
 }
 
-/// A table separator line contains only `|`, `-`, `:`, and spaces, with at
-/// least one dash.
 fn is_table_separator(line: &str) -> bool {
     line.contains('-') && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
-/// Split a `|`-delimited row into trimmed cell strings.
 fn parse_table_row(line: &str) -> Vec<String> {
     line.trim()
         .trim_start_matches('|')
@@ -743,8 +659,6 @@ fn parse_table_row(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Derive alignment from a separator cell (`:--` left, `--:` right, `:--:`
-/// center, `---` default left).
 fn parse_align(cell: &str) -> Align {
     let left = cell.starts_with(':');
     let right = cell.ends_with(':');
@@ -755,9 +669,6 @@ fn parse_align(cell: &str) -> Align {
     }
 }
 
-/// Render a markdown table with box-drawing borders. Column widths are the
-/// max cell width per column; the last column is shrunk if the table would
-/// exceed `content_w`.
 fn render_table(
     header: &[String],
     data: &[Vec<String>],
@@ -806,7 +717,6 @@ fn render_table(
     let mut out = Vec::new();
     let mut tr = start_row;
 
-    // Border row: left + (─×(w+2) + mid)×n + right
     let border_row = |left: char, mid: char, right: char, r: usize| -> RenderLine {
         let mut s = String::from(left);
         for (i, &cw) in col_w.iter().enumerate() {
@@ -839,8 +749,6 @@ fn render_table(
     }
     out.extend(hdr_rows);
     tr += hdr_len;
-    // The header-separator border carries the markdown separator line
-    // (`|---|---|`) so yanking it recovers the table-header syntax.
     let mut sep = border_row('├', '┼', '┤', tr);
     if let Some(src) = src_lines.get(1) {
         sep.raw = Some(RawLine::new(Arc::from(*src), Vec::new(), true));
@@ -869,11 +777,6 @@ fn render_table(
     out
 }
 
-/// One data row: `│ cell │ cell │` with borders in `border` style and cells in
-/// `style`. Each cell is parsed for inline markdown, wrapped to its column
-/// width, and aligned; a row whose cells wrap to different line counts
-/// produces one `RenderLine` per line, with shorter cells padded on
-/// continuation rows.
 #[allow(clippy::too_many_arguments)]
 fn table_row(
     col_w: &[usize],
@@ -923,7 +826,6 @@ fn table_row(
     out
 }
 
-/// Rendered width of a cell after stripping markdown markers.
 fn rendered_width(cell: &str, t: Theme, base: Style) -> usize {
     inline_spans(cell, t, base)
         .iter()
@@ -931,8 +833,6 @@ fn rendered_width(cell: &str, t: Theme, base: Style) -> usize {
         .sum()
 }
 
-/// Pad a sequence of styled spans to exactly `w` chars per the alignment.
-/// Spans that exceed `w` (trailing-space overflow from wrapping) are clipped.
 fn align_spans(
     spans: Vec<Span<'static>>,
     w: usize,
@@ -981,9 +881,6 @@ fn align_spans(
     }
 }
 
-/// Find the first occurrence of `marker` in `text`, optionally enforcing a
-/// word-boundary check (for underscore markers so `my_var` stays literal).
-/// `is_open` distinguishes opening (char before) from closing (char after).
 fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<usize> {
     let mut search = 0;
     while let Some(rel) = text[search..].find(marker) {
@@ -1010,10 +907,6 @@ fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<u
     None
 }
 
-// ── Thinking ─────────────────────────────────────────────────────────────
-
-/// Reasoning: muted italic text with a 2-space margin. While thinking a
-/// trailing `Thinking...` pulses; once settled it becomes `Thought for Ns`.
 struct Thinking<'a> {
     block: &'a ThinkingBlock,
 }
@@ -1083,13 +976,6 @@ fn trim_reasoning_summary(text: &str) -> String {
         .join("\n\n")
 }
 
-// ── Exec tree ────────────────────────────────────────────────────────────
-
-/// An `exec` block drawn as a plain tree without a background tile or
-/// top/bottom padding. A two-cell left gutter aligns it with other transcript
-/// blocks. Header `· Exec <label>` with a status-colored dot, the code with
-/// line numbers behind a `│` rail, then each native tool branched off that rail, and a final
-/// `└ ✓ Succeed`/`└ ✗ Failed` line with a result preview once done.
 struct ExecBlock<'a> {
     tool: &'a ToolCall,
 }
@@ -1147,9 +1033,6 @@ impl ExecBlock<'_> {
             let blank_n = " ".repeat(lw + 1);
             let body_style = Style::new().fg(t.fg);
             let num_style = Style::new().fg(t.subtle);
-            // Wrap each command line preserving its indentation; the line
-            // number labels the first row and a blank of the same width
-            // aligns continuation rows under the body.
             for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
                 let num_span = if j == 0 {
                     Span::styled(n.clone(), num_style)
@@ -1165,9 +1048,6 @@ impl ExecBlock<'_> {
 
         let n_total = self.tool.native.len();
         for (idx, nt) in self.tool.native.iter().enumerate() {
-            // While the exec is still running the last native tool is the
-            // tail (`└`); once done the final `└` is the exec-result line, so
-            // every native tool becomes a `├`.
             let is_last = idx + 1 == n_total && !self.tool.done;
             out.append_component(&ExecBlockBranch { nt, is_last }, cx);
         }
@@ -1180,8 +1060,6 @@ impl ExecBlock<'_> {
     }
 }
 
-/// The final `└ ✓ Succeed, took Ns` / `└ ✗ Failed, took Ns` branch with a
-/// preview of the returned value or error.
 fn exec_result_lines(tool: &ToolCall, t: Theme, w: usize, verbose: bool) -> Vec<RenderLine> {
     let mut out = Vec::new();
     let (icon, label, fg_color) = if tool.is_error {
@@ -1254,20 +1132,11 @@ fn exec_result_lines(tool: &ToolCall, t: Theme, w: usize, verbose: bool) -> Vec<
     out
 }
 
-// ── Exec block branch ───────────────────────────────────────────────────
-
-/// One native tool call branched off the exec rail: a `├`/`└` header with a
-/// status icon, then its result preview indented under a second rail.
 struct ExecBlockBranch<'a> {
     nt: &'a NativeTool,
-    /// Whether this is the tail of the exec tree (selects `└` and stops the
-    /// exec rail from continuing through the result body).
     is_last: bool,
 }
 
-/// Per-tool interpretation of a native tool's structured result: the body
-/// lines to render, whether to number them, the first line number, whether
-/// the body is a color-coded diff, and an optional always-shown notice.
 struct NativeBody {
     lines: Vec<String>,
     numbered: bool,
@@ -1280,8 +1149,6 @@ fn native_body(nt: &NativeTool) -> NativeBody {
     let name = nt.name.as_str();
     let raw = nt.result.as_deref().unwrap_or("");
     if nt.is_error {
-        // Bash failures are structured results; display only their output.
-        // Keep the complete JSON untouched in the native record/transcript.
         let display = if name == "bash" {
             serde_json::from_str::<serde_json::Value>(raw)
                 .ok()
@@ -1467,12 +1334,6 @@ fn split_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// A short parenthetical annotation for the tool header, derived from the
-/// structured result: `(lines 20-25)` for `read`/`view`/`bash_read`, and
-/// `(took 1.2s)` for bash. `None` when the tool is still running, has no
-/// result yet, or the result doesn't carry useful metadata.
-/// Return the encoded interior of a JSON string field without deserializing
-/// its potentially large value.
 fn json_string_field<'a>(raw: &'a str, field: &str) -> Option<&'a str> {
     let needle = format!("\"{field}\"");
     let key = raw.find(&needle)?;
@@ -1503,8 +1364,6 @@ fn json_string_field<'a>(raw: &'a str, field: &str) -> Option<&'a str> {
     None
 }
 
-/// Read a small unsigned metadata field without parsing adjacent large JSON
-/// strings into an owned `serde_json` tree.
 fn json_u64_field(raw: &str, field: &str) -> Option<u64> {
     let needle = format!("\"{field}\"");
     let key = raw.find(&needle)?;
@@ -1579,8 +1438,6 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    // Common high-volume tools only need tiny numeric metadata in the
-    // header. Avoid deserializing their adjacent output/content strings.
     if matches!(name, "read" | "view" | "bash_read") {
         let start = json_u64_field(raw, "start_line")?.max(1);
         let total = json_u64_field(raw, "total_lines")?;
@@ -1636,8 +1493,6 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
     }
 }
 
-/// A line diff of `old` vs `new` (what `edit` replaced), as `-`/`+`/` `
-/// prefixed lines. The renderer colors these by prefix.
 fn edit_diff(old: &str, new: &str) -> Vec<String> {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
@@ -1677,8 +1532,6 @@ impl ExecBlockBranch<'_> {
         let mut out = RenderWindow::new(range);
         let exec_cont = if self.is_last { "  " } else { "│ " };
 
-        // Header: "Tool <name> <args> <suffix>" wrapped to fit, preserving
-        // per-part colors (muted label, info name, subtle args/suffix).
         let mut content = vec![
             Span::styled("Tool ", Style::new().fg(t.muted)),
             Span::styled(self.nt.name.clone(), Style::new().fg(t.info)),
@@ -1727,8 +1580,6 @@ impl ExecBlockBranch<'_> {
         }
 
         let indent = 2 + 2 + 2; // left gutter + exec-rail column + own rail
-                                // Common large string payloads stay JSON-encoded here. Measurement
-                                // scans escape boundaries only; rendering decodes requested lines.
         let raw = result.as_str();
         let encoded_field = match self.nt.name.as_str() {
             "bash" => Some("output"),
@@ -1772,8 +1623,6 @@ impl ExecBlockBranch<'_> {
             Span::styled(exec_cont, Style::new().fg(t.subtle)),
             Span::styled("│ ", Style::new().fg(t.subtle)),
         ];
-        // Emit one logical line. Wrapped rows are counted individually, but
-        // styled strings are retained only if they intersect this window.
         let emit_line = |logical: usize, line: &str, out: &mut RenderWindow| {
             let n = format!("{:>lw$} ", start + logical, lw = lw);
             let content_style = if body.as_ref().is_some_and(|body| body.is_diff) {
@@ -1840,11 +1689,6 @@ impl ExecBlockBranch<'_> {
     }
 }
 
-// ── Non-exec tool ────────────────────────────────────────────────────────
-
-/// A non-`exec` tool — e.g. a hallucinated name the model emitted despite
-/// only `exec` being advertised — rendered as a single status line without
-/// the tree. Not reached in normal operation; kept as a defensive fallback.
 struct ToolLine<'a> {
     tool: &'a ToolCall,
 }
@@ -1867,9 +1711,6 @@ impl Component for ToolLine<'_> {
     }
 }
 
-// ── Fatal error ─────────────────────────────────────────────────────────
-
-// Direct user shell command.
 struct UserBashLine<'a> {
     command: &'a str,
     output: &'a str,
@@ -1890,8 +1731,6 @@ impl Component for UserBashLine<'_> {
         let command_style = Style::new().fg(t.fg);
         let mut out = Vec::new();
 
-        // Shell prompt: only `$` carries the shell green. The command itself
-        // remains ordinary transcript text, including on a failed command.
         let command_avail = cx.width.saturating_sub(4);
         for (i, seg) in prim::wrap_pre(self.command, command_avail)
             .into_iter()
@@ -1908,9 +1747,6 @@ impl Component for UserBashLine<'_> {
             ));
         }
 
-        // Match Exec output: a subtle tree rail on every row, muted output on
-        // success, and error-colored output on failure. Collapsed mode keeps
-        // the same three-logical-line preview as tool results.
         let lines: Vec<&str> = self.output.trim_end_matches('\n').split('\n').collect();
         let limit = if cx.app.verbose {
             lines.len()
@@ -1972,7 +1808,6 @@ impl Component for UserBashLine<'_> {
     }
 }
 
-/// A fatal error line: `✗ <message>`.
 struct ErrorLine<'a> {
     msg: &'a str,
 }
@@ -1981,9 +1816,6 @@ impl Component for ErrorLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let err = Style::new().fg(t.error);
-        // `✗ ` lead on the first line, a 2-space indent on continuations so
-        // wrapped rows align under the message. Long messages used to be
-        // clipped at the terminal edge on a single line.
         let content_w = cx.width.saturating_sub(4); // "  " + "✗ "
         let mut out = Vec::new();
         for (i, seg) in prim::wrap(self.msg, content_w).iter().enumerate() {
@@ -1997,8 +1829,6 @@ impl Component for ErrorLine<'_> {
         out
     }
 }
-
-// ── Turn-end rule ─────────────────────────────────────────────────────────
 
 /// Turn-end separator: `Done in Ns with <label>`. Appended to a turn when
 /// its run finishes. Carries only model, level, and duration so the line
@@ -2053,8 +1883,6 @@ struct TurnFailed {
 
 impl Component for TurnFailed {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
-        // Match the successful terminal transition: reveal the buffered
-        // failure only after the working row has been removed.
         if cx.active_turn {
             return Vec::new();
         }

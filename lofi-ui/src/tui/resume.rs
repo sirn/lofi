@@ -186,8 +186,6 @@ pub(super) fn replay_indexed_session(
             app.apply_file_backed_replay_event(AgentEvent::TurnStart {
                 prompt: prompts.get(turn).cloned().unwrap_or_default(),
             });
-            // Preserve cumulative cost/token accounting without parsing any
-            // message, tool-result, thinking, or native-result body.
             for &i in selected {
                 if !matches!(
                     index[i].kind,
@@ -202,10 +200,6 @@ pub(super) fn replay_indexed_session(
             }
         }
         let start = index[visible[start_pos]].offset;
-        // Physical EOF is correct only when this index represents the file's
-        // final appended leaf. A /tree rollback passes a projected lineage;
-        // its final turn must stop after that lineage's last event or an
-        // on-demand materialization would absorb later sibling branches.
         let lineage_end = visible.last().map_or(file_size, |&i| index[i].end_offset);
         let end = starts
             .get(turn + 1)
@@ -264,9 +258,6 @@ pub(super) fn restore_compaction_from_index(
             _ => {}
         }
     }
-    // A compaction invalidates every older provider-usage measurement. This
-    // remains true when partial continuation messages follow the marker but
-    // no new terminal usage event was committed before shutdown.
     let usage_after_compaction = last_usage
         .filter(|(pos, _)| last_compaction_pos.is_none_or(|compact_pos| *pos > compact_pos))
         .map(|(_, usage)| usage);

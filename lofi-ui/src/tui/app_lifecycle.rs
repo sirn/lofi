@@ -104,7 +104,6 @@ impl App {
         }
     }
 
-    /// Label written into the transcript header (model + resolved level).
     pub(super) fn session_model(&self) -> String {
         format!(
             "{}{}",
@@ -127,16 +126,9 @@ impl App {
         self.apply_event(ev);
     }
 
-    /// Fold an [`AgentEvent`] into the current turn's blocks / status.
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(super) fn apply_event(&mut self, ev: AgentEvent) {
-        // TurnStart is the turn boundary: push a fresh turn. Unlike the other
-        // arms, it does not assume a current turn exists — it creates one.
         if let AgentEvent::TurnStart { prompt } = ev {
-            // Freeze the previous committed turn at the same instant the new
-            // prompt becomes visible. Submit used to clear these blocks before
-            // the engine emitted TurnStart, allowing an intervening frame to
-            // show an old prompt with its response missing (a visual revert).
             if let Some(previous) = self.turns.len().checked_sub(1) {
                 if self
                     .turn_byte_ranges
@@ -150,24 +142,17 @@ impl App {
                 prompt,
                 blocks: Vec::new(),
             });
-            // Reset the per-turn accumulators: the live stream feeds these
-            // via `RoundUsage` events, and `TurnEnd` folds them once.
             self.turn_cost = 0.0;
             self.turn_has_round_usage = false;
             self.settled_usage_fresh = false;
             return;
         }
-        // A silent continuation: the run was force-stopped at the hard cap,
-        // compacted, and is resuming on the compacted history. Do NOT push a
-        // new turn (no "You:" line) — blocks append to the current turn.
-        // Reset the per-turn accumulators for the continuation's rounds.
         if let AgentEvent::TurnContinue = ev {
             self.turn_cost = 0.0;
             self.turn_has_round_usage = false;
             self.settled_usage_fresh = false;
             return;
         }
-        // Status-only events the turn builder doesn't own.
         match ev {
             AgentEvent::RetryStart {
                 attempt,
@@ -180,24 +165,14 @@ impl App {
                 });
                 return;
             }
-            AgentEvent::RetryEnd { success, .. } => {
+            AgentEvent::RetryEnd { .. } => {
                 self.retry = None;
-                if !success {
-                    // The retry budget was exhausted; the triggering error
-                    // surfaces via the subsequent `Error` event from the
-                    // engine, so no block is pushed here.
-                }
                 return;
             }
             AgentEvent::RoundCommitted {
                 byte_start,
                 byte_end,
             } => {
-                // Storage watermark only: retain the exact same turn/prompt/
-                // block tree. Successful outer-exec results are hidden in
-                // collapsed mode, so once durable they can be released; the
-                // range lets /verbose restore them without touching any other
-                // block or waiting for the turn to finish.
                 self.merge_last_turn_range(byte_start, byte_end);
                 if let Some(turn) = self.turns.last_mut() {
                     for block in &mut turn.blocks {
@@ -240,11 +215,6 @@ impl App {
                 return;
             }
             AgentEvent::TurnEnd { cost, usage, .. } => {
-                // Totals are owned by the App, not the turn builder. On the
-                // live path `RoundUsage` already applied this turn's tokens
-                // and `turn_cost` holds its cumulative cost; fold `turn_cost`
-                // and skip the bundled totals. On the resume path (no
-                // `RoundUsage` events) apply the bundled totals as before.
                 if self.turn_has_round_usage {
                     self.cost += self.turn_cost;
                 } else {
@@ -255,8 +225,6 @@ impl App {
                 }
                 self.turn_cost = 0.0;
                 self.turn_has_round_usage = false;
-                // Any TurnEnd with usage data means we have a real context
-                // size — clear the "just compacted" indicator.
                 self.compacted = false;
             }
             AgentEvent::TurnFailed { cost, usage, .. } => {
@@ -306,12 +274,8 @@ impl App {
                 self.reset_compaction_gauges();
                 self.compacted = true;
             }
-            // Remaining status/marker events do not mutate App-owned
-            // counters here; the shared turn builder handles them.
             _ => {}
         }
-        // Everything else (and the block-building part of `TurnEnd`) goes
-        // through the shared turn builder, so live and resume share one path.
         apply_event_to_turns(&mut self.turns, ev);
     }
 
@@ -336,11 +300,6 @@ impl App {
         self.retry = None;
     }
 
-    /// Reset compaction-related gauge state to the pre-compaction defaults.
-    /// Called from every site that invalidates the session context: the
-    /// `Compaction` event handler, `compact_now`, `/new`, `/resume`,
-    /// and `/rollback`. Centralizing the reset prevents drift when a new
-    /// field is added to the gauge cluster.
     pub(super) fn reset_compaction_gauges(&mut self) {
         self.status_usage = None;
         self.prev_ctx_tokens = None;
@@ -360,13 +319,8 @@ impl App {
             .map_or(0, |t| (t / 2) as usize)
     }
 
-    /// Invalidate the frozen-turn cache. Call whenever `turns` is replaced
-    /// wholesale (resume, `/new`, `/clear`); incremental `push` does not need
-    /// it — [`ensure_frozen`] freezes the newly-superseded turn on its own.
     pub(super) fn bump_render_epoch(&mut self) {
         self.render_epoch = self.render_epoch.wrapping_add(1);
-        // A wholesale transcript/layout invalidation makes both verbose-mode
-        // indexes stale. Width-only invalidation is handled by ensure_frozen.
         self.frozen_heights_other_mode.clear();
     }
 
@@ -382,9 +336,6 @@ impl App {
         );
     }
 
-    /// Extend the durable byte range of the current visible turn. Round
-    /// checkpoints and the terminal flush can arrive separately (including
-    /// across a hard-cap continuation), so ranges are merged monotonically.
     fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
         if let Some(range) = self.turn_byte_ranges.last_mut() {
             *range = Some(match *range {
@@ -394,9 +345,6 @@ impl App {
         }
     }
 
-    /// Restore successful outer-exec results released after a round
-    /// checkpoint. This reads only the current turn's durable range and fills
-    /// only matching result slots; it never rebuilds or replaces the turn.
     pub(super) fn restore_last_committed_exec_results(&mut self) {
         let Some((start, end)) = self.turn_byte_ranges.last().copied().flatten() else {
             return;
@@ -436,7 +384,6 @@ impl App {
         }
     }
 
-    /// Release restored outer-exec results when returning to collapsed mode.
     pub(super) fn release_last_committed_exec_results(&mut self) {
         let Some(turn) = self.turns.last_mut() else {
             return;
@@ -450,14 +397,12 @@ impl App {
         }
     }
 
-    /// Push a turn, keeping its file-backing indexes parallel to `turns`.
     pub(super) fn push_turn(&mut self, turn: Turn) {
         self.turns.push(turn);
         self.turn_byte_ranges.push(None);
         self.turn_event_offsets.push(None);
     }
 
-    /// Insert a turn at `idx`, keeping its file-backing indexes parallel.
     pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {
         self.turns.insert(idx, turn);
         self.turn_byte_ranges.insert(idx, None);
@@ -488,8 +433,6 @@ impl App {
         };
         let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
         let mut events = if let Some(offsets) = selected_offsets {
-            // Indexed resume/tree turns can be non-contiguous in the physical
-            // append-only file. Load only their selected lineage events.
             let loaded = if self.verbose {
                 cursor.events_at(offsets)
             } else {
@@ -550,9 +493,6 @@ impl App {
         turns.into_iter().next().unwrap_or(empty)
     }
 
-    /// Cache a frozen turn only when its complete styled representation is
-    /// reasonably small. Large /verbose turns are rendered by row window
-    /// instead, preventing one tool result from dominating RSS.
     pub(super) fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
         const MAX_CACHED_TURN_ROWS: usize = 4096;
         if self.frozen_render.contains(idx)
@@ -574,8 +514,6 @@ impl App {
         self.frozen_render.insert(idx, lines);
     }
 
-    /// Render a frozen turn's requested row window from its file-backed
-    /// source. Used for oversized turns that deliberately bypass the cache.
     pub(super) fn frozen_turn_window(
         &self,
         idx: usize,
@@ -644,10 +582,8 @@ impl App {
             // output; the viewport pass renders only rows it needs.
             self.frozen_heights.push(height);
         }
-        // Defensive: turns shrank without an epoch bump.
         if self.frozen_heights.len() > target {
             self.frozen_heights.truncate(target);
-            // Drop any cached entries beyond the new frozen range.
             self.frozen_render.map.retain(|idx, _| *idx < target);
             self.frozen_render.order.retain(|idx| *idx < target);
         }
@@ -698,8 +634,6 @@ impl App {
         self.run.unwrap_or(0)
     }
 
-    /// `model` or `model:level` — the label shown on the working / turn-end
-    /// lines. Mirrors [`session_model`].
     pub(super) fn run_label(&self) -> String {
         self.session_model()
     }
@@ -720,7 +654,6 @@ impl App {
         }
     }
 
-    /// Elapsed since the current run started; zero when idle.
     pub(super) fn run_elapsed(&self) -> Duration {
         self.run_start.map(|s| s.elapsed()).unwrap_or_default()
     }
@@ -748,10 +681,6 @@ impl App {
             self.notify(NotifyKind::Warn, "not enough history to compact yet");
             return false;
         };
-        // The full durable log can dominate memory. It is no longer needed
-        // once compact() has produced the summary and edited kept tail; drop
-        // it before constructing/persisting the replacement history so those
-        // representations do not overlap for the rest of this operation.
         drop(events);
         // Lock before persisting so every failure leaves both sources of truth
         // unchanged: a poisoned history lock cannot strand a checkpoint that
@@ -816,15 +745,6 @@ impl App {
         true
     }
 
-    /// `/recall [query]` — search the full session transcript (including
-    /// messages a compaction folded away) and render the matches inline in
-    /// the log. With no query, browse the most recent entries. Args:
-    /// `scope:all` (whole session) / `scope:lineage` (default, active branch)
-    /// / `scope:compaction:N` or `scope:compaction:latest` (within one
-    /// compaction's summarized range); `page:N` for paged search results.
-    ///
-    /// The user-facing command renders to the log only; the model reaches
-    /// the same engine via the `lofi.recall` native tool.
     pub(super) fn recall_now(&mut self, line: &str) {
         use lofi_core::recall::{recall, RecallRequest};
 
@@ -871,9 +791,6 @@ impl App {
         self.bump_render_epoch();
     }
 
-    /// Auto-compact after an upward soft-threshold crossing. Hysteresis avoids
-    /// repeated compaction while usage remains above the threshold; hard-cap
-    /// compaction remains an engine concern during a run.
     pub(super) fn maybe_auto_compact(&mut self) {
         if !std::mem::take(&mut self.settled_usage_fresh) || !self.compaction.auto.enable {
             return;
@@ -884,10 +801,6 @@ impl App {
         let Some(threshold) = self.compaction.soft_threshold(self.ctx_limit) else {
             return;
         };
-        // Use the full prompt size (non-cached + cached) so heavy prompt
-        // caching doesn't mask the real context size. Without this, a session
-        // with 150k cached tokens and 9k non-cached would read as 9k — well
-        // below the threshold — and never auto-compact.
         let current = usage.input_tokens + usage.cache_read_tokens;
         if current <= threshold {
             self.prev_ctx_tokens = Some(current);
@@ -900,17 +813,6 @@ impl App {
             return;
         }
 
-        // This is deliberately not gated by
-        // `min_messages_between_hard_compacts`. That cooldown belongs only
-        // to the hard force-compact + silent-continue loop: soft compaction is
-        // settled between turns and can safely fold even a short but very
-        // large tail. Reusing the hard cooldown here used to consume the
-        // first upward crossing without compacting; hysteresis then left the
-        // session permanently above the soft cap.
-        // Do not consume the crossing when compaction is not useful yet.
-        // A short transcript can exceed the cap in one huge message and only
-        // become compactable after later turns; it must be retried then rather
-        // than suppressed forever by hysteresis.
         self.compact_now();
     }
 
@@ -994,8 +896,6 @@ fn count_assistant_after_compaction(
     n
 }
 
-/// Parse a `scope:…` directive out of a `/recall` argument string. Returns
-/// the resolved scope and the argument text with the directive removed.
 fn parse_recall_args(raw: &str) -> (lofi_core::recall::RecallScope, String) {
     use lofi_core::recall::{CompactionTarget, RecallScope};
     let mut scope = RecallScope::default();
@@ -1026,7 +926,6 @@ fn parse_recall_args(raw: &str) -> (lofi_core::recall::RecallScope, String) {
     (scope, cleaned)
 }
 
-/// Pull a `page:N` token (1-based) out of the argument string, defaulting to 1.
 fn parse_recall_page(rest: &str) -> usize {
     rest.split_whitespace()
         .find_map(|t| {
