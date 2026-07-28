@@ -1,13 +1,3 @@
-//! Built-in sandbox tools: `read`, `ls`, `find`, `grep`, `write`, `edit`,
-//! `bash`. Each file tool resolves its path against a workspace root and
-//! rejects escapes; `bash` is exempt (it shells out) but runs with its cwd
-//! pinned to the root.
-//!
-//! These are plain async methods on [`BuiltinTools`]; the code-mode sandbox
-//! (the crate root) binds them directly onto the guest `lofi` object rather
-//! than going through a trait dispatch. The workspace root is held
-//! canonicalized so `starts_with` checks are reliable after `..` traversal.
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

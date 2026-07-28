@@ -1,16 +1,5 @@
 #![allow(clippy::needless_lifetimes)]
 
-//! The component model for the turn log.
-//!
-//! Every visual unit implements [`Component`], rendering to an owned block of
-//! lines. [`Stack`] composes children with a single gap policy: one blank
-//! line between any two non-empty neighbors. Children that render to zero
-//! lines (e.g. whitespace-only text/thinking blocks the model emits between a
-//! reasoning block and a tool call) are skipped entirely, so they leave no
-//! gap and no doubled separator. This is the one place gap rules live,
-//! replacing the scattered `push(Line::default())` calls that used to double
-//! up blanks.
-
 use crate::tui::theme::Theme;
 use crate::tui::App;
 

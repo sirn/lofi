@@ -1,8 +1,3 @@
-//! `OpenAI` Responses HTTP transport.
-//!
-//! Mirrors [`super::openai_completions`] but POSTs to `/responses` and maps
-//! events via [`map_openai_responses_event`].
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;

@@ -1201,9 +1201,6 @@ fn inline_markdown_table_renders_inline_formatting() {
     );
 }
 
-/// A numbered `read` line whose body is empty must still carry its line
-/// number as decoration with an empty content range, so the Navigate
-/// cursor overlay preserves it instead of treating it as a blank line.
 #[test]
 fn numbered_empty_body_line_keeps_its_number() {
     use crate::tui::view::blocks::render_turn_lines;
@@ -4522,8 +4519,6 @@ fn alt_up_restores_queued_prompt_lifo() {
     assert!(a.prompt_queue.is_empty());
 }
 
-/// With no model configured, submitting a prompt must not start a run;
-/// it re-surfaces the configuration hint on the prompt's turn instead.
 #[test]
 fn no_model_submit_surfaces_hint_without_running() {
     let mut a = app();
@@ -5321,12 +5316,6 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
     assert!(a.resume_model_switch(&no_turn).is_none());
 }
 
-/// Regression for "Transcript with background color should resize when
-/// viewport changed": the frozen-render cache must be invalidated on a width
-/// change, not only on a content (epoch) change. Otherwise completed turns
-/// keep their old-width rendering — background padding stays narrow after a
-/// terminal resize. A long prompt wraps to fewer lines at a wider viewport, so
-/// a strictly smaller height after widening proves the cache was rebuilt.
 #[test]
 fn frozen_cache_invalidates_on_width_change() {
     let mut a = app();
@@ -5351,10 +5340,6 @@ fn frozen_cache_invalidates_on_width_change() {
     );
 }
 
-/// Regression for "resize snaps a scrolled-up view to the bottom": a re-wrap
-/// shrinks `total`/`base`, and the carried-over absolute `top_line` can land
-/// past the new bottom, clamping to the bottom and sticky-pinning. The view
-/// must instead keep its previous relative scroll position.
 #[test]
 fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     use ratatui::backend::TestBackend;
@@ -5394,10 +5379,6 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     );
 }
 
-/// The Navigate cursor is an absolute line index, so a re-wrap mustn't drift
-/// it to a different proportional spot — it should stay on the same *screen
-/// row* (the viewport re-anchor keeps the viewport at ~its previous content, so
-/// the same row is ~the same line).
 #[test]
 fn resize_keeps_nav_cursor_on_same_content_line() {
     use ratatui::backend::TestBackend;
@@ -5605,8 +5586,6 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
     );
 }
 
-/// A height shrink that leaves the cursor's old row past the new viewport must
-/// clamp it to the bottom edge instead of letting it disappear off-screen.
 #[test]
 fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     use ratatui::backend::TestBackend;

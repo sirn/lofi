@@ -1,11 +1,3 @@
-//! `lofi-ui`: the presentation layer.
-//!
-//! Owns both user-facing drivers — the interactive TUI ([`tui`]) and the
-//! non-interactive `--print` stdio loop ([`run_print`]) — and the option
-//! bundles they share. Both build the agent through [`lofi_core::build_agent`]
-//! (the Service Layer) and never reach into providers or the sandbox
-//! directly, so the dependency direction stays Presentation → Domain.
-
 use std::io::Write;
 use std::path::PathBuf;
 
