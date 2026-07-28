@@ -5,11 +5,8 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// Recursively find every file under `dir` (default root) matching `glob`.
-    ///
     /// Relative paths are sorted. The result is complete or the call errors
     /// when a result or traversal safety ceiling is exceeded.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] if `dir` escapes the root, the glob is invalid,
     /// or a safety ceiling is exceeded.

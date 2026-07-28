@@ -10,10 +10,6 @@ pub mod tui;
 
 pub use cli::run_cli;
 
-/// Options for the interactive TUI session.
-///
-/// Mirrors the `--print` flags' resolution fields but with no prompt — the
-/// prompts come from the TUI input box at runtime.
 #[derive(Debug, Clone)]
 pub struct InteractiveOptions {
     pub root: PathBuf,
@@ -100,17 +96,10 @@ impl PrintOptions {
     }
 }
 
-/// Run the interactive TUI session.
-///
-/// Builds the agent via [`lofi_core::build_agent`] and hands it to [`tui::run`].
-/// Terminal setup/teardown is owned by the TUI's `Drop` guard; this function
-/// returns after the user quits.
-///
 /// A missing-models outcome is *not* fatal: the TUI still launches so the
 /// user can read transcripts, browse `/resume`, and quit. A hint explaining
 /// how to configure a model is shown in the log, and submitting a prompt
 /// re-surfaces that hint instead of running.
-///
 /// # Errors
 /// Propagates [`Error`] from config/session resolution or the terminal
 /// session. Model-resolution failures that reduce to "no active model" are
@@ -163,8 +152,6 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     .await
 }
 
-/// Startup agent resolution: a built agent, or the model-less launch path.
-///
 /// `Ready`'s payload is boxed: it holds the agent, config, and model
 /// registry (a KB+ together), and the variant is built once and unpacked
 /// immediately, so a single allocation keeps the enum off the stack.
@@ -211,11 +198,8 @@ async fn resolve_startup_agent(
     }
 }
 
-/// Resolve the [`tui::SessionConfig`] for an interactive run from the flags.
-///
 /// Independent of model resolution so the no-model launch path still gets a
 /// session (and thus `/resume`, transcript browsing, etc.).
-///
 /// # Errors
 /// Returns [`Error::State`] when `--resume <id>` matches no session, or
 /// propagates [`Error::Io`] from the store.
@@ -252,8 +236,6 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
     Ok(tui::SessionConfig::fresh(store, opts.root.clone()))
 }
 
-/// Run a single non-interactive prompt and stream assistant text to stdout.
-///
 /// Builds the agent via [`lofi_core::build_agent`], then drives
 /// [`lofi_core::Agent::run`] concurrently with a stdio consumer:
 /// - [`AgentEvent::Text`] deltas are written to stdout via
@@ -263,7 +245,6 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 /// - [`AgentEvent::Done`] writes a trailing newline to stdout;
 /// - `ToolStart` / `ToolEnd` are surfaced as short stderr markers so stdout
 ///   stays clean for piping.
-///
 /// # Errors
 /// Propagates [`Error`] from config load, model resolution, provider
 /// construction, or the agent run. The binary caller is responsible for
@@ -400,10 +381,6 @@ mod tests {
         cfg
     }
 
-    /// `--model provider/model` must be honored at startup, not silently
-    /// replaced by the config default. Regression for the model-restore
-    /// refactor that passed `restored` (None when `--model` is set) to
-    /// `build_agent` instead of `opts.model`.
     #[tokio::test]
     async fn startup_model_flag_honored() {
         let tmp = tempfile::TempDir::new().unwrap();

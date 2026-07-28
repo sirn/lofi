@@ -1,12 +1,3 @@
-//! Integration tests for the provider HTTP transports.
-//!
-//! Each of the three APIs is exercised against a `mockito` SSE server: a
-//! canned stream is mapped to the expected [`lofi_types::StreamingEvent`]
-//! sequence, and [`lofi_providers::ir::assemble_message`] is checked against the
-//! final assembled [`lofi_types::Message`]. The canned bodies match the wire
-//! shapes the `ir` mappers expect (see `ir/openai_completions.rs`,
-//! `ir/openai_responses.rs`, `ir/anthropic_messages.rs`).
-
 #![allow(clippy::unwrap_used)]
 
 use futures::StreamExt;
@@ -204,9 +195,6 @@ async fn openai_responses_maps_canned_stream() {
 
 #[tokio::test]
 async fn anthropic_messages_maps_canned_stream() {
-    // Anthropic SSE blocks carry an `event:` line. The sequence below mixes a
-    // tool_use block with a text delta and an input-json delta, exercising
-    // the start/delta/stop lifecycle plus the terminal `message_delta` usage.
     let body = concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\"}\n\n",

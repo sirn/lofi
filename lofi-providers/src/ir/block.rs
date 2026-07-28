@@ -1,9 +1,3 @@
-//! Helpers to convert `ContentBlock`/`Message` into each provider's wire shape.
-//!
-//! These are pure data transformations — no HTTP, no async. The per-provider
-//! request builders in [`crate::ir`] call into these to assemble the message
-//! portion of a request body.
-
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use lofi_types::{ContentBlock, Message, Role};
@@ -19,12 +13,6 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
-/// Convert a conversation log to the `OpenAI` Chat Completions `messages` array.
-///
-/// System/user messages become `{role, content: <string>}`. Assistant tool use
-/// is emitted as `tool_calls` alongside any text content. `ToolResult` blocks
-/// (carried by `Role::Tool` messages) each become a separate
-/// `{role:"tool", tool_call_id, content}` entry.
 #[must_use]
 pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -92,11 +80,6 @@ pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-/// Convert a conversation log to the `OpenAI` Responses `input` array.
-///
-/// System/user/assistant text becomes `{type:"message", role, content:[{type, text}]}`.
-/// Assistant tool use becomes `{type:"function_call", call_id, name, arguments}`.
-/// `ToolResult` blocks become `{type:"function_call_output", call_id, output}`.
 #[must_use]
 pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -155,13 +138,6 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-/// Convert a conversation log to Anthropic Messages API parts.
-///
-/// Returns `(system, messages)`: `System`-role text is concatenated into the
-/// top-level `system` string, and the remaining messages form the `messages`
-/// array with per-block `text`/`tool_use`/`tool_result`/`thinking` content.
-/// `ToolResult` blocks are emitted inside a synthetic `user` message, as the
-/// Anthropic API requires.
 #[must_use]
 pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<Value>) {
     let mut system_parts: Vec<String> = Vec::new();
@@ -212,7 +188,6 @@ pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<
     (system, out)
 }
 
-/// Map a single [`ContentBlock`] to its Anthropic content-block object.
 fn block_to_anthropic(b: &ContentBlock) -> Value {
     match b {
         ContentBlock::Text { text } => json!({"type": "text", "text": text}),

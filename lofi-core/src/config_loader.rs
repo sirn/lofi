@@ -1,13 +1,3 @@
-//! User-config loading and value resolution.
-//!
-//! Reads the user config file (default `$XDG_CONFIG_HOME/lofi/config.toml`,
-//! overridable via `$LOFI_CONFIG`) and parses it into a
-//! [`lofi_types::Config`], resolving `api_key` and `header` values along the
-//! way. This tree is treated as **read-only**: lofi never creates, writes, or
-//! modifies files under the user config dir. That separation lets an external
-//! config manager (Nix, stow, etc.) own the tree declaratively while lofi
-//! limits its writes to the agent-owned state dir (see [`crate::state`]).
-//!
 //! Value resolution syntax:
 //! - `!cmd`  -> run `sh -c cmd` and take the trimmed stdout;
 //! - `$VAR` / `${VAR}` -> read the env var (missing is an error);
@@ -21,13 +11,10 @@ use std::path::{Path, PathBuf};
 use lofi_error::{Error, Result};
 use lofi_types::Config;
 
-/// Resolve the path to the user config file.
-///
 /// Precedence: `$LOFI_CONFIG` (used verbatim as the full file path), then the
 /// platform default via [`dirs::config_dir`] (which honors `$XDG_CONFIG_HOME`
 /// on Linux and falls back to `~/.config`) with `lofi/config.toml` appended.
 /// If the platform's config dir cannot be resolved, fall back to `~/.config`.
-///
 /// # Errors
 /// Returns [`Error::Config`] only when no config base directory can be
 /// determined at all (e.g. `HOME` is unset) and `$LOFI_CONFIG` is not set.
@@ -47,11 +34,6 @@ pub fn user_config_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Resolve the path to the shell policy file.
-///
-/// Precedence: `$LOFI_POLICY` (used verbatim as the full file path), then
-/// the same directory as the config file with `policy.toml` appended.
-///
 /// # Errors
 /// Returns [`Error::Config`] only when no config base directory can be
 /// determined and `$LOFI_POLICY` is not set.
@@ -70,7 +52,6 @@ pub fn policy_config_path(config_path: &Path) -> Result<PathBuf> {
 /// Load the shell policy from `policy.toml` if it exists, otherwise return
 /// the default. The file is parsed as [`lofi_types::ShellPolicyConfig`] at
 /// root level (no `[shell_policy]` wrapper).
-///
 /// # Errors
 /// [`Error::Config`] when the file exists but fails to read or parse.
 pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConfig> {
@@ -91,8 +72,6 @@ pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConf
     }
 }
 
-/// Load the configured shell policy and evaluate `command` without executing it.
-///
 /// # Errors
 /// Returns configuration errors when the config or policy path cannot be
 /// resolved, read, or parsed.
@@ -103,12 +82,9 @@ pub fn evaluate_shell_policy(command: &str) -> Result<lofi_code::policy::Decisio
     Ok(lofi_code::policy::defaults::resolve(&config).evaluate(command))
 }
 
-/// Resolve a single config value (see module docs for the syntax).
-///
 /// This is the low-level primitive used by [`load_config`]; callers may also
 /// use it directly to resolve ad-hoc values. It is `async` because the `!cmd`
 /// form spawns a subprocess via tokio.
-///
 /// # Errors
 /// - [`Error::Config`] if an env var is missing or a shell command fails /
 ///   cannot be spawned.
@@ -235,12 +211,6 @@ async fn run_shell(cmd: &str) -> Result<String> {
     }
 }
 
-/// Load and parse the user config from `path`, resolving `api_key` and header
-/// values in place.
-///
-/// The returned [`Config`] has every `api_key` and header value replaced by
-/// its resolved form; downstream code can treat them as literals.
-///
 /// # Errors
 /// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, or
 ///   any value fails to resolve.
@@ -256,14 +226,12 @@ pub async fn load_config(path: &Path) -> Result<Config> {
 }
 
 /// Resolve every provider's credentials and headers inside `cfg` in place.
-///
 /// Resolution is **lenient** so a missing environment variable never aborts
 /// startup: a provider whose key cannot be resolved is left keyless (and
 /// therefore not available for selection). An explicit `api_key` (literal,
 /// `$VAR`, or `!cmd`) overrides `env_name`; otherwise `env_name` names the
 /// environment variable to read. Header values that fail to resolve are
 /// dropped rather than fatal.
-///
 /// # Errors
 /// Never errors in the current lenient implementation; the `Result` is kept
 /// for signature stability and future strict modes.
@@ -291,7 +259,6 @@ pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
 
 /// The built-in default configuration, shipped as TOML so the default
 /// provider/model set is expressed in the same format the user edits.
-///
 /// Defines `openai` (Responses API) and `anthropic` (Messages API) providers,
 /// each keyed off an environment variable (`OPENAI_API_KEY` /
 /// `ANTHROPIC_API_KEY`). Both are resolved *leniently* by [`resolve_config`]:
@@ -329,14 +296,6 @@ thinking_levels = ["low", "medium", "high", "xhigh"]
 thinking_levels = ["low", "medium", "high", "xhigh"]
 "#;
 
-/// The built-in configuration used when no user config file exists.
-///
-/// Returns the parsed (but not yet resolved) [`Config`] from
-/// [`DEFAULT_CONFIG_TOML`]; [`load_config_or_default`] resolves the env keys
-/// on top. Parsing the embedded default is infallible — a panic here means
-/// the shipped default TOML is malformed and is a bug, not a runtime
-/// condition.
-///
 /// # Panics
 /// The shipped [`DEFAULT_CONFIG_TOML`] is a compile-time constant; this
 /// panics only if it is malformed, which is a bug, not a runtime condition.
@@ -347,15 +306,11 @@ pub fn default_config() -> Config {
     })
 }
 
-/// Load the user config from `path`, or fall back to [`default_config`] when
-/// the file does not exist.
-///
 /// An existing file is parsed and resolved (leniently — see
 /// [`resolve_config`]); a missing file yields the built-in default config.
 /// In both cases a provider whose key is unset is left keyless, so the call
 /// itself never fails for a missing environment variable — that surfaces
 /// downstream as "no models configured".
-///
 /// # Errors
 /// [`Error::Config`] only when an existing file fails to read or parse as
 /// TOML.

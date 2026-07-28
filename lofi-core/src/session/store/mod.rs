@@ -56,9 +56,6 @@ impl SessionFile {
         parse_entry(&self.path, self.last_active)
     }
 
-    /// Open this transcript and return its selected-lineage snapshot in the
-    /// same index pass.
-    ///
     /// # Errors
     /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
@@ -86,8 +83,6 @@ impl SessionEntry {
             .unwrap_or_default()
     }
 
-    /// Open this session and return its selected-lineage snapshot in one pass.
-    ///
     /// # Errors
     /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
@@ -159,7 +154,6 @@ impl SessionCursor {
 
     /// Open an existing transcript at its durable selected head. Legacy files
     /// without a cursor record fall back once to their physically last event.
-    ///
     /// # Errors
     /// Returns an error when the transcript cannot be indexed or its selected
     /// head no longer exists.
@@ -171,7 +165,6 @@ impl SessionCursor {
     /// from the same index scan. Resume callers need both values; keeping this
     /// operation together avoids scanning a large append-only transcript twice
     /// and avoids a second allocator high-water mark during startup.
-    ///
     /// # Errors
     /// Returns an error when the transcript cannot be indexed or its selected
     /// head no longer exists.
@@ -231,9 +224,6 @@ impl SessionCursor {
         self.lock_leaf().clone()
     }
 
-    /// Move the cursor to an explicit branch point selected by the user and
-    /// persist that selection before returning.
-    ///
     /// # Errors
     /// Returns an error when the selected event is absent or the cursor record
     /// cannot be written durably.
@@ -248,7 +238,6 @@ impl SessionCursor {
 
     /// Atomically index the transcript and project it onto this cursor's
     /// selected lineage.
-    ///
     /// # Errors
     /// Returns an error when the transcript cannot be indexed or the selected
     /// head is absent/cyclic.
@@ -266,7 +255,6 @@ impl SessionCursor {
 
     /// Atomically index the full transcript tree together with this cursor's
     /// selected head. Intended only for branch/tree UI.
-    ///
     /// # Errors
     /// Returns an error when indexing fails or the selected head is absent.
     pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
@@ -281,25 +269,18 @@ impl SessionCursor {
         })
     }
 
-    /// Read one event at a byte offset obtained from this cursor's snapshot.
-    ///
     /// # Errors
     /// Propagates transcript seek, read, and parsing failures.
     pub fn event_at(&self, offset: u64) -> Result<SessionEvent> {
         load_event_at(&self.path, offset)
     }
 
-    /// Read events for collapsed transcript display while skipping successful
-    /// result bodies that are not rendered in that mode.
-    ///
     /// # Errors
     /// Propagates transcript seek, read, and parsing failures.
     pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
         load_collapsed_events_at(&self.path, offsets)
     }
 
-    /// Read events at byte offsets obtained from this cursor's snapshot.
-    ///
     /// # Errors
     /// Propagates transcript seek, read, and parsing failures.
     pub fn events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
@@ -307,20 +288,15 @@ impl SessionCursor {
     }
 
     /// Read an event by its durable ID from this transcript.
-    ///
     /// This intentionally searches the complete append-only tree, not only the
     /// selected lineage: result recovery may target compacted or abandoned
     /// content by an immutable transcript ID.
-    ///
     /// # Errors
     /// Propagates transcript indexing and event parsing failures.
     pub fn event_by_id(&self, id: &str) -> Result<Option<SessionEvent>> {
         load_event_by_id(&self.path, id)
     }
 
-    /// Visit complete events at snapshot-derived offsets one at a time. Unlike
-    /// `events_at`, this does not collect the selected payloads in memory.
-    ///
     /// # Errors
     /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_events(
@@ -331,10 +307,6 @@ impl SessionCursor {
         visit_events(&self.path, offsets, visit)
     }
 
-    /// Deserialize a small projection at snapshot-derived event offsets
-    /// without exposing the transcript path or allocating skipped payload
-    /// fields. Used by picker/recall metadata scans.
-    ///
     /// # Errors
     /// Propagates transcript seek/read/parse failures and callback errors.
     pub fn visit_event_values<T: serde::de::DeserializeOwned>(
@@ -349,7 +321,6 @@ impl SessionCursor {
     /// offsets. The native result field is skipped by serde's streaming
     /// deserializer, so a large tool result is neither allocated nor retained
     /// merely to render an exec summary.
-    ///
     /// # Errors
     /// Propagates transcript seek/read/parse failures.
     pub fn native_tool_summaries(&self, offsets: &[u64]) -> Result<Vec<(String, String, String)>> {
@@ -371,7 +342,6 @@ impl SessionCursor {
     /// Read only the first text block from user-message events. Assistant and
     /// tool payloads in the same record shape are skipped without allocation;
     /// startup replay uses this to build file-backed historical turn shells.
-    ///
     /// # Errors
     /// Propagates transcript seek/read/parse failures.
     pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<String>> {
@@ -404,7 +374,6 @@ impl SessionCursor {
 
     /// Read all non-cursor events physically contained in one committed byte
     /// range. The range is a durable handle recorded by this same cursor.
-    ///
     /// # Errors
     /// Propagates transcript seek, read, and parsing failures.
     pub fn events_in_range(&self, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
@@ -412,12 +381,10 @@ impl SessionCursor {
     }
 
     /// Materialize every non-cursor event in the append-only transcript tree.
-    ///
     /// This is intentionally distinct from `load_events`, which only returns
     /// the selected lineage. Full-tree consumers still read through the cursor
     /// so path access and legacy ID migration cannot diverge from the rest of
     /// the session API.
-    ///
     /// # Errors
     /// Propagates indexing and event parsing failures.
     pub fn load_tree_events(&self) -> Result<Vec<SessionEvent>> {
@@ -436,8 +403,6 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Materialize this cursor's selected event lineage.
-    ///
     /// # Errors
     /// Propagates indexing and event parsing failures.
     pub fn load_events(&self) -> Result<Vec<SessionEvent>> {
@@ -446,8 +411,6 @@ impl SessionCursor {
         load_indexed_path(&self.path, &index, leaf.as_deref())
     }
 
-    /// Materialize only the selected lineage suffix needed by compaction.
-    ///
     /// # Errors
     /// Propagates indexing and event parsing failures.
     pub fn load_compaction_events(&self) -> Result<Vec<SessionEvent>> {
@@ -463,8 +426,6 @@ impl SessionCursor {
         Ok(events)
     }
 
-    /// Append one event batch to this cursor's lineage and advance its leaf.
-    ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
@@ -481,8 +442,6 @@ impl SessionCursor {
         Ok((start, end))
     }
 
-    /// Append a complete compaction checkpoint and advance to its marker.
-    ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn append_compaction(
@@ -644,8 +603,6 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// Open the default store at `<state>/sessions` (see [`crate::state`]).
-    ///
     /// # Errors
     /// Propagates [`crate::state::state_dir`] if the base state dir cannot be
     /// resolved.
@@ -664,13 +621,10 @@ impl SessionStore {
         self.root.join(slug(cwd))
     }
 
-    /// Create a new session and return its shared logical cursor at the root.
-    ///
     /// The directory is created if needed; the header is written atomically via
     /// a temp file + rename so a partial file is never visible. Returning the
     /// cursor directly prevents active callers from constructing independent
     /// head state around the same path.
-    ///
     /// # Errors
     /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
     /// header-serialization failure.
@@ -702,8 +656,6 @@ impl SessionStore {
         Ok(path)
     }
 
-    /// List sessions for `cwd`, newest-first (by file stem's leading timestamp).
-    ///
     /// # Errors
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
@@ -717,9 +669,6 @@ impl SessionStore {
         Ok(entries)
     }
 
-    /// Discover session files using directory metadata only, newest first.
-    /// No transcript contents are read or indexed.
-    ///
     /// # Errors
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
@@ -747,16 +696,12 @@ impl SessionStore {
         Ok(files)
     }
 
-    /// The most recent session for `cwd`, or `None` if none exist.
-    ///
     /// # Errors
     /// Propagates [`list_for_cwd`](Self::list_for_cwd).
     pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
         Ok(self.list_for_cwd(cwd)?.into_iter().next())
     }
 
-    /// Find a session whose id starts with `prefix` (case-sensitive).
-    ///
     /// # Errors
     /// Returns [`Error::State`] if `prefix` matches more than one session.
     pub fn find(&self, cwd: &Path, prefix: &str) -> Result<Option<SessionEntry>> {
@@ -773,8 +718,6 @@ impl SessionStore {
     }
 }
 
-/// Load a session file: its metadata and the full event log.
-///
 /// # Errors
 /// Returns [`Error::State`] if the file is missing a header, has an
 /// unsupported version, or an event line fails to parse; [`Error::Io`] on a
@@ -866,13 +809,11 @@ impl AppendParent<'_> {
 /// Append session events to a transcript file (one JSON line each). The
 /// file is synchronized before returning so a crash after the turn still has
 /// the data.
-///
 /// Each event is stamped with a fresh `id` (any incoming `id` is
 /// overwritten) and chained to the previous one. A supplied `parent_hint`
 /// selects an explicit branch parent; otherwise this low-level compatibility
 /// helper continues from physical EOF. Active apps use [`SessionCursor`],
 /// which always supplies its explicit logical parent instead.
-///
 /// # Errors
 /// Returns [`Error::Io`] on open/write failure or [`Error::State`] on a
 /// serialization failure.
@@ -930,7 +871,6 @@ pub struct CompactionCounts {
 /// Append a compaction checkpoint as one batch: edited kept-tail messages
 /// followed by the marker. A failed write is rolled back to the original file
 /// length so the transcript cannot expose a partial checkpoint as its leaf.
-///
 /// # Errors
 /// Propagates transcript read, serialization, and write failures.
 #[cfg(test)]
@@ -1115,11 +1055,6 @@ fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, 
     Ok((byte_start, byte_end))
 }
 
-/// Read the `id` of the last event line in `path`, or `None` if the file has
-/// no events (only a header, or empty). Used by [`append_events`] to chain a
-/// continuation onto the active leaf, and by the recorder to branch a
-/// `TurnFailed` marker off the turn's checkpoint.
-///
 /// # Errors
 /// Returns [`Error::Io`] on a read failure other than the file not existing.
 #[cfg(test)]
@@ -1151,13 +1086,6 @@ fn last_event_id(path: &Path) -> Result<Option<String>> {
     Ok(last)
 }
 
-/// Parse a single transcript body line into a [`SessionEvent`].
-///
-/// Current files are tagged (`{"type":"message", ...}`); older files written
-/// before the event-log format stored bare `Message` JSON per line. Those are
-/// tolerated by falling back to `Message` and wrapping it, so legacy sessions
-/// still resume (without timings/cost, as before).
-///
 /// # Errors
 /// Returns [`Error::State`] if the line is neither a tagged event nor a
 /// legacy `Message` object.

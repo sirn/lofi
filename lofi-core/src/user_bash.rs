@@ -92,9 +92,6 @@ pub fn cancelled_user_bash(command: String, duration_ms: u64) -> UserBashResult 
     }
 }
 
-/// Run a command via `sh -c` in `root`, with no wall-clock timeout.
-/// Dropping/aborting the future kills the command's entire process group.
-///
 /// # Errors
 /// Returns an error if the shell cannot be spawned, its pipes are unavailable,
 /// or command output/status cannot be read.

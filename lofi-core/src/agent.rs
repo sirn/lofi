@@ -159,8 +159,6 @@ impl TurnStats {
     }
 }
 
-/// The agent: a provider, a model, a workspace root, and a system prompt.
-///
 /// Cheaply cloneable because the provider is held in an `Arc`.
 #[derive(Clone)]
 pub struct Agent {

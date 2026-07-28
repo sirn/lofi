@@ -160,14 +160,6 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
     // verbatim inflates the live list with huge tool results the agent no
     // longer sees, so a re-compact barely shrinks the context and plan_cut's
     // token estimates are wrong.
-    //
-    // Fix: apply edit_tail to the entire live list before plan_cut when a
-    // prior compaction is in effect. The keep_* counters count from the end
-    // (newest messages), so recent results/thinking/calls in the new turns
-    // are kept verbatim while the old kept tail's results are stubbed —
-    // exactly matching what the agent sees. This is cache-safe: compact()
-    // already rebuilds the prefix. The final edit_tail on the kept tail after
-    // plan_cut is then idempotent (stubs stay stubs).
     if previous_summary.is_some() && opts.edit.enabled && !live.is_empty() {
         let pairs: Vec<(&str, &Message)> = live
             .iter()
@@ -1867,9 +1859,6 @@ mod tests {
         );
     }
 
-    /// A single user prompt with many tool calls (cut == 0) and a token
-    /// budget must still compact via the oversized-turn guard, instead of
-    /// refusing with "not enough history to compact yet".
     #[test]
     fn compact_single_prompt_oversized_turn() {
         // One user prompt followed by 6 exec tool cycles (12 messages).

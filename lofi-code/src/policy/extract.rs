@@ -1,5 +1,3 @@
-//! Command extraction and wrapper unwrapping.
-//!
 //! Splits a token stream into command segments (on operators), recursively
 //! descends into subshells and command substitutions, and unwraps wrapper
 //! commands (`sudo`, `env`, `bash -c`, `docker run`, …) to evaluate the

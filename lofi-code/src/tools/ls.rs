@@ -4,12 +4,9 @@ use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
 impl BuiltinTools {
-    /// List every directory entry under `dir` (empty/`.` means the root).
-    ///
     /// Entries are returned as sorted paths relative to the root. The result
     /// is complete or the call errors when the hard safety ceiling is
     /// exceeded.
-    ///
     /// # Errors
     /// Returns [`Error::Tool`] if `dir` escapes the root or the directory
     /// exceeds [`MAX_LS_ENTRIES`].

@@ -19,8 +19,6 @@ pub(super) fn bind_tools<'js>(
     Ok(())
 }
 
-/// Bind `read`/`ls`/`find`/`grep`/`write`/`edit`/`bash`.
-///
 /// The async closures deliberately do **not** capture a `Ctx` clone: doing
 /// so would create a `context -> globals -> lofi -> function -> Ctx -> context`
 /// reference cycle that never collects and trips `QuickJS`'s `gc_obj_list`

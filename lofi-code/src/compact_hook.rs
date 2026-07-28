@@ -201,7 +201,6 @@ impl CompactionHook for CodeCompactionHook {
     }
 }
 
-/// Clip text to max chars on a word boundary.
 fn clip(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
@@ -244,13 +243,11 @@ fn extract_commit_message(cmd: &str) -> Option<String> {
     Some(clip(body[..end].trim(), 120))
 }
 
-/// First short git hash in a bash result string.
 fn first_hash(text: &str) -> Option<String> {
     let re = regex::Regex::new(r"\b[0-9a-f]{7,12}\b").ok()?;
     re.find(text).map(|m| m.as_str().to_string())
 }
 
-/// Extract a compact summary from a JSON tool result object.
 fn compress_json_result(text: &str, max: usize) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = v.as_object()?;
@@ -293,7 +290,6 @@ fn compress_json_result(text: &str, max: usize) -> Option<String> {
     Some(clip(&parts.join(" "), max))
 }
 
-/// Render a JSON value as a brief string.
 fn json_value_brief(v: &serde_json::Value, max: usize) -> String {
     match v {
         serde_json::Value::String(s) => clip(s.trim(), max),

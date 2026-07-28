@@ -3,14 +3,6 @@ use ratatui::style::Color;
 /// The resolved color palette. Colors are ANSI 256 values so the UI works
 /// in any terminal that advertises 256-color support without depending on
 /// truecolor.
-///
-/// Token roles (kept deliberately small and generic):
-/// - `primary` — brand/accent color.
-/// - `user` / `agent` — conversation-role colors.
-/// - `success` / `warn` / `error` / `info` — status semantics.
-/// - `fg` / `muted` / `subtle` — base, dimmed, and faint text.
-/// - `surface` — filled background for fenced code tiles.
-/// - `inline_bg` — background for inline code spans.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Theme {
     pub primary: Color,

@@ -1,12 +1,3 @@
-//! Provider trait + factory.
-//!
-//! [`Provider::stream`] yields [`lofi_types::StreamingEvent`]s; [`open`]
-//! builds the right transport by [`Api`]. Each concrete provider holds the
-//! resolved `base_url`/`api_key`/`headers` straight from [`ProviderConfig`]
-//! (value resolution happens earlier in `config_loader`) plus an HTTP client.
-//! The transport is a thin layer: request bodies come from [`crate::ir`], and
-//! SSE byte streams are decoded by [`sse`].
-
 mod anthropic_messages;
 pub mod ir;
 mod openai_completions;
@@ -29,8 +20,6 @@ pub use anthropic_messages::ANTHROPIC_VERSION;
 use openai_completions::OpenAiCompletionsProvider;
 use openai_responses::OpenAiResponsesProvider;
 
-/// A streaming chat-completion transport.
-///
 /// `stream` runs a single model turn, `POSTing` to `model.base_url` (the full
 /// endpoint URL resolved at config load) and yielding incremental events
 /// until the provider sends its terminal sentinel. Remote model-list
@@ -46,16 +35,12 @@ pub trait Provider: Send + Sync {
     ) -> Result<BoxStream<'static, Result<StreamingEvent>>>;
 }
 
-/// Build the concrete [`Provider`] for `api` from an already-resolved config.
-///
 /// `config_loader` resolves `api_key` and `header` values in place, so the
 /// factory simply hands them to the transport. The provider's `base_url`
 /// (host root) is the fallback used when a model does not carry its own
 /// `base_url`; per-model endpoint URLs are resolved earlier by the model
 /// registry. An unknown `api` is a config error rather than a transport one.
-///
 /// # Errors
-///
 /// Returns [`Error::Http`] if the shared HTTP client cannot be constructed.
 pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
     let base_url = cfg
@@ -120,8 +105,6 @@ pub fn effective_credentials(cfg: &ProviderConfig) -> (String, HashMap<String, S
     }
 }
 
-/// Build the shared `reqwest` client: `rustls` TLS, no default features.
-///
 /// Only the connection establishment is bounded (30 s) — streaming responses
 /// are not. A flat `.timeout()` caps the *whole* response body, so a long
 /// reasoning-model turn (which can stream for several minutes) would be
@@ -260,7 +243,6 @@ fn authed_get(
 /// raw JSON body. When `auth` is false the request is sent without
 /// credentials or provider headers so no configured credential headers leak
 /// to a public or alternate `models_url`.
-///
 /// # Errors
 /// Returns [`Error::Http`] on transport failure, [`Error::Provider`] on a
 /// non-2xx response or body that exceeds the size cap, or a decode error.
@@ -291,11 +273,6 @@ pub async fn fetch_models(
     read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await
 }
 
-/// Pull a human-readable message out of a provider error body.
-///
-/// Handles the common `{ "error": { "message": "..." } }` shape used by
-/// both `OpenAI` and Anthropic, a top-level `{ "message": "..." }`, and a bare
-/// string `error`.
 fn extract_error_detail(text: &str) -> Option<String> {
     let v: Value = serde_json::from_str(text).ok()?;
     if let Some(m) = v
