@@ -684,10 +684,11 @@ impl App {
             return false;
         };
         if let Some(cursor) = &self.session.cursor {
+            let summarized_range = c.summarized_range.clone().unwrap_or_default();
             match cursor.append_compaction(
                 &c.kept_messages,
-                c.summary.clone(),
-                c.summarized_range.clone().unwrap_or_default(),
+                &c.summary,
+                &summarized_range,
                 store::CompactionCounts {
                     summarized: c.summarized_count,
                     represented: c.represented_count,

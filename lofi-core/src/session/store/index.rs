@@ -240,6 +240,24 @@ where
 ///
 /// Returns the underlying IO error if the session file cannot be read or
 /// an event line cannot be parsed.
+fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
+    match kind_type {
+        "message" | "" => match role {
+            Some("user") => IndexKind::UserPrompt,
+            Some("assistant") => IndexKind::AssistantMessage,
+            Some("tool") => IndexKind::ToolResult,
+            Some("system") => IndexKind::SystemMessage,
+            _ => IndexKind::Other,
+        },
+        "turn_end" => IndexKind::TurnEnd,
+        "turn_failed" => IndexKind::TurnFailed,
+        "compaction" => IndexKind::Compaction,
+        "native_tool" => IndexKind::NativeTool,
+        "cursor" => IndexKind::Cursor,
+        _ => IndexKind::Other,
+    }
+}
+
 pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
     use std::io::{BufReader, Seek};
 
@@ -277,24 +295,7 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
         } else {
             (IndexId::parse(skel.id), skel.parent_id.map(IndexId::parse))
         };
-        let role_kind = |role: Option<&str>| -> IndexKind {
-            match role {
-                Some("user") => IndexKind::UserPrompt,
-                Some("assistant") => IndexKind::AssistantMessage,
-                Some("tool") => IndexKind::ToolResult,
-                Some("system") => IndexKind::SystemMessage,
-                _ => IndexKind::Other,
-            }
-        };
-        let kind = match skel.kind_type.as_str() {
-            "message" | "" => role_kind(skel.role.as_deref()),
-            "turn_end" => IndexKind::TurnEnd,
-            "turn_failed" => IndexKind::TurnFailed,
-            "compaction" => IndexKind::Compaction,
-            "native_tool" => IndexKind::NativeTool,
-            "cursor" => IndexKind::Cursor,
-            _ => IndexKind::Other,
-        };
+        let kind = index_kind(&skel.kind_type, skel.role.as_deref());
         let entry = EventIndex {
             id,
             parent_id,
@@ -315,6 +316,41 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     }
     let pos = reader.stream_position()?;
     Ok((header.meta, indices, pos))
+}
+
+/// Index only a known append range. Active cursors use this after each durable
+/// write, so compaction can retain a small suffix index instead of rebuilding
+/// an index for the complete append-only transcript.
+pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<EventIndex>> {
+    use std::io::{BufReader, Seek, SeekFrom};
+
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    reader.seek(SeekFrom::Start(start))?;
+    let mut indices = Vec::new();
+    while reader.stream_position()? < end {
+        let Some((line_start, line_end, skel)) = read_jsonl_value::<EventSkeleton, _>(&mut reader)?
+        else {
+            break;
+        };
+        if line_end > end {
+            return Err(Error::State(format!(
+                "index event extends beyond committed range {start}..{end} in {}",
+                path.display()
+            )));
+        }
+        if skel.kind_type == "cursor" {
+            continue;
+        }
+        indices.push(EventIndex {
+            id: IndexId::parse(skel.id),
+            parent_id: skel.parent_id.map(IndexId::parse),
+            offset: line_start,
+            end_offset: line_end,
+            kind: index_kind(&skel.kind_type, skel.role.as_deref()),
+            cursor_leaf: None,
+        });
+    }
+    Ok(indices)
 }
 
 /// Parse a single event at a known byte offset. Used for lazy label loading
@@ -584,6 +620,32 @@ pub(super) fn load_event_range(path: &Path, start: u64, end: u64) -> Result<Vec<
         }
     }
     Ok(out)
+}
+
+/// Retain only the selected-lineage suffix required by the next compaction.
+/// The input must already be projected root-to-leaf (as `SessionSnapshot` is).
+pub(super) fn compaction_index_suffix(
+    path: &Path,
+    lineage: &[EventIndex],
+) -> Result<Vec<EventIndex>> {
+    let Some(marker_pos) = lineage
+        .iter()
+        .rposition(|event| event.kind == IndexKind::Compaction)
+    else {
+        return Ok(lineage.to_vec());
+    };
+    let marker = load_event_at(path, lineage[marker_pos].offset)?;
+    let start = match marker.kind {
+        SessionEventKind::Compaction {
+            first_kept_entry_id,
+            ..
+        } if !first_kept_entry_id.is_empty() => lineage[..marker_pos]
+            .iter()
+            .position(|event| event.id.matches(&first_kept_entry_id))
+            .unwrap_or(marker_pos),
+        _ => marker_pos,
+    };
+    Ok(lineage[start..].to_vec())
 }
 
 /// Materialize only the lineage suffix needed by compaction. Once a

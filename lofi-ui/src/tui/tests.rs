@@ -53,7 +53,7 @@ fn test_append_compaction(
         None => store::SessionCursor::open(path.to_path_buf())?,
     };
     let (start, end) =
-        cursor.append_compaction(kept_messages, summary, summarized_range, counts)?;
+        cursor.append_compaction(kept_messages, &summary, &summarized_range, counts)?;
     Ok((start, end, cursor.leaf_id().unwrap_or_default()))
 }
 

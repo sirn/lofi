@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 use index::{
-    load_collapsed_events_at, load_compaction_path, load_event_at, load_event_by_id,
-    load_event_range, load_events_at, load_index, load_indexed_path, visit_event_values,
-    visit_events,
+    compaction_index_suffix, load_collapsed_events_at, load_compaction_path, load_event_at,
+    load_event_by_id, load_event_range, load_events_at, load_index, load_index_range,
+    load_indexed_path, visit_event_values, visit_events,
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
@@ -152,6 +152,10 @@ pub struct SessionTreeSnapshot {
 pub struct SessionCursor {
     path: PathBuf,
     leaf_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Active-lineage suffix from the latest compaction checkpoint onward.
+    /// Shared by cursor clones and extended from known append byte ranges, so
+    /// ordinary compaction never indexes the complete append-only transcript.
+    compaction_index: std::sync::Arc<std::sync::Mutex<Option<Vec<EventIndex>>>>,
 }
 
 impl SessionCursor {
@@ -165,6 +169,7 @@ impl SessionCursor {
             leaf_id: std::sync::Arc::new(std::sync::Mutex::new(
                 leaf_id.filter(|id| !id.is_empty()),
             )),
+            compaction_index: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -195,7 +200,10 @@ impl SessionCursor {
         }) {
             return Err(Error::State("session cursor head not found".to_string()));
         }
-        Ok(Self::new(path, leaf))
+        let index = indexed_lineage(index, leaf.as_deref())?;
+        let cursor = Self::new(path, leaf);
+        *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &index)?);
+        Ok(cursor)
     }
 
     /// Open an existing transcript and return its selected-lineage snapshot
@@ -222,6 +230,7 @@ impl SessionCursor {
         };
         let selected = indexed_lineage(index, leaf.as_deref())?;
         let cursor = Self::new(path, leaf);
+        *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &selected)?);
         Ok((
             cursor,
             SessionSnapshot {
@@ -255,6 +264,9 @@ impl SessionCursor {
         let mut leaf = self.lock_leaf();
         persist_cursor(&self.path, next.as_deref(), true)?;
         *leaf = next;
+        // The old suffix belongs to a different selected lineage. The next
+        // snapshot reseeds this with only the new branch's compactable tail.
+        *self.lock_compaction_index() = None;
         Ok(())
     }
 
@@ -268,6 +280,7 @@ impl SessionCursor {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
         let index = indexed_lineage(index, leaf.as_deref())?;
+        *self.lock_compaction_index() = Some(compaction_index_suffix(&self.path, &index)?);
         Ok(SessionSnapshot {
             meta,
             index,
@@ -463,8 +476,17 @@ impl SessionCursor {
     /// Propagates indexing and event parsing failures.
     pub fn load_compaction_events(&self) -> Result<Vec<SessionEvent>> {
         let leaf = self.lock_leaf();
+        if let Some(index) = self.lock_compaction_index().as_ref() {
+            return load_compaction_path(&self.path, index, leaf.as_deref());
+        }
+        // Compatibility fallback for cursors manually constructed around an
+        // existing file. Production open/resume paths seed the suffix once.
         let (_meta, index, _size) = load_index(&self.path)?;
-        load_compaction_path(&self.path, &index, leaf.as_deref())
+        let index = indexed_lineage(index, leaf.as_deref())?;
+        let suffix = compaction_index_suffix(&self.path, &index)?;
+        let events = load_compaction_path(&self.path, &suffix, leaf.as_deref())?;
+        *self.lock_compaction_index() = Some(suffix);
+        Ok(events)
     }
 
     /// Append one event batch to this cursor's lineage and advance its leaf.
@@ -474,7 +496,14 @@ impl SessionCursor {
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
         let mut leaf = self.lock_leaf();
         let (start, end, next) = append_cursor_events(&self.path, events, leaf.as_deref())?;
+        let appended = load_index_range(&self.path, start, end).ok();
         *leaf = next;
+        let mut index = self.lock_compaction_index();
+        match (index.as_mut(), appended) {
+            (Some(index), Some(appended)) => index.extend(appended),
+            (_, None) => *index = None,
+            (None, Some(_)) => {}
+        }
         Ok((start, end))
     }
 
@@ -485,8 +514,8 @@ impl SessionCursor {
     pub fn append_compaction(
         &self,
         kept_messages: &[Message],
-        summary: String,
-        summarized_range: [String; 2],
+        summary: &str,
+        summarized_range: &[String; 2],
         counts: CompactionCounts,
     ) -> Result<(u64, u64)> {
         let mut leaf = self.lock_leaf();
@@ -494,17 +523,25 @@ impl SessionCursor {
             &self.path,
             kept_messages,
             AppendParent::Explicit(leaf.as_deref()),
-            &summary,
-            &summarized_range,
+            summary,
+            summarized_range,
             counts,
             true,
         )?;
+        let suffix = load_index_range(&self.path, start, end).ok();
         *leaf = Some(marker_id);
+        *self.lock_compaction_index() = suffix;
         Ok((start, end))
     }
 
     fn lock_leaf(&self) -> std::sync::MutexGuard<'_, Option<String>> {
         self.leaf_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_compaction_index(&self) -> std::sync::MutexGuard<'_, Option<Vec<EventIndex>>> {
+        self.compaction_index
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -667,7 +704,12 @@ impl SessionStore {
     pub fn create_cursor(&self, cwd: &Path, model: &RunModel) -> Result<SessionCursor> {
         let path = self.create(cwd, model)?;
         persist_cursor(&path, None, false)?;
-        Ok(SessionCursor::new(path, None))
+        let cursor = SessionCursor::new(path, None);
+        // This transcript is known to have no conversation events yet. Start
+        // the suffix index empty so even its first compaction never needs a
+        // complete-file index scan.
+        *cursor.lock_compaction_index() = Some(Vec::new());
+        Ok(cursor)
     }
 
     /// Low-level path-returning creation helper for store tests. Active
@@ -1749,8 +1791,8 @@ mod tests {
         cursor
             .append_compaction(
                 &[assistant("kept")],
-                "summary".into(),
-                [root_id.clone(), reply[0].id.clone()],
+                "summary",
+                &[root_id.clone(), reply[0].id.clone()],
                 CompactionCounts {
                     summarized: 2,
                     represented: 2,
@@ -1762,6 +1804,52 @@ mod tests {
         let (_, events, _, _) = load(&path).unwrap();
         let marker = events.iter().find(|event| event.id == marker_id).unwrap();
         assert!(matches!(marker.kind, SessionEventKind::Compaction { .. }));
+    }
+
+    #[test]
+    fn cursor_compaction_cache_replaces_history_with_checkpoint_suffix() {
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/cursor-compaction-cache"), &"p/m".into())
+            .unwrap();
+        let cursor = SessionCursor::new(path, None);
+        let mut original = [ev(user("old")), ev(assistant("old reply"))];
+        cursor.append_events(&mut original).unwrap();
+        assert_eq!(cursor.load_compaction_events().unwrap().len(), 2);
+
+        cursor
+            .append_compaction(
+                &[assistant("kept")],
+                "summary",
+                &[original[0].id.clone(), original[1].id.clone()],
+                CompactionCounts {
+                    summarized: 2,
+                    represented: 2,
+                    kept: 1,
+                },
+            )
+            .unwrap();
+        let mut continuation = [ev(user("new")), ev(assistant("new reply"))];
+        cursor.append_events(&mut continuation).unwrap();
+
+        let events = cursor.load_compaction_events().unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0].kind,
+            SessionEventKind::Message(message)
+                if message.blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text } if text == "kept"
+                ))
+        ));
+        assert!(matches!(
+            events[1].kind,
+            SessionEventKind::Compaction { .. }
+        ));
+        assert_eq!(events[2].id, continuation[0].id);
+        assert_eq!(events[3].id, continuation[1].id);
+        assert!(!events.iter().any(|event| event.id == original[0].id));
+        assert!(!events.iter().any(|event| event.id == original[1].id));
     }
 
     #[test]
@@ -1836,8 +1924,8 @@ mod tests {
         cursor
             .append_compaction(
                 &[assistant("kept")],
-                "summary".into(),
-                ["first".into(), "last".into()],
+                "summary",
+                &["first".into(), "last".into()],
                 CompactionCounts {
                     summarized: 1,
                     represented: 1,
