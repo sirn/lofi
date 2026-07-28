@@ -78,12 +78,6 @@ pub(super) fn turn_byte_ranges_from_events(
 /// `apply_event` and by [`turns_from_session_events`] (used to materialize a
 /// frozen turn from its byte range on demand) so there is exactly one place
 /// that maps an `AgentEvent` to `Block`s.
-///
-/// `TurnStart` pushes a new turn; every other event mutates the last turn.
-/// Status-only events (`RetryStart`/`RetryEnd`/commit watermarks) are no-ops
-/// here — the caller (`App::apply_event`) handles them before calling this.
-// One match over AgentEvent shaping the turn list; per-variant helpers would
-// scatter the shared turn/byte-range state.
 #[allow(clippy::too_many_lines)]
 pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
     if let AgentEvent::TurnStart { prompt } = ev {
@@ -301,17 +295,6 @@ pub(super) fn turns_from_selected_session_events(events: &[SessionEvent]) -> Vec
     turns
 }
 
-/// Reconstruct a faithful [`AgentEvent`] stream from a transcript event log,
-/// emitting each event immediately so resume never retains a second full
-/// transcript representation. The resume and live paths still share one
-/// builder ([`App::apply_event`]).
-///
-/// Tool timings, thinking timings, and native-tool records are gathered first
-/// (they are written after the messages) so each `ToolUse` block can be
-/// stamped as it is replayed. A `SessionEvent::TurnEnd` becomes the matching
-/// `AgentEvent::TurnEnd`, attaching the `◇ Done in Ns with <model>` block to the
-/// turn it follows.
-///
 /// Tool results in the durable log travel as a separate `Message` with
 /// `Role::Tool` (or, for legacy entries, `Role::User` carrying `ToolResult`
 /// blocks) *after* the assistant's `ToolUse`. The live stream delivers the
@@ -639,10 +622,6 @@ pub(super) fn messages_from_events(
             _ => {}
         }
     }
-    // `out` is leaf-first; reverse to root-first for the model.
-    // Read verbatim — the transcript is the checkpoint. At compact time the
-    // edited kept-tail messages are written to the transcript, so no
-    // in-memory edit_tail is needed here.
     out.reverse();
     let mut messages: Vec<Message> = out.into_iter().map(|(_, m)| m).collect();
     if let Some(s) = summary_msg {

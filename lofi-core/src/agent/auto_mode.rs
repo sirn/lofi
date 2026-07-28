@@ -26,14 +26,6 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Build an [`AutoModeFn`] from the shell-policy auto-mode config, or return
-/// `None` when auto-mode is disabled or the configured model is unavailable.
-///
-/// The provider is opened from `config.providers` using the auto-mode
-/// config's `provider` key, and the model is resolved from the registry.
-/// Both are captured in the returned closure so each invocation is a
-/// self-contained LLM round-trip.
-///
 /// # Errors
 /// Returns [`Error::Config`] when the auto-mode config names a provider or
 /// model that does not exist or is not available (no credentials).

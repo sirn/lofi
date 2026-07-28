@@ -42,13 +42,9 @@ fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json:
     }
 }
 
-/// Edit the kept tail into a lighter, recall-recoverable form.
-///
 /// `kept` is the list of `(event_id, message)` pairs that would otherwise be
 /// carried verbatim as the post-compaction prefix. Returns a new message
 /// list with old tool results / thinking / tool-call code elided per `opts`.
-///
-/// When `opts.enabled` is false this is a plain clone (the verbatim tail).
 #[must_use]
 pub fn edit_tail(kept: &[(String, Message)], opts: &EditConfig) -> Vec<Message> {
     let refs: Vec<(&str, &Message)> = kept

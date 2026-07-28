@@ -1,16 +1,3 @@
-//! Shared SSE byte-stream decoder used by all three providers.
-//!
-//! The providers layer turns an HTTP response body into a stream of
-//! [`SseEvent`]s here, then maps each event to a [`StreamingEvent`] via a
-//! provider-specific closure. Keeping the incremental line/UTF-8 buffering in
-//! one place avoids duplicating the fiddly partial-chunk logic across the
-//! transports.
-//!
-//! Decoding handles two streaming hazards: a multibyte UTF-8 sequence may be
-//! split across `bytes::Bytes` chunks, and an SSE block (terminated by a blank
-//! line) may be split across chunks. A small byte buffer holds the unfinished
-//! tail of each until the next chunk completes it.
-
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use lofi_types::StreamingEvent;
@@ -20,13 +7,6 @@ use lofi_error::{Error, Result};
 
 pub(crate) type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<StreamingEvent>> + Send>>;
 
-/// Mapper from a parsed SSE event to zero or more [`StreamingEvent`]s.
-///
-/// Each provider supplies its own mapper: the `OpenAI` transports parse the
-/// `data:` JSON and call the relevant `ir` mapper; Anthropic forwards the
-/// `(event, data)` pair. Returning an empty vector skips keep-alive and
-/// no-op blocks. Returning [`Err`] surfaces a provider-reported error
-/// (e.g. an `error`/`failed`/`incomplete` event) and terminates the stream.
 pub(crate) trait SseMapper: Send + 'static {
     fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>>;
 
@@ -80,7 +60,6 @@ fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
 struct SseState<M> {
     bytes: std::pin::Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
     pending_bytes: Vec<u8>,
-    /// Decoded text waiting for the blank line that closes an SSE block.
     pending_lines: String,
     /// A trailing `\r` carried across a chunk boundary so a split `\r\n`
     /// line ending is not mistaken for a `\n\n` block terminator.
@@ -96,13 +75,6 @@ struct SseState<M> {
     mapper: M,
 }
 
-/// Turn a streaming HTTP response into a stream of [`StreamingEvent`]s.
-///
-/// `resp.error_for_status()` should be called by the provider before invoking
-/// this helper so transport-level failures surface as [`Error::Http`]. Each
-/// parsed SSE block is handed to `mapper`; `data: [DONE]` terminates the
-/// stream. Malformed JSON inside a `data:` line is the mapper's responsibility
-/// — it returns `None` for unrecognized payloads.
 pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M) -> EventStream {
     let bytes = Box::pin(resp.bytes_stream());
     let state = SseState {
@@ -119,10 +91,6 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
     futures::stream::unfold(state, step).boxed()
 }
 
-/// One unfold step: emit the next queued event, or pull and decode chunks
-/// until one produces an event (or the upstream ends). Protocols may either
-/// finish on their mapped terminal event or defer that event until an explicit
-/// transport sentinel/accepted EOF has been consumed.
 async fn step<M: SseMapper>(
     mut state: SseState<M>,
 ) -> Option<(Result<StreamingEvent>, SseState<M>)> {
@@ -162,8 +130,6 @@ async fn step<M: SseMapper>(
     }
 }
 
-/// Append a chunk to the decoder, decoding complete UTF-8 and splitting out
-/// any closed SSE blocks into `queued`.
 fn feed_chunk<M: SseMapper>(state: &mut SseState<M>, chunk: &Bytes) {
     state.pending_bytes.extend_from_slice(chunk);
     let pending = state.pending_bytes.split_off(0);
@@ -268,7 +234,6 @@ fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool)
         }
     }
     if start > 0 {
-        // Drop the processed prefix, keeping only the unfinished tail.
         let tail = state.pending_lines.split_off(start);
         state.pending_lines = tail;
     }
@@ -288,9 +253,6 @@ fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool)
 fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
     for ev in parse_sse_lines(block.lines()) {
         if is_done_marker(&ev.data) && state.mapper.handles_done_marker() {
-            // `[DONE]` is the transport sentinel for OpenAI transports. Emit
-            // any logical Done held from `response.completed`/the usage chunk
-            // only now, after the server's terminal bytes have been consumed.
             if let Some(done) = state.pending_done.take() {
                 state.queued.push_back(Ok(done));
             }
@@ -313,9 +275,6 @@ fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
                         state.queued.push_back(Ok(event));
                     }
                 }
-                // Protocols that do not defer logical completion retain the
-                // existing behavior: their terminal event ends the stream
-                // without waiting for transport EOF.
                 if terminal {
                     state.done = true;
                     return;
@@ -338,8 +297,6 @@ mod tests {
     use super::*;
     use lofi_types::StreamingEvent;
 
-    /// A mapper that pulls `data:` JSON and returns a `TextDelta` of the
-    /// `text` field, mirroring the shape the real `OpenAI` mapper consumes.
     #[allow(clippy::needless_pass_by_value)]
     fn text_mapper(ev: SseEvent) -> Result<Vec<StreamingEvent>> {
         let v: serde_json::Value = serde_json::from_str(&ev.data)
@@ -409,7 +366,6 @@ mod tests {
 
     #[tokio::test]
     async fn split_utf8_multibyte_across_chunks() {
-        // "é" is 0xC3 0xA9 in UTF-8; split it between chunks.
         let out = run_decoder(vec![b"data: {\"text\":\"a\xC3", b"\xA9\"}\n\n"]).await;
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -435,8 +391,6 @@ mod tests {
 
     #[tokio::test]
     async fn crlf_delimiter_split_across_chunks() {
-        // `\r\n\r\n` block terminator split at every byte boundary must
-        // still be recognized as a blank line.
         let out = run_decoder(vec![b"data: {\"text\":\"x\"}\r", b"\n\r\n"]).await;
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -447,7 +401,6 @@ mod tests {
 
     #[tokio::test]
     async fn lone_cr_line_terminator() {
-        // A lone `\r` is a valid SSE line terminator.
         let out = run_decoder(vec![b"data: {\"text\":\"y\"}\r\r"]).await;
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -468,8 +421,6 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_utf8_byte_rejected_immediately() {
-        // 0xFF is never a valid UTF-8 lead byte; the stream must fail instead
-        // of buffering it (and every later chunk) until EOF.
         let out = run_decoder(vec![b"data: ", &[0xFF], b"\n\n"]).await;
         assert!(out.iter().any(Result::is_err));
     }

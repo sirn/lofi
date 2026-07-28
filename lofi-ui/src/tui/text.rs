@@ -120,12 +120,6 @@ pub(super) fn char_index_to_byte(s: &str, row: usize, col: usize) -> usize {
 /// the shared core for [`App::input_select_rows`], [`count_wrapped_rows`],
 /// and [`wrap_cursor_pos`], which must agree so the cursor lands exactly
 /// where the text breaks.
-///
-/// Breaks at the last space that fits — the space stays on its row (a
-/// trailing blank cell) so every input char maps one-to-one to a displayed
-/// cell and the cursor's char column is trivial to locate. A token wider
-/// than `content_w` is hard-broken on a char boundary. Empty input yields a
-/// single empty row.
 pub(super) fn wrap_input_ranges(chars: &[char], content_w: usize) -> Vec<(usize, usize)> {
     let n = chars.len();
     if n == 0 || content_w == 0 {

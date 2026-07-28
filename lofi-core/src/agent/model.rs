@@ -21,9 +21,6 @@ pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
     messages
 }
 
-/// Build an [`Agent`] and its selected [`Model`] from the user config and
-/// an optional `--model provider/model[:level]` query.
-///
 /// Shared by the `lofi-ui` presentation drivers (`run_print`, `run_interactive`)
 /// so the resolution ladder (config load, registry + discovery, model +
 /// thinking-level resolution, transport construction) stays in one place.
@@ -32,7 +29,6 @@ pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
 /// [`Error::NoModels`] is returned so the interactive UI can launch and show
 /// a friendly message. Remote discovery failures
 /// fall back to static-only [`ModelRegistry::load`].
-///
 /// # Errors
 /// Propagates [`Error`] from config load, model resolution, thinking-level
 /// validation, or provider construction.
@@ -80,23 +76,8 @@ pub async fn build_agent(
     Ok((agent, model_obj, level, config, registry))
 }
 
-/// Assemble the agent's system prompt: the shipped [`SYSTEM_PROMPT`] followed
-/// by any `AGENTS.md` that applies to this run.
-///
-/// Two sources, ordered least to most specific so the most specific file is
-/// last and most prominent:
-/// - **Global** — `<config_dir>/AGENTS.md`, user-wide instructions kept next
-///   to the config file. Skipped when `config_dir` is `None`.
-/// - **Per-directory** — every `AGENTS.md` found walking from the workspace
-///   `root` up to the enclosing git repo root (inclusive). Walking stops at
-///   the repo boundary so unrelated ancestor directories never contribute;
-///   when `root` is not inside a git repository only `root`'s own
-///   `AGENTS.md` is considered. Files are ordered outermost-first.
-///
-/// Missing or whitespace-only files are skipped. When none are found the base
-/// [`SYSTEM_PROMPT`] is returned unchanged. Otherwise each found file is
-/// appended as an `agents_md` XML block (with a `source` attribute naming
-/// its origin) after the unwrapped base prompt.
+/// Walking stops at the repository boundary so unrelated ancestor
+/// instructions cannot affect the workspace.
 fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
 
@@ -161,17 +142,11 @@ fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-/// Build an [`Agent`] for a selected model from an already-loaded
-/// [`ModelRegistry`] and [`Config`], reusing an existing agent's per-session
-/// tmp directory, root, system prompt, retry budget, and bash policy when
-/// `existing` is given.
-///
 /// The startup path passes `None` and gets a fresh agent (a new tmp dir).
 /// The `/model` selector passes the live agent so the switch doesn't orphan
 /// `lofi.bash` full-output logs or `lofi.bash_read` state. This is sync and
 /// side-effect-free beyond provider construction, so a switch never blocks
 /// the UI on remote discovery — the registry is retained from startup.
-///
 /// # Errors
 /// Propagates [`Error`] from model resolution, thinking-level validation,
 /// or provider construction.
@@ -216,8 +191,6 @@ pub(crate) struct ModelQuery {
     level: Option<ThinkingLevel>,
 }
 
-/// Parse a `--model` argument of the form `provider/model[:level]`.
-///
 /// The provider qualifier is mandatory: bare ids are rejected so a prompt
 /// always names the endpoint it runs against. `level` is an optional
 /// `:off`/`:low`/`:medium`/`:high`/`:xhigh` suffix; an unrecognized suffix is
@@ -251,15 +224,6 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
 
 pub(crate) const NO_MODELS_HINT: &str = "No models configured.";
 
-/// Pick the model to run against and resolve its thinking level.
-///
-/// With a `model_query` of `provider/model[:level]`, the named model is resolved
-/// within the named provider and must be available (its provider
-/// authenticated or `no_auth`). Without a query, the first available model in
-/// registry (config) order is chosen. The thinking level resolves from the
-/// CLI `:level`, then the model/provider/agent defaults, then `medium`; it must
-/// be `off` or one of the model's declared `thinking_levels`.
-///
 /// # Errors
 /// Returns [`Error::NoModels`] when no model is available, or when the named
 /// model's provider is disabled (no credentials); [`Error::Config`] for an

@@ -116,9 +116,6 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Resolve `p` for read-only operations, allowing absolute paths under
-/// any of `extra_roots` in addition to `primary_root`.
-///
 /// Relative/empty paths resolve under `primary_root` (via [`resolve_under`]).
 /// Absolute paths are canonicalized (existing prefix) and checked against
 /// `primary_root` and every `extra_root`. Symlinks are followed by
@@ -172,10 +169,6 @@ pub(super) fn resolve_for_read(
     Err(Error::Tool(format!("path outside allowed roots: {p}")))
 }
 
-/// Reject `path` if it exists but is not a regular file (FIFO, socket,
-/// device). Called on a canonicalized path (symlinks already resolved by
-/// `resolve_for_read` or `resolve_under`), so no symlink check is needed.
-/// A nonexistent target is allowed so `write` can create new files.
 pub(super) fn reject_non_regular(label: &str, path: &Path) -> Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if !meta.is_file() {
@@ -197,8 +190,6 @@ pub(super) fn reject_symlink_leaf(root: &Path, p: &str, label: &str) -> Result<(
     Ok(())
 }
 
-/// Recursively collect files under `dir`.
-///
 /// Symlinks are followed (via `metadata`) so symlinked files and directories
 /// appear in results; broken symlinks are skipped. The canonicalization + root
 /// check in `resolve_for_read` is the security boundary for path escapes.

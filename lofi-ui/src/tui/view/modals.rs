@@ -437,14 +437,6 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// '/tree' branch-picker overlay: a popup showing the session's event tree
-/// rendered with ASCII tree art (`|-`, `` `-``, `|  `). `user:` nodes roll
-/// back to before the prompt (edit and resend); `agent:` nodes roll back to
-/// after the turn (continue from here). Nodes on the active path are
-/// highlighted so the current branch is visible at a glance.
-/// `/model` picker: a centered list of available `provider/model` entries.
-/// The current model is highlighted; `↑/↓` or `j`/`k` move, `Enter` switches,
-/// `Esc`/`q` cancels.
 pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.model_picker else {

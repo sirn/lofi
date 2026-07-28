@@ -169,8 +169,6 @@ pub(super) fn handle_event(
             }
         }
 
-        // Insert printable chars unless a control/alt combo is claimed by an
-        // arm above; Shift is already folded into `c` so it must be allowed.
         KeyCode::Char(c)
             if !k
                 .modifiers
@@ -215,7 +213,6 @@ mod user_bash_tests {
 /// on a double press within [`QUIT_DOUBLE_PRESS`] when the prompt is empty.
 /// Mode-independent — works the same in Input, Navigate, and Select.
 /// Kick off a silent force-continue after a hard-cap force-compact.
-///
 /// Mirrors the submit path in [`handle_event`] but appends no user prompt:
 /// it seeds the run from the (just-compacted) history, which ends in a tool
 /// result, so the model resumes the turn. The engine emits `TurnContinue`,
