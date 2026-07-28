@@ -40,71 +40,34 @@ pub use truncate::{
 };
 pub use util::{read_capped, PgrpKillGuard};
 
-/// Default `bash` timeout in milliseconds (120s).
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 
-/// Per-stream byte ceiling for captured `bash` output. Captured bytes are also
-/// output past this is discarded at the pipe before `bash` writes the temp file.
 const MAX_BASH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// File-size ceiling for `read`; larger files error.
 const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
-/// File-size ceiling for `edit`; larger files error before replacement.
 const MAX_EDIT_BYTES: usize = 8 * 1024 * 1024;
-/// Complete `grep` output byte ceiling; exceeding it errors.
 const MAX_GREP_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// Per-file `grep` size ceiling; larger files are reported as skipped.
 const MAX_GREP_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Complete `grep` row ceiling, including context rows; exceeding it errors.
 const MAX_GREP_ROWS: usize = 10_000;
-/// Complete `ls` entry ceiling; exceeding it errors.
 const MAX_LS_ENTRIES: usize = 50_000;
-/// Complete `find` result ceiling; exceeding it errors.
 const MAX_FIND_RESULTS: usize = 50_000;
-/// `find` traversal ceiling; exceeding it errors.
 const MAX_FIND_VISITED: usize = 65_536;
-/// `grep` traversal ceiling; exceeding it errors.
 const MAX_GREP_VISITED: usize = 65_536;
 
-/// The builtin tool bundle.
-///
-/// Holds the workspace root (canonicalized in [`new`](Self::new)) so every
-/// file operation can be confined to it. Methods are async and return JSON
-/// values ready to hand back to the sandbox.
 #[derive(Clone)]
 pub struct BuiltinTools {
     root: PathBuf,
-    /// Per-session tmp directory for full-output logs and other
-    /// agent-produced artifacts. Added as a read root so `lofi.read` can access files here.
     tmp_dir: PathBuf,
-    /// Optional sink for native tool-call events (Start/End per call).
     tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
-    /// Per-exec counter assigning ids to native tool calls.
     tool_counter: Arc<AtomicU64>,
-    /// Resolved `bash` child-env policy + output-redaction set.
     bash_env: BashEnv,
-    /// Resolved shell policy for `lofi.bash` command evaluation.
     shell_policy: crate::policy::ResolvedPolicy,
-    /// Async confirmation callback for shell-policy `ask` decisions.
     confirm: Option<crate::ConfirmFn>,
-    /// Async auto-mode callback for shell-policy `ask` decisions.
     auto_mode: Option<crate::AutoModeFn>,
-    /// Optional skills directory (`<config_dir>/skills`). When set,
-    /// `lofi.skills()` / `lofi.skill(name)` discover and read markdown
-    /// skill files from here and from `<root>/.lofi/skills/`.
     skills_dir: Option<PathBuf>,
-    /// Additional read-only root directories that `read`/`ls`/`find`/`grep`
-    /// can access via absolute paths. Includes the skills directory and the
-    /// per-session tmp directory (for bash output files).
     read_roots: Vec<PathBuf>,
 }
 
 impl BuiltinTools {
-    /// Construct a new bundle rooted at `root`.
-    ///
-    /// `root` is canonicalized on construction; if that fails (the directory
-    /// does not yet exist) the original path is kept and path checks fall
-    /// back to lexical resolution. The per-session tmp dir defaults to a
-    /// fresh directory under the system temp dir.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self::with_tool_cb(
@@ -117,8 +80,6 @@ impl BuiltinTools {
         )
     }
 
-    /// Like [`new`](Self::new) but also forwards native tool-call events to
-    /// `cb` so the UI can render each tool under its `exec` block.
     #[must_use]
     pub fn with_tool_cb(
         root: PathBuf,
@@ -140,8 +101,6 @@ impl BuiltinTools {
         )
     }
 
-    /// Like [`with_tool_cb`](Self::with_tool_cb) but also sets the skills
-    /// directory for `lofi.skills()` / `lofi.skill(name)`.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn with_skills_dir(
@@ -155,9 +114,6 @@ impl BuiltinTools {
         skills_dir: Option<PathBuf>,
     ) -> Self {
         let root = root.canonicalize().unwrap_or(root);
-        // Read-only roots: skills directory + per-session tmp dir (for bash
-        // output files). These allow `read`/`ls`/`find`/`grep` to access
-        // paths outside the workspace root.
         let mut read_roots = Vec::new();
         let tmp_canon = tmp_dir.canonicalize().unwrap_or_else(|_| tmp_dir.clone());
         read_roots.push(tmp_canon);
@@ -179,57 +135,45 @@ impl BuiltinTools {
         }
     }
 
-    /// The canonicalized workspace root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The per-session tmp directory (for full-output logs, etc.).
     #[must_use]
     pub fn tmp_dir(&self) -> &Path {
         &self.tmp_dir
     }
 
-    /// The resolved `bash` child-env policy + redaction set.
     #[must_use]
     pub fn bash_env(&self) -> &BashEnv {
         &self.bash_env
     }
 
-    /// The resolved shell policy for command evaluation.
     #[must_use]
     pub fn shell_policy(&self) -> &crate::policy::ResolvedPolicy {
         &self.shell_policy
     }
 
-    /// The async confirmation callback (if any).
     #[must_use]
     pub fn confirm(&self) -> Option<&crate::ConfirmFn> {
         self.confirm.as_ref()
     }
 
-    /// The async auto-mode callback (if any).
     #[must_use]
     pub fn auto_mode(&self) -> Option<&crate::AutoModeFn> {
         self.auto_mode.as_ref()
     }
 
-    /// The skills directory, if configured.
     #[must_use]
     pub fn skills_dir(&self) -> Option<&Path> {
         self.skills_dir.as_deref()
     }
 
-    /// Resolve a path for read-only operations (`read`/`ls`/`find`/`grep`).
-    /// Relative paths resolve under the workspace root. Absolute paths are
-    /// accepted if they fall under the workspace root or any read root.
     pub(super) fn resolve_for_read(&self, p: &str) -> Result<PathBuf> {
         resolve_for_read(&self.root, &self.read_roots, p)
     }
 
-    /// Determine which root a resolved path is under, for `strip_prefix` in
-    /// `ls`/`find`/`grep` output. Falls back to the workspace root.
     pub(super) fn root_for(&self, resolved: &Path) -> &Path {
         if resolved.starts_with(&self.root) {
             return &self.root;
@@ -242,12 +186,10 @@ impl BuiltinTools {
         &self.root
     }
 
-    /// Allocate the next native tool-call id.
     pub(crate) fn next_tool_id(&self) -> u64 {
         self.tool_counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Forward a tool event to the sink, if any.
     pub(crate) fn emit(&self, ev: ToolEvent) {
         if let Some(cb) = &self.tool_cb {
             cb(ev);
@@ -265,8 +207,6 @@ mod tests {
 
     fn tools() -> (tempfile::TempDir, BuiltinTools) {
         let dir = tempdir().unwrap();
-        // Test tools use a fully permissive policy (no deny rules) so that
-        // bash mechanics tests (kill, signal, timeout) aren't blocked.
         let policy = crate::policy::ResolvedPolicy {
             allow: Vec::new(),
             ask: Vec::new(),
@@ -288,7 +228,6 @@ mod tests {
         (dir, tools)
     }
 
-    /// Format a `grep` result's matches as `file:line:content` strings.
     fn grep_lines(v: &Value) -> Vec<String> {
         v["matches"]
             .as_array()
@@ -337,7 +276,6 @@ mod tests {
             .join("\n");
         std::fs::write(tools.root().join("big.txt"), content).unwrap();
         let v = tools.read("big.txt", Some(1), Some(3)).await.unwrap();
-        // 3 lines kept; truncation is signalled structurally.
         assert_eq!(v["content"], json!("line0\nline1\nline2"));
         assert_eq!(v["truncated"], json!(true));
         assert_eq!(v["total_lines"], json!(10));
@@ -360,8 +298,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_absolute_path_in_read_root() {
-        // An absolute path under a read root (tmp dir) should be readable,
-        // so the agent can page through bash output files.
         let (_dir, tools) = tools();
         std::fs::write(tools.tmp_dir().join("log.txt"), "first\nsecond\nthird").unwrap();
         let path = tools
@@ -780,8 +716,6 @@ mod tests {
 
     #[tokio::test]
     async fn bash_signal_death_reports_signal() {
-        // `kill -9 $$` terminates the shell with SIGKILL (9); the result
-        // carries the signal number and a null exit code.
         let (_dir, tools) = tools();
         let v = tools.bash(json!({ "cmd": "kill -9 $$" })).await.unwrap();
         assert_eq!(v["ok"], json!(false));
@@ -802,8 +736,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["output"], json!("<timeout>"));
-        // Give the background child enough time to have written the marker if
-        // it had survived the group kill.
         tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
         assert!(
             !marker.exists(),

@@ -1,11 +1,3 @@
-//! Integration tests for the code-mode sandbox (`lofi_code`).
-//!
-//! These exercise the public `compile_ts`/`exec` surface end-to-end against a
-//! real `tempfile::TempDir` workspace root: TS type stripping, value returns,
-//! top-level await, the `lofi.read`/`lofi.write` tool bridge, path-escape errors,
-//! and `print` log buffering. The `agent` callback is stubbed since the
-//! agent loop lands in a later step.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -15,7 +7,6 @@ use std::path::Path;
 use lofi_code::{compile_ts, exec, BashEnv, ExecCtx, ExecOptions, ToolEvent};
 use serde_json::{json, Value};
 
-/// Build an `ExecCtx` rooted at `root` with no named strings.
 fn ctx(root: &Path) -> ExecCtx {
     let tmp_dir = std::env::temp_dir().join("lofi-test");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -111,8 +102,6 @@ async fn every_native_api_result_can_be_returned_as_is() {
     .unwrap();
     std::fs::write(dir.path().join("source.txt"), "alpha\nbeta\n").unwrap();
 
-    // Keep each native result intact. This is the exact usage the public API
-    // promises: await a tool and return its object without rebuilding fields.
     let src = r#"
         const read = await lofi.read("source.txt");
         const ls = await lofi.ls(".");
@@ -165,9 +154,6 @@ async fn every_native_api_result_can_be_returned_as_is() {
 #[tokio::test]
 async fn path_escape_throws_a_js_error() {
     let dir = tempfile::tempdir().unwrap();
-    // The IIFE wrapper would turn an uncaught throw into a sandbox error;
-    // catching explicitly lets us inspect the message and confirm the tool
-    // surfaced the escape as a thrown JS `Error`.
     let src = "try { await lofi.read('../escape'); return 'no-throw'; } catch (e) { return 'caught:' + e.message; }";
     let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
         .await
@@ -259,14 +245,12 @@ async fn exec_bash_echo() {
 #[tokio::test]
 async fn exec_bash_read_pages_bash_log() {
     let dir = tempfile::tempdir().unwrap();
-    // Generate enough output to trigger tail truncation + a tmp log file.
     let src = "const r = await lofi.bash({ cmd: 'for i in $(seq 1 5000); do echo \"output line number $i with some padding text to make it longer\"; done' }); return r.output;";
     let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let out: &str = res.value.as_str().unwrap();
     assert!(out.contains("Full output:"), "got: {out}");
-    // Extract the absolute path from the notice: "Full output: /path/to/file.log. Use lofi.read"
     let path = out
         .split("Full output: ")
         .nth(1)
@@ -328,8 +312,6 @@ async fn write_and_edit_emit_written_content_as_result() {
                return 'ok';";
     exec(src, &cx, &ExecOptions::default()).await.unwrap();
     let evs = events.lock().unwrap();
-    // Each successful End carries the written content (write -> text,
-    // edit -> new), not the success ack.
     let ends: Vec<&String> = evs
         .iter()
         .filter_map(|e| match e {

@@ -12,9 +12,6 @@
 //! modify the filesystem in unexpected ways, access the network, or escalate
 //! privileges.
 
-/// The system/user prompt template for auto-mode evaluation.
-///
-/// Placeholders: `{COMMAND}`, `{CWD}`.
 const AUTO_MODE_PROMPT: &str = r#"You are a shell-command safety evaluator for a coding agent.
 The agent is working in the following directory: {CWD}
 
@@ -43,7 +40,6 @@ Guidelines:
 
 Respond with the JSON object only, no markdown fences, no explanation outside the JSON."#;
 
-/// Build the prompt text for a command evaluation.
 #[must_use]
 pub fn build_prompt(command: &str, cwd: &str) -> String {
     AUTO_MODE_PROMPT
@@ -51,12 +47,9 @@ pub fn build_prompt(command: &str, cwd: &str) -> String {
         .replace("{CWD}", cwd)
 }
 
-/// The parsed decision from the LLM's response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoModeDecision {
-    /// `true` when the command is safe to auto-approve.
     pub allow: bool,
-    /// Optional reason from the model (for logging/diagnostics).
     pub reason: String,
 }
 
@@ -83,13 +76,9 @@ pub fn parse_decision(text: &str) -> Option<AutoModeDecision> {
     Some(AutoModeDecision { allow, reason })
 }
 
-/// Extract the first `{...}` JSON object from the text, handling fenced
-/// code blocks.
 fn extract_json_object(text: &str) -> Option<String> {
-    // Try fenced code block first.
     let fenced = text.find("```").and_then(|start| {
         let rest = &text[start + 3..];
-        // Skip optional language tag on the first line.
         let rest = rest.find('\n').map_or(rest, |nl| &rest[nl + 1..]);
         let end = rest.find("```")?;
         Some(rest[..end].trim().to_string())

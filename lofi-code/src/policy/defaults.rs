@@ -1,15 +1,8 @@
-//! Built-in default policies for each execution mode.
-//!
-//! Each mode provides a baseline set of allow/ask/deny rules, wrapper
-//! configs, and redirect/heredoc policies. Custom rules from the config
-//! are merged on top.
-
 use lofi_types::{CommandEntry, MatchMode, ShellPolicyMode, WrapperKind, WrapperRuleConfig};
 
 use super::engine::ResolvedPolicy;
 use super::extract::build_wrapper_map;
 
-/// Standard wrapper rules shared by all modes.
 fn standard_wrappers() -> Vec<WrapperRuleConfig> {
     vec![
         WrapperRuleConfig {
@@ -87,7 +80,6 @@ fn standard_wrappers() -> Vec<WrapperRuleConfig> {
     ]
 }
 
-/// Commands that are always denied, regardless of mode.
 fn universal_deny() -> Vec<CommandEntry> {
     vec![
         entry("sudo", MatchMode::Prefix),
@@ -106,7 +98,6 @@ fn universal_deny() -> Vec<CommandEntry> {
     ]
 }
 
-/// Destructive operations that require confirmation.
 fn destructive_ask() -> Vec<CommandEntry> {
     vec![
         entry("rm", MatchMode::Prefix),
@@ -132,7 +123,6 @@ fn destructive_ask() -> Vec<CommandEntry> {
     ]
 }
 
-/// Read-only commands that are safe to allow.
 fn read_only_allow() -> Vec<CommandEntry> {
     vec![
         entry("ls", MatchMode::Prefix),
@@ -188,7 +178,6 @@ fn read_only_allow() -> Vec<CommandEntry> {
     ]
 }
 
-/// Workspace-write commands: build, test, lint, format, etc.
 fn workspace_write_allow() -> Vec<CommandEntry> {
     vec![
         entry("cargo", MatchMode::Prefix),
@@ -241,14 +230,11 @@ fn entry(match_str: &str, mode: MatchMode) -> CommandEntry {
     }
 }
 
-/// Resolve a `ShellPolicyConfig` into a `ResolvedPolicy` by merging the
-/// mode's defaults with custom rules.
 #[must_use]
 pub fn resolve(config: &lofi_types::ShellPolicyConfig) -> ResolvedPolicy {
     let (mut allow, mut ask, mut deny) = match config.mode {
         ShellPolicyMode::ReadOnly => (read_only_allow(), destructive_ask(), {
             let mut d = universal_deny();
-            // Also deny write commands in read-only mode
             d.extend(workspace_write_allow().into_iter().filter(|e| {
                 !matches!(
                     e.match_str.as_str(),
@@ -265,12 +251,10 @@ pub fn resolve(config: &lofi_types::ShellPolicyConfig) -> ResolvedPolicy {
         ShellPolicyMode::Unrestricted => (Vec::new(), Vec::new(), universal_deny()),
     };
 
-    // Merge custom rules on top
     allow.extend(config.allow.clone());
     ask.extend(config.ask.clone());
     deny.extend(config.deny.clone());
 
-    // Merge wrappers
     let mut wrappers = standard_wrappers();
     wrappers.extend(config.wrappers.clone());
     let wrapper_map = build_wrapper_map(&wrappers);

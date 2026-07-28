@@ -5,8 +5,6 @@ use super::truncate::{format_size, truncate_tail_with};
 /// through the per-session log named in the truncation notice.
 const BASH_MAX_LINES: usize = 20;
 const BASH_MAX_BYTES: usize = 4 * 1024;
-/// Keep fast auto-mode evaluations invisible. Once this grace period elapses,
-/// the user can override the still-running evaluator from the permission UI.
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
@@ -193,7 +191,6 @@ impl BuiltinTools {
             .unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
         let dur = Duration::from_millis(timeout_ms);
 
-        // Evaluate the command against the shell policy before spawning.
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
         }
@@ -221,9 +218,6 @@ impl BuiltinTools {
 
         let started = Instant::now();
         let mut child = command.spawn()?;
-        // `process_group(0)` makes the child its own session/group leader,
-        // so its pid is the process-group id. Killing `-pgid` reaches every
-        // descendant the shell spawned.
         let mut guard = PgrpKillGuard::new(child.id());
         let mut stdout = child
             .stdout
@@ -255,18 +249,12 @@ impl BuiltinTools {
 
         match result {
             Ok(Ok((out, err, status))) => {
-                // The child exited and was reaped inside the timed future;
-                // disarm the guard so the completed group isn't signaled.
                 guard.disarm();
                 let (out_bytes, out_truncated) = out;
                 let (err_bytes, err_truncated) = err;
                 let mut merged = out_bytes;
                 merged.extend_from_slice(&err_bytes);
                 let pipe_capped = out_truncated || err_truncated;
-                // Scrub approved secret values before the output is truncated,
-                // logged to the tmp file, or returned to the model — so a
-                // command may *use* a secret without its value landing in the
-                // transcript or the bash log.
                 let mut full = String::from_utf8_lossy(&merged).into_owned();
                 self.bash_env.redact(&mut full);
                 let output = self.format_bash_output(&full, pipe_capped);
@@ -284,16 +272,11 @@ impl BuiltinTools {
                 }))
             }
             Ok(Err(e)) => {
-                // A read error may leave the child running; kill the whole
-                // group and reap before surfacing the error so we don't
-                // orphan the shell or its descendants.
                 drop(guard);
                 let _ = child.wait().await;
                 Err(Error::Io(e))
             }
             Err(_) => {
-                // Timeout: drop the guard to SIGKILL the whole process group, then
-                // reap the leader so we don't leave a zombie.
                 drop(guard);
                 let _ = child.wait().await;
                 Ok(json!({
@@ -325,8 +308,6 @@ impl BuiltinTools {
         let mut out = t.content;
         let start_line = t.total_lines.saturating_sub(t.output_lines) + 1;
         let end_line = t.total_lines;
-        // Write the full captured output to the session tmp dir so the model can
-        // page through it with `lofi.read` (the tmp dir is a read root).
         let path = match self.write_bash_log(full) {
             Ok(p) => p,
             Err(_) => "<temp file unavailable>".to_string(),
@@ -355,8 +336,6 @@ impl BuiltinTools {
         out
     }
 
-    /// Write `content` to `lofi-bash-<hex>.log` under the session tmp dir and
-    /// return the path.
     fn write_bash_log(&self, content: &str) -> std::io::Result<String> {
         use std::io::Write;
         let id = temp_id();
@@ -370,7 +349,6 @@ impl BuiltinTools {
     }
 }
 
-/// 16-hex-char random id for temp file names, without pulling in another crate.
 fn temp_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

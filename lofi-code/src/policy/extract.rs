@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use super::token::{tokenize, GroupKind, Token};
 use lofi_types::WrapperKind;
 
-/// Where a command came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSource {
     Direct,
@@ -19,7 +18,6 @@ pub enum CommandSource {
     WrapperArg,
 }
 
-/// One extracted command with its parsed words and redirects.
 #[derive(Debug, Clone)]
 pub struct ExtractedCommand {
     pub name: String,
@@ -29,10 +27,8 @@ pub struct ExtractedCommand {
     pub source: CommandSource,
 }
 
-/// Map of command name → wrapper kind, for recursive unwrapping.
 pub type WrapperRuleMap = HashMap<String, WrapperKind>;
 
-/// Build a wrapper rule map from config entries.
 #[must_use]
 pub fn build_wrapper_map(entries: &[lofi_types::WrapperRuleConfig]) -> WrapperRuleMap {
     entries
@@ -41,14 +37,10 @@ pub fn build_wrapper_map(entries: &[lofi_types::WrapperRuleConfig]) -> WrapperRu
         .collect()
 }
 
-/// Shell keywords that consume the entire segment (no embedded command to check).
 const SKIP_SEGMENT: &[&str] = &["for", "case", "select", "in", "done", "fi", "esac"];
 
-/// Keywords to strip from the front of a segment to reach the actual command.
 const STRIP_KEYWORDS: &[&str] = &["while", "until", "if", "elif", "do", "then", "else"];
 
-/// Extract all commands from a token stream, recursively descending into
-/// groups and unwrapping wrappers.
 #[must_use]
 pub fn extract_commands(
     tokens: &[Token],
@@ -57,7 +49,6 @@ pub fn extract_commands(
 ) -> Vec<ExtractedCommand> {
     let mut results = Vec::new();
 
-    // Split on operators into segments
     let mut segments: Vec<Vec<&Token>> = Vec::new();
     let mut current: Vec<&Token> = Vec::new();
     for tok in tokens {
@@ -74,7 +65,6 @@ pub fn extract_commands(
     }
 
     for seg in &segments {
-        // Descend into group tokens first
         for tok in seg {
             if let Token::Group { tokens, kind } = tok {
                 let src = match kind {
@@ -85,7 +75,6 @@ pub fn extract_commands(
             }
         }
 
-        // Extract words and redirects from this segment
         let mut word_tokens: Vec<&str> = Vec::new();
         let mut redirects: Vec<(String, String)> = Vec::new();
         for tok in seg {
@@ -99,11 +88,9 @@ pub fn extract_commands(
             continue;
         }
 
-        // Skip compound-command keywords
         if SKIP_SEGMENT.contains(&word_tokens[0]) {
             continue;
         }
-        // Strip leading keywords (while, if, do, then, …)
         let word_slice = if STRIP_KEYWORDS.contains(&word_tokens[0]) {
             &word_tokens[1..]
         } else {
@@ -131,7 +118,6 @@ pub fn extract_commands(
             source,
         });
 
-        // Unwrap wrapper commands
         if let Some(kind) = wrappers.get(&word_slice[0].to_ascii_lowercase()) {
             if let Some(inner_words) = unwrap_wrapper(
                 *kind,
@@ -161,12 +147,9 @@ fn is_assignment(word: &str) -> bool {
     word.find('=').is_some_and(|i| i > 0)
 }
 
-/// Extract the inner command from a wrapper, given the wrapper kind and
-/// the full word list (including the wrapper name at index 0).
 fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
     match kind {
         WrapperKind::ShellC => {
-            // bash -c 'cmd' — find -c, next operand is the command
             let mut i = 1;
             while i + 1 < words.len() {
                 if words[i] == "-c" {
@@ -177,7 +160,6 @@ fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
             None
         }
         WrapperKind::UtilityOperand | WrapperKind::Xargs => {
-            // Skip options, first non-option operand (or after --)
             let mut saw_dash = false;
             for w in &words[1..] {
                 if !saw_dash && w == "--" {
@@ -198,7 +180,6 @@ fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
             None
         }
         WrapperKind::Env => {
-            // Skip options and NAME=VALUE assignments
             let mut saw_dash = false;
             let mut i = 1;
             while i < words.len() {
@@ -255,7 +236,6 @@ fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
                     i += 2;
                     continue;
                 }
-                // First non-flag = image/container, skip it
                 i += 1;
                 return words.get(i..).map(<[std::string::String]>::to_vec);
             }
