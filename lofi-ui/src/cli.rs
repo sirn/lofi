@@ -1,9 +1,3 @@
-//! Command-line presentation and dispatch.
-//!
-//! Clap parsing, stdout formatting, and selection of the interactive or
-//! non-interactive UI live here so the binary crate remains only process
-//! startup wiring.
-
 use std::io::{IsTerminal, Write};
 
 use crate::{InteractiveOptions, PrintOptions};
