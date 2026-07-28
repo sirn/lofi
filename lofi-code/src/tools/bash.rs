@@ -322,9 +322,15 @@ impl BuiltinTools {
 
     fn write_bash_log(&self, content: &str) -> std::io::Result<String> {
         use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
         let id = temp_id();
         let path = self.tmp_dir.join(format!("lofi-bash-{id}.log"));
-        let mut f = std::fs::File::create(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
         f.write_all(content.as_bytes())?;
         f.sync_all()?;
         drop(f);

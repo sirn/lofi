@@ -45,8 +45,21 @@ pub fn discovery_cache_path() -> Result<PathBuf> {
 /// base directory cannot be resolved.
 pub fn ensure_state_dir() -> Result<PathBuf> {
     let path = state_dir()?;
-    std::fs::create_dir_all(&path)?;
+    ensure_private_dir(&path)?;
     Ok(path)
+}
+
+pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Create a fresh per-session tmp directory under `<state>/tmp/` and return
@@ -59,11 +72,12 @@ pub fn create_session_tmp_dir() -> Result<PathBuf> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut path = ensure_state_dir()?;
     path.push("tmp");
+    ensure_private_dir(&path)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     path.push(format!("{nanos:016x}"));
-    std::fs::create_dir_all(&path)?;
+    ensure_private_dir(&path)?;
     Ok(path)
 }
 
