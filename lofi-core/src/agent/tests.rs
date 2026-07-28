@@ -353,14 +353,12 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
     };
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
-    let commit = SessionCommit {
-        cursor: crate::session::store::SessionCursor::new(path.clone(), None),
-    };
+    let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
     let run = agent.run_continuation(
         &mut messages,
         "go".into(),
         tx,
-        Some(&commit),
+        Some(&cursor),
         false,
         None,
         None,
@@ -372,7 +370,7 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         "second provider round should still be pending"
     );
 
-    let events = commit.cursor.load_tree_events().unwrap();
+    let events = cursor.load_tree_events().unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         SessionEventKind::Message(message) if message.role == Role::Tool
