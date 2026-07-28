@@ -22,7 +22,8 @@ use lofi_error::{Error, Result};
 /// Anthropic API requires it.
 #[must_use]
 pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
-    let (system, msgs) = to_anthropic_request_parts(messages);
+    let (system, mut msgs) = to_anthropic_request_parts(messages);
+    add_conversation_cache_breakpoint(&mut msgs);
     // Anthropic requires `max_tokens` and requires it to exceed the thinking
     // budget when thinking is enabled. Default to 4096, then bump to leave
     // room for the reasoning budget + a response allowance.
@@ -41,10 +42,17 @@ pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[Too
         req["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
     }
     if let Some(sys) = system {
-        req["system"] = json!(sys);
+        // Anthropic accepts the system prompt as content blocks. Mark its
+        // stable tail so instructions and skills can be reused independently
+        // of the changing conversation that follows.
+        req["system"] = json!([{
+            "type": "text",
+            "text": sys,
+            "cache_control": ephemeral_cache_control(),
+        }]);
     }
     if !tools.is_empty() {
-        let tools_arr: Vec<Value> = tools
+        let mut tools_arr: Vec<Value> = tools
             .iter()
             .map(|t| {
                 json!({
@@ -54,9 +62,50 @@ pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[Too
                 })
             })
             .collect();
+        // Tool definitions precede the system prompt in Anthropic's cache
+        // hierarchy. A breakpoint on the final definition keeps the complete
+        // tool set reusable without annotating every tool.
+        if let Some(last) = tools_arr.last_mut() {
+            last["cache_control"] = ephemeral_cache_control();
+        }
         req["tools"] = json!(tools_arr);
     }
     req
+}
+
+fn ephemeral_cache_control() -> Value {
+    json!({ "type": "ephemeral" })
+}
+
+/// Put a rolling cache breakpoint on the final user message.
+///
+/// Anthropic caches the full request prefix through a marked block, so the
+/// next tool round can read the previous round and write only its appended
+/// suffix. Restrict this to block types documented for user content; in
+/// particular, never attach cache control to assistant thinking or tool-use
+/// blocks. This matches Pi's placement strategy. Keeping it as a wire-only
+/// mutation leaves provider-neutral history and transcripts untouched.
+fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
+    let Some(message) = messages
+        .last_mut()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    let block = message
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| {
+            blocks.iter_mut().rev().find(|block| {
+                matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("text" | "tool_result")
+                )
+            })
+        });
+    if let Some(block) = block {
+        block["cache_control"] = ephemeral_cache_control();
+    }
 }
 
 /// Map a thinking level to an Anthropic `thinking.budget_tokens` value.
@@ -300,9 +349,115 @@ mod tests {
         ];
         let req = build_anthropic_request(&model(), &msgs, &[]);
         assert_eq!(req["model"], "claude");
-        assert_eq!(req["system"], "sys");
+        assert_eq!(req["system"][0]["type"], "text");
+        assert_eq!(req["system"][0]["text"], "sys");
         assert_eq!(req["max_tokens"], 1024);
         assert_eq!(req["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn request_marks_tools_system_and_conversation_for_caching() {
+        let msgs = [
+            Message {
+                role: Role::System,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: "stable instructions".to_string(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: "first turn".to_string(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: "first answer".to_string(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: "latest turn".to_string(),
+                }],
+            },
+        ];
+        let tools = [ToolSchema {
+            name: "exec".to_string(),
+            description: "Run code".to_string(),
+            input_schema: json!({"type": "object"}),
+        }];
+
+        let req = build_anthropic_request(&model(), &msgs, &tools);
+        let ephemeral = json!({"type": "ephemeral"});
+        assert_eq!(req["tools"][0]["cache_control"], ephemeral);
+        assert_eq!(req["system"][0]["cache_control"], ephemeral);
+        assert_eq!(req["messages"][2]["content"][0]["cache_control"], ephemeral);
+        assert!(req["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(req["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn conversation_breakpoint_marks_terminal_tool_result() {
+        let msgs = [
+            Message {
+                role: Role::Assistant,
+                blocks: vec![lofi_types::ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "return 1"}),
+                }],
+            },
+            Message {
+                role: Role::Tool,
+                blocks: vec![lofi_types::ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "1".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        assert_eq!(
+            req["messages"][1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(req["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn conversation_breakpoint_is_only_on_terminal_user_message() {
+        let msgs = [
+            Message {
+                role: Role::User,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: "do not mark an older user message".to_string(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                blocks: vec![lofi_types::ContentBlock::Thinking {
+                    text: "reasoning".to_string(),
+                    signature: Some("signature".to_string()),
+                }],
+            },
+        ];
+
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        assert!(req["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(req["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none());
     }
 
     #[test]
