@@ -856,13 +856,8 @@ impl App {
         }
     }
 
-    /// Key dispatch for the read-only information modal ([`InfoModal`]).
-    /// `↑/↓` or `j`/`k` (and `Ctrl+N`/`Ctrl+P`, `PgUp`/`PgDn`) scroll the
-    /// body; `y` copies the body to the clipboard (the modal stays open so
-    /// Whether a centered modal (info, `/resume` picker, `/tree` picker) is
-    /// open. While true the prompt cursor is hidden and paste is ignored.
-    /// The slash-complete popover is intentionally excluded — it's inline
-    /// and you're still typing into the prompt.
+    /// Whether a centered modal is open. The inline slash-complete popover is
+    /// excluded because input remains active beneath it.
     pub(super) fn modal_open(&self) -> bool {
         self.info.is_some()
             || self.picker.is_some()
@@ -958,9 +953,9 @@ impl App {
         true
     }
 
-    /// you can keep reading); `Esc`/`q`/`Enter` dismiss. Other keys are
-    /// swallowed. Returns `true` while the modal is open so keys don't fall
-    /// through to the prompt.
+    /// Handle keys for the read-only information modal. Copy leaves the modal
+    /// open; dismiss and navigation keys are consumed instead of reaching the
+    /// prompt.
     pub(super) fn handle_info_key(&mut self, k: &KeyEvent) -> bool {
         if self.info.is_none() {
             return false;

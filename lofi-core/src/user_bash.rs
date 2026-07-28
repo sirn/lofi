@@ -50,7 +50,7 @@ impl UserBashResult {
         }
     }
 
-    /// Pi-compatible textual representation injected into subsequent model context.
+    /// Textual representation injected into subsequent model context.
     #[must_use]
     pub fn context_text(&self) -> String {
         let mut text = format!("Ran `{}`\n", self.command);
