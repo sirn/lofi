@@ -9,6 +9,7 @@ use super::*;
 use std::sync::Arc;
 
 use lofi_types::{ContentBlock, Role, Usage};
+use ratatui::backend::TestBackend;
 
 fn app() -> App {
     App::new(
@@ -44,8 +45,8 @@ fn test_append_compaction(
     path: &Path,
     kept_messages: &[Message],
     parent: Option<&str>,
-    summary: String,
-    summarized_range: [String; 2],
+    summary: &str,
+    summarized_range: &[String; 2],
     counts: store::CompactionCounts,
 ) -> lofi_core::Result<(u64, u64, String)> {
     let cursor = match parent {
@@ -53,7 +54,7 @@ fn test_append_compaction(
         None => store::SessionCursor::open(path.to_path_buf())?,
     };
     let (start, end) =
-        cursor.append_compaction(kept_messages, &summary, &summarized_range, counts)?;
+        cursor.append_compaction(kept_messages, summary, summarized_range, counts)?;
     Ok((start, end, cursor.leaf_id().unwrap_or_default()))
 }
 
@@ -1788,6 +1789,7 @@ fn tool_input_and_end_land_under_matching_id() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("round-commit.jsonl");
@@ -2804,6 +2806,7 @@ fn tree_no_session_pushes_error() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn tree_opens_rolls_back_and_prefills_prompt() {
     // Build a two-turn session: user1 → assistant1 → turn_end1 →
     // user2 → assistant2 → turn_end2. The picker should offer three
@@ -3020,10 +3023,7 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     assert_eq!(text(&chosen), "chosen");
     assert!(!text(&shared).contains("SIBLING MUST NOT LEAK"));
 
-    // Production rendering must use the same file-backed selected lineage.
-    // In particular, the selected final turn is frozen too after /tree; it is
-    // not an empty live shell and no physically interleaved sibling can leak.
-    use ratatui::backend::TestBackend;
+    // Rendering must stay on the selected lineage, including the final turn.
     let mut term = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();
@@ -3182,8 +3182,8 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
         &path,
         &[user("first"), assistant("hello")],
         None,
-        "summary".into(),
-        [original[0].id.clone(), original[1].id.clone()],
+        "summary",
+        &[original[0].id.clone(), original[1].id.clone()],
         store::CompactionCounts {
             summarized: 2,
             represented: 2,
@@ -6198,8 +6198,8 @@ fn resumed_compaction_restores_summarized_message_count() {
         &path,
         &[],
         None,
-        "previous summary".to_string(),
-        [old[0].id.clone(), old[4].id.clone()],
+        "previous summary",
+        &[old[0].id.clone(), old[4].id.clone()],
         store::CompactionCounts {
             summarized: old.len(),
             represented: old.len(),
@@ -6340,10 +6340,10 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
         },
     ];
     test_append_events(&path, &mut branch_b, Some(&root)).unwrap();
-    let branch_b_leaf = branch_b[1].id.clone();
+    let sibling_leaf = branch_b[1].id.clone();
     assert_eq!(
         store::SessionCursor::open(path.clone()).unwrap().leaf_id(),
-        Some(branch_b_leaf.clone())
+        Some(sibling_leaf.clone())
     );
 
     assert!(a.compact_now(), "branch A has enough history to compact");
@@ -6372,7 +6372,7 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
         "compaction must descend from the branch captured by resume"
     );
     assert!(
-        lineage.iter().all(|&i| events[i].id != branch_b_leaf),
+        lineage.iter().all(|&i| events[i].id != sibling_leaf),
         "later physical-EOF sibling must not leak into resumed compaction"
     );
     let SessionEventKind::Compaction { summary, .. } = &events[marker_index].kind else {
@@ -6425,8 +6425,8 @@ fn resume_does_not_restore_usage_measured_before_latest_compaction() {
         &path,
         &[],
         None,
-        "summary".to_string(),
-        [old[0].id.clone(), old[1].id.clone()],
+        "summary",
+        &[old[0].id.clone(), old[1].id.clone()],
         store::CompactionCounts {
             summarized: 2,
             represented: 2,
@@ -6543,7 +6543,9 @@ fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
     let (mut req, _response) = confirm_request("rm generated.txt");
     req.reason = std::sync::Arc::new(std::sync::Mutex::new(
         lofi_core::ConfirmReason::AutoEvaluating {
-            started_at: std::time::Instant::now() - std::time::Duration::from_secs(4),
+            started_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(4))
+                .unwrap(),
         },
     ));
     let reason = req.reason.clone();

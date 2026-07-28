@@ -177,26 +177,6 @@ fn resume_preview_spans(t: Theme, preview: String) -> Vec<Span<'static>> {
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resume_preview_highlights_role_labels() {
-        let t = Theme::dark();
-        let user = resume_preview_spans(t, "user: hello".to_string());
-        assert_eq!(user[0].content, "user");
-        assert_eq!(user[0].style.fg, Some(t.user));
-        assert_eq!(user[1].content, ": hello");
-        assert_eq!(user[1].style.fg, Some(t.fg));
-
-        let agent = resume_preview_spans(t, "agent: hi".to_string());
-        assert_eq!(agent[0].content, "agent");
-        assert_eq!(agent[0].style.fg, Some(t.agent));
-        assert_eq!(agent[1].content, ": hi");
-    }
-}
-
 pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.picker else {
@@ -887,4 +867,24 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     ])
     .alignment(Alignment::Right);
     f.render_widget(Paragraph::new(actions), rows[5]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_preview_highlights_role_labels() {
+        let t = Theme::dark();
+        let user = resume_preview_spans(t, "user: hello".to_string());
+        assert_eq!(user[0].content, "user");
+        assert_eq!(user[0].style.fg, Some(t.user));
+        assert_eq!(user[1].content, ": hello");
+        assert_eq!(user[1].style.fg, Some(t.fg));
+
+        let agent = resume_preview_spans(t, "agent: hi".to_string());
+        assert_eq!(agent[0].content, "agent");
+        assert_eq!(agent[0].style.fg, Some(t.agent));
+        assert_eq!(agent[1].content, ": hi");
+    }
 }
