@@ -27,6 +27,7 @@ enum IndexIdRepr {
 }
 
 impl IndexId {
+    #[must_use]
     pub fn parse(value: String) -> Self {
         if value.is_empty() {
             return Self(IndexIdRepr::Empty);
