@@ -466,8 +466,7 @@ Automatic mode asks a small model to pre-approve commands that would otherwise r
 enable = true
 provider = "openai"
 model = "gpt-4o-mini"
-timeout_ms = 30000
 # max_tokens = 1024
 ```
 
-`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. `timeout_ms` defaults to `30000`, and `max_tokens` defaults to the selected model's output limit.
+`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use the agent's default stream idle timeout, and `max_tokens` defaults to the selected model's output limit.

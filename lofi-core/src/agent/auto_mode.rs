@@ -11,14 +11,12 @@
 //! the config at agent build time, so each `ask` command triggers a fresh
 //! single-turn stream — no session, no tools, no thinking.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use futures::StreamExt;
 use lofi_code::policy::auto_mode;
 use lofi_code::{AutoModeFn, AutoModeOutcome};
 use lofi_providers::{open, Provider};
 use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Model, Role};
+use std::sync::Arc;
 
 use lofi_error::{Error, Result};
 
@@ -94,7 +92,6 @@ pub fn build_auto_mode(
     }
 
     let provider: Arc<dyn Provider> = Arc::from(open(model.api, provider_cfg)?);
-    let timeout = Duration::from_millis(auto_cfg.timeout_ms);
     let max_tokens = auto_cfg.max_tokens.or(model.max_tokens);
     let cwd = cwd.to_path_buf();
 
@@ -108,19 +105,12 @@ pub fn build_auto_mode(
             let handle = tokio::task::spawn(async move {
                 evaluate_command(&provider, &model, &command, &cwd, max_tokens).await
             });
-            let mut handle = handle;
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
-            let outcome = match tokio::time::timeout(timeout, &mut handle).await {
-                Ok(Ok(outcome)) => outcome,
-                Ok(Err(e)) => AutoModeOutcome::Failed {
+            let outcome = match handle.await {
+                Ok(outcome) => outcome,
+                Err(e) => AutoModeOutcome::Failed {
                     reason: format!("evaluation task failed: {e}"),
                 },
-                Err(_) => {
-                    handle.abort();
-                    AutoModeOutcome::Failed {
-                        reason: format!("evaluation timed out after {}s", timeout.as_secs()),
-                    }
-                }
             };
             abort_on_drop.disarm();
             outcome
@@ -210,7 +200,13 @@ async fn collect_text(
     mut stream: futures::stream::BoxStream<'static, Result<lofi_types::StreamingEvent>>,
 ) -> Result<String> {
     let mut text = String::new();
-    while let Some(ev) = stream.next().await {
+    loop {
+        let ev = match tokio::time::timeout(super::DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await
+        {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(_) => return Err(Error::Provider("stream idle timeout".into())),
+        };
         match ev {
             Ok(lofi_types::StreamingEvent::TextDelta(d)) => text.push_str(&d),
             Ok(lofi_types::StreamingEvent::Done(_)) => break,

@@ -6343,7 +6343,7 @@ fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
         evaluating.contains("Auto evaluation for 4s..."),
         "{evaluating}"
     );
-    assert!(evaluating.contains("override it"), "{evaluating}");
+    assert!(!evaluating.contains("allow or deny"), "{evaluating}");
 
     *reason
         .lock()

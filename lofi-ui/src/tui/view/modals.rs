@@ -741,10 +741,9 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .clone();
     let explanation = match reason {
         lofi_core::ConfirmReason::Policy => "Shell wants to run this command".to_string(),
-        lofi_core::ConfirmReason::AutoEvaluating { started_at } => format!(
-            "Auto evaluation for {}s... You can allow or deny now to override it.",
-            started_at.elapsed().as_secs()
-        ),
+        lofi_core::ConfirmReason::AutoEvaluating { started_at } => {
+            format!("Auto evaluation for {}s...", started_at.elapsed().as_secs())
+        }
         lofi_core::ConfirmReason::AutoAsk { reason } => {
             if reason.trim().is_empty() {
                 "Auto evaluation asks for your approval.".to_string()
