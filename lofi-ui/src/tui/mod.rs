@@ -290,6 +290,16 @@ impl SessionState {
     fn path(&self) -> Option<&Path> {
         self.cursor.as_ref().map(store::SessionCursor::path)
     }
+
+    fn cursor_or_create(&mut self, model: &RunModel) -> Option<store::SessionCursor> {
+        if self.cursor.is_none() {
+            self.cursor = self
+                .store
+                .as_ref()
+                .and_then(|store| store.create_cursor(&self.cwd, model).ok());
+        }
+        self.cursor.clone()
+    }
 }
 
 /// Resolved session handed to [`run`] by the binary.
