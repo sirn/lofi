@@ -264,7 +264,7 @@ pub(super) fn write_auto_cache(
     cache: &HashMap<String, CachedDiscovery>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::state::ensure_private_dir(parent)?;
     }
     let json = serde_json::to_string_pretty(cache)
         .map_err(|e| Error::State(format!("auto-models cache encode error: {e}")))?;
@@ -296,6 +296,7 @@ pub(super) fn write_auto_cache(
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, path)?;
+        crate::state::ensure_private_file(path)?;
         std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();

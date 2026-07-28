@@ -90,11 +90,48 @@ impl SessionEntry {
     }
 }
 
-fn slug(cwd: &Path) -> String {
+fn legacy_slug(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .replace('/', "-")
         .trim_start_matches('-')
         .to_string()
+}
+
+fn workspace_key(cwd: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let label = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '-' })
+                .take(40)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "root".to_string());
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_os_str().as_bytes());
+    format!("{label}-{id}")
+}
+
+fn metadata_matches_cwd(meta: &SessionMeta, cwd: &Path) -> bool {
+    let stored = Path::new(&meta.cwd);
+    stored == cwd
+        || stored
+            .canonicalize()
+            .ok()
+            .zip(cwd.canonicalize().ok())
+            .is_some_and(|(stored, requested)| stored == requested)
+}
+
+fn read_session_meta(path: &Path) -> Option<SessionMeta> {
+    use std::io::BufRead as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut lines = std::io::BufReader::new(file).lines();
+    let line = lines.find_map(|line| line.ok().filter(|line| !line.is_empty()))?;
+    serde_json::from_str::<Header>(&line).ok().map(|header| header.meta)
 }
 
 fn now_ms() -> u64 {
@@ -618,7 +655,11 @@ impl SessionStore {
     }
 
     fn dir_for_cwd(&self, cwd: &Path) -> PathBuf {
-        self.root.join(slug(cwd))
+        self.root.join(workspace_key(cwd))
+    }
+
+    fn dirs_for_cwd(&self, cwd: &Path) -> [PathBuf; 2] {
+        [self.dir_for_cwd(cwd), self.root.join(legacy_slug(cwd))]
     }
 
     /// The directory is created if needed; the header is written atomically via
@@ -637,8 +678,9 @@ impl SessionStore {
     }
 
     fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
+        crate::state::ensure_private_dir(&self.root)?;
         let dir = self.dir_for_cwd(cwd);
-        std::fs::create_dir_all(&dir)?;
+        crate::state::ensure_private_dir(&dir)?;
         let file_name = format!("{}_{}.jsonl", now_ms(), short_id());
         let path = dir.join(file_name);
         let header = Header {
@@ -673,24 +715,35 @@ impl SessionStore {
     /// Returns [`Error::Io`] if the per-cwd directory cannot be read for a reason
     /// other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
-        let dir = self.dir_for_cwd(cwd);
         let mut files = Vec::new();
-        let read = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(Error::Io(e)),
-        };
-        for ent in read {
-            let ent = ent?;
-            let path = ent.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
+        for dir in self.dirs_for_cwd(cwd) {
+            let read = match std::fs::read_dir(&dir) {
+                Ok(read) => {
+                    crate::state::ensure_private_dir(&dir)?;
+                    read
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Error::Io(error)),
+            };
+            for entry in read {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(meta) = read_session_meta(&path) else {
+                    continue;
+                };
+                if !metadata_matches_cwd(&meta, cwd) {
+                    continue;
+                }
+                crate::state::ensure_private_file(&path)?;
+                let last_active = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                files.push(SessionFile { path, last_active });
             }
-            let last_active = ent
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            files.push(SessionFile { path, last_active });
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
@@ -1313,6 +1366,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    crate::state::ensure_private_file(path)?;
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
@@ -2039,8 +2093,18 @@ mod tests {
     }
 
     #[test]
-    fn slug_collapses_separators() {
-        assert_eq!(slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
-        assert_eq!(slug(Path::new("/")), "");
+    fn workspace_key_is_readable_and_collision_resistant() {
+        let first = workspace_key(Path::new("/work/a-b/c"));
+        let second = workspace_key(Path::new("/work/a/b-c"));
+        assert!(first.starts_with("c-"));
+        assert!(second.starts_with("b-c-"));
+        assert_ne!(first, second);
+        assert_eq!(workspace_key(Path::new("/work/a-b/c")), first);
+    }
+
+    #[test]
+    fn legacy_slug_collapses_separators() {
+        assert_eq!(legacy_slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
+        assert_eq!(legacy_slug(Path::new("/")), "");
     }
 }
