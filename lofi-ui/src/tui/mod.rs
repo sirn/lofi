@@ -227,6 +227,16 @@ enum Block {
     Text(String),
     Thinking(ThinkingBlock),
     Tool(ToolCall),
+    UserBash {
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        duration: Duration,
+        truncated: bool,
+        cancelled: bool,
+        exclude_from_context: bool,
+    },
     Error(String),
     /// Turn-end rule: `<label> done in Ns` followed by a dash
     /// fill, appended when a run finishes.
@@ -939,6 +949,9 @@ struct RunHandle {
     /// queued prompt at the earliest opportunity — between rounds, not after
     /// the entire multi-round turn.
     preempt: Arc<AtomicBool>,
+    /// Direct user shell commands share the run slot so input/cancellation and
+    /// queued prompts remain serialized with agent turns.
+    user_bash: Option<(String, bool)>,
 }
 
 struct TerminalGuard {
@@ -1139,7 +1152,19 @@ async fn run_loop(
             } => {
                 match ev {
                     Some(e) => {
-                        app.apply_event(e);
+                        if let AgentEvent::UserBash {
+                            command, output, exit_code, signal, duration_ms,
+                            truncated, cancelled, exclude_from_context,
+                        } = e
+                        {
+                            let result = lofi_core::UserBashResult::from_session(
+                                command, output, exit_code, signal, duration_ms,
+                                truncated, cancelled,
+                            );
+                            finish_user_bash(&mut app, result, exclude_from_context);
+                        } else {
+                            app.apply_event(e);
+                        }
                         // If there's a queued prompt, signal the agent to
                         // exit its round loop after the current round so the
                         // queued prompt is sent at the earliest opportunity.
@@ -1154,10 +1179,16 @@ async fn run_loop(
                     }
                     None => {
                         if let Some(r) = current_run.take() {
+                            let was_user_bash = r.user_bash.is_some();
                             r.handle.abort();
                             app.run_finished();
-                            app.debug_sample("agent_settled");
-                            if app.context_pressure {
+                            app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
+                            if was_user_bash {
+                                if let Some(prompt) = app.prompt_queue.first().cloned() {
+                                    app.prompt_queue.remove(0);
+                                    spawn_prompt(&mut app, agent.as_ref(), &mut current_run, prompt);
+                                }
+                            } else if app.context_pressure {
                                 // Hard cap: force-compact + silent
                                 // continue, gated by the cooldown so a run
                                 // that re-crosses the hard cap too soon
@@ -1313,6 +1344,7 @@ async fn run_loop(
     }
 
     if let Some(r) = current_run.take() {
+        r.cancel.store(true, Ordering::Relaxed);
         r.handle.abort();
     }
     if let Some(msg) = last_err {

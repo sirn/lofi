@@ -104,6 +104,32 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         });
         return;
     }
+    if let AgentEvent::UserBash {
+        command,
+        output,
+        exit_code,
+        signal,
+        duration_ms,
+        truncated,
+        cancelled,
+        exclude_from_context,
+    } = ev
+    {
+        turns.push(Turn {
+            prompt: String::new(),
+            blocks: vec![Block::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration: Duration::from_millis(duration_ms),
+                truncated,
+                cancelled,
+                exclude_from_context,
+            }],
+        });
+        return;
+    }
     let Some(turn) = turns.last_mut() else {
         return;
     };
@@ -251,6 +277,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. }
+        | AgentEvent::UserBash { .. }
         // Live-only signals handled by `App::apply_event`; no block here.
         | AgentEvent::TurnContinue
         | AgentEvent::ContextPressure { .. } => {}
@@ -480,6 +507,25 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 }
                 Role::System => {}
             },
+            SessionEventKind::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration_ms,
+                truncated,
+                cancelled,
+                exclude_from_context,
+            } => emit(AgentEvent::UserBash {
+                command: command.clone(),
+                output: output.clone(),
+                exit_code: *exit_code,
+                signal: *signal,
+                duration_ms: *duration_ms,
+                truncated: *truncated,
+                cancelled: *cancelled,
+                exclude_from_context: *exclude_from_context,
+            }),
             SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
             | SessionEventKind::ThinkingTiming { .. } => {}
@@ -591,6 +637,38 @@ pub(super) fn messages_from_events(
                     if b == &events[i].id {
                         break;
                     }
+                }
+            }
+            SessionEventKind::UserBash {
+                command,
+                output,
+                exit_code,
+                signal,
+                duration_ms,
+                truncated,
+                cancelled,
+                exclude_from_context: false,
+            } if !skipping => {
+                let result = lofi_core::UserBashResult::from_session(
+                    command.clone(),
+                    output.clone(),
+                    *exit_code,
+                    *signal,
+                    *duration_ms,
+                    *truncated,
+                    *cancelled,
+                );
+                out.push((
+                    events[i].id.clone(),
+                    Message {
+                        role: Role::User,
+                        blocks: vec![ContentBlock::Text {
+                            text: result.context_text(),
+                        }],
+                    },
+                ));
+                if boundary.as_ref().is_some_and(|b| b == &events[i].id) {
+                    break;
                 }
             }
             _ => {}

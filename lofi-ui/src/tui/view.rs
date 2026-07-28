@@ -650,7 +650,15 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
-    let bar = if active { t.user } else { t.subtle };
+    // A leading `!` (including `!!`) switches the prompt rail to the shell
+    // accent immediately, making bash mode visible before submission.
+    let bar = if !active {
+        t.subtle
+    } else if app.input.starts_with('!') {
+        t.warn
+    } else {
+        t.user
+    };
     for y in panel.y..panel.bottom() {
         let cell = &mut f.buffer_mut()[(panel.x, y)];
         cell.set_char('▌');

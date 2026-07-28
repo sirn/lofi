@@ -579,7 +579,8 @@ fn push_tree_entry(
                     branch_point,
                 )
             }
-            store::IndexKind::AssistantMessage
+            store::IndexKind::UserBash
+            | store::IndexKind::AssistantMessage
             | store::IndexKind::SystemMessage
             | store::IndexKind::NativeTool
             | store::IndexKind::Cursor
