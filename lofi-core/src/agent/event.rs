@@ -203,6 +203,11 @@ pub enum AgentEvent {
         /// This round's token usage (drives the context gauge).
         usage: Usage,
     },
+    /// One complete provider/tool round was durably appended to the transcript.
+    /// This is a storage/watermark signal only: it must never create, replace,
+    /// or finalize a visible turn. The TUI may release already-hidden payloads
+    /// from completed tool rows, while preserving the prompt and every block.
+    RoundCommitted { byte_start: u64, byte_end: u64 },
     /// A turn's events were durably appended to the transcript file, covering
     /// the byte range `[byte_start, byte_end)`. The UI uses this to make the
     /// now-frozen turn file-backed (drop its in-memory blocks and re-materialize

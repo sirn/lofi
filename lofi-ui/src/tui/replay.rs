@@ -91,7 +91,7 @@ pub(super) fn turn_byte_ranges_from_events(
 /// that maps an `AgentEvent` to `Block`s.
 ///
 /// `TurnStart` pushes a new turn; every other event mutates the last turn.
-/// Status-only events (`RetryStart`/`RetryEnd`/`TurnCommitted`) are no-ops
+/// Status-only events (`RetryStart`/`RetryEnd`/commit watermarks) are no-ops
 /// here — the caller (`App::apply_event`) handles them before calling this.
 // One match over AgentEvent shaping the turn list; per-variant helpers would
 // scatter the shared turn/byte-range state.
@@ -175,6 +175,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 label: None,
                 native: Vec::new(),
                 result: None,
+                result_committed: false,
                 is_error: false,
                 done: false,
                 elapsed: None,
@@ -274,6 +275,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         // reaching this builder; they are no-ops here.
         AgentEvent::RetryStart { .. }
         | AgentEvent::RetryEnd { .. }
+        | AgentEvent::RoundCommitted { .. }
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. }
