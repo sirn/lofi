@@ -695,10 +695,8 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Shell-policy permission dialog, inspired by Crush's explicit action
-/// chooser: the requested command sits in a distinct content panel and Allow
-/// / Deny are real selectable buttons. Only Enter or an action key resolves
-/// the request; unrelated keys leave it open.
+/// Shell-policy permission dialog with explicit selectable actions. Unrelated
+/// keys leave the request unresolved.
 pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     const MAX_COMMAND_ROWS: usize = 12;
 
