@@ -515,6 +515,15 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 
     let outcome = async {
         async_with!(&actx => |ctx| {
+            // QuickJS can fault while building an error backtrace after its
+            // heap limit is exhausted. The harness never exposes guest stacks.
+            ctx.eval::<(), _>(
+                r#"Error.stackTraceLimit = 0;
+                Object.defineProperty(Error, "stackTraceLimit", {
+                    value: 0, writable: false, configurable: false
+                }); void 0;"#,
+            )
+            .map_err(|e| Error::Sandbox(format!("context: {e}")))?;
             install_globals(&ctx, &tools, &strings, recall, result, skills_dir, &logs)
                 .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
@@ -1077,6 +1086,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.value, json!(42));
+    }
+
+    #[tokio::test]
+    async fn exec_cannot_reenable_error_backtraces() {
+        let dir = tempdir().unwrap();
+        let src = r#"
+            const changed = Reflect.set(Error, "stackTraceLimit", 10);
+            const descriptor = Object.getOwnPropertyDescriptor(Error, "stackTraceLimit");
+            return { changed, limit: Error.stackTraceLimit, descriptor };
+        "#;
+        let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(res.value["changed"], json!(false));
+        assert_eq!(res.value["limit"], json!(0));
+        assert_eq!(res.value["descriptor"]["writable"], json!(false));
+        assert_eq!(res.value["descriptor"]["configurable"], json!(false));
     }
 
     #[tokio::test]
