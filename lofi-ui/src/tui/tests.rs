@@ -2858,6 +2858,12 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "world")));
+
+    let cached = a.materialize_turn(0);
+    assert!(Arc::ptr_eq(&materialized, &cached));
+    a.bump_render_epoch();
+    let after_layout_invalidation = a.materialize_turn(0);
+    assert!(Arc::ptr_eq(&cached, &after_layout_invalidation));
 }
 
 #[test]
