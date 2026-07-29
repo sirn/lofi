@@ -32,6 +32,7 @@ mod tests;
 #[allow(clippy::wildcard_imports)]
 use {input::*, replay::*, resume::*, text::*, tree::*};
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
@@ -123,6 +124,7 @@ impl ModelSwitcher {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
+const RESIZE_DEBOUNCE_MS: u64 = 50;
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
@@ -221,6 +223,44 @@ enum Block {
 pub(crate) struct Turn {
     prompt: String,
     blocks: Vec<Block>,
+}
+
+impl Turn {
+    fn retained_bytes(&self) -> usize {
+        self.prompt.capacity()
+            + self.blocks.capacity() * std::mem::size_of::<Block>()
+            + self
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    Block::Text(text) | Block::Error(text) => text.capacity(),
+                    Block::Thinking(thinking) => thinking.text.capacity(),
+                    Block::Tool(tool) => {
+                        tool.id.capacity()
+                            + tool.name.capacity()
+                            + tool.input.capacity()
+                            + tool.label.as_ref().map_or(0, String::capacity)
+                            + tool.result.as_ref().map_or(0, String::capacity)
+                            + tool.native.capacity() * std::mem::size_of::<NativeTool>()
+                            + tool
+                                .native
+                                .iter()
+                                .map(|native| {
+                                    native.name.capacity()
+                                        + native.args.capacity()
+                                        + native.result.as_ref().map_or(0, String::capacity)
+                                })
+                                .sum::<usize>()
+                    }
+                    Block::UserBash {
+                        command, output, ..
+                    } => command.capacity() + output.capacity(),
+                    Block::TurnEnd { label, .. } => label.capacity(),
+                    Block::TurnFailed { label, error, .. } => label.capacity() + error.capacity(),
+                    Block::Compaction { summary, .. } => summary.capacity(),
+                })
+                .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +553,70 @@ struct TreeEntry {
     hydrated: bool,
 }
 
+/// Retains collapsed, width-independent display models so resizing a resumed
+/// transcript does not rescan its JSONL file. Successful exec payloads have
+/// already been removed before insertion. A hard budget preserves bounded
+/// memory for transcripts whose visible content itself is unusually large.
+struct CollapsedTurnCache {
+    map: HashMap<usize, Arc<Turn>>,
+    retained_bytes: usize,
+    frame_hits: usize,
+    frame_misses: usize,
+    frame_materialize_us: u128,
+}
+
+impl CollapsedTurnCache {
+    const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            retained_bytes: 0,
+            frame_hits: 0,
+            frame_misses: 0,
+            frame_materialize_us: 0,
+        }
+    }
+
+    fn get(&mut self, idx: usize) -> Option<Arc<Turn>> {
+        let turn = self.map.get(&idx).cloned();
+        if turn.is_some() {
+            self.frame_hits += 1;
+        } else {
+            self.frame_misses += 1;
+        }
+        turn
+    }
+
+    fn finish_materialize(&mut self, elapsed_us: u128) {
+        self.frame_materialize_us += elapsed_us;
+    }
+
+    fn reset_frame_profile(&mut self) {
+        self.frame_hits = 0;
+        self.frame_misses = 0;
+        self.frame_materialize_us = 0;
+    }
+
+    fn insert(&mut self, idx: usize, turn: Arc<Turn>) {
+        if self.map.contains_key(&idx) {
+            return;
+        }
+        let bytes = turn.retained_bytes();
+        if bytes > Self::MAX_RETAINED_BYTES.saturating_sub(self.retained_bytes) {
+            return;
+        }
+        self.retained_bytes += bytes;
+        self.map.insert(idx, turn);
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.retained_bytes = 0;
+        self.reset_frame_profile();
+    }
+}
+
 /// Retains only viewport-adjacent rendering to avoid holding the styled
 /// representation of the full session.
 struct FrozenCache {
@@ -698,6 +802,7 @@ pub(crate) struct App {
     last_turn_height: usize,
     log_view_h: usize,
     frozen_render: FrozenCache,
+    collapsed_turns: RefCell<CollapsedTurnCache>,
     /// Line count per frozen turn (all of them), so the viewport can be
     /// located and `total` computed without fetching rendered lines. Synced
     /// to the file-backed prefix (which may be all turns) for the active mode.
@@ -710,6 +815,7 @@ pub(crate) struct App {
     /// bump — otherwise background-padded lines keep the old (narrower)
     /// width after the terminal grows.
     frozen_width: usize,
+    render_profile: Box<RenderProfile>,
 }
 
 impl App {
@@ -724,6 +830,7 @@ impl App {
             *history = messages;
         }
         self.turns.clear();
+        self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
         self.cost = 0.0;
@@ -748,15 +855,77 @@ struct RunHandle {
     user_bash: Option<(String, bool)>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RenderProfile {
+    resize_events: usize,
+    resize_batch_us: u128,
+    resize_quiet_us: u128,
+    width: usize,
+    height: usize,
+    turns: usize,
+    frozen_turns: usize,
+    collapsed_cache_hits: usize,
+    collapsed_cache_misses: usize,
+    collapsed_cache_entries: usize,
+    collapsed_cache_bytes: usize,
+    materialize_us: u128,
+    width_changed: bool,
+    ensure_frozen_us: u128,
+    live_height_us: u128,
+    viewport_cache_us: u128,
+    frozen_window_us: u128,
+    live_window_us: u128,
+    log_total_us: u128,
+}
+
+#[derive(Debug, Default)]
+struct ResizeState {
+    deadline: Option<tokio::time::Instant>,
+    first_frame: bool,
+    started: Option<Instant>,
+    last: Option<Instant>,
+    events: usize,
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl TerminalGuard {
-    fn draw(&mut self, app: &mut App) -> Result<()> {
-        self.terminal
-            .draw(|f| view::render(f, app))
+    fn draw(
+        &mut self,
+        app: &mut App,
+        resize_events: usize,
+        resize_started: Option<Instant>,
+        resize_last: Option<Instant>,
+    ) -> Result<()> {
+        app.collapsed_turns.get_mut().reset_frame_profile();
+        *app.render_profile = RenderProfile {
+            resize_events,
+            resize_batch_us: resize_started.map_or(0, |at| at.elapsed().as_micros()),
+            resize_quiet_us: resize_last.map_or(0, |at| at.elapsed().as_micros()),
+            ..RenderProfile::default()
+        };
+        let draw_started = Instant::now();
+        let mut render_us = 0;
+        let frame = self
+            .terminal
+            .draw(|f| {
+                let render_started = Instant::now();
+                view::render(f, app);
+                render_us = render_started.elapsed().as_micros();
+            })
             .map_err(Error::Io)?;
+        let draw_us = draw_started.elapsed().as_micros();
+        {
+            let cache = app.collapsed_turns.get_mut();
+            app.render_profile.collapsed_cache_hits = cache.frame_hits;
+            app.render_profile.collapsed_cache_misses = cache.frame_misses;
+            app.render_profile.collapsed_cache_entries = cache.map.len();
+            app.render_profile.collapsed_cache_bytes = cache.retained_bytes;
+            app.render_profile.materialize_us = cache.frame_materialize_us;
+        }
+        app.debug_render_timing(frame.area.width, frame.area.height, draw_us, render_us);
         Ok(())
     }
 }
@@ -909,11 +1078,16 @@ async fn run_loop(
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
     let mut dirty = true;
+    let mut resize = Box::<ResizeState>::default();
     loop {
-        if dirty {
-            guard.draw(&mut app)?;
+        if dirty && (resize.deadline.is_none() || std::mem::take(&mut resize.first_frame)) {
+            guard.draw(&mut app, resize.events, resize.started, resize.last)?;
+            if resize.deadline.is_none() {
+                resize.started = None;
+                resize.last = None;
+                resize.events = 0;
+            }
             if let Some(event) = app.debug_after_draw.take() {
                 app.debug_sample(event);
             }
@@ -1007,8 +1181,10 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
+                        defer_redraw = matches!(ev, Event::Resize(_, _));
                         handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
@@ -1035,6 +1211,38 @@ async fn run_loop(
                         break;
                     }
                 }
+                if defer_redraw {
+                    // Ratatui clears resized terminal regions before painting.
+                    // Paint the leading edge immediately, suppress intermediate
+                    // dimensions, then paint once more after the burst is quiet.
+                    let now = Instant::now();
+                    if resize.deadline.is_none() {
+                        resize.first_frame = true;
+                        resize.started = Some(now);
+                        resize.events = 0;
+                        dirty = true;
+                    }
+                    resize.events = resize.events.saturating_add(1);
+                    resize.last = Some(now);
+                    resize.deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    );
+                } else {
+                    // Explicit user input should never wait behind resize UI
+                    // policy. Treat it as the end of the current resize burst.
+                    resize.deadline = None;
+                    resize.first_frame = false;
+                    dirty = true;
+                }
+            }
+            () = async {
+                match resize.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                resize.deadline = None;
                 dirty = true;
             }
             _ = tick.tick() => {
