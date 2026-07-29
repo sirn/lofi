@@ -13,19 +13,14 @@ use lofi_error::{Error, Result};
 pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
     let (system, mut msgs) = to_anthropic_request_parts(messages);
     add_conversation_cache_breakpoint(&mut msgs);
-    let mut max_tokens = model.max_tokens.unwrap_or(4096);
     let mut req = json!({
         "model": model.id,
         "messages": msgs,
         "stream": true,
-        "max_tokens": max_tokens,
+        "max_tokens": model.max_tokens.unwrap_or(4096),
     });
-    if let Some(budget) = anthropic_budget(&model.thinking) {
-        // Reserve `budget` tokens for thinking and at least 2048 for the
-        // visible response so the API doesn't reject the request.
-        max_tokens = max_tokens.max(budget + 2048);
-        req["max_tokens"] = json!(max_tokens);
-        req["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+    if let Some(effort) = anthropic_effort(&model.thinking) {
+        req["thinking"] = json!({ "type": "adaptive", "effort": effort });
     }
     if let Some(sys) = system {
         req["system"] = json!([{
@@ -86,13 +81,11 @@ fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
-fn anthropic_budget(level: &ThinkingLevel) -> Option<u64> {
+fn anthropic_effort(level: &ThinkingLevel) -> Option<&str> {
     match level {
-        ThinkingLevel::Off | ThinkingLevel::Custom(_) => None,
-        ThinkingLevel::Low => Some(1024),
-        ThinkingLevel::Medium => Some(4096),
-        ThinkingLevel::High => Some(10_000),
-        ThinkingLevel::XHigh => Some(32_000),
+        ThinkingLevel::Off => None,
+        ThinkingLevel::XHigh => Some("max"),
+        other => Some(other.as_str()),
     }
 }
 
@@ -317,6 +310,30 @@ mod tests {
         assert_eq!(req["system"][0]["text"], "sys");
         assert_eq!(req["max_tokens"], 1024);
         assert_eq!(req["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn request_uses_adaptive_thinking_effort() {
+        for (level, effort) in [
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::XHigh, "max"),
+            (ThinkingLevel::Custom("custom".to_string()), "custom"),
+        ] {
+            let mut model = model();
+            model.thinking = level;
+            let req = build_anthropic_request(&model, &[], &[]);
+            assert_eq!(
+                req["thinking"],
+                json!({"type": "adaptive", "effort": effort})
+            );
+            assert_eq!(req["max_tokens"], 1024);
+            assert!(req["thinking"].get("budget_tokens").is_none());
+        }
+        assert!(build_anthropic_request(&model(), &[], &[])
+            .get("thinking")
+            .is_none());
     }
 
     #[test]
