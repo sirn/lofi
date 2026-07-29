@@ -340,7 +340,7 @@ impl Agent {
         RunModel {
             provider: self.model.provider.clone(),
             id: self.model.id.clone(),
-            thinking: self.model.thinking,
+            thinking: self.model.thinking.clone(),
         }
     }
 

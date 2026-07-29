@@ -39,7 +39,7 @@ pub fn build_openai_responses_request(
             .collect();
         req["tools"] = json!(tools_arr);
     }
-    if let Some(effort) = openai_effort(model.thinking) {
+    if let Some(effort) = openai_effort(&model.thinking) {
         req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
     }
     req
@@ -69,13 +69,8 @@ fn prompt_cache_key(model: &Model, input: &[Value]) -> String {
     format!("lofi:{hash:016x}")
 }
 
-fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
-    match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Low => Some("low"),
-        ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::XHigh => Some("high"),
-    }
+fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
+    (level != &ThinkingLevel::Off).then(|| level.as_str())
 }
 
 #[derive(Default, Debug, Clone)]
@@ -343,14 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn request_enables_reasoning_summary_when_thinking_is_on() {
-        let mut model = model();
-        model.thinking = ThinkingLevel::Medium;
-        let req = build_openai_responses_request(&model, &[], &[]);
-        assert_eq!(
-            req["reasoning"],
-            json!({"effort": "medium", "summary": "auto"})
-        );
+    fn request_forwards_configured_reasoning_effort_verbatim() {
+        for (level, expected) in [
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Custom("minimal".to_string()), "minimal"),
+        ] {
+            let mut model = model();
+            model.thinking = level;
+            let req = build_openai_responses_request(&model, &[], &[]);
+            assert_eq!(
+                req["reasoning"],
+                json!({"effort": expected, "summary": "auto"})
+            );
+        }
     }
 
     #[test]
