@@ -65,7 +65,7 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
         dst.thinking_levels.clone_from(&src.thinking_levels);
     }
     if dst.thinking_level.is_none() {
-        dst.thinking_level = src.thinking_level;
+        dst.thinking_level.clone_from(&src.thinking_level);
     }
     if dst.base_url.is_none() {
         dst.base_url.clone_from(&src.base_url);
@@ -228,7 +228,7 @@ pub(super) fn parse_auto_models(
                 context_window,
                 max_tokens,
                 thinking_levels,
-                thinking_level: am.thinking_level,
+                thinking_level: am.thinking_level.clone(),
                 base_url: Some(base_url),
                 input_price,
                 output_price,

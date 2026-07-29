@@ -660,7 +660,7 @@ impl App {
         RunModel {
             provider: provider.to_string(),
             id: id.to_string(),
-            thinking: self.thinking,
+            thinking: self.thinking.clone(),
         }
     }
 

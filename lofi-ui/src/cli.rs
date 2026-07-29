@@ -56,7 +56,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         crate::run_print(opts).await?;
     } else {
         let opts = build_interactive_opts(&cli, root);
-        crate::run_interactive(opts).await?;
+        Box::pin(crate::run_interactive(opts)).await?;
     }
     Ok(())
 }
