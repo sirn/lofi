@@ -2,6 +2,10 @@
 
 Lofi is a minimal coding-agent harness written in Rust.
 
+## Platform support
+
+The initial release targets Unix-like systems with POSIX shell and process semantics. Linux is the primary tested platform; macOS and other Unix targets are best effort. Windows is not currently supported.
+
 ## Building
 
 ```sh
