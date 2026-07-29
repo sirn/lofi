@@ -137,15 +137,7 @@ impl App {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(super) fn apply_event(&mut self, ev: AgentEvent) {
         if let AgentEvent::TurnStart { prompt } = ev {
-            if let Some(previous) = self.turns.len().checked_sub(1) {
-                if self
-                    .turn_byte_ranges
-                    .get(previous)
-                    .is_some_and(Option::is_some)
-                {
-                    self.turns[previous].blocks.clear();
-                }
-            }
+            self.freeze_previous_file_backed_turn();
             self.push_turn(Turn {
                 prompt,
                 blocks: Vec::new(),
@@ -284,7 +276,30 @@ impl App {
             }
             _ => {}
         }
+        let starts_standalone_turn = matches!(&ev, AgentEvent::UserBash { .. });
+        if starts_standalone_turn {
+            self.freeze_previous_file_backed_turn();
+        }
+        let previous_turns = self.turns.len();
         apply_event_to_turns(&mut self.turns, ev);
+        if starts_standalone_turn {
+            debug_assert_eq!(self.turns.len(), previous_turns + 1);
+            self.turn_byte_ranges.push(None);
+            self.turn_event_offsets.push(None);
+        }
+    }
+
+    fn freeze_previous_file_backed_turn(&mut self) {
+        let Some(previous) = self.turns.len().checked_sub(1) else {
+            return;
+        };
+        if self
+            .turn_byte_ranges
+            .get(previous)
+            .is_some_and(Option::is_some)
+        {
+            self.turns[previous].blocks.clear();
+        }
     }
 
     pub(super) fn run_finished(&mut self) {
