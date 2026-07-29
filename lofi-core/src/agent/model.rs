@@ -111,11 +111,12 @@ fn read_agents_md(path: &std::path::Path) -> Option<String> {
 }
 
 /// Collect `(origin, body)` pairs for every `AGENTS.md` from `root` up to
-/// the enclosing git repo root (inclusive), ordered outermost-first. When
-/// `root` is not inside a git repository only `root`'s own `AGENTS.md` is
-/// considered, so the walk never escapes into unrelated ancestor directories.
+/// the enclosing Git or Jujutsu repository root (inclusive), ordered
+/// outermost-first. When `root` is not inside a repository only `root`'s own
+/// `AGENTS.md` is considered, so the walk never escapes into unrelated
+/// ancestor directories.
 fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
-    let boundary = git_boundary(root).unwrap_or_else(|| root.to_path_buf());
+    let boundary = repository_boundary(root).unwrap_or_else(|| root.to_path_buf());
     let mut found: Vec<(String, String)> = Vec::new();
     let mut cur = Some(root);
     while let Some(d) = cur {
@@ -131,10 +132,10 @@ fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-fn git_boundary(start: &std::path::Path) -> Option<PathBuf> {
+fn repository_boundary(start: &std::path::Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(d) = cur {
-        if d.join(".git").exists() {
+        if d.join(".git").exists() || d.join(".jj").exists() {
             return Some(d.to_path_buf());
         }
         cur = d.parent();
@@ -404,6 +405,25 @@ mod tests {
         let prompt = assemble_system_prompt(Some(&tmp.path().join("config")), &root);
         assert!(prompt.contains("inside"));
         assert!(!prompt.contains("OUTSIDE-LEAK"));
+    }
+
+    #[test]
+    fn walk_stops_at_jj_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let root = repo.join("sub");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(repo.join(".jj")).unwrap();
+        write(&tmp.path().join("AGENTS.md"), "OUTSIDE-LEAK\n");
+        write(&repo.join("AGENTS.md"), "jj-repo rules\n");
+        write(&root.join("AGENTS.md"), "sub rules\n");
+
+        let prompt = assemble_system_prompt(Some(&tmp.path().join("config")), &root);
+
+        assert!(prompt.contains("jj-repo rules"));
+        assert!(prompt.contains("sub rules"));
+        assert!(!prompt.contains("OUTSIDE-LEAK"));
+        assert!(prompt.find("jj-repo rules").unwrap() < prompt.find("sub rules").unwrap());
     }
 
     #[test]
