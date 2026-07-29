@@ -33,6 +33,23 @@ impl Provider for PendingAfterRoundProvider {
 
 struct TerminalThenPendingProvider;
 
+struct PartialThenPendingProvider;
+
+#[async_trait]
+impl Provider for PartialThenPendingProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        Ok(Box::pin(
+            stream::iter([Ok(StreamingEvent::TextDelta("partial answer".into()))])
+                .chain(stream::pending()),
+        ))
+    }
+}
+
 #[async_trait]
 impl Provider for TerminalThenPendingProvider {
     async fn stream(
@@ -368,6 +385,81 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         &event.kind,
         SessionEventKind::Message(message) if message.role == Role::Tool
     )));
+}
+
+#[tokio::test]
+async fn cancelled_run_persists_partial_output_as_failed_turn() {
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+    let agent = Agent {
+        provider: Arc::new(PartialThenPendingProvider),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    {
+        let run = agent.run_continuation(
+            &mut messages,
+            "go".into(),
+            tx,
+            Some(&cursor),
+            false,
+            Some(cancel.clone()),
+            None,
+        );
+        tokio::pin!(run);
+
+        loop {
+            let event = tokio::select! {
+                result = run.as_mut() => panic!("run settled before cancellation: {result:?}"),
+                event = rx.recv() => event.unwrap_or_else(|| panic!("run event channel closed")),
+            };
+            if matches!(event, AgentEvent::Text(ref text) if text == "partial answer") {
+                break;
+            }
+        }
+        cancel.store(true, Ordering::Relaxed);
+        run.as_mut().await.unwrap();
+    }
+
+    let mut saw_failed = false;
+    let mut committed = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::TurnFailed { error, .. } => {
+                assert_eq!(error, "cancelled");
+                saw_failed = true;
+            }
+            AgentEvent::TurnCommitted {
+                byte_start,
+                byte_end,
+            } => committed = Some((byte_start, byte_end)),
+            _ => {}
+        }
+    }
+    assert!(saw_failed);
+    assert!(committed.is_some());
+
+    let events = cursor.load_events().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::Message(message)
+            if message.role == Role::Assistant
+                && message.blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text } if text == "partial answer"
+                ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::TurnFailed { error, .. } if error == "cancelled"
+    )));
+    assert!(
+        messages.is_empty(),
+        "failed branch must remain display-only in live provider history"
+    );
 }
 
 #[tokio::test]

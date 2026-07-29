@@ -234,11 +234,24 @@ impl Agent {
                                 error: e.to_string(),
                             })
                             .await;
-                        // Cancellable backoff: wait `delay` for the channel to
-                        // stay open. If the receiver drops, roll back like a
-                        // normal cancellation rather than driving a dead channel.
-                        if tokio::time::timeout(delay, tx.closed()).await.is_err() {
+                        // Cancellable backoff: stop promptly for Ctrl-C or a
+                        // closed consumer instead of waiting out the retry
+                        // delay and issuing another provider request.
+                        let retry_ready = if let Some(flag) = cancel.as_ref() {
+                            tokio::select! {
+                                biased;
+                                () = wait_for_cancel(flag) => false,
+                                () = tx.closed() => false,
+                                () = tokio::time::sleep(delay) => true,
+                            }
                         } else {
+                            tokio::select! {
+                                biased;
+                                () = tx.closed() => false,
+                                () = tokio::time::sleep(delay) => true,
+                            }
+                        };
+                        if !retry_ready {
                             cancelled = true;
                             break;
                         }
@@ -319,6 +332,14 @@ impl Agent {
                 _ => {}
             }
         }
+        if matches!(&outcome, Some(TurnOutcome::Failed(_))) {
+            // `TurnFailed` is a durable display boundary: replay keeps the
+            // failed branch visible but `messages_from_events` excludes it
+            // from provider context. Keep the live shared history identical
+            // by rolling back the prompt, completed rounds, and partial final
+            // response only after the recorder has flushed their display copy.
+            messages.truncate(prev_len);
+        }
         match err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -380,7 +401,20 @@ impl Agent {
         if let Some(mt) = self.max_output_tokens {
             model.max_tokens = Some(mt);
         }
-        let stream = self.provider.stream(&model, messages, &[schema]).await?;
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        let schemas = [schema];
+        let stream = match cancel {
+            Some(flag) => {
+                tokio::select! {
+                    biased;
+                    () = wait_for_cancel(flag) => return Err(Error::Cancelled),
+                    stream = self.provider.stream(&model, messages, &schemas) => stream?,
+                }
+            }
+            None => self.provider.stream(&model, messages, &schemas).await?,
+        };
         let mut stream = stream;
 
         let mut assembler = MessageAssembler::new();
@@ -395,7 +429,20 @@ impl Agent {
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
             loop {
-                match tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await {
+                let next = match cancel {
+                    Some(flag) => {
+                        tokio::select! {
+                            biased;
+                            () = wait_for_cancel(flag) => return Err(Error::Cancelled),
+                            next = tokio::time::timeout(
+                                DEFAULT_STREAM_IDLE_TIMEOUT,
+                                stream.next(),
+                            ) => next,
+                        }
+                    }
+                    None => tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await,
+                };
+                match next {
                     Err(_) => return Err(Error::Provider("stream idle timeout".into())),
                     Ok(None) => break,
                     Ok(Some(ev)) => match ev {
@@ -550,7 +597,18 @@ impl Agent {
             Ok(())
         };
 
-        collect.await?;
+        if let Err(error) = collect.await {
+            // The live UI has already rendered every accepted delta. Preserve
+            // that same partial assistant message on failed/cancelled turns so
+            // durable replay cannot make visible output disappear. A
+            // `TurnFailed` marker excludes this branch from future model
+            // context, so an incomplete tool call is display-only.
+            let partial = assembler.finish();
+            if !partial.blocks.is_empty() {
+                messages.push(partial);
+            }
+            return Err(error);
+        }
 
         let assistant_index = messages.len();
         messages.push(assembler.finish());

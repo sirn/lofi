@@ -369,3 +369,9 @@ async fn emit(tx: Option<&Sender<AgentEvent>>, ev: AgentEvent) -> bool {
     }
     true
 }
+
+async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
