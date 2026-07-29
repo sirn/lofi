@@ -41,7 +41,7 @@ pub fn build_openai_chat_request(
             .collect();
         req["tools"] = json!(tools_arr);
     }
-    if let Some(effort) = openai_effort(model.thinking) {
+    if let Some(effort) = openai_effort(&model.thinking) {
         // Chat Completions exposes reasoning effort as a top-level field on
         // reasoning-capable models. `off` omits it entirely so the model's
         // default behavior applies.
@@ -50,16 +50,9 @@ pub fn build_openai_chat_request(
     req
 }
 
-/// Map a thinking level to an `OpenAI` `reasoning_effort` value. `Off`
-/// disables thinking (returns `None` so the field is omitted);
-/// `XHigh` clamps to `high` since `OpenAI` exposes no higher step.
-fn openai_effort(level: ThinkingLevel) -> Option<&'static str> {
-    match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Low => Some("low"),
-        ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::XHigh => Some("high"),
-    }
+/// Return the configured effort verbatim, omitting only `off`.
+fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
+    (level != &ThinkingLevel::Off).then(|| level.as_str())
 }
 
 /// `OpenAI` identifies each streaming tool call by a stable `index`; the call
@@ -231,6 +224,22 @@ mod tests {
         assert_eq!(req["model"], "gpt-4o");
         assert_eq!(req["stream"], true);
         assert_eq!(req["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn request_forwards_configured_reasoning_effort_verbatim() {
+        for (level, expected) in [
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Custom("minimal".to_string()), "minimal"),
+        ] {
+            let mut model = model();
+            model.thinking = level;
+            let req = build_openai_chat_request(&model, &[], &[]);
+            assert_eq!(req["reasoning_effort"], expected);
+        }
+        assert!(build_openai_chat_request(&model(), &[], &[])
+            .get("reasoning_effort")
+            .is_none());
     }
 
     #[test]

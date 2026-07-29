@@ -20,7 +20,7 @@ pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[Too
         "stream": true,
         "max_tokens": max_tokens,
     });
-    if let Some(budget) = anthropic_budget(model.thinking) {
+    if let Some(budget) = anthropic_budget(&model.thinking) {
         // Reserve `budget` tokens for thinking and at least 2048 for the
         // visible response so the API doesn't reject the request.
         max_tokens = max_tokens.max(budget + 2048);
@@ -86,9 +86,9 @@ fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
-fn anthropic_budget(level: ThinkingLevel) -> Option<u64> {
+fn anthropic_budget(level: &ThinkingLevel) -> Option<u64> {
     match level {
-        ThinkingLevel::Off => None,
+        ThinkingLevel::Off | ThinkingLevel::Custom(_) => None,
         ThinkingLevel::Low => Some(1024),
         ThinkingLevel::Medium => Some(4096),
         ThinkingLevel::High => Some(10_000),

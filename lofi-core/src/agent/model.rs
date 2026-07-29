@@ -188,7 +188,7 @@ pub fn rebuild_agent(
     root: &std::path::Path,
 ) -> Result<(Agent, Model, ThinkingLevel)> {
     let (mut model_obj, level) = select_model(registry, config, model)?;
-    model_obj.thinking = level;
+    model_obj.thinking = level.clone();
 
     let provider_cfg = config
         .providers
@@ -322,7 +322,12 @@ pub fn select_model(
             "no model `{model_id}` for provider `{provider_name}`"
         ))
     })?;
-    let level = resolve_thinking_level(explicit_level, mc, pcfg, config.agent.thinking_level)?;
+    let level = resolve_thinking_level(
+        explicit_level,
+        mc,
+        pcfg,
+        config.agent.thinking_level.clone(),
+    )?;
     Ok((model, level))
 }
 
@@ -332,16 +337,17 @@ pub(crate) fn resolve_thinking_level(
     pcfg: &lofi_types::ProviderConfig,
     agent: Option<ThinkingLevel>,
 ) -> Result<ThinkingLevel> {
+    let was_explicit = explicit.is_some();
     let desired = explicit
-        .or(mc.thinking_level)
-        .or(pcfg.thinking_level)
+        .or_else(|| mc.thinking_level.clone())
+        .or_else(|| pcfg.thinking_level.clone())
         .or(agent)
         .unwrap_or(ThinkingLevel::Medium);
     if desired == ThinkingLevel::Off {
         return Ok(ThinkingLevel::Off);
     }
     if mc.thinking_levels.is_empty() {
-        if explicit.is_some() {
+        if was_explicit {
             return Err(Error::Config(format!(
                 "model does not support thinking (no thinking_levels declared); cannot use `{}`",
                 desired.as_str()
@@ -350,7 +356,11 @@ pub(crate) fn resolve_thinking_level(
         return Ok(ThinkingLevel::Off);
     }
     if !mc.thinking_levels.contains(&desired) {
-        let allowed: Vec<&str> = mc.thinking_levels.iter().map(|l| l.as_str()).collect();
+        let allowed: Vec<&str> = mc
+            .thinking_levels
+            .iter()
+            .map(ThinkingLevel::as_str)
+            .collect();
         return Err(Error::Config(format!(
             "thinking level `{}` not supported by this model; allowed: {}",
             desired.as_str(),

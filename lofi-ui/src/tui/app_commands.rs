@@ -554,7 +554,7 @@ impl App {
             );
             return;
         }
-        let selected = levels.iter().position(|&l| l == self.thinking).unwrap_or(0);
+        let selected = levels.iter().position(|l| l == &self.thinking).unwrap_or(0);
         self.thinking_picker = Some(ThinkingPickerState { levels, selected });
     }
 
@@ -565,9 +565,9 @@ impl App {
             .iter()
             .find(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
         {
-            for &l in &c.thinking_levels {
-                if l != ThinkingLevel::Off {
-                    out.push(l);
+            for level in &c.thinking_levels {
+                if level != &ThinkingLevel::Off && !out.contains(level) {
+                    out.push(level.clone());
                 }
             }
         }
@@ -576,7 +576,7 @@ impl App {
 
     pub(super) fn thinking_picker_confirm(&mut self) {
         if let Some(picker) = self.thinking_picker.take() {
-            if let Some(&level) = picker.levels.get(picker.selected) {
+            if let Some(level) = picker.levels.get(picker.selected) {
                 self.pending_model_switch =
                     Some(format!("{}:{}", self.model_label, level.as_str()));
             }

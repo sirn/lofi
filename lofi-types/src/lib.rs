@@ -81,8 +81,7 @@ impl Api {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum ThinkingLevel {
     #[default]
     Off,
@@ -90,6 +89,8 @@ pub enum ThinkingLevel {
     Medium,
     High,
     XHigh,
+    /// Provider-defined effort retained verbatim for forward compatibility.
+    Custom(String),
 }
 
 impl ThinkingLevel {
@@ -106,13 +107,37 @@ impl ThinkingLevel {
     }
 
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Off => "off",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl Serialize for ThinkingLevel {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingLevel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            Err(serde::de::Error::custom("thinking level cannot be empty"))
+        } else {
+            Ok(Self::parse(&value).unwrap_or(Self::Custom(value)))
         }
     }
 }
@@ -1288,6 +1313,10 @@ mod tests {
         );
         let l: ThinkingLevel = serde_json::from_str(concat!('"', "medium", '"')).unwrap();
         assert_eq!(l, ThinkingLevel::Medium);
+
+        let future: ThinkingLevel = serde_json::from_str(r#""minimal""#).unwrap();
+        assert_eq!(future.as_str(), "minimal");
+        assert_eq!(serde_json::to_string(&future).unwrap(), r#""minimal""#);
     }
 
     #[test]
