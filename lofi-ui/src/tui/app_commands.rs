@@ -256,7 +256,7 @@ impl App {
         lines.push(info_kv(
             t,
             "messages",
-            &self.history.lock().map_or(0, |m| m.len()).to_string(),
+            &self.lifecycle.history_stats().messages.to_string(),
         ));
         lines.push(info_kv(t, "turns", &self.turns.len().to_string()));
         lines.push(Line::from(""));
@@ -272,8 +272,8 @@ impl App {
     }
 
     pub(super) fn start_new_session(&mut self) {
-        if let Ok(mut m) = self.history.lock() {
-            m.clear();
+        if let Err(error) = self.lifecycle.clear_history() {
+            self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
         }
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
@@ -591,6 +591,7 @@ impl App {
             .context_window
             .filter(|&l| l > 0)
             .unwrap_or(DEFAULT_CTX_LIMIT);
+        self.lifecycle.set_context_window(self.ctx_limit);
         self.notify(
             NotifyKind::Info,
             format!(
