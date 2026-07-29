@@ -1,9 +1,11 @@
 mod anthropic_messages;
-pub mod ir;
+mod ir;
+mod message_assembler;
 mod openai_completions;
 mod openai_responses;
 pub(crate) mod sse;
 
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -12,13 +14,20 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use lofi_types::{Api, Message, Model, ProviderConfig, StreamingEvent};
 
-use crate::ir::chat::ToolSchema;
 use lofi_error::{Error, Result};
 
 use anthropic_messages::AnthropicMessagesProvider;
 pub use anthropic_messages::ANTHROPIC_VERSION;
+pub use message_assembler::{assemble_message, MessageAssembler};
 use openai_completions::OpenAiCompletionsProvider;
 use openai_responses::OpenAiResponsesProvider;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToolSchema {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
 
 /// `stream` runs a single model turn, `POSTing` to `model.base_url` (the full
 /// endpoint URL resolved at config load) and yielding incremental events

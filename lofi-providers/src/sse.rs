@@ -2,8 +2,84 @@ use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use lofi_types::StreamingEvent;
 
-use crate::ir::codec::{is_done_marker, parse_sse_lines, SseEvent};
+use crate::ir::ProtocolIr;
 use lofi_error::{Error, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SseEvent {
+    pub event: Option<String>,
+    pub data: String,
+}
+
+#[must_use]
+fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent> {
+    let mut out = Vec::new();
+    let mut event = None;
+    let mut data_lines = Vec::new();
+    let mut have_data = false;
+    for line in lines {
+        if line.is_empty() {
+            if have_data {
+                out.push(SseEvent {
+                    event: event.take(),
+                    data: data_lines.join("\n"),
+                });
+                data_lines.clear();
+                have_data = false;
+            } else {
+                event = None;
+            }
+        } else if let Some(rest) = line.strip_prefix("event:") {
+            event = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+            have_data = true;
+        }
+    }
+    if have_data {
+        out.push(SseEvent {
+            event,
+            data: data_lines.join("\n"),
+        });
+    }
+    out
+}
+
+fn is_done_marker(data: &str) -> bool {
+    data.trim() == "[DONE]"
+}
+
+pub(crate) struct IrSseMapper<I: ProtocolIr> {
+    state: I::State,
+}
+
+impl<I: ProtocolIr> Default for IrSseMapper<I> {
+    fn default() -> Self {
+        Self {
+            state: I::State::default(),
+        }
+    }
+}
+
+impl<I: ProtocolIr> SseMapper for IrSseMapper<I> {
+    fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
+        let data: serde_json::Value = serde_json::from_str(&event.data)
+            .map_err(|error| Error::Provider(format!("malformed SSE data: {error}")))?;
+        I::map_event(event.event.as_deref(), &data, &mut self.state)
+    }
+
+    fn on_eof(&mut self) -> Result<()> {
+        I::on_eof(&self.state)
+    }
+
+    fn handles_done_marker(&self) -> bool {
+        I::handles_done_marker()
+    }
+
+    fn defer_done_until_transport_end(&self) -> bool {
+        I::defer_done_until_transport_end()
+    }
+}
 
 pub(crate) type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<StreamingEvent>> + Send>>;
 

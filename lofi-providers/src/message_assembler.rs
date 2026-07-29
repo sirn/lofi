@@ -1,63 +1,5 @@
-#![cfg_attr(test, allow(clippy::unwrap_used))]
-
 use lofi_types::{ContentBlock, Message, Role, StreamingEvent};
 use serde_json::Value;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SseEvent {
-    pub event: Option<String>,
-    pub data: String,
-}
-
-#[must_use]
-pub fn parse_sse(body: &str) -> Vec<SseEvent> {
-    parse_sse_lines(body.lines())
-}
-
-/// A block with no `data:` line is skipped: the mappers decode the `data:`
-/// payload as JSON, so an event-only block (e.g. a keep-alive) would otherwise
-/// abort the stream with a parse error.
-#[must_use]
-pub fn parse_sse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<SseEvent> {
-    let mut out = Vec::new();
-    let mut event: Option<String> = None;
-    let mut data_lines: Vec<String> = Vec::new();
-    let mut have_data = false;
-    for line in lines {
-        if line.is_empty() {
-            if have_data {
-                out.push(SseEvent {
-                    event: event.take(),
-                    data: data_lines.join("\n"),
-                });
-                data_lines.clear();
-                have_data = false;
-            } else {
-                event = None;
-            }
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("event:") {
-            event = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            data_lines.push(rest.to_string());
-            have_data = true;
-        }
-    }
-    if have_data {
-        out.push(SseEvent {
-            event: event.take(),
-            data: data_lines.join("\n"),
-        });
-    }
-    out
-}
-
-#[must_use]
-pub fn is_done_marker(data: &str) -> bool {
-    data.trim() == "[DONE]"
-}
 
 #[derive(Default)]
 pub struct MessageAssembler {
@@ -168,61 +110,10 @@ pub fn assemble_message(events: &[StreamingEvent]) -> Message {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use lofi_types::Usage;
-
-    #[test]
-    fn parses_event_and_data_lines() {
-        let body = "event: delta\ndata: {\"a\":1}\n\nevent: done\ndata: [DONE]\n\n";
-        let ev = parse_sse(body);
-        assert_eq!(ev.len(), 2);
-        assert_eq!(ev[0].event.as_deref(), Some("delta"));
-        assert_eq!(ev[0].data, "{\"a\":1}");
-        assert!(is_done_marker(&ev[1].data));
-    }
-
-    #[test]
-    fn joins_multiline_data() {
-        let body = "data: line1\ndata: line2\n\n";
-        let ev = parse_sse(body);
-        assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].event, None);
-        assert_eq!(ev[0].data, "line1\nline2");
-    }
-
-    #[test]
-    fn emits_trailing_block_without_blank_line() {
-        let body = "data: tail";
-        let ev = parse_sse(body);
-        assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].data, "tail");
-    }
-
-    #[test]
-    fn ignores_comments_and_unknown_fields() {
-        let body = ": ping\nretry: 5000\ndata: keep\n\n";
-        let ev = parse_sse(body);
-        assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].data, "keep");
-    }
-
-    #[test]
-    fn event_only_block_does_not_leak_event_name() {
-        // An event-only block (e.g. a keep-alive) must not attach its event
-        // name to the next data-bearing block.
-        let body = "event: ping\n\ndata: {\"a\":1}\n\n";
-        let ev = parse_sse(body);
-        assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].event, None);
-        assert_eq!(ev[0].data, "{\"a\":1}");
-    }
-
-    #[test]
-    fn done_marker_is_trim_aware() {
-        assert!(is_done_marker("[DONE]"));
-        assert!(is_done_marker("  [DONE]  "));
-        assert!(!is_done_marker("not done"));
-    }
 
     #[test]
     fn assembles_text_only_message() {

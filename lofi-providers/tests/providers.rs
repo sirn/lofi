@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use futures::StreamExt;
-use lofi_providers::ir::assemble_message;
+use lofi_providers::assemble_message;
 use lofi_providers::open;
 use lofi_types::{
     Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, ProviderConfig,

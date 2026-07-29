@@ -1,18 +1,119 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
 use serde_json::{json, Value};
 
-use super::block::to_openai_chat_messages;
-use super::chat::ToolSchema;
+use super::ProtocolIr;
+use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
+fn collect_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        if let ContentBlock::Text { text } = b {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
 #[must_use]
-pub fn build_openai_chat_request(
-    model: &Model,
-    messages: &[Message],
-    tools: &[ToolSchema],
-) -> Value {
+pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::System => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({"role": "system", "content": text}));
+                }
+            }
+            Role::User => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({"role": "user", "content": text}));
+                }
+            }
+            Role::Assistant => {
+                let text = collect_text(&m.blocks);
+                let tool_calls: Vec<Value> = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => {
+                            let args =
+                                serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+                            Some(json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": args},
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut msg = json!({"role": "assistant"});
+                msg["content"] = if text.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text)
+                };
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(tool_calls);
+                }
+                out.push(msg);
+            }
+            Role::Tool => {
+                for b in &m.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        out.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": content,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(crate) struct OpenAiCompletionsIr;
+
+impl ProtocolIr for OpenAiCompletionsIr {
+    type State = ChatMapperState;
+
+    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+        build_openai_chat_request(model, messages, tools)
+    }
+
+    fn map_event(
+        _event: Option<&str>,
+        data: &Value,
+        state: &mut Self::State,
+    ) -> Result<Vec<StreamingEvent>> {
+        map_openai_chat_event(data, state)
+    }
+
+    fn on_eof(_state: &Self::State) -> Result<()> {
+        Err(Error::Provider(
+            "stream ended before [DONE] sentinel".into(),
+        ))
+    }
+
+    fn defer_done_until_transport_end() -> bool {
+        true
+    }
+}
+
+#[must_use]
+fn build_openai_chat_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
     let msgs = to_openai_chat_messages(messages);
     let mut req = json!({
         "model": model.id,
@@ -62,7 +163,7 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 /// synthesized placeholder that [`assemble_message`](super::codec::assemble_message)
 /// can't correlate.
 #[derive(Default, Debug, Clone)]
-pub struct ChatMapperState {
+pub(crate) struct ChatMapperState {
     index_to_id: std::collections::HashMap<u64, String>,
 }
 
@@ -75,10 +176,7 @@ pub struct ChatMapperState {
 /// Returns [`Error::Provider`] when a chunk carries a top-level `error`
 /// object, so an in-stream provider error fails the round trip instead of
 /// ending as a silent partial turn.
-pub fn map_openai_chat_event(
-    v: &Value,
-    state: &mut ChatMapperState,
-) -> Result<Vec<StreamingEvent>> {
+fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<StreamingEvent>> {
     let mut out = Vec::new();
     // An in-stream error chunk (`{"error": {...}}`) must fail the round trip
     // rather than being ignored as an unrecognized chunk.
