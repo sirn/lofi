@@ -169,17 +169,19 @@ pub fn rebuild_agent(
     let agent = if let Some(a) = existing {
         a.with_model(provider, model_obj.clone())
     } else {
+        let tmp_lease = state::create_session_tmp_dir()?;
         Agent::new(
             provider,
             model_obj.clone(),
             root.to_path_buf(),
-            state::create_session_tmp_dir()?,
+            tmp_lease.path().to_path_buf(),
             SYSTEM_PROMPT.to_string(),
             None,
             config.compaction.reserved_context_tokens,
             &config.bash,
             &config.shell_policy,
         )
+        .with_tmp_lease(tmp_lease)
         .with_retry(crate::retry::RetryPolicy::from(config.retry))
     };
     Ok((agent, model_obj, level))
