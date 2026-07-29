@@ -74,7 +74,7 @@ use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
 use crate::tui::view::HStack;
-use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions};
+use lofi_core::{Agent, AgentEvent, AgentLifecycle, HardCompactOutcome};
 use lofi_error::{Error, Result};
 
 /// Retained model registry + config so `/model` can rebuild the agent
@@ -698,7 +698,7 @@ pub(crate) struct App {
     turn_event_offsets: Vec<Option<Vec<u64>>>,
     input: String,
     input_cursor: usize,
-    history: Arc<Mutex<Vec<Message>>>,
+    lifecycle: AgentLifecycle,
     history_nav: Vec<String>,
     history_idx: Option<usize>,
     input_stash: String,
@@ -713,13 +713,11 @@ pub(crate) struct App {
     turn_cost: f64,
     turn_has_round_usage: bool,
     ctx_limit: u64,
-    compaction: lofi_types::CompactionConfig,
     /// Last observed context input-token count, for the auto-compaction
     /// hysteresis: the trigger fires only on the upward crossing of the
     /// threshold, not on every above-threshold turn. `None` until the
     /// first round reports usage, and reset to `None` after a compaction
     /// or a session rollback so the baseline re-evaluates cleanly.
-    prev_ctx_tokens: Option<u64>,
     settled_usage_fresh: bool,
     compacted: bool,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
@@ -813,9 +811,7 @@ impl App {
         file_size: u64,
     ) -> Result<()> {
         let messages = history_from_index(cursor, index, &self.compaction.edit)?;
-        if let Ok(mut history) = self.history.lock() {
-            *history = messages;
-        }
+        self.lifecycle.replace_history(messages)?;
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
