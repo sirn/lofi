@@ -1,11 +1,116 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
 use serde_json::{json, Value};
 
-use super::block::to_openai_chat_messages;
-use super::chat::ToolSchema;
+use super::ProtocolIr;
+use crate::ToolSchema;
 use lofi_error::{Error, Result};
+
+fn collect_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        if let ContentBlock::Text { text } = b {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::System => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({"role": "system", "content": text}));
+                }
+            }
+            Role::User => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({"role": "user", "content": text}));
+                }
+            }
+            Role::Assistant => {
+                let text = collect_text(&m.blocks);
+                let tool_calls: Vec<Value> = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => {
+                            let args =
+                                serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+                            Some(json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": args},
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut msg = json!({"role": "assistant"});
+                msg["content"] = if text.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text)
+                };
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(tool_calls);
+                }
+                out.push(msg);
+            }
+            Role::Tool => {
+                for b in &m.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        out.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": content,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub struct OpenAiCompletionsIr;
+
+impl ProtocolIr for OpenAiCompletionsIr {
+    type State = ChatMapperState;
+
+    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+        build_openai_chat_request(model, messages, tools)
+    }
+
+    fn map_event(
+        _event: Option<&str>,
+        data: &Value,
+        state: &mut Self::State,
+    ) -> Result<Vec<StreamingEvent>> {
+        map_openai_chat_event(data, state)
+    }
+
+    fn on_eof(_state: &Self::State) -> Result<()> {
+        Err(Error::Provider(
+            "stream ended before [DONE] sentinel".into(),
+        ))
+    }
+
+    fn defer_done_until_transport_end() -> bool {
+        true
+    }
+}
 
 #[must_use]
 pub fn build_openai_chat_request(

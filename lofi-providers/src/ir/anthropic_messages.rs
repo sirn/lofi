@@ -2,12 +2,128 @@
 
 use std::collections::HashMap;
 
-use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
 use serde_json::{json, Value};
 
-use super::block::to_anthropic_request_parts;
-use super::chat::ToolSchema;
+use super::ProtocolIr;
+use crate::ToolSchema;
 use lofi_error::{Error, Result};
+
+fn collect_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        if let ContentBlock::Text { text } = b {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<Value>) {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::System => {
+                let t = collect_text(&m.blocks);
+                if !t.is_empty() {
+                    system_parts.push(t);
+                }
+            }
+            Role::User | Role::Assistant => {
+                let blocks: Vec<Value> = m.blocks.iter().map(block_to_anthropic).collect();
+                if !blocks.is_empty() {
+                    out.push(json!({"role": m.role.as_str(), "content": blocks}));
+                }
+            }
+            Role::Tool => {
+                let blocks: Vec<Value> = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => Some(json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": content,
+                            "is_error": is_error,
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                if !blocks.is_empty() {
+                    out.push(json!({"role": "user", "content": blocks}));
+                }
+            }
+        }
+    }
+    let system = if system_parts.is_empty() {
+        None
+    } else {
+        Some(system_parts.join("\n\n"))
+    };
+    (system, out)
+}
+
+fn block_to_anthropic(b: &ContentBlock) -> Value {
+    match b {
+        ContentBlock::Text { text } => json!({"type": "text", "text": text}),
+        ContentBlock::ToolUse { id, name, input } => {
+            json!({"type": "tool_use", "id": id, "name": name, "input": input})
+        }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        }),
+        ContentBlock::Thinking { text, signature } => {
+            let mut obj = json!({"type": "thinking", "thinking": text});
+            if let Some(sig) = signature {
+                obj["signature"] = json!(sig);
+            }
+            obj
+        }
+    }
+}
+
+pub struct AnthropicMessagesIr;
+
+impl ProtocolIr for AnthropicMessagesIr {
+    type State = AnthropicMapperState;
+
+    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+        build_anthropic_request(model, messages, tools)
+    }
+
+    fn map_event(
+        event: Option<&str>,
+        data: &Value,
+        state: &mut Self::State,
+    ) -> Result<Vec<StreamingEvent>> {
+        map_anthropic_event(event, data, state)
+    }
+
+    fn on_eof(state: &Self::State) -> Result<()> {
+        if state.saw_stop {
+            Ok(())
+        } else {
+            Err(Error::Provider("stream ended before message_stop".into()))
+        }
+    }
+
+    fn handles_done_marker() -> bool {
+        false
+    }
+}
 
 #[must_use]
 pub fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
