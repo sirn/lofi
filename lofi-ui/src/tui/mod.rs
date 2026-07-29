@@ -123,6 +123,7 @@ impl ModelSwitcher {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
+const RESIZE_FRAME_MS: u64 = 16;
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
@@ -909,8 +910,11 @@ async fn run_loop(
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut resize_tick = tokio::time::interval(Duration::from_millis(RESIZE_FRAME_MS));
+    resize_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut dirty = true;
+    let mut resize_pending = false;
     loop {
         if dirty {
             guard.draw(&mut app)?;
@@ -1007,8 +1011,10 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
+                        defer_redraw = matches!(ev, Event::Resize(_, _));
                         handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
@@ -1035,7 +1041,20 @@ async fn run_loop(
                         break;
                     }
                 }
-                dirty = true;
+                if defer_redraw {
+                    // Resize drags can enqueue hundreds of obsolete sizes.
+                    // Defer them to the UI tick so the event stream is drained
+                    // instead of synchronously re-wrapping the transcript once
+                    // for every queued size.
+                    resize_pending = true;
+                } else {
+                    dirty = true;
+                }
+            }
+            _ = resize_tick.tick() => {
+                if std::mem::take(&mut resize_pending) {
+                    dirty = true;
+                }
             }
             _ = tick.tick() => {
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
