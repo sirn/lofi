@@ -911,6 +911,7 @@ async fn run_loop(
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut dirty = true;
+    let mut resize_pending = false;
     loop {
         if dirty {
             guard.draw(&mut app)?;
@@ -1007,8 +1008,10 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
+                        defer_redraw = matches!(ev, Event::Resize(_, _));
                         handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
@@ -1035,9 +1038,20 @@ async fn run_loop(
                         break;
                     }
                 }
-                dirty = true;
+                if defer_redraw {
+                    // Resize drags can enqueue hundreds of obsolete sizes.
+                    // Defer them to the UI tick so the event stream is drained
+                    // instead of synchronously re-wrapping the transcript once
+                    // for every queued size.
+                    resize_pending = true;
+                } else {
+                    dirty = true;
+                }
             }
             _ = tick.tick() => {
+                if std::mem::take(&mut resize_pending) {
+                    dirty = true;
+                }
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
