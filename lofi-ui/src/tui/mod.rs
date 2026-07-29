@@ -1015,16 +1015,9 @@ async fn run_loop(
     // only for branch operations. Explicitly drop it before the event loop so
     // an async state-machine frame cannot retain thousands of ID strings.
     drop(index);
-    // Freeze every turn except the last: its blocks are backed by the
-    // transcript file (see `materialize_turn`), so drop them to keep memory
-    // bounded by the viewport rather than the whole session. The last turn
-    // keeps its blocks so it renders without a file read each frame.
-    if app.turns.len() > 1 {
-        let n = app.turns.len();
-        for turn in &mut app.turns[..n - 1] {
-            turn.blocks.clear();
-        }
-    }
+    // Resume replay creates file-backed shells for every historical turn,
+    // including the final one. Viewport materialization owns the bounded
+    // display working set from this point onward.
     app.bump_render_epoch();
     app.no_models_hint = no_models_hint.clone();
     if let Some(hint) = no_models_hint {
