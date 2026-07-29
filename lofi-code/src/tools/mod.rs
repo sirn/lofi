@@ -21,6 +21,7 @@ pub mod truncate;
 pub mod write;
 
 pub use bash_env::BashEnv;
+pub use bash_util::{read_capped, PgrpKillGuard};
 use fs::{
     atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
     reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
