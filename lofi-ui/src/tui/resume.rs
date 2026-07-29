@@ -29,11 +29,11 @@ pub(super) fn visible_index_path(
     Ok((0..index.len()).filter(|i| !hidden.contains(i)).collect())
 }
 
-/// Restore the transcript as file-backed turn shells. Historical turns need
-/// only their prompt, offsets, and terminal accounting at startup; their full
-/// blocks are materialized from disk only when the viewport reaches them.
-/// The final turn remains fully resident so the initial bottom view renders
-/// without a second disk pass.
+/// Restore the transcript as file-backed turn shells. Turns need only their
+/// prompt, offsets, and terminal accounting at startup; their full blocks are
+/// materialized from disk only when the viewport reaches them. This includes
+/// the final historical turn: eagerly hydrating it makes resume memory depend
+/// on the size of the last response.
 pub(super) fn replay_indexed_session(
     app: &mut App,
     cursor: &store::SessionCursor,
@@ -72,20 +72,11 @@ pub(super) fn replay_indexed_session(
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         let selected = &visible[start_pos..end_pos];
         let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
-        let is_last = turn + 1 == starts.len();
-        if is_last {
-            let events = cursor.events_at(&offsets)?;
-            replay_selected_session_events(&events, |ev| {
-                app.apply_file_backed_replay_event(ev);
-            });
-        } else if index[visible[start_pos]].kind == store::IndexKind::UserBash {
+        if index[visible[start_pos]].kind == store::IndexKind::UserBash {
             let event = cursor.event_at(index[visible[start_pos]].offset)?;
             replay_selected_session_events(&[event], |ev| {
                 app.apply_file_backed_replay_event(ev);
             });
-            if let Some(shell_turn) = app.turns.last_mut() {
-                shell_turn.blocks.clear();
-            }
         } else {
             app.apply_file_backed_replay_event(AgentEvent::TurnStart {
                 prompt: prompts.get(turn).cloned().unwrap_or_default(),
@@ -114,7 +105,12 @@ pub(super) fn replay_indexed_session(
         if let Some(event_offsets) = app.turn_event_offsets.last_mut() {
             *event_offsets = Some(offsets);
         }
+        if let Some(shell_turn) = app.turns.last_mut() {
+            shell_turn.blocks.clear();
+        }
     }
+    debug_assert_eq!(app.turns.len(), app.turn_byte_ranges.len());
+    debug_assert_eq!(app.turns.len(), app.turn_event_offsets.len());
     Ok(())
 }
 

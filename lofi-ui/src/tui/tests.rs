@@ -20,7 +20,7 @@ fn app() -> App {
 }
 
 fn push_turn(app: &mut App) {
-    app.turns.push(Turn {
+    app.push_turn(Turn {
         prompt: "p".to_string(),
         blocks: Vec::new(),
     });
@@ -1635,6 +1635,105 @@ fn sev_chain<I: IntoIterator<Item = SessionEventKind>>(kinds: I) -> Vec<SessionE
 
 fn msg(m: Message) -> SessionEventKind {
     SessionEventKind::Message(m)
+}
+
+#[test]
+fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "first".into(),
+    });
+    a.apply_event(AgentEvent::Text("answer".into()));
+    a.apply_event(AgentEvent::TurnCommitted {
+        byte_start: 10,
+        byte_end: 20,
+    });
+
+    a.apply_event(AgentEvent::UserBash {
+        command: "pwd".into(),
+        output: "/tmp".into(),
+        exit_code: Some(0),
+        signal: None,
+        duration_ms: 1,
+        truncated: false,
+        cancelled: false,
+        exclude_from_context: false,
+    });
+
+    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.turn_byte_ranges.len(), 2);
+    assert_eq!(a.turn_event_offsets.len(), 2);
+    assert!(a.turns[0].blocks.is_empty());
+
+    a.turn_byte_ranges[1] = Some((20, 30));
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "second".into(),
+    });
+    assert!(a.turns[1].blocks.is_empty());
+    assert_eq!(a.turns.len(), a.turn_byte_ranges.len());
+    assert_eq!(a.turns.len(), a.turn_event_offsets.len());
+}
+
+#[test]
+fn resumed_user_bash_and_final_turn_are_file_backed_shells() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/workspace"), &"p/m".into())
+        .unwrap();
+    let kinds = [
+        msg(user("first")),
+        msg(assistant("first answer")),
+        SessionEventKind::TurnEnd {
+            model: "p/m".into(),
+            elapsed_ms: 1,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+        SessionEventKind::UserBash {
+            command: "pwd".into(),
+            output: "/workspace".into(),
+            exit_code: Some(0),
+            signal: None,
+            duration_ms: 1,
+            truncated: false,
+            cancelled: false,
+            exclude_from_context: false,
+        },
+        msg(user("second")),
+        msg(assistant("final answer")),
+        SessionEventKind::TurnEnd {
+            model: "p/m".into(),
+            elapsed_ms: 1,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut events: Vec<_> = kinds
+        .into_iter()
+        .map(|kind| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        })
+        .collect();
+    cursor.append_events(&mut events).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+
+    let mut a = app();
+    a.session.cursor = Some(cursor.clone());
+    a.restore_indexed_session(&cursor, &snapshot.index, snapshot.file_size)
+        .unwrap();
+
+    assert_eq!(a.turns.len(), 3);
+    assert_eq!(a.turns.len(), a.turn_byte_ranges.len());
+    assert_eq!(a.turns.len(), a.turn_event_offsets.len());
+    assert!(a.turns.iter().all(|turn| turn.blocks.is_empty()));
+    let final_turn = a.materialize_turn(2);
+    assert!(final_turn
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Text(text) if text == "final answer")));
 }
 
 #[test]
