@@ -237,7 +237,7 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 }
 
 /// Builds the agent via [`lofi_core::build_agent`], then drives
-/// [`lofi_core::Agent::run`] concurrently with a stdio consumer:
+/// [`lofi_core::Agent::run_continuation`] concurrently with a stdio consumer:
 /// - [`AgentEvent::Text`] deltas are written to stdout via
 ///   `std::io::stdout().write_all` (never `println!`, which is denied by the
 ///   workspace lints);
@@ -260,7 +260,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
 
     let prompt = opts.prompt.clone();
-    let agent_run = agent.run(prompt, tx);
+    let mut messages = Vec::new();
+    let agent_run = agent.run_continuation(&mut messages, prompt, tx, None, false, None, None);
 
     // The agent future is not `Send` (the QuickJS `AsyncContext` is not
     // `Sync`), so it cannot be `tokio::spawn`'d. Drive it concurrently with
@@ -269,6 +270,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
     let consumer = async {
         let mut stdout = std::io::stdout().lock();
         let mut stderr = std::io::stderr().lock();
+        let mut context_pressure = false;
         loop {
             let Some(ev) = rx.recv().await else {
                 break;
@@ -288,9 +290,19 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RetryEnd { .. }
                 | AgentEvent::TurnStart { .. }
                 | AgentEvent::TurnContinue
-                | AgentEvent::ContextPressure { .. }
                 | AgentEvent::Compaction { .. }
                 | AgentEvent::UserBash { .. } => Ok(()),
+                AgentEvent::ContextPressure { .. } => {
+                    context_pressure = true;
+                    let _ = stdout.write_all(
+                        b"
+",
+                    );
+                    writeln!(
+                        stderr,
+                        "error: context limit reached; use the interactive TUI to compact and continue"
+                    )
+                }
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),
@@ -310,6 +322,11 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
         }
         stdout.flush()?;
         stderr.flush()?;
+        if context_pressure {
+            return Err(Error::State(
+                "context limit reached in non-interactive mode".to_string(),
+            ));
+        }
         Ok::<(), Error>(())
     };
 
