@@ -111,12 +111,11 @@ fn read_agents_md(path: &std::path::Path) -> Option<String> {
 }
 
 /// Collect `(origin, body)` pairs for every `AGENTS.md` from `root` up to
-/// the enclosing Git or Jujutsu repository root (inclusive), ordered
-/// outermost-first. When `root` is not inside a repository only `root`'s own
-/// `AGENTS.md` is considered, so the walk never escapes into unrelated
-/// ancestor directories.
+/// the enclosing project root (inclusive), ordered outermost-first. When
+/// `root` is not inside a recognized project only `root`'s own `AGENTS.md`
+/// is considered, so the walk never escapes into unrelated ancestors.
 fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
-    let boundary = repository_boundary(root).unwrap_or_else(|| root.to_path_buf());
+    let boundary = project_boundary(root).unwrap_or_else(|| root.to_path_buf());
     let mut found: Vec<(String, String)> = Vec::new();
     let mut cur = Some(root);
     while let Some(d) = cur {
@@ -132,15 +131,45 @@ fn dir_agents_md(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-fn repository_boundary(start: &std::path::Path) -> Option<PathBuf> {
-    let mut cur = Some(start);
-    while let Some(d) = cur {
-        if d.join(".git").exists() || d.join(".jj").exists() {
-            return Some(d.to_path_buf());
-        }
-        cur = d.parent();
-    }
-    None
+const PROJECT_ROOT_MARKERS: &[&str] = &[
+    // Version-control metadata. `.git` may be either a directory or a file
+    // in linked worktrees, so marker detection deliberately uses `exists`.
+    ".git",
+    ".jj",
+    ".hg",
+    ".svn",
+    // High-signal language and build manifests.
+    "Cargo.toml",
+    "go.mod",
+    "go.work",
+    "package.json",
+    "deno.json",
+    "deno.jsonc",
+    "pyproject.toml",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "Gemfile",
+    "composer.json",
+    "mix.exs",
+    "pubspec.yaml",
+    "Package.swift",
+    "CMakeLists.txt",
+];
+
+fn is_project_root(path: &std::path::Path) -> bool {
+    PROJECT_ROOT_MARKERS
+        .iter()
+        .any(|marker| path.join(marker).exists())
+}
+
+fn project_boundary(start: &std::path::Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|path| is_project_root(path))
+        .map(std::path::Path::to_path_buf)
 }
 
 /// The startup path passes `None` and gets a fresh agent (a new tmp dir).
@@ -373,6 +402,43 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_common_project_root_markers() {
+        let tmp = TempDir::new().unwrap();
+        let plain = tmp.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(!is_project_root(&plain));
+
+        for marker in PROJECT_ROOT_MARKERS {
+            let candidate = tmp.path().join(marker.replace('.', "_"));
+            fs::create_dir_all(&candidate).unwrap();
+            write(&candidate.join(marker), "marker");
+            assert!(is_project_root(&candidate), "did not recognize {marker}");
+        }
+    }
+
+    #[test]
+    fn walk_stops_at_manifest_project_root() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let root = project.join("src");
+        fs::create_dir_all(&root).unwrap();
+        write(
+            &project.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n",
+        );
+        write(&tmp.path().join("AGENTS.md"), "OUTSIDE-LEAK\n");
+        write(&project.join("AGENTS.md"), "project rules\n");
+        write(&root.join("AGENTS.md"), "source rules\n");
+
+        let prompt = assemble_system_prompt(Some(&tmp.path().join("config")), &root);
+
+        assert!(prompt.contains("project rules"));
+        assert!(prompt.contains("source rules"));
+        assert!(!prompt.contains("OUTSIDE-LEAK"));
+        assert!(prompt.find("project rules").unwrap() < prompt.find("source rules").unwrap());
+    }
+
+    #[test]
     fn per_dir_agents_md_ordered_outermost_first() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
@@ -427,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn non_git_project_uses_only_root() {
+    fn unrecognized_project_uses_only_root() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("proj");
         fs::create_dir_all(&root).unwrap();
