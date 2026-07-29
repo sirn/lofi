@@ -413,30 +413,29 @@ pub(super) fn handle_ctrl_c(
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
 ) {
-    if let Some(r) = current_run.take() {
+    if let Some(r) = current_run.as_mut() {
         let user_bash = r.user_bash.clone();
-        // Signal the QuickJS interrupt handler to break any synchronous
-        // guest loop *before* aborting the task — handle.abort() alone cannot
-        // preempt code blocked inside native guest execution.
+        // Agent runs must settle cooperatively: the engine checkpoints each
+        // completed round, flushes the partial current response, and writes a
+        // TurnFailed marker before its channel closes. Aborting the task here
+        // skips all of that cleanup and makes the cancelled output disappear
+        // from both the durable transcript and the shared live history.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        r.handle.abort();
         if let Some((command, exclude_from_context)) = user_bash {
+            let Some(r) = current_run.take() else {
+                return;
+            };
+            r.handle.abort();
             let result =
                 lofi_core::cancelled_user_bash(command, app.run_elapsed().as_millis() as u64);
             finish_user_bash(app, result, exclude_from_context);
-        } else if let Some(turn) = app.turns.last_mut() {
-            turn.blocks.push(Block::Error("cancelled".to_string()));
-        }
-        app.run_finished();
-        app.ctrl_c_at = None;
-        // Pop the next queued prompt (FIFO) so a queued message is sent
-        // at the earliest opportunity after an abort.
-        if app.run.is_none() {
+            app.run_finished();
             if let Some(prompt) = app.prompt_queue.first().cloned() {
                 app.prompt_queue.remove(0);
                 spawn_prompt(app, agent, current_run, prompt);
             }
         }
+        app.ctrl_c_at = None;
         return;
     }
     if app.input.is_empty() {

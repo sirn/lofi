@@ -98,6 +98,44 @@ fn failed_exec_settles_pending_native_tools() {
 }
 
 #[test]
+fn failed_turn_settles_open_tool_rows() {
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::ToolStart {
+        id: "exec-1".into(),
+        name: "exec".into(),
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "exec-1".into(),
+        id: 1,
+        name: "bash".into(),
+        args: "sleep 10".into(),
+    });
+    a.apply_event(AgentEvent::TurnFailed {
+        model: "p/m".into(),
+        elapsed_ms: 50,
+        error: "cancelled".into(),
+        cost: 0.0,
+        usage: Usage::default(),
+    });
+
+    let Block::Tool(tool) = &a.turns[0].blocks[0] else {
+        panic!("expected tool block");
+    };
+    assert!(tool.done);
+    assert!(tool.is_error);
+    assert_eq!(tool.result.as_deref(), Some("cancelled"));
+    assert!(tool.native[0].done);
+    assert!(tool.native[0].is_error);
+    assert!(matches!(
+        a.turns[0].blocks.last(),
+        Some(Block::TurnFailed { error, .. }) if error == "cancelled"
+    ));
+}
+
+#[test]
 fn native_tool_events_nest_under_their_exec() {
     let mut a = app();
     push_turn(&mut a);
