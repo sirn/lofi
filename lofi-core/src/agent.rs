@@ -166,6 +166,7 @@ pub struct Agent {
     model: Model,
     root: PathBuf,
     tmp_dir: PathBuf,
+    tmp_lease: Option<Arc<state::SessionTempDir>>,
     retry: crate::retry::RetryPolicy,
     system_prompt: String,
     max_output_tokens: Option<u64>,
@@ -199,6 +200,7 @@ impl Agent {
             model,
             root,
             tmp_dir,
+            tmp_lease: None,
             retry: crate::retry::RetryPolicy::default(),
             system_prompt,
             max_output_tokens,
@@ -212,6 +214,13 @@ impl Agent {
         }
     }
 
+    fn with_tmp_lease(mut self, lease: state::SessionTempDir) -> Self {
+        let lease = Arc::new(lease);
+        self.tmp_dir = lease.path().to_path_buf();
+        self.tmp_lease = Some(lease);
+        self
+    }
+
     #[must_use]
     pub fn with_model(&self, provider: Box<dyn Provider>, model: Model) -> Self {
         Self {
@@ -219,6 +228,7 @@ impl Agent {
             model,
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
+            tmp_lease: self.tmp_lease.clone(),
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
@@ -239,6 +249,7 @@ impl Agent {
             model: self.model.clone(),
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
+            tmp_lease: self.tmp_lease.clone(),
             retry: self.retry,
             system_prompt,
             max_output_tokens: self.max_output_tokens,
@@ -259,6 +270,7 @@ impl Agent {
             model: self.model.clone(),
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
+            tmp_lease: self.tmp_lease.clone(),
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
