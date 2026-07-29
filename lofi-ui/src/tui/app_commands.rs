@@ -276,6 +276,7 @@ impl App {
             m.clear();
         }
         self.turns.clear();
+        self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
         self.session.cursor = None;

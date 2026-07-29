@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use crate::tui::theme::{active_indicator, agent_indicator, user_indicator, Theme};
-use crate::tui::{App, Block, NativeTool, ThinkingBlock, ToolCall, Turn};
+use crate::tui::{App, Block, NativePreview, NativeTool, ThinkingBlock, ToolCall, Turn};
 
 use super::component::{Component, Cx, Stack};
 use super::prim::{self, RawLine, RenderLine};
@@ -1309,6 +1309,52 @@ fn native_body(nt: &NativeTool) -> NativeBody {
     }
 }
 
+pub(crate) fn compact_native_previews(turn: &mut Turn) {
+    for block in &mut turn.blocks {
+        let Block::Tool(tool) = block else { continue };
+        for native in &mut tool.native {
+            if native.is_error || native.result.as_deref().is_none_or(str::is_empty) {
+                continue;
+            }
+            if !matches!(native.name.as_str(), "bash" | "write" | "edit" | "agent") {
+                native.result = None;
+                continue;
+            }
+            let raw = native.result.as_deref().unwrap_or_default();
+            let header_suffix = native_header_suffix(&native.name, Some(raw));
+            let encoded_field = match native.name.as_str() {
+                "bash" => Some("output"),
+                "write" => Some("content"),
+                _ => None,
+            };
+            let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
+            let body = encoded.is_none().then(|| native_body(native));
+            let total_lines = encoded.map_or_else(
+                || body.as_ref().map_or(0, |body| body.lines.len()),
+                encoded_json_line_count,
+            );
+            let range = native_preview_range(&native.name, total_lines, false);
+            let mut lines = Vec::with_capacity(range.len());
+            if let Some(encoded) = encoded {
+                for_each_encoded_json_line(encoded, range.clone(), |_, line| lines.push(line));
+            } else if let Some(body) = &body {
+                lines.extend(body.lines[range.clone()].iter().cloned());
+            }
+            native.preview = Some(Box::new(NativePreview {
+                header_suffix,
+                lines,
+                total_lines,
+                preview_start: range.start,
+                numbered: body.as_ref().is_some_and(|body| body.numbered),
+                start_line: body.as_ref().map_or(1, |body| body.start_line),
+                is_diff: body.as_ref().is_some_and(|body| body.is_diff),
+                notice: body.and_then(|body| body.notice),
+            }));
+            native.result = None;
+        }
+    }
+}
+
 fn native_preview_range(name: &str, total: usize, verbose: bool) -> std::ops::Range<usize> {
     if verbose {
         return 0..total;
@@ -1536,7 +1582,14 @@ impl ExecBlockBranch<'_> {
                 Style::new().fg(t.subtle),
             ));
         }
-        if let Some(note) = native_header_suffix(&self.nt.name, self.nt.result.as_deref()) {
+        let header_suffix = self
+            .nt
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.header_suffix.as_deref())
+            .map(str::to_owned)
+            .or_else(|| native_header_suffix(&self.nt.name, self.nt.result.as_deref()));
+        if let Some(note) = header_suffix {
             content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
         }
         let header_deco = vec![
@@ -1554,6 +1607,72 @@ impl ExecBlockBranch<'_> {
             Span::raw(" ".repeat(name_w)),
         ];
         out.extend(prim::rline_wrapped(header_deco, &cont_deco, content, w));
+
+        if let Some(preview) = &self.nt.preview {
+            let indent = 2 + 2 + 2;
+            let lw = preview.total_lines.to_string().len().max(3);
+            let avail = w
+                .saturating_sub(indent)
+                .saturating_sub(if preview.numbered { lw + 1 } else { 0 });
+            let body_fg = if self.nt.is_error { t.error } else { t.muted };
+            let blank_n = " ".repeat(lw + 1);
+            let base_deco = vec![
+                Span::raw("  "),
+                Span::styled(exec_cont, Style::new().fg(t.subtle)),
+                Span::styled("│ ", Style::new().fg(t.subtle)),
+            ];
+            for (i, line) in preview.lines.iter().enumerate() {
+                let logical = preview.preview_start + i;
+                let n = format!("{:>lw$} ", preview.start_line + logical, lw = lw);
+                let style = if preview.is_diff {
+                    match line.chars().next() {
+                        Some('-') => Style::new().fg(t.error),
+                        Some('+') => Style::new().fg(t.success),
+                        _ => Style::new().fg(t.muted),
+                    }
+                } else if preview.numbered {
+                    Style::new().fg(t.fg)
+                } else {
+                    Style::new().fg(body_fg)
+                };
+                for (row, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
+                    let mut deco = base_deco.clone();
+                    if preview.numbered {
+                        deco.push(if row == 0 {
+                            Span::styled(n.clone(), Style::new().fg(t.subtle))
+                        } else {
+                            Span::styled(blank_n.clone(), Style::new().fg(t.subtle))
+                        });
+                    }
+                    out.push(prim::rline(deco, vec![Span::styled(seg, style)]));
+                }
+            }
+            let hidden = preview.total_lines.saturating_sub(preview.lines.len());
+            if hidden > 0 {
+                out.push(prim::rline(
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(exec_cont, Style::new().fg(t.subtle)),
+                        Span::styled("… ", Style::new().fg(t.subtle)),
+                    ],
+                    vec![Span::styled(
+                        format!("({hidden} lines hidden)"),
+                        Style::new().fg(t.subtle),
+                    )],
+                ));
+            }
+            if let Some(notice) = &preview.notice {
+                out.push(prim::rline(
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(exec_cont, Style::new().fg(t.subtle)),
+                        Span::styled("… ", Style::new().fg(t.subtle)),
+                    ],
+                    vec![Span::styled(notice.clone(), Style::new().fg(t.subtle))],
+                ));
+            }
+            return out;
+        }
 
         let Some(result) = &self.nt.result else {
             return out;
@@ -1995,6 +2114,7 @@ mod tests {
             name: "bash".to_string(),
             args: String::new(),
             result: Some(raw.clone()),
+            preview: None,
             is_error: true,
             done: true,
         };

@@ -160,6 +160,7 @@ fn rich_header_suffix_for_read_and_bash() {
                         })
                         .to_string(),
                     ),
+                    preview: None,
                     is_error: false,
                     done: true,
                 },
@@ -177,6 +178,7 @@ fn rich_header_suffix_for_read_and_bash() {
                         })
                         .to_string(),
                     ),
+                    preview: None,
                     is_error: false,
                     done: true,
                 },
@@ -2858,6 +2860,20 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "world")));
+
+    let cached = a.materialize_turn(0);
+    assert!(cached
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Text(text) if text == "hello")));
+    let hits = a.collapsed_turns.borrow().frame_hits;
+    a.bump_render_epoch();
+    let after_layout_invalidation = a.materialize_turn(0);
+    assert!(after_layout_invalidation
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Text(text) if text == "hello")));
+    assert_eq!(a.collapsed_turns.borrow().frame_hits, hits + 1);
 }
 
 #[test]
@@ -6288,4 +6304,70 @@ fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
         asking.contains("Auto evaluation asks: command deletes a file"),
         "{asking}"
     );
+}
+
+#[test]
+fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
+    use crate::tui::view::blocks::{compact_native_previews, render_turn_lines};
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        prompt: "run it".to_string(),
+        blocks: vec![Block::Tool(ToolCall {
+            id: "exec-1".to_string(),
+            name: "exec".to_string(),
+            input: r#"await lofi.bash({ cmd: "printf test" })"#.to_string(),
+            label: None,
+            native: vec![NativeTool {
+                id: 1,
+                name: "bash".to_string(),
+                args: "printf test".to_string(),
+                result: Some(
+                    serde_json::json!({
+                        "output": "one\ntwo\nthree\nfour",
+                        "duration_ms": 10,
+                    })
+                    .to_string(),
+                ),
+                preview: None,
+                is_error: false,
+                done: true,
+            }],
+            result: Some("{\"value\":null}".to_string()),
+            result_committed: true,
+            is_error: false,
+            done: true,
+            elapsed: Some(Duration::from_millis(10)),
+        })],
+    });
+    let render = |app: &App, turn: &Turn| {
+        let cx = Cx {
+            app,
+            theme: app.theme,
+            width: 80,
+            active_turn: false,
+        };
+        render_turn_lines(&cx, turn)
+            .iter()
+            .map(|line| {
+                line.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = render(&a, &a.turns[0]);
+    let mut compact = a.turns[0].clone();
+    compact_native_previews(&mut compact);
+    let mut cache = CollapsedTurnCache::new();
+    cache.insert(0, &compact);
+    let restored = cache.get(0).unwrap();
+    assert_eq!(render(&a, &restored), expected);
+    assert!(restored.blocks.iter().all(|block| match block {
+        Block::Tool(tool) => tool.native.iter().all(|native| native.result.is_none()),
+        _ => true,
+    }));
 }
