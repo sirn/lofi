@@ -2,15 +2,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use lofi_types::{Api, Message, Model, StreamingEvent};
-use serde_json::Value;
+use lofi_types::{Message, Model, StreamingEvent};
 
-use super::{apply_headers, with_bearer};
-use crate::ir::build_request;
-use crate::ir::chat::ToolSchema;
-use crate::ir::codec::SseEvent;
-use crate::ir::openai_completions::{map_openai_chat_event, ChatMapperState};
-use crate::sse::{map_sse_response, SseMapper};
+use super::{apply_headers, with_bearer, ToolSchema};
+use crate::ir::{OpenAiCompletionsIr, ProtocolIr};
+use crate::sse::{map_sse_response, IrSseMapper};
 use lofi_error::{Error, Result};
 
 pub(crate) struct OpenAiCompletionsProvider {
@@ -28,7 +24,7 @@ impl super::Provider for OpenAiCompletionsProvider {
         messages: &[Message],
         tools: &[ToolSchema],
     ) -> Result<BoxStream<'static, Result<StreamingEvent>>> {
-        let body = build_request(Api::OpenAiCompletions, model, messages, tools);
+        let body = OpenAiCompletionsIr::build_request(model, messages, tools);
         let req = apply_headers(
             with_bearer(
                 self.client
@@ -40,29 +36,9 @@ impl super::Provider for OpenAiCompletionsProvider {
         );
         let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
         let resp = super::ensure_ok(resp).await?;
-        Ok(map_sse_response(resp, OpenAiChatMapper::default()))
-    }
-}
-
-#[derive(Default)]
-struct OpenAiChatMapper {
-    state: ChatMapperState,
-}
-
-impl SseMapper for OpenAiChatMapper {
-    fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
-        let v: Value = serde_json::from_str(&event.data)
-            .map_err(|e| Error::Provider(format!("malformed SSE data: {e}")))?;
-        map_openai_chat_event(&v, &mut self.state)
-    }
-
-    fn on_eof(&mut self) -> Result<()> {
-        Err(Error::Provider(
-            "stream ended before [DONE] sentinel".into(),
+        Ok(map_sse_response(
+            resp,
+            IrSseMapper::<OpenAiCompletionsIr>::default(),
         ))
-    }
-
-    fn defer_done_until_transport_end(&self) -> bool {
-        true
     }
 }

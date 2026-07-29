@@ -2,15 +2,115 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lofi_types::{Message, Model, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
 use serde_json::{json, Value};
 
-use super::block::to_openai_responses_input;
-use super::chat::ToolSchema;
+use super::ProtocolIr;
+use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
+fn collect_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        if let ContentBlock::Text { text } = b {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
 #[must_use]
-pub fn build_openai_responses_request(
+pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::System | Role::User => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({
+                        "type": "message",
+                        "role": m.role.as_str(),
+                        "content": [{"type": "input_text", "text": text}],
+                    }));
+                }
+            }
+            Role::Assistant => {
+                let text = collect_text(&m.blocks);
+                if !text.is_empty() {
+                    out.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    }));
+                }
+                for b in &m.blocks {
+                    if let ContentBlock::ToolUse { id, name, input } = b {
+                        let args =
+                            serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+                        out.push(json!({
+                            "type": "function_call",
+                            "call_id": id,
+                            "name": name,
+                            "arguments": args,
+                        }));
+                    }
+                }
+            }
+            Role::Tool => {
+                for b in &m.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        out.push(json!({
+                            "type": "function_call_output",
+                            "call_id": tool_use_id,
+                            "output": content,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(crate) struct OpenAiResponsesIr;
+
+impl ProtocolIr for OpenAiResponsesIr {
+    type State = ResponsesMapperState;
+
+    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+        build_openai_responses_request(model, messages, tools)
+    }
+
+    fn map_event(
+        _event: Option<&str>,
+        data: &Value,
+        state: &mut Self::State,
+    ) -> Result<Vec<StreamingEvent>> {
+        map_openai_responses_event(data, state)
+    }
+
+    fn on_eof(state: &Self::State) -> Result<()> {
+        if state.saw_completed {
+            Ok(())
+        } else {
+            Err(Error::Provider(
+                "stream ended before response.completed".into(),
+            ))
+        }
+    }
+
+    fn defer_done_until_transport_end() -> bool {
+        true
+    }
+}
+
+#[must_use]
+fn build_openai_responses_request(
     model: &Model,
     messages: &[Message],
     tools: &[ToolSchema],
@@ -74,7 +174,7 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct ResponsesMapperState {
+pub(crate) struct ResponsesMapperState {
     item_to_call: HashMap<String, String>,
     reasoning_items_with_deltas: HashSet<String>,
     pub(crate) saw_completed: bool,
@@ -83,7 +183,7 @@ pub struct ResponsesMapperState {
 /// # Errors
 /// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
 /// or `error` events so a provider-reported failure fails the round trip.
-pub fn map_openai_responses_event(
+fn map_openai_responses_event(
     v: &Value,
     state: &mut ResponsesMapperState,
 ) -> Result<Vec<StreamingEvent>> {

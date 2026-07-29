@@ -7,15 +7,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use lofi_types::{Api, Message, Model, StreamingEvent};
-use serde_json::Value;
+use lofi_types::{Message, Model, StreamingEvent};
 
-use super::{apply_headers, with_key_header};
-use crate::ir::anthropic_messages::{map_anthropic_event, AnthropicMapperState};
-use crate::ir::build_request;
-use crate::ir::chat::ToolSchema;
-use crate::ir::codec::SseEvent;
-use crate::sse::{map_sse_response, SseMapper};
+use super::{apply_headers, with_key_header, ToolSchema};
+use crate::ir::{AnthropicMessagesIr, ProtocolIr};
+use crate::sse::{map_sse_response, IrSseMapper};
 use lofi_error::{Error, Result};
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -35,7 +31,7 @@ impl super::Provider for AnthropicMessagesProvider {
         messages: &[Message],
         tools: &[ToolSchema],
     ) -> Result<BoxStream<'static, Result<StreamingEvent>>> {
-        let body = build_request(Api::AnthropicMessages, model, messages, tools);
+        let body = AnthropicMessagesIr::build_request(model, messages, tools);
         let req = apply_headers(
             with_key_header(
                 self.client
@@ -49,31 +45,9 @@ impl super::Provider for AnthropicMessagesProvider {
         );
         let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
         let resp = super::ensure_ok(resp).await?;
-        Ok(map_sse_response(resp, AnthropicMapper::default()))
-    }
-}
-
-#[derive(Default)]
-struct AnthropicMapper {
-    state: AnthropicMapperState,
-}
-
-impl SseMapper for AnthropicMapper {
-    fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
-        let v: Value = serde_json::from_str(&event.data)
-            .map_err(|e| Error::Provider(format!("malformed SSE data: {e}")))?;
-        map_anthropic_event(event.event.as_deref(), &v, &mut self.state)
-    }
-
-    fn on_eof(&mut self) -> Result<()> {
-        if self.state.saw_stop {
-            Ok(())
-        } else {
-            Err(Error::Provider("stream ended before message_stop".into()))
-        }
-    }
-
-    fn handles_done_marker(&self) -> bool {
-        false
+        Ok(map_sse_response(
+            resp,
+            IrSseMapper::<AnthropicMessagesIr>::default(),
+        ))
     }
 }
