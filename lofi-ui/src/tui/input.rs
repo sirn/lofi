@@ -227,13 +227,13 @@ pub(super) fn finish_user_bash(
     exclude_from_context: bool,
 ) {
     if !exclude_from_context {
-        if let Ok(mut history) = app.history.lock() {
-            history.push(Message {
-                role: Role::User,
-                blocks: vec![ContentBlock::Text {
-                    text: result.context_text(),
-                }],
-            });
+        if let Err(error) = app.lifecycle.push_message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: result.context_text(),
+            }],
+        }) {
+            app.notify(NotifyKind::Error, format!("update agent history: {error}"));
         }
     }
     let byte_range = app.session.cursor.as_ref().and_then(|cursor| {
@@ -297,7 +297,7 @@ fn spawn_agent_run(
 ) {
     let cursor = app.session.cursor_or_create(&app.run_model());
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let history = Arc::clone(&app.history);
+    let history = app.lifecycle.shared_history();
     let agent = agent.clone();
     let err_tx = tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
