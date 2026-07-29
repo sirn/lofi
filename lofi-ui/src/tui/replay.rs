@@ -251,6 +251,23 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
             ..
         } => {
             finalize_open_thinking(turn);
+            for block in &mut turn.blocks {
+                if let Block::Tool(tool) = block {
+                    if !tool.done {
+                        for native in &mut tool.native {
+                            if !native.done {
+                                native.result = Some("cancelled".to_string());
+                                native.is_error = true;
+                                native.done = true;
+                            }
+                        }
+                        tool.result = Some(error.clone());
+                        tool.is_error = true;
+                        tool.done = true;
+                        tool.elapsed = Some(Duration::from_millis(elapsed_ms));
+                    }
+                }
+            }
             turn.blocks.push(Block::TurnFailed {
                 label: model.label(),
                 elapsed: Duration::from_millis(elapsed_ms),
