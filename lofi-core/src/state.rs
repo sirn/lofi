@@ -87,11 +87,30 @@ impl Drop for SessionTempDir {
 
 const LEGACY_TMP_MAX_AGE: std::time::Duration = std::time::Duration::from_hours(24);
 
+fn entry_is_stale(entry: &std::fs::DirEntry) -> bool {
+    entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= LEGACY_TMP_MAX_AGE)
+}
+
 fn collect_abandoned_tmp_dirs(root: &std::path::Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(root)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".creating-")
+        {
+            if entry_is_stale(&entry) {
+                let _ = std::fs::remove_dir_all(path);
+            }
             continue;
         }
         let lease_path = path.join(".lease");
@@ -104,13 +123,7 @@ fn collect_abandoned_tmp_dirs(root: &std::path::Path) -> std::io::Result<()> {
                 let _ = std::fs::remove_dir_all(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let stale = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age >= LEGACY_TMP_MAX_AGE);
-                if stale {
+                if entry_is_stale(&entry) {
                     let _ = std::fs::remove_dir_all(path);
                 }
             }
@@ -261,5 +274,15 @@ mod tests {
 
         drop(lease);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn startup_preserves_fresh_staging_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join(".creating-in-progress");
+        ensure_private_dir(&staging).unwrap();
+
+        collect_abandoned_tmp_dirs(root.path()).unwrap();
+        assert!(staging.exists());
     }
 }
