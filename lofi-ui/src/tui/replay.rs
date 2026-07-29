@@ -215,6 +215,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     name,
                     args,
                     result: None,
+                    collapsed: None,
                     is_error: false,
                     done: false,
                 });
