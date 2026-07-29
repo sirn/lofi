@@ -190,10 +190,7 @@ impl App {
     }
 
     fn component_memory_json(&self) -> serde_json::Value {
-        let history_bytes = self.history.lock().map_or(0, |messages| {
-            messages.capacity() * size_of::<Message>()
-                + messages.iter().map(message_heap_bytes).sum::<usize>()
-        });
+        let history_bytes = self.lifecycle.history_stats().estimated_retained_bytes;
         let turns_bytes = self.turns.capacity() * size_of::<Turn>()
             + self.turns.iter().map(turn_heap_bytes).sum::<usize>();
         let render_cache_bytes = self.frozen_render.order.capacity() * size_of::<usize>()
@@ -450,7 +447,7 @@ impl DebugState {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis());
-        let history_messages = app.history.lock().map_or(0, |messages| messages.len());
+        let history_messages = app.lifecycle.history_stats().messages;
         let transcript_bytes = app
             .session
             .cursor
@@ -553,43 +550,6 @@ fn option_delta(current: Option<u64>, previous: Option<u64>) -> Option<i128> {
 
 fn read_allocator_memory() -> AllocatorMemory {
     AllocatorMemory::default()
-}
-
-fn message_heap_bytes(message: &Message) -> usize {
-    message.blocks.capacity() * size_of::<ContentBlock>()
-        + message.blocks.iter().map(content_heap_bytes).sum::<usize>()
-}
-
-fn content_heap_bytes(block: &ContentBlock) -> usize {
-    match block {
-        ContentBlock::Text { text } => text.capacity(),
-        ContentBlock::ToolUse { id, name, input } => {
-            id.capacity() + name.capacity() + json_heap_bytes(input)
-        }
-        ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            ..
-        } => tool_use_id.capacity() + content.capacity(),
-        ContentBlock::Thinking { text, signature } => {
-            text.capacity() + signature.as_ref().map_or(0, String::capacity)
-        }
-    }
-}
-
-fn json_heap_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(value) => value.capacity(),
-        serde_json::Value::Array(values) => {
-            values.capacity() * size_of::<serde_json::Value>()
-                + values.iter().map(json_heap_bytes).sum::<usize>()
-        }
-        serde_json::Value::Object(values) => values
-            .iter()
-            .map(|(key, value)| key.capacity() + json_heap_bytes(value))
-            .sum(),
-        _ => 0,
-    }
 }
 
 fn turn_heap_bytes(turn: &Turn) -> usize {
