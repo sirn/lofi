@@ -29,99 +29,6 @@ pub(super) fn visible_index_path(
     Ok((0..index.len()).filter(|i| !hidden.contains(i)).collect())
 }
 
-pub(super) fn history_from_index(
-    cursor: &store::SessionCursor,
-    index: &[store::EventIndex],
-    edit: &lofi_types::EditConfig,
-) -> Result<Vec<Message>> {
-    let mut start = 0;
-    for (pos, event) in index.iter().enumerate().rev() {
-        if event.kind != store::IndexKind::Compaction {
-            continue;
-        }
-        let ev = cursor.event_at(event.offset)?;
-        if let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            ..
-        } = &ev.kind
-        {
-            start = if first_kept_entry_id.is_empty() {
-                pos
-            } else {
-                index[..pos]
-                    .iter()
-                    .position(|event| event.id.matches(first_kept_entry_id))
-                    .unwrap_or(pos)
-            };
-            break;
-        }
-    }
-    let offsets: Vec<u64> = index[start..]
-        .iter()
-        .rev()
-        .map(|event| event.offset)
-        .collect();
-    messages_from_cursor(cursor, &offsets, edit)
-}
-
-fn messages_from_cursor(
-    cursor: &store::SessionCursor,
-    leaf_first_offsets: &[u64],
-    _edit: &lofi_types::EditConfig,
-) -> Result<Vec<Message>> {
-    let mut out = Vec::new();
-    let mut skipping = false;
-    let mut summary_msg = None;
-    cursor.visit_events(leaf_first_offsets, |event| {
-        match event.kind {
-            SessionEventKind::Compaction { summary, .. } => {
-                if !summary.is_empty() {
-                    summary_msg = Some(Message {
-                        role: Role::User,
-                        blocks: vec![ContentBlock::Text { text: summary }],
-                    });
-                }
-            }
-            SessionEventKind::TurnFailed { .. } => skipping = true,
-            SessionEventKind::TurnEnd { .. } => skipping = false,
-            SessionEventKind::Message(message) if !skipping => out.push(message),
-            SessionEventKind::UserBash {
-                command,
-                output,
-                exit_code,
-                signal,
-                duration_ms,
-                truncated,
-                cancelled,
-                exclude_from_context: false,
-            } if !skipping => {
-                let result = lofi_core::UserBashResult::from_session(
-                    command,
-                    output,
-                    exit_code,
-                    signal,
-                    duration_ms,
-                    truncated,
-                    cancelled,
-                );
-                out.push(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text {
-                        text: result.context_text(),
-                    }],
-                });
-            }
-            _ => {}
-        }
-        Ok(())
-    })?;
-    out.reverse();
-    if let Some(summary) = summary_msg {
-        out.insert(0, summary);
-    }
-    Ok(out)
-}
-
 /// Restore the transcript as file-backed turn shells. Historical turns need
 /// only their prompt, offsets, and terminal accounting at startup; their full
 /// blocks are materialized from disk only when the viewport reaches them.
@@ -262,6 +169,6 @@ pub(super) fn restore_compaction_from_index(
     // Resume itself never compacts. Leave hysteresis unarmed so the first
     // newly completed model round is evaluated against the soft cap instead
     // of inheriting a missed pre-shutdown crossing forever.
-    app.prev_ctx_tokens = None;
+    app.lifecycle.reset_compaction_policy();
     app.status_usage = usage_after_compaction;
 }

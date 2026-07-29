@@ -37,7 +37,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -74,7 +74,7 @@ use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
 use crate::tui::view::HStack;
-use lofi_core::{compact, compacted_history, Agent, AgentEvent, CompactOptions};
+use lofi_core::{Agent, AgentEvent, AgentLifecycle, HardCompactOutcome};
 use lofi_error::{Error, Result};
 
 /// Retained model registry + config so `/model` can rebuild the agent
@@ -698,7 +698,7 @@ pub(crate) struct App {
     turn_event_offsets: Vec<Option<Vec<u64>>>,
     input: String,
     input_cursor: usize,
-    history: Arc<Mutex<Vec<Message>>>,
+    lifecycle: AgentLifecycle,
     history_nav: Vec<String>,
     history_idx: Option<usize>,
     input_stash: String,
@@ -713,13 +713,8 @@ pub(crate) struct App {
     turn_cost: f64,
     turn_has_round_usage: bool,
     ctx_limit: u64,
-    compaction: lofi_types::CompactionConfig,
-    /// Last observed context input-token count, for the auto-compaction
-    /// hysteresis: the trigger fires only on the upward crossing of the
-    /// threshold, not on every above-threshold turn. `None` until the
-    /// first round reports usage, and reset to `None` after a compaction
-    /// or a session rollback so the baseline re-evaluates cleanly.
-    prev_ctx_tokens: Option<u64>,
+    /// True when a settled round supplied usage that core policy has not
+    /// evaluated yet.
     settled_usage_fresh: bool,
     compacted: bool,
     /// Set by `ContextPressure` when the engine force-stopped the run at the
@@ -812,10 +807,7 @@ impl App {
         index: &[store::EventIndex],
         file_size: u64,
     ) -> Result<()> {
-        let messages = history_from_index(cursor, index, &self.compaction.edit)?;
-        if let Ok(mut history) = self.history.lock() {
-            *history = messages;
-        }
+        self.lifecycle.restore_history(cursor, index)?;
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
@@ -1126,26 +1118,21 @@ async fn run_loop(
                                     spawn_prompt(&mut app, agent.as_ref(), &mut current_run, prompt);
                                 }
                             } else if app.context_pressure {
-                                // Hard cap: force-compact + silent
-                                // continue, gated by the cooldown so a run
-                                // that re-crosses the hard cap too soon
-                                // after a compact errors out instead of
-                                // looping.
+                                // Core owns hard-cap eligibility and
+                                // compaction; the UI only presents its outcome.
                                 app.context_pressure = false;
-                                let cooled = app.messages_since_last_compact()
-                                    >= app.compaction.min_messages_between_hard_compacts;
-                                if !cooled {
-                                    app.notify(
+                                match app.hard_compact() {
+                                    HardCompactOutcome::Compacted(_) => {
+                                        spawn_continue(&mut app, agent.as_ref(), &mut current_run);
+                                    }
+                                    HardCompactOutcome::Cooldown => app.notify(
                                         NotifyKind::Warn,
-                                        "context exceeded the hard cap too soon after a compaction; cannot continue".to_string(),
-                                    );
-                                } else if !app.compact_now() {
-                                    app.notify(
+                                        "context exceeded the hard cap too soon after a compaction; cannot continue",
+                                    ),
+                                    HardCompactOutcome::NotEnoughHistory => app.notify(
                                         NotifyKind::Warn,
-                                        "could not compact at the hard cap; cannot continue".to_string(),
-                                    );
-                                } else {
-                                    spawn_continue(&mut app, agent.as_ref(), &mut current_run);
+                                        "could not compact at the hard cap; cannot continue",
+                                    ),
                                 }
                             } else {
                                 app.maybe_auto_compact();
