@@ -5,7 +5,7 @@ use super::truncate::{format_size, truncate_tail_with};
 /// through the per-session log named in the truncation notice.
 const BASH_MAX_LINES: usize = 20;
 const BASH_MAX_BYTES: usize = 4 * 1024;
-use super::util::{read_capped, PgrpKillGuard};
+use super::bash_util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
