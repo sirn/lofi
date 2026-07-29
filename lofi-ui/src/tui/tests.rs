@@ -57,13 +57,17 @@ fn test_append_compaction(
 
 #[test]
 fn compact_thresholds_use_the_models_actual_small_context_window() {
-    let mut a = app();
-    a.ctx_limit = 100_000;
-    a.compaction.auto.context_ratio = Some(0.5);
-    a.compaction.reserved_context_tokens = 20_000;
+    let mut config = lofi_types::CompactionConfig::default();
+    config.auto.context_ratio = Some(0.5);
+    config.reserved_context_tokens = 20_000;
+    let a = App::new(
+        "openai/gpt-4o".to_string(),
+        ThinkingLevel::Medium,
+        100_000,
+        config,
+    );
 
-    assert_eq!(a.compaction.soft_threshold(a.ctx_limit), Some(50_000));
-    assert_eq!(a.derive_compact_budget(), 25_000);
+    assert_eq!(a.lifecycle.compact_budget(), 25_000);
 }
 
 #[test]
@@ -2829,7 +2833,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // of historical response/tool bodies in the display turns.
     assert_eq!(a.turns.len(), 1);
     assert!(a.turns[0].blocks.is_empty());
-    assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    assert_eq!(a.lifecycle.history_stats().messages, 2); // user1 + assistant1
 
     // The final selected turn ends at its lineage event, not physical EOF.
     // Otherwise lazy materialization would read the rolled-back second turn
@@ -3065,7 +3069,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             .and_then(store::SessionCursor::leaf_id),
         Some(turn_end1_id)
     );
-    assert_eq!(a.history.lock().unwrap().len(), 2); // user1 + assistant1
+    assert_eq!(a.lifecycle.history_stats().messages, 2); // user1 + assistant1
     assert_eq!(a.turns.len(), 1);
 }
 
@@ -5980,15 +5984,20 @@ fn resumed_compaction_restores_summarized_message_count() {
 
     let resumed = store::SessionCursor::open(path.clone()).unwrap();
     let index = resumed.snapshot().unwrap().index;
-    let mut a = app();
-    a.compaction.auto.max_context_tokens = Some(100_000);
+    let mut config = lofi_types::CompactionConfig::default();
+    config.auto.max_context_tokens = Some(100_000);
+    let mut a = App::new(
+        "openai/gpt-4o".to_string(),
+        ThinkingLevel::Medium,
+        0,
+        config,
+    );
     a.session.cursor = Some(resumed.clone());
-    *a.history.lock().unwrap() = history_from_index(&resumed, &index, &a.compaction.edit).unwrap();
+    a.lifecycle.restore_history(&resumed, &index).unwrap();
     restore_compaction_from_index(&mut a, &resumed, &index);
 
-    assert_eq!(a.history.lock().unwrap().len(), 3);
+    assert_eq!(a.lifecycle.history_stats().messages, 3);
     assert_eq!(a.status_usage.unwrap().input_tokens, 113_000);
-    assert_eq!(a.prev_ctx_tokens, None);
     a.apply_event(AgentEvent::RoundUsage {
         cost: 0.0,
         usage: Usage {
@@ -6061,8 +6070,9 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
     let resumed_index = resumed.snapshot().unwrap().index;
     let mut a = app();
     a.session.cursor = Some(resumed.clone());
-    *a.history.lock().unwrap() =
-        history_from_index(&resumed, &resumed_index, &a.compaction.edit).unwrap();
+    a.lifecycle
+        .restore_history(&resumed, &resumed_index)
+        .unwrap();
 
     let root = branch_a[0].id.clone();
     let mut branch_b = [
@@ -6185,7 +6195,6 @@ fn resume_does_not_restore_usage_measured_before_latest_compaction() {
     restore_compaction_from_index(&mut a, &resumed, &index);
 
     assert_eq!(a.status_usage, None);
-    assert_eq!(a.prev_ctx_tokens, None);
     assert!(!a.settled_usage_fresh);
     assert!(a.compacted);
 }

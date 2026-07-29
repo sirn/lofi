@@ -15,7 +15,14 @@ impl App {
             turns: Vec::new(),
             input: String::new(),
             input_cursor: 0,
-            history: Arc::new(Mutex::new(Vec::new())),
+            lifecycle: AgentLifecycle::new(
+                compaction,
+                if ctx_limit > 0 {
+                    ctx_limit
+                } else {
+                    DEFAULT_CTX_LIMIT
+                },
+            ),
             history_nav: Vec::new(),
             history_idx: None,
             input_stash: String::new(),
@@ -28,8 +35,6 @@ impl App {
             } else {
                 DEFAULT_CTX_LIMIT
             },
-            compaction,
-            prev_ctx_tokens: None,
             settled_usage_fresh: false,
             compacted: false,
             context_pressure: false,
@@ -305,21 +310,9 @@ impl App {
 
     pub(super) fn reset_compaction_gauges(&mut self) {
         self.status_usage = None;
-        self.prev_ctx_tokens = None;
+        self.lifecycle.reset_compaction_policy();
         self.settled_usage_fresh = false;
         self.compacted = false;
-    }
-
-    /// Derive the kept-tail token budget for `plan_cut` from the compaction
-    /// thresholds. Prefers the soft threshold, falls back to the hard
-    /// threshold, and uses 50% of the threshold so the kept tail stays well
-    /// under the cap. Returns 0 when no threshold is configured (disables the
-    /// oversized-turn guard).
-    pub(super) fn derive_compact_budget(&self) -> usize {
-        self.compaction
-            .soft_threshold(self.ctx_limit)
-            .or_else(|| self.compaction.hard_threshold(self.ctx_limit))
-            .map_or(0, |t| (t / 2) as usize)
     }
 
     pub(super) fn bump_render_epoch(&mut self) {
@@ -670,277 +663,87 @@ impl App {
 }
 
 impl App {
-    /// Run an offline compaction over the current session and fold the older
-    /// history into a structured summary. Replaces the agent history with
-    /// the summary message followed by the kept tail, appends a Compaction
-    /// marker to the transcript (so a resumed session rebuilds the same
-    /// compacted history), and renders a marker block on the current turn.
-    /// Returns true when a compaction actually ran.
-    pub(super) fn compact_now(&mut self) -> bool {
-        let Some(events) = self.compaction_events() else {
-            self.notify(NotifyKind::Warn, "not enough history to compact yet");
-            return false;
+    fn render_compaction(&mut self, compaction: &lofi_core::Compaction) {
+        let event = AgentEvent::Compaction {
+            summarized: compaction.summarized_count,
+            kept: compaction.kept_count,
+            summary: compaction.summary.clone(),
         };
-        let budget = self.derive_compact_budget();
-        let opts = CompactOptions {
-            max_kept_tokens: budget,
-            edit: self.compaction.edit.clone(),
-            hooks: vec![std::sync::Arc::new(lofi_core::CodeCompactionHook)],
-        };
-        let Some(c) = compact(&events, &opts) else {
-            self.notify(NotifyKind::Warn, "not enough history to compact yet");
-            return false;
-        };
-        drop(events);
-        // Lock before persisting so every failure leaves both sources of truth
-        // unchanged: a poisoned history lock cannot strand a checkpoint that
-        // the running agent never adopted, and a failed write cannot compact
-        // memory while resume still reconstructs the old context. The store
-        // emits the kept tail and marker as one rollback-on-error batch.
-        let new_history = compacted_history(&c);
-        let Ok(mut history) = self.history.lock() else {
-            self.notify(NotifyKind::Error, "could not update compacted history");
-            return false;
-        };
-        if let Some(cursor) = &self.session.cursor {
-            let summarized_range = c.summarized_range.clone().unwrap_or_default();
-            match cursor.append_compaction(
-                &c.kept_messages,
-                &c.summary,
-                &summarized_range,
-                store::CompactionCounts {
-                    summarized: c.summarized_count,
-                    represented: c.represented_count,
-                    kept: c.kept_count,
-                },
-            ) {
-                Ok((_byte_start, _byte_end)) => {}
-                Err(error) => {
-                    drop(history);
-                    self.notify(
-                        NotifyKind::Error,
-                        format!("could not persist compaction: {error}"),
-                    );
-                    return false;
-                }
-            }
-        }
-        *history = new_history;
-        drop(history);
-        // Render the marker. Attach to the last turn when one exists; push a
-        // fresh turn otherwise (e.g. compaction invoked before any turn).
         if self.turns.is_empty() {
             self.push_turn(Turn {
                 prompt: String::new(),
-                blocks: vec![Block::Compaction {
-                    summarized: c.summarized_count,
-                    kept: c.kept_count,
-                    summary: c.summary.clone(),
-                }],
-            });
-        } else {
-            self.apply_event(AgentEvent::Compaction {
-                summarized: c.summarized_count,
-                kept: c.kept_count,
-                summary: c.summary.clone(),
+                blocks: Vec::new(),
             });
         }
-        // The context gauge's last reading reflects the pre-compaction fill;
-        // drop it so the auto-trigger does not re-fire on the same crossing
-        // and the gauge waits for the next round's real (smaller) usage.
-        self.reset_compaction_gauges();
-        self.compacted = true;
+        self.apply_event(event);
         self.bump_render_epoch();
         self.debug_sample("compaction");
-        true
     }
 
+    /// Request an immediate core-owned compaction and render its outcome.
+    pub(super) fn compact_now(&mut self) -> bool {
+        let cursor = self.session.cursor.clone();
+        match self.lifecycle.compact(cursor.as_ref()) {
+            Ok(Some(compaction)) => {
+                self.render_compaction(&compaction);
+                true
+            }
+            Ok(None) => {
+                self.notify(NotifyKind::Warn, "not enough history to compact yet");
+                false
+            }
+            Err(error) => {
+                self.notify(NotifyKind::Error, format!("could not compact: {error}"));
+                false
+            }
+        }
+    }
+
+    /// Request core-owned recall and render the read-only result.
     pub(super) fn recall_now(&mut self, line: &str) {
-        use lofi_core::recall::{recall, RecallRequest};
-
-        let raw = line.trim().strip_prefix("/recall").unwrap_or("").trim();
-        let (scope, rest) = parse_recall_args(raw);
-        let page = parse_recall_page(&rest);
-        let query_text = rest
-            .split_whitespace()
-            .filter(|t| !t.starts_with("page:"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let req = RecallRequest {
-            query: (!query_text.is_empty()).then_some(query_text),
-            scope,
-            page,
-            expand: Vec::new(),
-        };
-
-        let outcome = if let Some(cursor) = self.session.cursor.as_ref() {
-            lofi_core::recall::recall_cursor(cursor, &req)
-        } else {
-            let Some(events) = self.compaction_events() else {
-                self.notify(NotifyKind::Warn, "no session history yet");
-                return;
-            };
-            recall(&events, &req)
-        };
-        // Render inline as a read-only turn so the result lives in the log
-        // alongside the conversation; the prompt line echoes the invocation.
-        let prompt = format!(
-            "/recall{}{}",
-            if rest.is_empty() {
-                String::new()
-            } else {
-                " ".to_string()
-            },
-            rest
-        );
-        self.push_turn(Turn {
-            prompt,
-            blocks: vec![Block::Text(outcome.text)],
-        });
-        self.notify(NotifyKind::Info, outcome.status);
-        self.bump_render_epoch();
+        let cursor = self.session.cursor.as_ref();
+        match self.lifecycle.recall_line(cursor, line) {
+            Ok(Some(outcome)) => {
+                self.push_turn(Turn {
+                    prompt: line.trim().to_string(),
+                    blocks: vec![Block::Text(outcome.text)],
+                });
+                self.notify(NotifyKind::Info, outcome.status);
+                self.bump_render_epoch();
+            }
+            Ok(None) => self.notify(NotifyKind::Warn, "no session history yet"),
+            Err(error) => self.notify(NotifyKind::Error, format!("recall failed: {error}")),
+        }
     }
 
+    /// Let core evaluate soft-compaction policy; the UI only renders outcomes.
     pub(super) fn maybe_auto_compact(&mut self) {
-        if !std::mem::take(&mut self.settled_usage_fresh) || !self.compaction.auto.enable {
+        if !std::mem::take(&mut self.settled_usage_fresh) {
             return;
         }
         let Some(usage) = self.status_usage else {
             return;
         };
-        let Some(threshold) = self.compaction.soft_threshold(self.ctx_limit) else {
-            return;
-        };
-        let current = usage.input_tokens + usage.cache_read_tokens;
-        if current <= threshold {
-            self.prev_ctx_tokens = Some(current);
-            return;
+        let cursor = self.session.cursor.clone();
+        match self.lifecycle.auto_compact(usage, cursor.as_ref()) {
+            Ok(Some(compaction)) => self.render_compaction(&compaction),
+            Ok(None) => {}
+            Err(error) => self.notify(NotifyKind::Error, format!("could not compact: {error}")),
         }
-        if self
-            .prev_ctx_tokens
-            .is_some_and(|previous| previous > threshold)
-        {
-            return;
-        }
-
-        self.compact_now();
     }
 
-    /// Count assistant messages on the active path produced after the most
-    /// recent `Compaction` marker — i.e. new agent content since the last
-    /// compaction. Used by the hard-cap cooldown: a force-compact is only
-    /// allowed when at least `min_messages_between_hard_compacts` assistant
-    /// messages have elapsed since the last compact, otherwise the kept tail
-    /// alone is too big and compacting again cannot help (the run errors
-    /// out). Returns a large count when no compaction has happened yet.
-    pub(super) fn messages_since_last_compact(&self) -> usize {
-        let Some(events) = self.compaction_events() else {
-            return usize::MAX;
-        };
-        let path: Vec<usize> = (0..events.len()).collect();
-        let last_compaction = path
-            .iter()
-            .rev()
-            .find(|&&i| matches!(events[i].kind, SessionEventKind::Compaction { .. }))
-            .copied();
-        if last_compaction.is_none() {
-            return usize::MAX;
-        }
-        count_assistant_after_compaction(&path, &events, last_compaction)
-    }
-
-    /// Gather the active-path events for compaction: load the transcript
-    /// (so native tool records are available) when a session file exists,
-    /// otherwise synthesize a linear event log from the in-memory history.
-    /// Returns None when the history is empty.
-    fn compaction_events(&self) -> Option<Vec<SessionEvent>> {
-        if let Some(cursor) = self.session.cursor.as_ref() {
-            return cursor.load_compaction_events().ok();
-        }
-        let msgs = self.history.lock().ok()?;
-        if msgs.is_empty() {
-            return None;
-        }
-        let mut events = Vec::with_capacity(msgs.len());
-        for (i, m) in msgs.iter().enumerate() {
-            events.push(SessionEvent {
-                id: i.to_string(),
-                parent_id: if i == 0 {
-                    None
-                } else {
-                    Some((i - 1).to_string())
-                },
-                kind: SessionEventKind::Message(m.clone()),
-            });
-        }
-        Some(events)
-    }
-}
-
-/// Count assistant messages on the active path after the last compaction
-/// marker. Shared by the hard-cap cooldown paths so the counting logic lives
-/// in one place. Returns 0 when there is no compaction marker.
-fn count_assistant_after_compaction(
-    path: &[usize],
-    events: &[SessionEvent],
-    last_compaction_idx: Option<usize>,
-) -> usize {
-    let Some(ci) = last_compaction_idx else {
-        return 0;
-    };
-    let mut n = 0usize;
-    for &i in path {
-        if i == ci {
-            n = 0;
-            continue;
-        }
-        if i > ci {
-            if let SessionEventKind::Message(m) = &events[i].kind {
-                if m.role == Role::Assistant {
-                    n += 1;
-                }
+    pub(super) fn hard_compact(&mut self) -> HardCompactOutcome {
+        let cursor = self.session.cursor.clone();
+        match self.lifecycle.hard_compact(cursor.as_ref()) {
+            Ok(HardCompactOutcome::Compacted(compaction)) => {
+                self.render_compaction(&compaction);
+                HardCompactOutcome::Compacted(compaction)
+            }
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.notify(NotifyKind::Error, format!("could not compact: {error}"));
+                HardCompactOutcome::NotEnoughHistory
             }
         }
     }
-    n
-}
-
-fn parse_recall_args(raw: &str) -> (lofi_core::recall::RecallScope, String) {
-    use lofi_core::recall::{CompactionTarget, RecallScope};
-    let mut scope = RecallScope::default();
-    let mut cleaned = String::new();
-    for tok in raw.split_whitespace() {
-        if let Some(val) = tok.strip_prefix("scope:") {
-            let val = val.trim();
-            scope = match val {
-                "all" => RecallScope::All,
-                "lineage" => RecallScope::Lineage,
-                "latest" => RecallScope::Compaction(CompactionTarget::Latest),
-                other if other.starts_with("compaction:") => {
-                    let n = other.strip_prefix("compaction:").unwrap_or("");
-                    match n.parse::<usize>() {
-                        Ok(i) => RecallScope::Compaction(CompactionTarget::Index(i)),
-                        Err(_) => RecallScope::Lineage,
-                    }
-                }
-                _ => RecallScope::Lineage,
-            };
-        } else {
-            if !cleaned.is_empty() {
-                cleaned.push(' ');
-            }
-            cleaned.push_str(tok);
-        }
-    }
-    (scope, cleaned)
-}
-
-fn parse_recall_page(rest: &str) -> usize {
-    rest.split_whitespace()
-        .find_map(|t| {
-            t.strip_prefix("page:")
-                .and_then(|n| n.parse::<usize>().ok())
-        })
-        .unwrap_or(1)
-        .max(1)
 }
