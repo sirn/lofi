@@ -123,6 +123,7 @@ impl ModelSwitcher {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
+const RESIZE_DEBOUNCE_MS: u64 = 50;
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
@@ -909,10 +910,11 @@ async fn run_loop(
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
     let mut dirty = true;
+    let mut resize_deadline: Option<tokio::time::Instant> = None;
+    let mut resize_first_frame = false;
     loop {
-        if dirty {
+        if dirty && (resize_deadline.is_none() || std::mem::take(&mut resize_first_frame)) {
             guard.draw(&mut app)?;
             if let Some(event) = app.debug_after_draw.take() {
                 app.debug_sample(event);
@@ -1007,8 +1009,10 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
+                        defer_redraw = matches!(ev, Event::Resize(_, _));
                         handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
@@ -1035,6 +1039,33 @@ async fn run_loop(
                         break;
                     }
                 }
+                if defer_redraw {
+                    // Ratatui clears resized terminal regions before painting.
+                    // Paint the leading edge immediately, suppress intermediate
+                    // dimensions, then paint once more after the burst is quiet.
+                    if resize_deadline.is_none() {
+                        resize_first_frame = true;
+                        dirty = true;
+                    }
+                    resize_deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    );
+                } else {
+                    // Explicit user input should never wait behind resize UI
+                    // policy. Treat it as the end of the current resize burst.
+                    resize_deadline = None;
+                    resize_first_frame = false;
+                    dirty = true;
+                }
+            }
+            () = async {
+                match resize_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                resize_deadline = None;
                 dirty = true;
             }
             _ = tick.tick() => {
