@@ -15,6 +15,26 @@ pub(super) struct DebugState {
     latest_rss_bytes: Option<u64>,
     latest_heap_bytes: Option<u64>,
     previous_sample: Option<SampleTotals>,
+    slow_render_window: Option<Box<SlowRenderWindow>>,
+}
+
+const SLOW_RENDER_THRESHOLD_US: u128 = 5_000;
+const SLOW_RENDER_WINDOW: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct RenderTimingSample {
+    frame_width: u16,
+    frame_height: u16,
+    draw_us: u128,
+    render_us: u128,
+    profile: RenderProfile,
+}
+
+struct SlowRenderWindow {
+    started: Instant,
+    session_path: Option<PathBuf>,
+    suppressed: usize,
+    slowest: Option<RenderTimingSample>,
 }
 
 #[derive(Clone, Copy)]
@@ -127,6 +147,33 @@ impl App {
         }
     }
 
+    pub(super) fn debug_render_timing(
+        &mut self,
+        frame_width: u16,
+        frame_height: u16,
+        draw_us: u128,
+        render_us: u128,
+    ) {
+        let sample = RenderTimingSample {
+            frame_width,
+            frame_height,
+            draw_us,
+            render_us,
+            profile: *self.render_profile,
+        };
+        let session_path = self.session.path().map(Path::to_path_buf);
+        let Some(debug) = self.debug.as_mut() else {
+            return;
+        };
+        if let Err(error) = debug.record_render_timing(session_path.as_deref(), &sample) {
+            self.debug = None;
+            self.notify(
+                NotifyKind::Error,
+                format!("debug render logging stopped: {error}"),
+            );
+        }
+    }
+
     pub(crate) fn debug_memory_line(&self) -> Option<Line<'static>> {
         let debug = self.debug.as_ref()?;
         let components = self.component_memory_json();
@@ -159,6 +206,9 @@ impl App {
                         + lines.iter().map(render_line_heap_bytes).sum::<usize>()
                 })
                 .sum::<usize>();
+        let collapsed_turn_cache = self.collapsed_turns.borrow();
+        let collapsed_turn_cache_bytes = collapsed_turn_cache.retained_bytes
+            + collapsed_turn_cache.map.capacity() * (size_of::<usize>() + size_of::<Box<[u8]>>());
         let visible_log_bytes = self.log_vis.capacity() * size_of::<view::VisLine>()
             + self
                 .log_vis
@@ -187,6 +237,7 @@ impl App {
         let estimated_total = history_bytes
             + turns_bytes
             + render_cache_bytes
+            + collapsed_turn_cache_bytes
             + visible_log_bytes
             + input_bytes
             + index_bytes;
@@ -194,6 +245,8 @@ impl App {
             "history_bytes": history_bytes,
             "turns_bytes": turns_bytes,
             "render_cache_bytes": render_cache_bytes,
+            "collapsed_turn_cache_bytes": collapsed_turn_cache_bytes,
+            "collapsed_turn_cache_entries": collapsed_turn_cache.map.len(),
             "visible_log_bytes": visible_log_bytes,
             "input_and_queue_bytes": input_bytes,
             "indexes_bytes": index_bytes,
@@ -217,6 +270,7 @@ impl DebugState {
             latest_rss_bytes: None,
             latest_heap_bytes: None,
             previous_sample: None,
+            slow_render_window: None,
         })
     }
 
@@ -241,8 +295,139 @@ impl DebugState {
         Ok(())
     }
 
+    fn record_render_timing(
+        &mut self,
+        session_path: Option<&Path>,
+        sample: &RenderTimingSample,
+    ) -> std::io::Result<()> {
+        if sample.profile.width_changed {
+            self.flush_slow_render_window()?;
+            return self.write_render_timing(session_path, sample, "width_change", 1, 0);
+        }
+        if sample.draw_us < SLOW_RENDER_THRESHOLD_US {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let starts_window = self
+            .slow_render_window
+            .as_ref()
+            .is_none_or(|window| window.session_path.as_deref() != session_path);
+        if starts_window {
+            self.flush_slow_render_window()?;
+            self.slow_render_window = Some(Box::new(SlowRenderWindow {
+                started: now,
+                session_path: session_path.map(Path::to_path_buf),
+                suppressed: 0,
+                slowest: None,
+            }));
+            return self.write_render_timing(session_path, sample, "slow_frame", 1, 0);
+        }
+
+        let Some(window) = self.slow_render_window.as_mut() else {
+            return Ok(());
+        };
+        window.suppressed += 1;
+        if window
+            .slowest
+            .is_none_or(|slowest| sample.draw_us > slowest.draw_us)
+        {
+            window.slowest = Some(*sample);
+        }
+        if now.duration_since(window.started) >= SLOW_RENDER_WINDOW {
+            self.flush_slow_render_window()?;
+        }
+        Ok(())
+    }
+
+    fn flush_slow_render_window(&mut self) -> std::io::Result<()> {
+        let Some(window) = self.slow_render_window.take() else {
+            return Ok(());
+        };
+        let Some(slowest) = window.slowest else {
+            return Ok(());
+        };
+        self.write_render_timing(
+            window.session_path.as_deref(),
+            &slowest,
+            "slow_window",
+            window.suppressed,
+            window.started.elapsed().as_micros(),
+        )
+    }
+
+    fn write_render_timing(
+        &mut self,
+        session_path: Option<&Path>,
+        sample: &RenderTimingSample,
+        sampling_kind: &str,
+        eligible_frames: usize,
+        window_us: u128,
+    ) -> std::io::Result<()> {
+        self.ensure_file(session_path)?;
+        let RenderTimingSample {
+            frame_width,
+            frame_height,
+            draw_us,
+            render_us,
+            profile,
+        } = *sample;
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "timestamp_ms": timestamp_ms,
+            "elapsed_ms": self.started.elapsed().as_millis(),
+            "event": "render_timing",
+            "sampling": {
+                "kind": sampling_kind,
+                "eligible_frames": eligible_frames,
+                "window_us": window_us,
+            },
+            "frame": {
+                "width": frame_width,
+                "height": frame_height,
+                "draw_us": draw_us,
+                "render_callback_us": render_us,
+                "backend_us": draw_us.saturating_sub(render_us),
+            },
+            "resize": {
+                "events": profile.resize_events,
+                "batch_us": profile.resize_batch_us,
+                "quiet_us": profile.resize_quiet_us,
+            },
+            "log": {
+                "width": profile.width,
+                "height": profile.height,
+                "turns": profile.turns,
+                "frozen_turns": profile.frozen_turns,
+                "collapsed_cache_hits": profile.collapsed_cache_hits,
+                "collapsed_cache_misses": profile.collapsed_cache_misses,
+                "collapsed_cache_entries": profile.collapsed_cache_entries,
+                "collapsed_cache_bytes": profile.collapsed_cache_bytes,
+                "materialize_us": profile.materialize_us,
+                "width_changed": profile.width_changed,
+                "total_us": profile.log_total_us,
+                "ensure_frozen_us": profile.ensure_frozen_us,
+                "live_height_us": profile.live_height_us,
+                "viewport_cache_us": profile.viewport_cache_us,
+                "frozen_window_us": profile.frozen_window_us,
+                "live_window_us": profile.live_window_us,
+            },
+        });
+        serde_json::to_writer(&mut *file, &record)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn write_sample(&mut self, app: &App, event: &str) -> std::io::Result<()> {
+        self.flush_slow_render_window()?;
         self.ensure_file(app.session.path())?;
         let Some(file) = self.file.as_mut() else {
             return Ok(());
@@ -598,4 +783,80 @@ fn read_process_memory() -> std::io::Result<ProcessMemory> {
             .unwrap_or(0);
     }
     Ok(memory)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn debug_state(debug_dir: PathBuf) -> DebugState {
+        DebugState {
+            file: None,
+            path: None,
+            session_path: None,
+            debug_dir,
+            started: Instant::now(),
+            latest_rss_bytes: None,
+            latest_heap_bytes: None,
+            previous_sample: None,
+            slow_render_window: None,
+        }
+    }
+
+    fn timing(draw_us: u128, width_changed: bool) -> RenderTimingSample {
+        RenderTimingSample {
+            frame_width: 120,
+            frame_height: 40,
+            draw_us,
+            render_us: draw_us.saturating_sub(100),
+            profile: RenderProfile {
+                width_changed,
+                ..RenderProfile::default()
+            },
+        }
+    }
+
+    fn records(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn render_timing_aggregates_slow_frames_but_keeps_resize_immediate() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session.jsonl");
+        let log = dir.path().join("session.jsonl");
+        let mut debug = debug_state(dir.path().to_path_buf());
+
+        debug
+            .record_render_timing(Some(session.as_path()), &timing(6_000, false))
+            .unwrap();
+        debug
+            .record_render_timing(Some(session.as_path()), &timing(20_000, false))
+            .unwrap();
+        assert_eq!(records(&log).len(), 1);
+
+        debug.slow_render_window.as_mut().unwrap().started =
+            Instant::now().checked_sub(SLOW_RENDER_WINDOW).unwrap();
+        debug
+            .record_render_timing(Some(session.as_path()), &timing(10_000, false))
+            .unwrap();
+        let entries = records(&log);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["sampling"]["kind"], "slow_window");
+        assert_eq!(entries[1]["sampling"]["eligible_frames"], 2);
+        assert_eq!(entries[1]["frame"]["draw_us"], 20_000);
+
+        debug
+            .record_render_timing(Some(session.as_path()), &timing(1_000, true))
+            .unwrap();
+        let entries = records(&log);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[2]["sampling"]["kind"], "width_change");
+        assert_eq!(entries[2]["frame"]["draw_us"], 1_000);
+    }
 }
