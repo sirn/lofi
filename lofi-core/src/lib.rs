@@ -6,6 +6,7 @@ pub mod compact;
 pub mod config_loader;
 pub mod context_edit;
 pub mod models;
+mod lifecycle;
 pub mod recall;
 pub mod retry;
 pub mod session;
@@ -20,6 +21,7 @@ pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOF
 pub use lofi_code::compact_hook::CodeCompactionHook;
 pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};
+pub use lifecycle::{AgentLifecycle, HardCompactOutcome};
 pub use lofi_types::{CompactBlock, CompactionHook, SummarySection};
 pub use lofi_types::{Config, SessionEvent};
 pub use models::ModelRegistry;
