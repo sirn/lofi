@@ -127,6 +127,39 @@ impl App {
         }
     }
 
+    pub(super) fn debug_render_timing(
+        &mut self,
+        frame_width: u16,
+        frame_height: u16,
+        draw_us: u128,
+        render_us: u128,
+    ) {
+        let profile = self.render_profile;
+        // Width changes are always useful for resize diagnosis. For ordinary
+        // frames, retain only visibly slow draws to keep diagnostics compact.
+        if !profile.width_changed && draw_us < 5_000 {
+            return;
+        }
+        let session_path = self.session.path().map(Path::to_path_buf);
+        let Some(debug) = self.debug.as_mut() else {
+            return;
+        };
+        if let Err(error) = debug.write_render_timing(
+            session_path.as_deref(),
+            frame_width,
+            frame_height,
+            draw_us,
+            render_us,
+            profile,
+        ) {
+            self.debug = None;
+            self.notify(
+                NotifyKind::Error,
+                format!("debug render logging stopped: {error}"),
+            );
+        }
+    }
+
     pub(crate) fn debug_memory_line(&self) -> Option<Line<'static>> {
         let debug = self.debug.as_ref()?;
         let components = self.component_memory_json();
@@ -238,6 +271,60 @@ impl DebugState {
         self.file = Some(file);
         self.path = Some(path);
         self.session_path = session_path;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_render_timing(
+        &mut self,
+        session_path: Option<&Path>,
+        frame_width: u16,
+        frame_height: u16,
+        draw_us: u128,
+        render_us: u128,
+        profile: RenderProfile,
+    ) -> std::io::Result<()> {
+        self.ensure_file(session_path)?;
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "timestamp_ms": timestamp_ms,
+            "elapsed_ms": self.started.elapsed().as_millis(),
+            "event": "render_timing",
+            "frame": {
+                "width": frame_width,
+                "height": frame_height,
+                "draw_us": draw_us,
+                "render_callback_us": render_us,
+                "backend_us": draw_us.saturating_sub(render_us),
+            },
+            "resize": {
+                "events": profile.resize_events,
+                "batch_us": profile.resize_batch_us,
+                "quiet_us": profile.resize_quiet_us,
+            },
+            "log": {
+                "width": profile.width,
+                "height": profile.height,
+                "turns": profile.turns,
+                "frozen_turns": profile.frozen_turns,
+                "width_changed": profile.width_changed,
+                "total_us": profile.log_total_us,
+                "ensure_frozen_us": profile.ensure_frozen_us,
+                "live_height_us": profile.live_height_us,
+                "viewport_cache_us": profile.viewport_cache_us,
+                "frozen_window_us": profile.frozen_window_us,
+                "live_window_us": profile.live_window_us,
+            },
+        });
+        serde_json::to_writer(&mut *file, &record)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
         Ok(())
     }
 

@@ -123,6 +123,7 @@ impl ModelSwitcher {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
+const RESIZE_DEBOUNCE_MS: u64 = 50;
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
@@ -710,6 +711,7 @@ pub(crate) struct App {
     /// bump — otherwise background-padded lines keep the old (narrower)
     /// width after the terminal grows.
     frozen_width: usize,
+    render_profile: RenderProfile,
 }
 
 impl App {
@@ -748,15 +750,63 @@ struct RunHandle {
     user_bash: Option<(String, bool)>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RenderProfile {
+    resize_events: usize,
+    resize_batch_us: u128,
+    resize_quiet_us: u128,
+    width: usize,
+    height: usize,
+    turns: usize,
+    frozen_turns: usize,
+    width_changed: bool,
+    ensure_frozen_us: u128,
+    live_height_us: u128,
+    viewport_cache_us: u128,
+    frozen_window_us: u128,
+    live_window_us: u128,
+    log_total_us: u128,
+}
+
+#[derive(Debug, Default)]
+struct ResizeState {
+    deadline: Option<tokio::time::Instant>,
+    first_frame: bool,
+    started: Option<Instant>,
+    last: Option<Instant>,
+    events: usize,
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl TerminalGuard {
-    fn draw(&mut self, app: &mut App) -> Result<()> {
-        self.terminal
-            .draw(|f| view::render(f, app))
+    fn draw(
+        &mut self,
+        app: &mut App,
+        resize_events: usize,
+        resize_started: Option<Instant>,
+        resize_last: Option<Instant>,
+    ) -> Result<()> {
+        app.render_profile = RenderProfile {
+            resize_events,
+            resize_batch_us: resize_started.map_or(0, |at| at.elapsed().as_micros()),
+            resize_quiet_us: resize_last.map_or(0, |at| at.elapsed().as_micros()),
+            ..RenderProfile::default()
+        };
+        let draw_started = Instant::now();
+        let mut render_us = 0;
+        let frame = self
+            .terminal
+            .draw(|f| {
+                let render_started = Instant::now();
+                view::render(f, app);
+                render_us = render_started.elapsed().as_micros();
+            })
             .map_err(Error::Io)?;
+        let draw_us = draw_started.elapsed().as_micros();
+        app.debug_render_timing(frame.area.width, frame.area.height, draw_us, render_us);
         Ok(())
     }
 }
@@ -909,11 +959,16 @@ async fn run_loop(
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
     let mut dirty = true;
+    let mut resize = Box::<ResizeState>::default();
     loop {
-        if dirty {
-            guard.draw(&mut app)?;
+        if dirty && (resize.deadline.is_none() || std::mem::take(&mut resize.first_frame)) {
+            guard.draw(&mut app, resize.events, resize.started, resize.last)?;
+            if resize.deadline.is_none() {
+                resize.started = None;
+                resize.last = None;
+                resize.events = 0;
+            }
             if let Some(event) = app.debug_after_draw.take() {
                 app.debug_sample(event);
             }
@@ -1007,8 +1062,10 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
+                        defer_redraw = matches!(ev, Event::Resize(_, _));
                         handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
@@ -1035,6 +1092,38 @@ async fn run_loop(
                         break;
                     }
                 }
+                if defer_redraw {
+                    // Ratatui clears resized terminal regions before painting.
+                    // Paint the leading edge immediately, suppress intermediate
+                    // dimensions, then paint once more after the burst is quiet.
+                    let now = Instant::now();
+                    if resize.deadline.is_none() {
+                        resize.first_frame = true;
+                        resize.started = Some(now);
+                        resize.events = 0;
+                        dirty = true;
+                    }
+                    resize.events = resize.events.saturating_add(1);
+                    resize.last = Some(now);
+                    resize.deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    );
+                } else {
+                    // Explicit user input should never wait behind resize UI
+                    // policy. Treat it as the end of the current resize burst.
+                    resize.deadline = None;
+                    resize.first_frame = false;
+                    dirty = true;
+                }
+            }
+            () = async {
+                match resize.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                resize.deadline = None;
                 dirty = true;
             }
             _ = tick.tick() => {
