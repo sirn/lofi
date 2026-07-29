@@ -160,6 +160,7 @@ fn rich_header_suffix_for_read_and_bash() {
                         })
                         .to_string(),
                     ),
+                    preview: None,
                     is_error: false,
                     done: true,
                 },
@@ -177,6 +178,7 @@ fn rich_header_suffix_for_read_and_bash() {
                         })
                         .to_string(),
                     ),
+                    preview: None,
                     is_error: false,
                     done: true,
                 },
@@ -2858,6 +2860,12 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "world")));
+
+    let cached = a.materialize_turn(0);
+    assert!(Arc::ptr_eq(&materialized, &cached));
+    a.bump_render_epoch();
+    let after_layout_invalidation = a.materialize_turn(0);
+    assert!(Arc::ptr_eq(&cached, &after_layout_invalidation));
 }
 
 #[test]
@@ -6288,4 +6296,52 @@ fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
         asking.contains("Auto evaluation asks: command deletes a file"),
         "{asking}"
     );
+}
+
+#[test]
+#[ignore]
+fn real_session_collapsed_cache_probe() {
+    let path = std::path::PathBuf::from(std::env::var("LOFI_PROBE_SESSION").unwrap());
+    let cursor = store::SessionCursor::open(path.clone()).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+    let mut a = app();
+    replay_indexed_session(&mut a, &cursor, &snapshot.index, snapshot.file_size).unwrap();
+    a.session.cursor = Some(cursor);
+    let started = std::time::Instant::now();
+    a.ensure_frozen(110);
+    let first = started.elapsed();
+    let bytes = a.collapsed_turns.borrow().retained_bytes;
+    let entries = a.collapsed_turns.borrow().map.len();
+    let started = std::time::Instant::now();
+    a.ensure_frozen(100);
+    let second = started.elapsed();
+    let cache = a.collapsed_turns.borrow();
+    let mut preview_bytes = 0usize;
+    let mut preview_max = 0usize;
+    let mut preview_count = 0usize;
+    let mut args_bytes = 0usize;
+    let mut text_bytes = 0usize;
+    for turn in cache.map.values() {
+        text_bytes += turn.prompt.capacity();
+        for block in &turn.blocks {
+            match block {
+                Block::Text(text) | Block::Error(text) => text_bytes += text.capacity(),
+                Block::Thinking(thinking) => text_bytes += thinking.text.capacity(),
+                Block::Tool(tool) => {
+                    args_bytes += tool.input.capacity();
+                    for native in &tool.native {
+                        args_bytes += native.args.capacity();
+                        if let Some(preview) = &native.preview {
+                            let size = preview.lines.iter().map(String::capacity).sum::<usize>();
+                            preview_bytes += size;
+                            preview_max = preview_max.max(size);
+                            preview_count += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    eprintln!("probe cache_bytes={bytes} entries={entries} first={first:?} second={second:?} preview_bytes={preview_bytes} preview_max={preview_max} preview_count={preview_count} args_bytes={args_bytes} text_bytes={text_bytes}");
 }
