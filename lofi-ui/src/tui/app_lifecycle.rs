@@ -80,6 +80,7 @@ impl App {
             sel: None,
             mode: Mode::Input,
             pending_confirms: Vec::new(),
+            deferred_confirms: Vec::new(),
             confirm_selected: 0,
             confirm_scroll: 0,
             confirm_total: 0,

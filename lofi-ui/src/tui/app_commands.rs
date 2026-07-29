@@ -792,6 +792,64 @@ impl App {
         }
     }
 
+    pub(super) fn queue_confirmation(&mut self, req: lofi_core::ConfirmRequest) {
+        if Self::confirmation_ready(&req) {
+            self.pending_confirms.push(req);
+        } else {
+            self.deferred_confirms.push(req);
+        }
+    }
+
+    /// Retire completed requests and promote auto-mode evaluations once they
+    /// need user attention. The grace period is a presentation policy: core
+    /// and tool layers emit the evaluating request immediately.
+    pub(super) fn refresh_confirmations(&mut self) -> bool {
+        let old_front = self.pending_confirms.first().map(|req| req.id);
+        let old_pending = self.pending_confirms.len();
+        let old_deferred = self.deferred_confirms.len();
+
+        self.pending_confirms
+            .retain(|req| req.active.load(std::sync::atomic::Ordering::Relaxed));
+
+        let mut waiting = Vec::with_capacity(self.deferred_confirms.len());
+        for req in self.deferred_confirms.drain(..) {
+            if !req.active.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            if Self::confirmation_ready(&req) {
+                self.pending_confirms.push(req);
+            } else {
+                waiting.push(req);
+            }
+        }
+        self.deferred_confirms = waiting;
+
+        let new_front = self.pending_confirms.first().map(|req| req.id);
+        if old_front != new_front {
+            self.confirm_selected = 0;
+            self.confirm_scroll = 0;
+            self.confirm_total = 0;
+            self.confirm_view_h = 0;
+        }
+
+        old_pending != self.pending_confirms.len()
+            || old_deferred != self.deferred_confirms.len()
+            || old_front != new_front
+    }
+
+    fn confirmation_ready(req: &lofi_core::ConfirmRequest) -> bool {
+        match *req
+            .reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            lofi_core::ConfirmReason::AutoEvaluating { started_at } => {
+                started_at.elapsed() >= AUTO_MODE_UI_GRACE
+            }
+            _ => true,
+        }
+    }
+
     /// Whether a centered modal is open. The inline slash-complete popover is
     /// excluded because input remains active beneath it.
     pub(super) fn modal_open(&self) -> bool {

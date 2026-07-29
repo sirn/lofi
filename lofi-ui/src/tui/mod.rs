@@ -123,6 +123,7 @@ impl ModelSwitcher {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS: u64 = 60;
+const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
 const MAX_INPUT_LINES: usize = 8;
@@ -673,6 +674,7 @@ pub(crate) struct App {
     sel: Option<Selection>,
     mode: Mode,
     pending_confirms: Vec<lofi_core::ConfirmRequest>,
+    deferred_confirms: Vec<lofi_core::ConfirmRequest>,
     confirm_selected: usize,
     confirm_scroll: usize,
     confirm_total: usize,
@@ -1036,17 +1038,7 @@ async fn run_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
-                let before = app.pending_confirms.len();
-                app.pending_confirms.retain(|req| {
-                    req.active.load(std::sync::atomic::Ordering::Relaxed)
-                });
-                if app.pending_confirms.len() != before {
-                    app.confirm_selected = 0;
-                    app.confirm_scroll = 0;
-                    app.confirm_total = 0;
-                    app.confirm_view_h = 0;
-                    dirty = true;
-                } else if !app.pending_confirms.is_empty() {
+                if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
                 if app.run.is_some() {
@@ -1086,13 +1078,7 @@ async fn run_loop(
             req = confirm_rx.recv() => {
                 if let Some(req) = req {
                     if req.active.load(std::sync::atomic::Ordering::Relaxed) {
-                        if app.pending_confirms.is_empty() {
-                            app.confirm_selected = 0;
-                            app.confirm_scroll = 0;
-                            app.confirm_total = 0;
-                            app.confirm_view_h = 0;
-                        }
-                        app.pending_confirms.push(req);
+                        app.queue_confirmation(req);
                         dirty = true;
                     }
                 }

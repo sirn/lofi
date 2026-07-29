@@ -5,7 +5,6 @@ use super::truncate::{format_size, truncate_tail_with};
 /// through the per-session log named in the truncation notice.
 const BASH_MAX_LINES: usize = 20;
 const BASH_MAX_BYTES: usize = 4 * 1024;
-const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 use super::util::{read_capped, PgrpKillGuard};
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -23,12 +22,9 @@ impl BuiltinTools {
     /// truncated, the full captured output is written to a temp file under
     /// the session tmp dir and its absolute path is included in the notice
     /// so the model can `lofi.read` it in pages (the tmp dir is a read root).
-    /// Decision flow for `Ask`:
-    /// 1. Auto-mode gets a three-second head start with no UI.
-    /// 2. If it is still running, show a live confirmation dialog and race
-    ///    the evaluator against the user's override.
-    /// 3. An auto-mode `ask` or failure leaves the dialog open with its
-    ///    reason. An `allow` dismisses it and proceeds.
+    /// Auto-mode emits an evaluating confirmation request immediately and
+    /// races its decision against a manual response. Presentation and timing
+    /// policy belong to consumers of that event.
     async fn check_policy(&self, cmd: &str) -> Option<Value> {
         let decision = self.shell_policy.evaluate(cmd);
         let suffix = decision
@@ -49,8 +45,7 @@ impl BuiltinTools {
             })),
             lofi_types::PolicyAction::Ask => {
                 let approved = if let Some(auto_mode) = &self.auto_mode {
-                    self.auto_mode_decision_after(cmd, auto_mode, AUTO_MODE_UI_GRACE)
-                        .await
+                    self.auto_mode_decision(cmd, auto_mode).await
                 } else {
                     self.confirm_decision(cmd, crate::ConfirmReason::Policy)
                         .await
@@ -73,37 +68,26 @@ impl BuiltinTools {
         }
     }
 
-    async fn auto_mode_decision_after(
-        &self,
-        cmd: &str,
-        auto_mode: &crate::AutoModeFn,
-        ui_grace: Duration,
-    ) -> bool {
-        let started_at = Instant::now();
+    async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> bool {
         let mut evaluation = auto_mode(cmd.to_string());
-        match tokio::time::timeout(ui_grace, &mut evaluation).await {
-            Ok(outcome) => return self.finish_auto_mode(cmd, outcome).await,
-            Err(_) if self.confirm.is_none() => {
-                return matches!(evaluation.await, crate::AutoModeOutcome::Allow { .. });
-            }
-            Err(_) => {}
-        }
+        let Some(confirm) = &self.confirm else {
+            return matches!(evaluation.await, crate::AutoModeOutcome::Allow { .. });
+        };
 
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let reason = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::ConfirmReason::AutoEvaluating { started_at },
+            crate::ConfirmReason::AutoEvaluating {
+                started_at: Instant::now(),
+            },
         ));
-        let prompt = crate::ConfirmPrompt {
+        let mut response = confirm(crate::ConfirmPrompt {
             command: cmd.to_string(),
             reason: reason.clone(),
             active: active.clone(),
-        };
-        let Some(confirm) = &self.confirm else {
-            return false;
-        };
-        let mut response = confirm(prompt);
+        });
 
         tokio::select! {
+            biased;
             outcome = &mut evaluation => {
                 match outcome {
                     crate::AutoModeOutcome::Allow { .. } => {
@@ -129,20 +113,6 @@ impl BuiltinTools {
             approved = &mut response => {
                 active.store(false, std::sync::atomic::Ordering::Relaxed);
                 approved
-            }
-        }
-    }
-
-    async fn finish_auto_mode(&self, cmd: &str, outcome: crate::AutoModeOutcome) -> bool {
-        match outcome {
-            crate::AutoModeOutcome::Allow { .. } => true,
-            crate::AutoModeOutcome::Ask { reason } => {
-                self.confirm_decision(cmd, crate::ConfirmReason::AutoAsk { reason })
-                    .await
-            }
-            crate::AutoModeOutcome::Failed { reason } => {
-                self.confirm_decision(cmd, crate::ConfirmReason::AutoFailed { reason })
-                    .await
             }
         }
     }
@@ -384,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fast_auto_approval_does_not_open_confirmation() {
+    async fn fast_auto_approval_retires_confirmation_event() {
         let confirmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let confirm: crate::ConfirmFn = {
             let confirmed = confirmed.clone();
@@ -402,12 +372,8 @@ mod tests {
         });
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(
-            tools
-                .auto_mode_decision_after("echo ok", &auto, Duration::from_secs(1))
-                .await
-        );
-        assert!(!confirmed.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(tools.auto_mode_decision("echo ok", &auto).await);
+        assert!(confirmed.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -430,11 +396,7 @@ mod tests {
         let auto: crate::AutoModeFn = Arc::new(|_| Box::pin(future::pending()));
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(
-            tools
-                .auto_mode_decision_after("echo ok", &auto, Duration::from_millis(1))
-                .await
-        );
+        assert!(tools.auto_mode_decision("echo ok", &auto).await);
         assert!(seen.load(std::sync::atomic::Ordering::Relaxed));
     }
 
@@ -471,11 +433,7 @@ mod tests {
         });
         let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
 
-        assert!(
-            !tools
-                .auto_mode_decision_after("cp x /tmp/x", &auto, Duration::from_millis(1))
-                .await
-        );
+        assert!(!tools.auto_mode_decision("cp x /tmp/x", &auto).await);
         assert_eq!(
             *seen
                 .lock()

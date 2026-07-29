@@ -2319,6 +2319,51 @@ fn confirm_request(
 }
 
 #[test]
+fn auto_evaluation_is_deferred_until_the_ui_grace_expires() {
+    let mut a = app();
+    let (mut req, _response) = confirm_request("rm generated.txt");
+    req.reason = std::sync::Arc::new(std::sync::Mutex::new(
+        lofi_core::ConfirmReason::AutoEvaluating {
+            started_at: std::time::Instant::now(),
+        },
+    ));
+    let reason = req.reason.clone();
+
+    a.queue_confirmation(req);
+    assert!(a.pending_confirms.is_empty());
+    assert_eq!(a.deferred_confirms.len(), 1);
+    assert!(!a.modal_open());
+
+    *reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = lofi_core::ConfirmReason::AutoAsk {
+        reason: "command deletes a file".to_string(),
+    };
+    assert!(a.refresh_confirmations());
+    assert_eq!(a.pending_confirms.len(), 1);
+    assert!(a.deferred_confirms.is_empty());
+    assert!(a.modal_open());
+}
+
+#[test]
+fn elapsed_auto_evaluation_is_shown_by_the_ui() {
+    let mut a = app();
+    let (mut req, _response) = confirm_request("rm generated.txt");
+    req.reason = std::sync::Arc::new(std::sync::Mutex::new(
+        lofi_core::ConfirmReason::AutoEvaluating {
+            started_at: std::time::Instant::now()
+                .checked_sub(AUTO_MODE_UI_GRACE)
+                .unwrap(),
+        },
+    ));
+
+    a.queue_confirmation(req);
+
+    assert_eq!(a.pending_confirms.len(), 1);
+    assert!(a.deferred_confirms.is_empty());
+}
+
+#[test]
 fn permission_dialog_requires_an_explicit_choice() {
     let mut a = app();
     let (req, mut response) = confirm_request("rm -rf build");
