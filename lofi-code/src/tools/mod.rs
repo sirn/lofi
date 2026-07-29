@@ -7,20 +7,21 @@ use serde_json::Value;
 use crate::ToolEvent;
 use lofi_error::{Error, Result};
 pub mod bash;
+mod bash_env;
 pub mod edit;
-pub mod env;
 pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
 
+mod bash_util;
 mod fs;
 pub mod skills;
 pub mod truncate;
-pub mod util;
 pub mod write;
 
-pub use env::BashEnv;
+pub use bash_env::BashEnv;
+pub use bash_util::{read_capped, PgrpKillGuard};
 use fs::{
     atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
     reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
@@ -28,7 +29,6 @@ use fs::{
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
 };
-pub use util::{read_capped, PgrpKillGuard};
 
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 
