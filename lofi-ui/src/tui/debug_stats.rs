@@ -820,3 +820,4 @@ mod tests {
         assert_eq!(entries[2]["frame"]["draw_us"], 1_000);
     }
 }
+
