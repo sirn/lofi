@@ -183,6 +183,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let w = content.width as usize;
     let height = content.height as usize;
     let width_changed = app.frozen_width != w;
+    let log_started = std::time::Instant::now();
+    app.render_profile.width = w;
+    app.render_profile.height = height;
+    app.render_profile.turns = app.turns.len();
+    app.render_profile.width_changed = width_changed;
     let view_changed = width_changed || app.log_view_h != height;
     let nav_anchor = if width_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
         app.nav_content_anchor()
@@ -209,13 +214,17 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         None
     };
+    let phase_started = std::time::Instant::now();
     app.ensure_frozen(w);
+    app.render_profile.ensure_frozen_us = phase_started.elapsed().as_micros();
+    app.render_profile.frozen_turns = app.frozen_heights.len();
     let theme = app.theme;
     let n_turns = app.turns.len();
     let frozen_turns = app.frozen_heights.len();
     let has_live_turn = frozen_turns < n_turns;
     let running = app.run_active();
 
+    let phase_started = std::time::Instant::now();
     let last_h = if has_live_turn {
         let cx = component::Cx {
             app,
@@ -227,6 +236,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         0
     };
+    app.render_profile.live_height_us = phase_started.elapsed().as_micros();
 
     let frozen_total: usize = app.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
@@ -307,7 +317,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    let phase_started = std::time::Instant::now();
     app.sync_frozen_cache_for_viewport(off, height, w);
+    app.render_profile.viewport_cache_us = phase_started.elapsed().as_micros();
 
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
@@ -349,7 +361,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         let start = off.saturating_sub(turn_start);
                         let stop = start.saturating_add(want).min(h);
+                        let phase_started = std::time::Instant::now();
                         let lines = app.frozen_turn_window(i, w, start..stop);
+                        app.render_profile.frozen_window_us += phase_started.elapsed().as_micros();
                         pos = turn_start + start;
                         feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
                     }
@@ -367,8 +381,10 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         width: w,
                         active_turn: running,
                     };
+                    let phase_started = std::time::Instant::now();
                     let lines =
                         blocks::render_turn_window(&cx, &app.turns[n_turns - 1], start..stop);
+                    app.render_profile.live_window_us += phase_started.elapsed().as_micros();
                     pos = turn_start + start;
                     feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
                 }
@@ -379,6 +395,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     app.log_vis = visv;
+    app.render_profile.log_total_us = log_started.elapsed().as_micros();
 
     if let Some(sel) = &app.sel {
         let (sl, sc) = sel.start;

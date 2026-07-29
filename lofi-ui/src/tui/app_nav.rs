@@ -648,6 +648,7 @@ impl App {
 
     pub(super) fn clear_log(&mut self) {
         self.turns.clear();
+        self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
         self.pinned = true;

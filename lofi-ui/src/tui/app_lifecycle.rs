@@ -95,6 +95,7 @@ impl App {
             last_turn_height: 0,
             log_view_h: 0,
             frozen_render: FrozenCache::new(),
+            collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
             frozen_heights: Vec::new(),
             frozen_heights_other_mode: Vec::new(),
             turn_byte_ranges: Vec::new(),
@@ -102,6 +103,7 @@ impl App {
             render_epoch: 0,
             frozen_epoch: 0,
             frozen_width: 0,
+            render_profile: Box::default(),
         }
     }
 
@@ -401,6 +403,7 @@ impl App {
     }
 
     pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {
+        self.collapsed_turns.get_mut().clear();
         self.turns.insert(idx, turn);
         self.turn_byte_ranges.insert(idx, None);
         self.turn_event_offsets.insert(idx, None);
@@ -410,10 +413,16 @@ impl App {
     /// in memory (ephemeral session, or not yet frozen), clone them. Otherwise
     /// re-parse the turn's byte range from the transcript file. On any read or
     /// parse failure the turn's prompt is preserved with empty blocks.
-    pub(super) fn materialize_turn(&self, idx: usize) -> Turn {
+    pub(super) fn materialize_turn(&self, idx: usize) -> Arc<Turn> {
         if let Some(turn) = self.turns.get(idx) {
             if !turn.blocks.is_empty() {
-                return turn.clone();
+                return Arc::new(turn.clone());
+            }
+        }
+        let materialize_started = Instant::now();
+        if !self.verbose {
+            if let Some(turn) = self.collapsed_turns.borrow_mut().get(idx) {
+                return turn;
             }
         }
         let prompt = self
@@ -426,7 +435,7 @@ impl App {
             blocks: Vec::new(),
         };
         let Some(cursor) = self.session.cursor.as_ref() else {
-            return empty;
+            return Arc::new(empty);
         };
         let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
         let mut events = if let Some(offsets) = selected_offsets {
@@ -437,15 +446,15 @@ impl App {
             };
             match loaded {
                 Ok(events) => events,
-                Err(_) => return empty,
+                Err(_) => return Arc::new(empty),
             }
         } else {
             let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
-                return empty;
+                return Arc::new(empty);
             };
             match cursor.events_in_range(start, end) {
                 Ok(events) => events,
-                Err(_) => return empty,
+                Err(_) => return Arc::new(empty),
             }
         };
         let mut exec_ids = std::collections::HashSet::new();
@@ -487,7 +496,13 @@ impl App {
         } else {
             turns_from_session_events(&events)
         };
-        turns.into_iter().next().unwrap_or(empty)
+        let turn = Arc::new(turns.into_iter().next().unwrap_or(empty));
+        if !self.verbose {
+            let mut cache = self.collapsed_turns.borrow_mut();
+            cache.insert(idx, turn.clone());
+            cache.finish_materialize(materialize_started.elapsed().as_micros());
+        }
+        turn
     }
 
     pub(super) fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
