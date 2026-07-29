@@ -820,3 +820,19 @@ mod tests {
         assert_eq!(entries[2]["frame"]["draw_us"], 1_000);
     }
 }
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn inspect_fixed_real_resume_retention() {
+    use ratatui::backend::TestBackend;
+    let path = PathBuf::from(std::env::var("HOME").unwrap()).join(
+        ".local/state/lofi/sessions/home-sirn-Dev-src-git.sr.ht-~sirn-lofi/1784908657580_c5b95bfc2ac444df8ab071d0c81eaf4f.jsonl",
+    );
+    let (cursor, snapshot) = store::SessionCursor::open_snapshot(path).unwrap();
+    let before = read_process_memory();
+    let mut app = App::new(
+        "plexus/gpt-5.6-sol".to_string(),
+        ThinkingLevel::High,
+        200_000,
+        lofi_types::CompactionConfig::default(),
