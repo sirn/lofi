@@ -820,3 +820,34 @@ mod tests {
         assert_eq!(entries[2]["frame"]["draw_us"], 1_000);
     }
 }
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn inspect_real_resume_turn_retention() {
+    let path = PathBuf::from(std::env::var("HOME").unwrap()).join(
+        ".local/state/lofi/sessions/home-sirn-Dev-src-git.sr.ht-~sirn-lofi/1784908657580_c5b95bfc2ac444df8ab071d0c81eaf4f.jsonl",
+    );
+    let cursor = store::SessionCursor::open(path).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+    let mut app = App::new(
+        "plexus/gpt-5.6-sol".to_string(),
+        ThinkingLevel::High,
+        200_000,
+        lofi_types::CompactionConfig::default(),
+    );
+    app.session.cursor = Some(cursor.clone());
+    app.restore_indexed_session(&cursor, &snapshot.index, snapshot.file_size)
+        .unwrap();
+    let mut turns: Vec<_> = app
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(i, turn)| (turn_heap_bytes(turn), i, turn.blocks.len(), turn.prompt.len()))
+        .collect();
+    turns.sort_unstable_by(|a, b| b.cmp(a));
+    eprintln!("components={} history={:?}", app.component_memory_json(), app.lifecycle.history_stats());
+    for turn in turns.into_iter().take(15) {
+        eprintln!("turn={turn:?}");
+    }
+}
