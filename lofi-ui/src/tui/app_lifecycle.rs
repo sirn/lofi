@@ -102,6 +102,7 @@ impl App {
             render_epoch: 0,
             frozen_epoch: 0,
             frozen_width: 0,
+            render_profile: Box::default(),
         }
     }
 
