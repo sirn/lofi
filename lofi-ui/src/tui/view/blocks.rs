@@ -11,7 +11,7 @@ use crate::tui::theme::{active_indicator, agent_indicator, user_indicator, Theme
 use crate::tui::{App, Block, NativePreview, NativeTool, ThinkingBlock, ToolCall, Turn};
 
 use super::component::{Component, Cx, Stack};
-use super::prim::{self, RawLine, RenderLine};
+use super::prim::{self, Hyperlink, RawLine, RenderLine};
 
 const PREVIEW_LINES: usize = 3;
 
@@ -366,6 +366,7 @@ fn render_markdown_body(
                         line: Line::from(all),
                         content: (deco_len, deco_len + content_len),
                         raw: Some(RawLine::new(src, map, true)),
+                        links: Vec::new(),
                     });
                     row += 1;
                     continue;
@@ -396,18 +397,34 @@ fn render_markdown_body(
                 .take_while(|c| *c == ' ' || *c == '\t')
                 .count();
             let full_map = build_content_map(raw.len(), &mapped);
+            let links = mapped_hyperlinks(&mapped);
             let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
             let line = Line::from(spans);
             let src: Arc<str> = Arc::from(raw);
             let rows = prim::wrap_line_styled(&line, content_w);
             let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
+            let row_links = split_links_by_rows(&links, &rows);
             for (i, wrapped) in rows.into_iter().enumerate() {
+                let lead = lead_fn(row);
+                let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+                let links = row_links.get(i).map_or_else(Vec::new, |links| {
+                    links
+                        .iter()
+                        .map(|link| Hyperlink {
+                            start: deco_len + link.start,
+                            end: deco_len + link.end,
+                            url: link.url.clone(),
+                        })
+                        .collect()
+                });
                 out.push(
-                    prim::rline(lead_fn(row), wrapped.spans).with_raw(RawLine::new(
-                        src.clone(),
-                        row_maps.get(i).cloned().unwrap_or_default(),
-                        i == 0,
-                    )),
+                    prim::rline(lead, wrapped.spans)
+                        .with_raw(RawLine::new(
+                            src.clone(),
+                            row_maps.get(i).cloned().unwrap_or_default(),
+                            i == 0,
+                        ))
+                        .with_links(links),
                 );
                 row += 1;
             }
@@ -418,10 +435,18 @@ fn render_markdown_body(
 }
 
 fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
-    inline_spans_mapped(line, t, base)
-        .into_iter()
-        .map(|m| m.span)
-        .collect()
+    inline_spans_and_links(line, t, base).0
+}
+
+fn inline_spans_and_links(
+    line: &str,
+    t: Theme,
+    base: Style,
+) -> (Vec<Span<'static>>, Vec<Hyperlink>) {
+    let mapped = inline_spans_mapped(line, t, base);
+    let links = mapped_hyperlinks(&mapped);
+    let spans = mapped.into_iter().map(|mapped| mapped.span).collect();
+    (spans, links)
 }
 
 /// A styled span paired with the byte offsets it occupies in the source
@@ -435,6 +460,7 @@ struct MappedSpan {
     span: Span<'static>,
     content_start: usize,
     boundary_start: usize,
+    link: Option<Arc<str>>,
 }
 
 fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
@@ -456,6 +482,7 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
                 span: Span::styled(padded, code_style),
                 content_start: pos + start + 1,
                 boundary_start: pos + start,
+                link: None,
             });
             pos += start + 1 + end + 1;
             rest = &after[end + 1..];
@@ -478,6 +505,25 @@ fn parse_markers_mapped(
     style: Style,
     pending_open: Option<usize>,
 ) -> Vec<MappedSpan> {
+    if let Some((open, label, url, close)) = find_markdown_link(text) {
+        let before = &text[..open];
+        let after = &text[close..];
+        let mut out = parse_markers_mapped(before, base, style, pending_open);
+        let link: Arc<str> = url;
+        let mut label_spans = parse_markers_mapped(
+            label,
+            base + open + 1,
+            style.add_modifier(Modifier::UNDERLINED),
+            Some(base + open),
+        );
+        for span in &mut label_spans {
+            span.link = Some(link.clone());
+        }
+        out.extend(label_spans);
+        out.extend(parse_markers_mapped(after, base + close, style, None));
+        return out;
+    }
+
     for (marker, modifier, check) in [
         ("**", Modifier::BOLD, false),
         ("__", Modifier::BOLD, true),
@@ -523,6 +569,7 @@ fn parse_markers_mapped(
             span: Span::styled(text.to_string(), style),
             content_start: base,
             boundary_start: pending_open.unwrap_or(base),
+            link: None,
         }]
     }
 }
@@ -533,6 +580,7 @@ fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
             span: Span::raw(String::new()),
             content_start: 0,
             boundary_start: 0,
+            link: None,
         });
     }
     spans
@@ -790,39 +838,61 @@ fn table_row(
     start_row: usize,
     lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
 ) -> Vec<RenderLine> {
-    let wrapped: Vec<Vec<Line<'static>>> = col_w
+    let wrapped: Vec<(Vec<Line<'static>>, Vec<Vec<Hyperlink>>)> = col_w
         .iter()
         .enumerate()
         .map(|(i, &w)| {
             let cell = cells.get(i).map_or("", String::as_str);
-            let line = Line::from(inline_spans(cell, t, style));
-            prim::wrap_line_styled(&line, w)
+            let (spans, links) = inline_spans_and_links(cell, t, style);
+            let rows = prim::wrap_line_styled(&Line::from(spans), w);
+            let links = split_links_by_rows(&links, &rows);
+            (rows, links)
         })
         .collect();
-    let max_lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let max_lines = wrapped
+        .iter()
+        .map(|(rows, _)| rows.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let mut out = Vec::with_capacity(max_lines);
     for line_idx in 0..max_lines {
+        let lead = lead_fn(start_row + line_idx);
+        let mut offset: usize = lead.iter().map(|span| span.content.chars().count()).sum();
         let mut spans = vec![Span::styled("│", border)];
+        let mut links = Vec::new();
+        offset += 1;
         for (i, &w) in col_w.iter().enumerate() {
             let cell_spans = wrapped[i]
+                .0
                 .get(line_idx)
-                .map_or(Vec::new(), |l| l.spans.clone());
-            let aligned = align_spans(
-                cell_spans,
-                w,
-                aligns.get(i).copied().unwrap_or(Align::Left),
-                style,
-            );
+                .map_or(Vec::new(), |line| line.spans.clone());
+            let cell_width: usize = cell_spans
+                .iter()
+                .map(|span| prim::width(&span.content))
+                .sum();
+            let align = aligns.get(i).copied().unwrap_or(Align::Left);
+            let left_pad = match align {
+                Align::Left => 0,
+                Align::Right => w.saturating_sub(cell_width),
+                Align::Center => w.saturating_sub(cell_width) / 2,
+            };
+            let aligned = align_spans(cell_spans, w, align, style);
             spans.push(Span::raw(" "));
+            offset += 1;
+            if let Some(row_links) = wrapped[i].1.get(line_idx) {
+                links.extend(row_links.iter().map(|link| Hyperlink {
+                    start: offset + left_pad + link.start,
+                    end: offset + left_pad + link.end,
+                    url: link.url.clone(),
+                }));
+            }
             spans.extend(aligned);
             spans.push(Span::raw(" "));
             spans.push(Span::styled("│", border));
+            offset += w + 2;
         }
-        out.push(prim::render(
-            lead_fn(start_row + line_idx),
-            spans,
-            pad.to_vec(),
-        ));
+        out.push(prim::render(lead, spans, pad.to_vec()).with_links(links));
     }
     out
 }
@@ -886,6 +956,132 @@ fn align_spans(
             out
         }
     }
+}
+
+fn find_markdown_link(text: &str) -> Option<(usize, &str, Arc<str>, usize)> {
+    let mut search = 0usize;
+    while let Some(relative_open) = text[search..].find('[') {
+        let open = search + relative_open;
+        if text[..open].ends_with('!') {
+            search = open + 1;
+            continue;
+        }
+        let after_open = &text[open + 1..];
+        let label_end_rel = after_open.find("](")?;
+        let label_end = open + 1 + label_end_rel;
+        let destination_start = label_end + 2;
+        let bytes = text.as_bytes();
+        let mut depth = 1usize;
+        let mut escaped = false;
+        let mut close = destination_start;
+        while close < bytes.len() {
+            let byte = bytes[close];
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'(' {
+                depth += 1;
+            } else if byte == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            close += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+
+        let destination = text[destination_start..close].trim();
+        let destination = if let Some(angle) = destination.strip_prefix('<') {
+            angle.split_once('>').map_or("", |(url, _)| url)
+        } else {
+            destination.split_whitespace().next().unwrap_or_default()
+        };
+        let url = unescape_link_destination(destination);
+        if is_safe_link_url(&url) {
+            return Some((open, &text[open + 1..label_end], Arc::from(url), close + 1));
+        }
+        search = open + 1;
+    }
+    None
+}
+
+fn unescape_link_destination(destination: &str) -> String {
+    let mut out = String::with_capacity(destination.len());
+    let mut chars = destination.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_safe_link_url(url: &str) -> bool {
+    !url.is_empty() && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn mapped_hyperlinks(spans: &[MappedSpan]) -> Vec<Hyperlink> {
+    let mut out: Vec<Hyperlink> = Vec::new();
+    let mut pos = 0usize;
+    for mapped in spans {
+        let len = mapped.span.content.chars().count();
+        if let Some(url) = &mapped.link {
+            if let Some(previous) = out
+                .last_mut()
+                .filter(|link| link.end == pos && Arc::ptr_eq(&link.url, url))
+            {
+                previous.end += len;
+            } else {
+                out.push(Hyperlink {
+                    start: pos,
+                    end: pos + len,
+                    url: url.clone(),
+                });
+            }
+        }
+        pos += len;
+    }
+    out
+}
+
+fn split_links_by_rows(
+    links: &[Hyperlink],
+    rows: &[ratatui::text::Line<'static>],
+) -> Vec<Vec<Hyperlink>> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut row_start = 0usize;
+    for row in rows {
+        let row_len: usize = row
+            .spans
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum();
+        let row_end = row_start + row_len;
+        out.push(
+            links
+                .iter()
+                .filter_map(|link| {
+                    let start = link.start.max(row_start);
+                    let end = link.end.min(row_end);
+                    (start < end).then(|| Hyperlink {
+                        start: start - row_start,
+                        end: end - row_start,
+                        url: link.url.clone(),
+                    })
+                })
+                .collect(),
+        );
+        row_start = row_end;
+    }
+    out
 }
 
 fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<usize> {

@@ -583,6 +583,113 @@ fn inline_markdown_bold_italic_underscore() {
 }
 
 #[test]
+fn inline_markdown_link_strips_syntax_and_records_target() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use ratatui::style::Modifier;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(
+        "Visit [Lofi](https://example.com/docs?q=1) now".to_string(),
+    ));
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 120,
+        active_turn: false,
+    };
+    let line = render_turn_lines(&cx, &a.turns[0])
+        .into_iter()
+        .find(|line| !line.links.is_empty())
+        .expect("linked line");
+    let rendered: String = line
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    assert_eq!(rendered, "▌ Visit Lofi now");
+    assert!(line.line.spans.iter().any(
+        |span| span.content == "Lofi" && span.style.add_modifier.contains(Modifier::UNDERLINED)
+    ));
+    assert_eq!(line.links.len(), 1);
+    let label: String = rendered
+        .chars()
+        .skip(line.links[0].start)
+        .take(line.links[0].end - line.links[0].start)
+        .collect();
+    assert_eq!(label, "Lofi");
+    assert_eq!(&*line.links[0].url, "https://example.com/docs?q=1");
+}
+
+#[test]
+fn inline_markdown_link_wraps_and_preserves_each_row_target() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(
+        "[alpha beta gamma delta](https://example.com)".to_string(),
+    ));
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 13,
+        active_turn: false,
+    };
+    let linked: Vec<_> = render_turn_lines(&cx, &a.turns[0])
+        .into_iter()
+        .filter(|line| !line.links.is_empty())
+        .collect();
+
+    assert!(linked.len() > 1, "link should wrap over multiple rows");
+    for line in linked {
+        assert_eq!(line.links.len(), 1);
+        assert_eq!(&*line.links[0].url, "https://example.com");
+    }
+}
+
+#[test]
+fn inline_markdown_table_records_links() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let md = "| Site |
+|------|
+| [Lofi](https://example.com) |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let line = render_turn_lines(&cx, &a.turns[0])
+        .into_iter()
+        .find(|line| !line.links.is_empty())
+        .expect("linked table cell");
+    let rendered: String = line
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    let label: String = rendered
+        .chars()
+        .skip(line.links[0].start)
+        .take(line.links[0].end - line.links[0].start)
+        .collect();
+    assert_eq!(label, "Lofi");
+    assert_eq!(&*line.links[0].url, "https://example.com");
+}
+
+#[test]
 fn inline_markdown_code_stays_literal() {
     let spans = render_text_spans("use `inline_spans` here");
     let code = spans
