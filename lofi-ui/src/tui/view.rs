@@ -154,6 +154,7 @@ fn feed_segment(
     want: &mut usize,
     vis: &mut Vec<Line<'static>>,
     visv: &mut Vec<VisLine>,
+    links: &mut Vec<Vec<prim::Hyperlink>>,
 ) {
     if *want == 0 {
         return;
@@ -172,6 +173,7 @@ fn feed_segment(
             content: rl.content,
             raw: rl.raw.clone(),
         });
+        links.push(rl.links.clone());
         *pos += 1;
         *want -= 1;
     }
@@ -324,6 +326,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
     let mut visv: Vec<VisLine> = Vec::with_capacity(height);
+    let mut links: Vec<Vec<prim::Hyperlink>> = Vec::with_capacity(height);
     let mut pos = 0usize;
     let mut want = height;
     if n_turns == 0 {
@@ -334,6 +337,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             &mut want,
             &mut vis,
             &mut visv,
+            &mut links,
         );
     } else {
         for i in 0..n_turns {
@@ -345,6 +349,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     &mut want,
                     &mut vis,
                     &mut visv,
+                    &mut links,
                 );
                 if want == 0 {
                     break;
@@ -357,7 +362,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     let turn_start = pos;
                     if let Some(lines) = app.frozen_render.get(i) {
-                        feed_segment(lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                        feed_segment(
+                            lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                        );
                     } else {
                         let start = off.saturating_sub(turn_start);
                         let stop = start.saturating_add(want).min(h);
@@ -365,7 +372,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         let lines = app.frozen_turn_window(i, w, start..stop);
                         app.render_profile.frozen_window_us += phase_started.elapsed().as_micros();
                         pos = turn_start + start;
-                        feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                        feed_segment(
+                            &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                        );
                     }
                 }
             } else {
@@ -386,7 +395,9 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         blocks::render_turn_window(&cx, &app.turns[n_turns - 1], start..stop);
                     app.render_profile.live_window_us += phase_started.elapsed().as_micros();
                     pos = turn_start + start;
-                    feed_segment(&lines, &mut pos, off, &mut want, &mut vis, &mut visv);
+                    feed_segment(
+                        &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                    );
                 }
             }
             if want == 0 {
@@ -488,6 +499,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 
     let para = Paragraph::new(vis).scroll((0, 0));
     f.render_widget(para, content);
+    prim::apply_hyperlinks(f.buffer_mut(), content, &app.log_vis, &links);
     draw_scrollbar(f, scroll_area.gutter, off, height, total, app.theme);
 }
 
