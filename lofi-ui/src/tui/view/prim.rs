@@ -107,10 +107,19 @@ impl RawLine {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hyperlink {
+    /// Character range within the rendered line (including decoration).
+    pub start: usize,
+    pub end: usize,
+    pub url: Arc<str>,
+}
+
 pub struct RenderLine {
     pub line: Line<'static>,
     pub content: (usize, usize),
     pub raw: Option<RawLine>,
+    pub links: Vec<Hyperlink>,
 }
 
 impl RenderLine {
@@ -123,6 +132,11 @@ impl RenderLine {
 
     pub fn with_raw(mut self, raw: RawLine) -> Self {
         self.raw = Some(raw);
+        self
+    }
+
+    pub fn with_links(mut self, links: Vec<Hyperlink>) -> Self {
+        self.links = links;
         self
     }
 }
@@ -164,6 +178,7 @@ pub fn render(
         line: Line::from(all),
         content: (start, end),
         raw: None,
+        links: Vec::new(),
     }
 }
 
@@ -176,6 +191,7 @@ pub fn rblank() -> RenderLine {
         line: Line::default(),
         content: (0, 0),
         raw: None,
+        links: Vec::new(),
     }
 }
 
@@ -218,6 +234,71 @@ pub fn rtile(
         Style::new().bg(bg),
     ));
     rl
+}
+
+const OSC8_CLOSE: &str = "]8;;\\";
+
+/// Wrap linked cells in OSC 8 while forcing Ratatui's diff width to remain the
+/// visible grapheme width. Unsupported terminals ignore OSC 8 and show the
+/// same text.
+pub fn apply_hyperlinks(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    rendered: &[VisLine],
+    rows: &[Vec<Hyperlink>],
+) {
+    use std::num::NonZeroU16;
+
+    use ratatui::buffer::CellDiffOption;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    for (row, links) in rows.iter().enumerate().take(area.height as usize) {
+        let Some(y) = area.y.checked_add(u16::try_from(row).unwrap_or(u16::MAX)) else {
+            continue;
+        };
+        let Some(rendered) = rendered.get(row).map(|line| line.rendered.as_str()) else {
+            continue;
+        };
+        for link in links {
+            let mut char_pos = 0usize;
+            let mut cell_pos = 0usize;
+            for grapheme in rendered.graphemes(true) {
+                let chars = grapheme.chars().count();
+                let cells = width(grapheme);
+                let next_char = char_pos + chars;
+                if next_char > link.start && char_pos < link.end && cells > 0 {
+                    let x = area
+                        .x
+                        .saturating_add(u16::try_from(cell_pos).unwrap_or(u16::MAX));
+                    if x < area.right() {
+                        let symbol = buffer[(x, y)].symbol().to_string();
+                        // Cells are diffed independently, so each one needs a
+                        // self-contained link. Otherwise repainting only a
+                        // middle cell would silently remove its hyperlink.
+                        let wrapped = osc8_symbol(&link.url, &symbol);
+                        let forced = u16::try_from(cells).unwrap_or(u16::MAX);
+                        if let Some(forced) = NonZeroU16::new(forced) {
+                            buffer[(x, y)]
+                                .set_symbol(&wrapped)
+                                .set_diff_option(CellDiffOption::ForcedWidth(forced));
+                        }
+                    }
+                }
+                char_pos = next_char;
+                cell_pos += cells;
+            }
+        }
+    }
+}
+
+fn osc8_symbol(url: &str, symbol: &str) -> String {
+    let mut out = String::with_capacity(url.len() + symbol.len() + 16);
+    out.push_str("]8;;");
+    out.push_str(url);
+    out.push_str("\\");
+    out.push_str(symbol);
+    out.push_str(OSC8_CLOSE);
+    out
 }
 
 fn span_width(spans: &[Span<'static>]) -> usize {
@@ -558,6 +639,14 @@ mod tests {
 
     fn spans_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn osc8_symbol_is_self_contained() {
+        assert_eq!(
+            osc8_symbol("https://example.com", "a"),
+            format!("]8;;https://example.com\\a{OSC8_CLOSE}")
+        );
     }
 
     #[test]
