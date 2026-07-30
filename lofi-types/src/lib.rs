@@ -326,19 +326,24 @@ pub enum SessionEventKind {
         cost: f64,
         usage: Usage,
     },
-    /// A turn that ended in failure (a non-retryable provider error or a
-    /// user cancel): the raw model identity that ran it, wall-clock duration,
-    /// the error message, and the cost/usage accumulated by the rounds that
-    /// did run. Rendered as a `◇ Failed in Ns with <model>` marker. Its
-    /// `parent_id` points at
-    /// the turn's checkpoint (the last event before the failed turn started),
-    /// so the active-path walk excludes the failed turn's messages from the
-    /// agent's history on resume while keeping them visible in the tree.
+    /// A turn that ended in a non-retryable provider/runtime failure.
+    /// Its partial messages stay on the visible lineage, but context rebuilds
+    /// skip them so retrying begins from the preceding successful checkpoint.
     TurnFailed {
         #[serde(alias = "label", default)]
         model: RunModel,
         elapsed_ms: u64,
         error: String,
+        cost: f64,
+        usage: Usage,
+    },
+    /// A turn explicitly interrupted by the user. Like Pi's aborted assistant
+    /// message, completed rounds and the partial current response remain both
+    /// visible and available to subsequent model turns.
+    TurnCancelled {
+        #[serde(alias = "label", default)]
+        model: RunModel,
+        elapsed_ms: u64,
         cost: f64,
         usage: Usage,
     },

@@ -98,7 +98,7 @@ fn failed_exec_settles_pending_native_tools() {
 }
 
 #[test]
-fn failed_turn_settles_open_tool_rows() {
+fn cancelled_turn_settles_open_tool_rows() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
         prompt: "go".into(),
@@ -113,10 +113,9 @@ fn failed_turn_settles_open_tool_rows() {
         name: "bash".into(),
         args: "sleep 10".into(),
     });
-    a.apply_event(AgentEvent::TurnFailed {
+    a.apply_event(AgentEvent::TurnCancelled {
         model: "p/m".into(),
         elapsed_ms: 50,
-        error: "cancelled".into(),
         cost: 0.0,
         usage: Usage::default(),
     });
@@ -126,12 +125,12 @@ fn failed_turn_settles_open_tool_rows() {
     };
     assert!(tool.done);
     assert!(tool.is_error);
-    assert_eq!(tool.result.as_deref(), Some("cancelled"));
+    assert_eq!(tool.result.as_deref(), Some("Operation aborted"));
     assert!(tool.native[0].done);
     assert!(tool.native[0].is_error);
     assert!(matches!(
         a.turns[0].blocks.last(),
-        Some(Block::TurnFailed { error, .. }) if error == "cancelled"
+        Some(Block::TurnCancelled { .. })
     ));
 }
 
@@ -5074,6 +5073,53 @@ fn tab_enters_navigate_and_esc_clears() {
     handle_event(&plain_key(KeyCode::Esc), &mut b, None, &mut run);
     assert_eq!(b.mode, Mode::Input);
     assert_eq!(b.input, "");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn escape_interrupts_run_and_restores_queue_like_pi() {
+    let mut a = app();
+    a.prompt_queue = vec!["steer first".to_string(), "follow up".to_string()];
+    a.set_input("draft".to_string());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+
+    assert!(cancel.load(Ordering::Relaxed));
+    assert!(a.prompt_queue.is_empty());
+    assert_eq!(a.input, "steer first\n\nfollow up\n\ndraft");
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn escape_dismisses_completion_before_interrupting_run() {
+    let mut a = app();
+    a.set_input("/".to_string());
+    a.refresh_slash_complete();
+    assert!(a.slash_complete.is_some());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+
+    assert!(!cancel.load(Ordering::Relaxed));
+    assert!(a.slash_complete.is_none());
+    assert_eq!(a.input, "/");
+    run.take().unwrap().handle.abort();
 }
 
 #[test]

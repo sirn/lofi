@@ -451,6 +451,57 @@ mod tests {
     }
 
     #[test]
+    fn restore_history_keeps_cancelled_turn_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let mut events = vec![
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text { text: "go".into() }],
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::Text {
+                        text: "partial".into(),
+                    }],
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnCancelled {
+                    model: "p/m".into(),
+                    elapsed_ms: 5,
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        cursor.append_events(&mut events).unwrap();
+        let snapshot = cursor.snapshot().unwrap();
+        let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+
+        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+
+        let history = lifecycle.shared_history();
+        let messages = history.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert!(matches!(
+            &messages[1].blocks[..],
+            [ContentBlock::Text { text }] if text == "partial"
+        ));
+    }
+
+    #[test]
     fn history_stats_measure_core_owned_capacities() {
         let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
         let text = String::with_capacity(4_096);

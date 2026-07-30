@@ -83,6 +83,15 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
+    /// The user interrupted the turn. Completed rounds and any partial
+    /// assistant response have already been retained in history and in the
+    /// durable transcript, matching Pi's aborted-message semantics.
+    TurnCancelled {
+        model: RunModel,
+        elapsed_ms: u64,
+        cost: f64,
+        usage: Usage,
+    },
     /// The run hit the hard context cap mid-turn: the latest round's
     /// input tokens exceeded `context_window - reserved_context_tokens`.
     /// The engine stops before the next (overflowing) round and commits the

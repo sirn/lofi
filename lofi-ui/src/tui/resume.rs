@@ -84,7 +84,9 @@ pub(super) fn replay_indexed_session(
             for &i in selected {
                 if !matches!(
                     index[i].kind,
-                    store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
+                    store::IndexKind::TurnEnd
+                        | store::IndexKind::TurnFailed
+                        | store::IndexKind::TurnCancelled
                 ) {
                     continue;
                 }
@@ -121,13 +123,16 @@ pub(super) fn last_run_model_from_index(
     for i in (0..index.len()).rev() {
         if !matches!(
             index[i].kind,
-            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed
+            store::IndexKind::TurnEnd
+                | store::IndexKind::TurnFailed
+                | store::IndexKind::TurnCancelled
         ) {
             continue;
         }
         match cursor.event_at(index[i].offset).ok()?.kind {
             SessionEventKind::TurnEnd { model, .. }
-            | SessionEventKind::TurnFailed { model, .. } => return Some(model),
+            | SessionEventKind::TurnFailed { model, .. }
+            | SessionEventKind::TurnCancelled { model, .. } => return Some(model),
             _ => {}
         }
     }
@@ -144,11 +149,14 @@ pub(super) fn restore_compaction_from_index(
     for (pos, event) in index.iter().enumerate() {
         match event.kind {
             store::IndexKind::Compaction => last_compaction_pos = Some(pos),
-            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => {
+            store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled => {
                 if let Ok(ev) = cursor.event_at(event.offset) {
                     match ev.kind {
                         SessionEventKind::TurnEnd { usage, .. }
-                        | SessionEventKind::TurnFailed { usage, .. } => {
+                        | SessionEventKind::TurnFailed { usage, .. }
+                        | SessionEventKind::TurnCancelled { usage, .. } => {
                             last_usage = Some((pos, usage));
                         }
                         _ => {}

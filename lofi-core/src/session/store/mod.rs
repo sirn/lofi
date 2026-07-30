@@ -911,9 +911,8 @@ fn append_events_from(
     lock.lock()?;
     let mut parent = parent.resolve(path)?;
     // Assign a fresh id to each event. `parent_id` is auto-filled only when
-    // the event did not set one explicitly — the recorder uses an explicit
-    // `parent_id` on a `TurnFailed` marker to branch it off the turn's
-    // checkpoint instead of off the preceding message.
+    // the event did not set one explicitly, preserving callers that construct
+    // a branch inside one append batch.
     for ev in events.iter_mut() {
         ev.id = short_id();
         if ev.parent_id.is_none() {
@@ -1206,7 +1205,8 @@ pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
         .rev()
         .find_map(|i| match &events[i].kind {
             SessionEventKind::TurnEnd { model, .. }
-            | SessionEventKind::TurnFailed { model, .. } => Some(model.clone()),
+            | SessionEventKind::TurnFailed { model, .. }
+            | SessionEventKind::TurnCancelled { model, .. } => Some(model.clone()),
             _ => None,
         })
 }
@@ -1264,6 +1264,7 @@ fn entry_preview(ev: &EntryPreview) -> String {
             format!("{prefix}{}", one_line(text))
         }
         "turn_failed" => format!("agent: {} (failed)", one_line(&ev.error)),
+        "turn_cancelled" => "agent: (cancelled)".to_string(),
         "compaction" => format!(
             "compact: Compacted {} messages · kept {}",
             ev.summarized, ev.kept

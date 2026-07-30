@@ -128,12 +128,14 @@ impl Agent {
         });
         let mut finished_normally = false;
         let mut cancelled = false;
+        let mut detached = false;
         let mut context_pressure = false;
         let mut err: Option<Error> = None;
         let retry = self.retry;
         let mut retry_attempt = 0u32;
         loop {
             if tx.is_closed() {
+                detached = true;
                 break;
             }
             let round = self
@@ -162,7 +164,7 @@ impl Agent {
                     break;
                 }
                 Ok(false) if tx.is_closed() => {
-                    cancelled = true;
+                    detached = true;
                     break;
                 }
                 Ok(false) => {
@@ -211,12 +213,15 @@ impl Agent {
                     }
                 }
                 Err(Error::Cancelled) => {
-                    // Abandoned by the user (Ctrl-C / receiver dropped). The
-                    // rounds that ran still consumed tokens, so record the
-                    // partial turn as a failed branch instead of dropping it.
-                    // Fall through to the commit block, which emits a
-                    // `TurnFailed` marker and writes the partial messages.
-                    cancelled = true;
+                    // A set cancel flag is an explicit user interruption;
+                    // a closed receiver is only a detached consumer. Keep
+                    // those outcomes separate so Ctrl-C is durably recorded
+                    // as aborted while broken output pipes stay silent.
+                    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                        cancelled = true;
+                    } else {
+                        detached = true;
+                    }
                     break;
                 }
                 Err(e) => {
@@ -252,7 +257,11 @@ impl Agent {
                             }
                         };
                         if !retry_ready {
-                            cancelled = true;
+                            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                                cancelled = true;
+                            } else {
+                                detached = true;
+                            }
                             break;
                         }
                         continue;
@@ -279,7 +288,9 @@ impl Agent {
         } else if let Some(e) = &err {
             Some(TurnOutcome::Failed(e.to_string()))
         } else if cancelled {
-            Some(TurnOutcome::Failed("cancelled".to_string()))
+            Some(TurnOutcome::Cancelled)
+        } else if detached {
+            Some(TurnOutcome::Detached)
         } else {
             None
         };
@@ -313,13 +324,22 @@ impl Agent {
                         })
                         .await
                     }
-                    TurnOutcome::Cancelled => Ok(()),
+                    TurnOutcome::Cancelled => {
+                        tx.send(AgentEvent::TurnCancelled {
+                            model: self.run_model(),
+                            elapsed_ms,
+                            cost: stats.cost,
+                            usage: stats.usage,
+                        })
+                        .await
+                    }
+                    TurnOutcome::Detached => Ok(()),
                 };
             }
         }
         if let Some(recorder) = recorder.as_mut() {
             let summary = stats.summary(elapsed_ms);
-            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Cancelled);
+            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
             match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
                     let _ = tx
@@ -334,10 +354,9 @@ impl Agent {
         }
         if matches!(&outcome, Some(TurnOutcome::Failed(_))) {
             // `TurnFailed` is a durable display boundary: replay keeps the
-            // failed branch visible but `messages_from_events` excludes it
-            // from provider context. Keep the live shared history identical
-            // by rolling back the prompt, completed rounds, and partial final
-            // response only after the recorder has flushed their display copy.
+            // failed branch visible but context rebuild excludes it. User
+            // cancellation deliberately does not enter this path: Pi retains
+            // an aborted assistant message in context for the next prompt.
             messages.truncate(prev_len);
         }
         match err {
@@ -600,9 +619,10 @@ impl Agent {
         if let Err(error) = collect.await {
             // The live UI has already rendered every accepted delta. Preserve
             // that same partial assistant message on failed/cancelled turns so
-            // durable replay cannot make visible output disappear. A
-            // `TurnFailed` marker excludes this branch from future model
-            // context, so an incomplete tool call is display-only.
+            // durable replay cannot make visible output disappear. The
+            // terminal outcome decides context semantics: failures
+            // are rolled back, while explicit user cancellation retains the
+            // partial assistant message like Pi's aborted message.
             let partial = assembler.finish();
             if !partial.blocks.is_empty() {
                 messages.push(partial);

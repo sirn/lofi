@@ -227,7 +227,8 @@ impl App {
                 self.turn_has_round_usage = false;
                 self.compacted = false;
             }
-            AgentEvent::TurnFailed { cost, usage, .. } => {
+            AgentEvent::TurnFailed { cost, usage, .. }
+            | AgentEvent::TurnCancelled { cost, usage, .. } => {
                 // A failed turn's consumed tokens count honestly. Same
                 // fold logic as `TurnEnd`: the live path already applied
                 // per-round tokens via `RoundUsage` and `turn_cost` holds

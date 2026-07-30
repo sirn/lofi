@@ -150,6 +150,12 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                     error,
                 });
             }
+            Block::TurnCancelled { label, elapsed } => {
+                stack.push(TurnCancelled {
+                    label: label.clone(),
+                    elapsed: *elapsed,
+                });
+            }
             Block::Compaction {
                 summarized,
                 kept,
@@ -2028,6 +2034,37 @@ impl Component for TurnFailed {
             }
         }
         out
+    }
+}
+
+/// Turn-cancelled separator. Mirrors Pi's "Operation aborted" status while
+/// keeping partial assistant content immediately above it.
+struct TurnCancelled {
+    label: String,
+    elapsed: Duration,
+}
+
+impl Component for TurnCancelled {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        if cx.active_turn {
+            return Vec::new();
+        }
+        let t = cx.theme;
+        let dur = prim::fmt_duration(self.elapsed);
+        vec![prim::render(
+            vec![
+                Span::raw("  "),
+                Span::styled("◇ ", Style::new().fg(t.error)),
+            ],
+            vec![
+                Span::styled(
+                    format!("Cancelled after {dur} with "),
+                    Style::new().fg(t.error),
+                ),
+                Span::styled(self.label.clone(), Style::new().fg(t.error)),
+            ],
+            vec![],
+        )]
     }
 }
 

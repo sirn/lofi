@@ -227,6 +227,10 @@ enum Block {
         elapsed: Duration,
         error: String,
     },
+    TurnCancelled {
+        label: String,
+        elapsed: Duration,
+    },
     Compaction {
         summarized: usize,
         kept: usize,

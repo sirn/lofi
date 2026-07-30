@@ -17,6 +17,26 @@ pub(super) fn tool_mut<'a>(blocks: &'a mut [Block], id: &str) -> Option<&'a mut 
     })
 }
 
+fn settle_open_tools(turn: &mut Turn, result: &str, elapsed_ms: u64) {
+    for block in &mut turn.blocks {
+        if let Block::Tool(tool) = block {
+            if !tool.done {
+                for native in &mut tool.native {
+                    if !native.done {
+                        native.result = Some(result.to_string());
+                        native.is_error = true;
+                        native.done = true;
+                    }
+                }
+                tool.result = Some(result.to_string());
+                tool.is_error = true;
+                tool.done = true;
+                tool.elapsed = Some(Duration::from_millis(elapsed_ms));
+            }
+        }
+    }
+}
+
 fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
     use std::collections::HashSet;
     let path = store::active_path_from_leaf(events);
@@ -251,27 +271,21 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
             ..
         } => {
             finalize_open_thinking(turn);
-            for block in &mut turn.blocks {
-                if let Block::Tool(tool) = block {
-                    if !tool.done {
-                        for native in &mut tool.native {
-                            if !native.done {
-                                native.result = Some("cancelled".to_string());
-                                native.is_error = true;
-                                native.done = true;
-                            }
-                        }
-                        tool.result = Some(error.clone());
-                        tool.is_error = true;
-                        tool.done = true;
-                        tool.elapsed = Some(Duration::from_millis(elapsed_ms));
-                    }
-                }
-            }
+            settle_open_tools(turn, &error, elapsed_ms);
             turn.blocks.push(Block::TurnFailed {
                 label: model.label(),
                 elapsed: Duration::from_millis(elapsed_ms),
                 error,
+            });
+        }
+        AgentEvent::TurnCancelled {
+            model, elapsed_ms, ..
+        } => {
+            finalize_open_thinking(turn);
+            settle_open_tools(turn, "Operation aborted", elapsed_ms);
+            turn.blocks.push(Block::TurnCancelled {
+                label: model.label(),
+                elapsed: Duration::from_millis(elapsed_ms),
             });
         }
         AgentEvent::Error(msg) => {
@@ -545,6 +559,19 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     model: model.clone(),
                     elapsed_ms: *elapsed_ms,
                     error: error.clone(),
+                    cost: *cost,
+                    usage: *usage,
+                });
+            }
+            SessionEventKind::TurnCancelled {
+                model,
+                elapsed_ms,
+                cost,
+                usage,
+            } => {
+                emit(AgentEvent::TurnCancelled {
+                    model: model.clone(),
+                    elapsed_ms: *elapsed_ms,
                     cost: *cost,
                     usage: *usage,
                 });

@@ -28,10 +28,15 @@ pub enum TurnOutcome {
     /// compaction can keep the latest turn verbatim and `messages_from_events`
     /// includes them), but NO terminal marker is written — the turn did not
     /// finish or fail, and the UI is signaled via a live `ContextPressure`
-    /// event instead. Behaves like [`Cancelled`] for the empty-input
+    /// event instead. Behaves like [`Detached`] for the empty-input
     /// short-circuit (no terminal marker).
     ContextPressure,
+    /// Explicit user interruption. Unlike a failure, its messages remain in
+    /// model context; the terminal marker records the aborted status.
     Cancelled,
+    /// The event consumer disappeared (for example, a broken stdout pipe).
+    /// Preserve any already-built data but do not stamp a user cancellation.
+    Detached,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +123,13 @@ impl SessionRecorder {
                 cost: summary.cost,
                 usage: summary.usage,
             }),
-            TurnOutcome::ContextPressure | TurnOutcome::Cancelled => None,
+            TurnOutcome::Cancelled => Some(SessionEventKind::TurnCancelled {
+                model: self.model.clone(),
+                elapsed_ms: summary.elapsed_ms,
+                cost: summary.cost,
+                usage: summary.usage,
+            }),
+            TurnOutcome::ContextPressure | TurnOutcome::Detached => None,
         };
         self.append_pending(messages, summary, terminal)?;
         Ok(self.byte_start.zip(self.byte_end))
@@ -363,7 +374,9 @@ mod tests {
         );
         assert!(!checkpoint_events.iter().any(|event| matches!(
             event.kind,
-            SessionEventKind::TurnEnd { .. } | SessionEventKind::TurnFailed { .. }
+            SessionEventKind::TurnEnd { .. }
+                | SessionEventKind::TurnFailed { .. }
+                | SessionEventKind::TurnCancelled { .. }
         )));
         assert_eq!(first_range.1, checkpoint_size);
 
@@ -455,7 +468,7 @@ mod tests {
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let messages = vec![user_msg("go"), assistant_text("hi")];
-        rec.flush(&messages, &TurnOutcome::Cancelled, &summary(50))
+        rec.flush(&messages, &TurnOutcome::Detached, &summary(50))
             .unwrap();
         let events = cursor.load_tree_events().unwrap();
         assert!(!events
@@ -478,10 +491,37 @@ mod tests {
             thinking_elapsed: vec![],
             native_tools: vec![],
         };
-        let range = rec.flush(&[], &TurnOutcome::Cancelled, &empty).unwrap();
+        let range = rec.flush(&[], &TurnOutcome::Detached, &empty).unwrap();
         assert!(range.is_none());
         let events = cursor.load_tree_events().unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn flush_cancelled_writes_terminal_marker_after_partial_message() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path, None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+
+        rec.flush(
+            &[user_msg("go"), assistant_text("partial")],
+            &TurnOutcome::Cancelled,
+            &summary(50),
+        )
+        .unwrap();
+
+        let events = cursor.load_events().unwrap();
+        let cancelled = events.last().expect("terminal marker");
+        assert!(matches!(
+            cancelled.kind,
+            SessionEventKind::TurnCancelled { elapsed_ms: 50, .. }
+        ));
+        assert_eq!(
+            cancelled.parent_id.as_deref(),
+            events.get(events.len() - 2).map(|event| event.id.as_str())
+        );
     }
 
     #[test]

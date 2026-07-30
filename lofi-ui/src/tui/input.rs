@@ -40,12 +40,27 @@ pub(super) fn handle_event(
     }
 
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+        if current_run.is_some() {
+            interrupt_run(app, agent, current_run);
+            return;
+        }
         if app.mode != Mode::Input {
             app.enter_input();
             app.pin_to_latest();
             return;
         }
         handle_ctrl_c(app, agent, current_run);
+        return;
+    }
+
+    // Pi's interrupt key is Escape: it dismisses completion first, then aborts
+    // an active stream. Keep Ctrl-C as an alias for existing lofi users and
+    // for the TODO's documented path.
+    if k.code == KeyCode::Esc
+        && current_run.is_some()
+        && (app.mode != Mode::Input || app.slash_complete.is_none())
+    {
+        interrupt_run(app, agent, current_run);
         return;
     }
 
@@ -408,18 +423,38 @@ pub(super) fn spawn_continue(
     }
 }
 
-pub(super) fn handle_ctrl_c(
+fn restore_queued_prompts(app: &mut App) {
+    if app.prompt_queue.is_empty() {
+        return;
+    }
+    let queued = std::mem::take(&mut app.prompt_queue).join("\n\n");
+    let draft = std::mem::take(&mut app.input);
+    app.input = [queued, draft]
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    app.input_cursor = app.input.len();
+    app.history_idx = None;
+    app.refresh_slash_complete();
+}
+
+fn interrupt_run(
     app: &mut App,
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(r) = current_run.as_mut() {
+        if r.user_bash.is_none() {
+            // Pi restores steering/follow-up messages to the editor when a
+            // stream is aborted instead of submitting them automatically.
+            restore_queued_prompts(app);
+        }
         let user_bash = r.user_bash.clone();
         // Agent runs must settle cooperatively: the engine checkpoints each
         // completed round, flushes the partial current response, and writes a
-        // TurnFailed marker before its channel closes. Aborting the task here
-        // skips all of that cleanup and makes the cancelled output disappear
-        // from both the durable transcript and the shared live history.
+        // TurnCancelled marker before its channel closes. Aborting the task
+        // here skips that cleanup and makes cancelled output disappear.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some((command, exclude_from_context)) = user_bash {
             let Some(r) = current_run.take() else {
@@ -436,6 +471,16 @@ pub(super) fn handle_ctrl_c(
             }
         }
         app.ctrl_c_at = None;
+    }
+}
+
+pub(super) fn handle_ctrl_c(
+    app: &mut App,
+    agent: Option<&lofi_core::Agent>,
+    current_run: &mut Option<RunHandle>,
+) {
+    if current_run.is_some() {
+        interrupt_run(app, agent, current_run);
         return;
     }
     if app.input.is_empty() {

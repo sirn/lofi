@@ -582,7 +582,7 @@ fn block_heap_bytes(block: &Block) -> usize {
         Block::UserBash {
             command, output, ..
         } => command.capacity() + output.capacity(),
-        Block::TurnEnd { label, .. } => label.capacity(),
+        Block::TurnEnd { label, .. } | Block::TurnCancelled { label, .. } => label.capacity(),
         Block::TurnFailed { label, error, .. } => label.capacity() + error.capacity(),
         Block::Compaction { summary, .. } => summary.capacity(),
     }

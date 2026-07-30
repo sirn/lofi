@@ -308,6 +308,10 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                     let _ = stdout.write_all(b"\n");
                     writeln!(stderr, "error: {error}")
                 }
+                AgentEvent::TurnCancelled { .. } => {
+                    let _ = stdout.write_all(b"\n");
+                    writeln!(stderr, "Operation aborted")
+                }
             };
             if let Err(e) = write_res {
                 // Close the receive side so agent sends fail immediately

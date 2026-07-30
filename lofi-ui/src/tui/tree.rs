@@ -281,7 +281,9 @@ fn load_native_tools_for_turn(
         };
         match ctx.indices[next].kind {
             store::IndexKind::NativeTool => offsets.push(ctx.indices[next].offset),
-            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => break,
+            store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled => break,
             _ => {}
         }
         current = next;
@@ -422,6 +424,7 @@ fn skeleton_tree_entry(ix: &store::EventIndex) -> Option<TreeEntryFields> {
         store::IndexKind::ToolResult => "tool: loading…",
         store::IndexKind::TurnEnd => "agent: loading…",
         store::IndexKind::TurnFailed => "agent: loading… (failed)",
+        store::IndexKind::TurnCancelled => "agent: loading… (cancelled)",
         store::IndexKind::Compaction => "compact: loading…",
         _ => return None,
     }
@@ -534,6 +537,19 @@ fn hydrated_tree_entry(ctx: &TreeCtx, idx: usize) -> Option<TreeEntryFields> {
             String::new(),
             ix.id.to_event_id(),
         )),
+        store::IndexKind::TurnCancelled => {
+            let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
+            let preview = if preview.is_empty() {
+                "(cancelled)".to_string()
+            } else {
+                format!("{preview} (cancelled)")
+            };
+            Some((
+                format!("agent: {preview}"),
+                String::new(),
+                ix.id.to_event_id(),
+            ))
+        }
         store::IndexKind::Compaction => Some(compaction_tree_entry(ctx, ix)),
         _ => None,
     }
@@ -581,6 +597,7 @@ pub(super) fn is_tree_node(kind: store::IndexKind) -> bool {
             | store::IndexKind::ToolResult
             | store::IndexKind::TurnEnd
             | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled
             | store::IndexKind::Compaction
     )
 }
@@ -597,7 +614,9 @@ pub(super) fn find_turn_outcome(
             return None;
         }
         match indices[cur].kind {
-            store::IndexKind::TurnEnd | store::IndexKind::TurnFailed => return Some(cur),
+            store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled => return Some(cur),
             _ => {}
         }
         let children = children_by_parent.get(&indices[cur].id)?;

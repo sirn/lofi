@@ -394,7 +394,7 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
 }
 
 #[tokio::test]
-async fn cancelled_run_persists_partial_output_as_failed_turn() {
+async fn cancelled_run_persists_partial_output_as_aborted_turn() {
     let dir = tempdir().unwrap();
     let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
     let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
@@ -447,13 +447,12 @@ async fn cancelled_run_persists_partial_output_as_failed_turn() {
         run.as_mut().await.unwrap();
     }
 
-    let mut saw_failed = false;
+    let mut saw_cancelled = false;
     let mut committed = None;
     while let Some(event) = rx.recv().await {
         match event {
-            AgentEvent::TurnFailed { error, .. } => {
-                assert_eq!(error, "cancelled");
-                saw_failed = true;
+            AgentEvent::TurnCancelled { .. } => {
+                saw_cancelled = true;
             }
             AgentEvent::TurnCommitted {
                 byte_start,
@@ -462,7 +461,7 @@ async fn cancelled_run_persists_partial_output_as_failed_turn() {
             _ => {}
         }
     }
-    assert!(saw_failed);
+    assert!(saw_cancelled);
     assert!(committed.is_some());
 
     let events = cursor.load_events().unwrap();
@@ -479,14 +478,18 @@ async fn cancelled_run_persists_partial_output_as_failed_turn() {
                     ContentBlock::Text { text } if text == "partial answer"
                 ))
     )));
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        SessionEventKind::TurnFailed { error, .. } if error == "cancelled"
-    )));
-    assert!(
-        messages.is_empty(),
-        "failed branch must remain display-only in live provider history"
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, SessionEventKind::TurnCancelled { .. })));
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[0].role, Role::System);
+    assert_eq!(messages[1].role, Role::User);
+    assert_eq!(messages[2].role, Role::Assistant);
+    assert_eq!(messages[3].role, Role::Tool);
+    assert!(matches!(
+        &messages[4].blocks[..],
+        [ContentBlock::Text { text }] if text == "partial answer"
+    ));
 }
 
 #[tokio::test]
