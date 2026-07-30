@@ -3141,6 +3141,8 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             first_kept_entry_id: String::new(),
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
+            detached: false,
+            previous_leaf_id: None,
             summarized: 3,
             represented: 3,
             kept: 1,
@@ -3210,7 +3212,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
 }
 
 #[test]
-fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
+fn tree_keeps_pre_compaction_history_and_reverts_detached_checkpoint() {
     use lofi_core::session::store::{self, SessionStore};
     let dir = tempfile::tempdir().unwrap();
     let session_store = SessionStore::new(dir.path().join("s"));
@@ -3272,6 +3274,24 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
         .find(|e| e.label.starts_with("compact:"))
         .unwrap();
     assert_eq!(compact.branch_point, pre_compaction_leaf);
+    let _ = picker;
+    let comp_idx = a
+        .tree_picker
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|entry| entry.label.starts_with("compact:"))
+        .unwrap();
+    a.tree_picker.as_mut().unwrap().selected = comp_idx;
+    a.tree_picker_confirm();
+    assert_eq!(
+        a.session
+            .cursor
+            .as_ref()
+            .and_then(store::SessionCursor::leaf_id),
+        Some(pre_compaction_leaf)
+    );
 }
 
 #[test]
@@ -4100,6 +4120,8 @@ fn selected_replay_preserves_prompt_when_compaction_parent_was_filtered_out() {
                 first_kept_entry_id: "filtered-checkpoint-copy".into(),
                 summarized_range: ["a".into(), "b".into()],
                 checkpointed_tail: true,
+                detached: false,
+                previous_leaf_id: None,
                 summarized: 1,
                 represented: 1,
                 kept: 1,
@@ -4142,6 +4164,8 @@ fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
             first_kept_entry_id: "e4".to_string(),
             summarized_range: ["e0".to_string(), "e1".to_string()],
             checkpointed_tail: true,
+            detached: false,
+            previous_leaf_id: None,
             summarized: 2,
             represented: 2,
             kept: 2,
@@ -4386,6 +4410,8 @@ fn messages_from_events_prepends_compaction_summary() {
             first_kept_entry_id: String::new(), // patched after append
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
+            detached: false,
+            previous_leaf_id: None,
             summarized: 1,
             represented: 1,
             kept: 2,
@@ -4438,6 +4464,8 @@ fn messages_from_events_compact_all_does_not_restore_old_messages() {
             first_kept_entry_id: String::new(),
             summarized_range: ["e0".to_string(), "e1".to_string()],
             checkpointed_tail: false,
+            detached: false,
+            previous_leaf_id: None,
             summarized: 2,
             represented: 2,
             kept: 0,
@@ -4500,6 +4528,8 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             first_kept_entry_id: "e1".to_string(),
             summarized_range: [String::new(), String::new()],
             checkpointed_tail: false,
+            detached: false,
+            previous_leaf_id: None,
             summarized: 1,
             represented: 1,
             kept: 4,
@@ -6298,9 +6328,19 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
         events[marker_index].kind,
         SessionEventKind::Compaction { .. }
     ));
-    assert!(
-        lineage.iter().any(|&i| events[i].id == branch_a_leaf),
-        "compaction must descend from the branch captured by resume"
+    let SessionEventKind::Compaction {
+        detached,
+        previous_leaf_id,
+        ..
+    } = &events[marker_index].kind
+    else {
+        unreachable!()
+    };
+    assert!(*detached, "compaction should start a bounded lineage");
+    assert_eq!(
+        previous_leaf_id.as_deref(),
+        Some(branch_a_leaf.as_str()),
+        "detached checkpoint must remember the resumed branch"
     );
     assert!(
         lineage.iter().all(|&i| events[i].id != sibling_leaf),

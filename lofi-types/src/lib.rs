@@ -360,11 +360,19 @@ pub enum SessionEventKind {
         summarized_range: [String; 2],
         /// True when the kept tail was copied immediately before this marker
         /// as a durable, context-edited checkpoint. UI replay suppresses those
-        /// copies (the original turns remain visible); model-history replay
-        /// reads them as the authoritative post-compaction tail. Older marker
-        /// layouts default to false.
+        /// copies only for legacy attached checkpoints; detached checkpoints
+        /// use the copies as their visible retained tail.
         #[serde(default)]
         checkpointed_tail: bool,
+        /// New checkpoints start a fresh event lineage, allowing active resume
+        /// indexing to stay bounded after repeated compactions.
+        #[serde(default)]
+        detached: bool,
+        /// The selected leaf immediately before a detached checkpoint. The old
+        /// tree remains physically available for recall and rollback without
+        /// remaining ancestral to the active model context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_leaf_id: Option<String>,
         summarized: usize,
         #[serde(default)]
         represented: usize,

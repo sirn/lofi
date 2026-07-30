@@ -118,11 +118,11 @@ fn hidden_checkpoint_indices(
         if indices[idx].kind != store::IndexKind::Compaction {
             continue;
         }
-        let (_, _, checkpointed, first_kept) = load_compaction_details(cursor, indices[idx].offset);
-        if checkpointed && !first_kept.is_empty() {
+        let details = load_compaction_details(cursor, indices[idx].offset);
+        if details.checkpointed && !details.first_kept.is_empty() {
             if let Some(start) = active_path[..marker_pos]
                 .iter()
-                .position(|&i| indices[i].id.matches(&first_kept))
+                .position(|&i| indices[i].id.matches(&details.first_kept))
             {
                 hidden.extend(active_path[start..marker_pos].iter().copied());
             }
@@ -235,9 +235,15 @@ fn build_tree_entries_inner(
             render_branch_subtree(&ctx, &branches, child_indent, &mut out);
         }
     }
-    if trunk.is_empty() && out.is_empty() {
-        let roots = top_level_tree_nodes(indices, &by_id);
-        render_branch_subtree(&ctx, &roots, "", &mut out);
+    let roots = top_level_tree_nodes(indices, &by_id);
+    let active_roots: std::collections::HashSet<usize> =
+        active_path.first().copied().into_iter().collect();
+    let detached_roots: Vec<usize> = roots
+        .into_iter()
+        .filter(|root| !active_roots.contains(root) && !hidden_checkpoint.contains(root))
+        .collect();
+    if !detached_roots.is_empty() {
+        render_branch_subtree(&ctx, &detached_roots, "", &mut out);
     }
     out
 }
@@ -471,11 +477,12 @@ fn tool_result_tree_entry(ctx: &TreeCtx, idx: usize) -> TreeEntryFields {
 }
 
 fn compaction_tree_entry(ctx: &TreeCtx, ix: &store::EventIndex) -> TreeEntryFields {
-    let (summarized, kept, checkpointed, first_kept) =
-        load_compaction_details(ctx.cursor, ix.offset);
-    let branch_point = if checkpointed && !first_kept.is_empty() {
+    let details = load_compaction_details(ctx.cursor, ix.offset);
+    let branch_point = if details.detached {
+        details.previous_leaf
+    } else if details.checkpointed && !details.first_kept.is_empty() {
         ctx.by_id
-            .get(&store::IndexId::parse(first_kept))
+            .get(&store::IndexId::parse(details.first_kept))
             .and_then(|&i| {
                 ctx.indices[i]
                     .parent_id
@@ -490,7 +497,10 @@ fn compaction_tree_entry(ctx: &TreeCtx, ix: &store::EventIndex) -> TreeEntryFiel
             .unwrap_or_default()
     };
     (
-        format!("compact: Compacted {summarized} messages · kept {kept}"),
+        format!(
+            "compact: Compacted {} messages · kept {}",
+            details.summarized, details.kept
+        ),
         String::new(),
         branch_point,
     )
@@ -742,24 +752,40 @@ pub(super) fn load_failed_error(cursor: &store::SessionCursor, offset: u64) -> S
     }
 }
 
-fn load_compaction_details(
-    cursor: &store::SessionCursor,
-    offset: u64,
-) -> (usize, usize, bool, String) {
+#[derive(Default)]
+struct CompactionDetails {
+    summarized: usize,
+    kept: usize,
+    checkpointed: bool,
+    detached: bool,
+    first_kept: String,
+    previous_leaf: String,
+}
+
+fn load_compaction_details(cursor: &store::SessionCursor, offset: u64) -> CompactionDetails {
     let Ok(ev) = cursor.event_at(offset) else {
-        return (0, 0, false, String::new());
+        return CompactionDetails::default();
     };
     if let SessionEventKind::Compaction {
         summarized,
         kept,
         checkpointed_tail,
+        detached,
         first_kept_entry_id,
+        previous_leaf_id,
         ..
     } = ev.kind
     {
-        (summarized, kept, checkpointed_tail, first_kept_entry_id)
+        CompactionDetails {
+            summarized,
+            kept,
+            checkpointed: checkpointed_tail,
+            detached,
+            first_kept: first_kept_entry_id,
+            previous_leaf: previous_leaf_id.unwrap_or_default(),
+        }
     } else {
-        (0, 0, false, String::new())
+        CompactionDetails::default()
     }
 }
 
