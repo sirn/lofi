@@ -1149,6 +1149,50 @@ fn inline_markdown_table_renders_borders() {
 }
 
 #[test]
+fn inline_markdown_table_uses_terminal_width_for_medal_emoji() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use unicode_width::UnicodeWidthStr;
+
+    let md = "| # | Provider | Requests | Input Tokens | Output Tokens | Cached Tokens | **Total Tokens** | **Cost** |\n|---|----------|---------:|------------:|-------------:|-------------:|----------------:|---------:|\n| 🥇 | **lilac-sub** | 26,709 | 114,626,193 | 14,627,472 | 2,034,195,392 | **2,163,449,057** | **$578.54** |\n| 🥈 | **hyper** | 17,144 | 50,531,552 | 4,954,628 | 1,228,034,243 | **1,283,520,423** | **$215.72** |\n| 🥉 | **synthetic** | 4,030 | 10,104,845 | 1,644,837 | 262,834,368 | **274,584,050** | **$0.00** |";
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text(md.to_string()));
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 140,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let rendered: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    let top_width = rendered
+        .iter()
+        .find(|line| line.contains('┌'))
+        .map(|line| line.as_str().width())
+        .expect("table top border");
+
+    for line in rendered.iter().filter(|line| {
+        line.contains('│') || line.contains('┌') || line.contains('├') || line.contains('└')
+    }) {
+        assert_eq!(
+            line.as_str().width(),
+            top_width,
+            "table row and border widths differ: {line:?}"
+        );
+    }
+}
+
+#[test]
 fn inline_markdown_table_fits_narrow_width() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;

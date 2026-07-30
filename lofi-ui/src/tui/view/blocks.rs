@@ -830,7 +830,7 @@ fn table_row(
 fn rendered_width(cell: &str, t: Theme, base: Style) -> usize {
     inline_spans(cell, t, base)
         .iter()
-        .map(|s| s.content.chars().count())
+        .map(|s| prim::width(&s.content))
         .sum()
 }
 
@@ -840,12 +840,12 @@ fn align_spans(
     align: Align,
     pad_style: Style,
 ) -> Vec<Span<'static>> {
-    let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let len: usize = spans.iter().map(|s| prim::width(&s.content)).sum();
     if len > w {
         let mut out = Vec::new();
         let mut remaining = w;
         for span in spans {
-            let count = span.content.chars().count();
+            let count = prim::width(&span.content);
             if remaining == 0 {
                 break;
             }
@@ -853,10 +853,16 @@ fn align_spans(
                 out.push(span);
                 remaining -= count;
             } else {
-                let clipped: String = span.content.chars().take(remaining).collect();
-                out.push(Span::styled(clipped, span.style));
-                remaining = 0;
+                let clipped = prim::truncate(&span.content, remaining);
+                remaining = remaining.saturating_sub(prim::width(&clipped));
+                if !clipped.is_empty() {
+                    out.push(Span::styled(clipped, span.style));
+                }
+                break;
             }
+        }
+        if remaining > 0 {
+            out.push(Span::styled(" ".repeat(remaining), pad_style));
         }
         return out;
     }
