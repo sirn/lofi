@@ -45,7 +45,6 @@ fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             checkpointed_tail: true,
-            detached: false,
             ..
         } = &events[event_idx].kind
         {

@@ -6479,19 +6479,16 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
         events[marker_index].kind,
         SessionEventKind::Compaction { .. }
     ));
-    let SessionEventKind::Compaction {
-        detached,
-        previous_leaf_id,
-        ..
-    } = &events[marker_index].kind
-    else {
-        unreachable!()
-    };
-    assert!(*detached, "compaction should start a bounded lineage");
-    assert_eq!(
-        previous_leaf_id.as_deref(),
-        Some(branch_a_leaf.as_str()),
-        "detached checkpoint must remember the resumed branch"
+    let marker_pos = lineage
+        .iter()
+        .position(|&i| events[i].id == marker_leaf)
+        .expect("marker is on its own lineage");
+    assert!(
+        lineage[..marker_pos].iter().any(|&i| {
+            matches!(events[i].kind, SessionEventKind::Message(_))
+                && events[i].parent_id.as_deref() == Some(branch_a_leaf.as_str())
+        }),
+        "checkpointed kept tail must chain onto the resumed branch, not physical EOF"
     );
     assert!(
         lineage.iter().all(|&i| events[i].id != sibling_leaf),

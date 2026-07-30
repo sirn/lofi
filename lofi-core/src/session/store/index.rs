@@ -678,33 +678,10 @@ pub(super) fn load_indexed_path(
     index: &[EventIndex],
     leaf_id: Option<&str>,
 ) -> Result<Vec<SessionEvent>> {
-    use std::collections::HashMap;
-
     if index.is_empty() {
         return Ok(Vec::new());
     }
-    let by_id: HashMap<&IndexId, usize> = index
-        .iter()
-        .enumerate()
-        .map(|(i, event)| (&event.id, i))
-        .collect();
-    let leaf = leaf_id.map(|id| IndexId::parse(id.to_string()));
-    let mut current = leaf.as_ref().and_then(|id| by_id.get(id).copied());
-    let mut lineage = Vec::new();
-    while let Some(i) = current {
-        lineage.push(i);
-        if lineage.len() > index.len() {
-            return Err(Error::State("cycle in session event lineage".to_string()));
-        }
-        current = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
-    }
-    if leaf_id.is_some() && lineage.is_empty() {
-        return Err(Error::State("session branch leaf not found".to_string()));
-    }
-    lineage.reverse();
+    let lineage = super::lineage_indices(path, index, leaf_id)?;
     load_index_entries(path, index, &lineage)
 }
 

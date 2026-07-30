@@ -229,7 +229,7 @@ impl SessionCursor {
                 .find(|event| event.kind != IndexKind::Cursor)
                 .map(|event| event.id.to_event_id()),
         };
-        let selected = indexed_lineage(index, leaf.as_deref())?;
+        let selected = indexed_lineage(&path, index, leaf.as_deref())?;
         let cursor = Self::new(path, leaf);
         *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &selected)?);
         Ok((
@@ -291,7 +291,7 @@ impl SessionCursor {
     pub fn snapshot(&self) -> Result<SessionSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
-        let index = indexed_lineage(index, leaf.as_deref())?;
+        let index = indexed_lineage(&self.path, index, leaf.as_deref())?;
         *self.lock_compaction_index() = Some(compaction_index_suffix(&self.path, &index)?);
         Ok(SessionSnapshot {
             meta,
@@ -307,7 +307,7 @@ impl SessionCursor {
     pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
-        lineage_indices(&index, leaf.as_deref())?;
+        lineage_indices(&self.path, &index, leaf.as_deref())?;
         Ok(SessionTreeSnapshot {
             meta,
             index,
@@ -466,7 +466,7 @@ impl SessionCursor {
             return load_compaction_path(&self.path, index, leaf.as_deref());
         }
         let (_meta, index, _size) = load_index(&self.path)?;
-        let index = indexed_lineage(index, leaf.as_deref())?;
+        let index = indexed_lineage(&self.path, index, leaf.as_deref())?;
         let suffix = compaction_index_suffix(&self.path, &index)?;
         let events = load_compaction_path(&self.path, &suffix, leaf.as_deref())?;
         *self.lock_compaction_index() = Some(suffix);
@@ -527,7 +527,44 @@ impl SessionCursor {
     }
 }
 
-fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<usize>> {
+/// Follow a legacy detached checkpoint back across its cut: when the walk
+/// terminates at a root that a detached compaction marker names as its kept
+/// tail, continue from that marker's `previous_leaf_id`. Detached markers were
+/// written briefly before inline chaining was restored; the pre-compact
+/// branch is still the user's history and must remain reachable for display,
+/// while model-context reads stay bounded by the marker suffix.
+fn detached_continuation(
+    path: &Path,
+    index: &[EventIndex],
+    by_id: &std::collections::HashMap<&IndexId, usize>,
+    root: &IndexId,
+) -> Result<Option<usize>> {
+    for entry in index {
+        if entry.kind != IndexKind::Compaction {
+            continue;
+        }
+        let event = load_event_at(path, entry.offset)?;
+        let SessionEventKind::Compaction {
+            first_kept_entry_id,
+            detached: true,
+            previous_leaf_id: Some(previous),
+            ..
+        } = event.kind
+        else {
+            continue;
+        };
+        if root.matches(&first_kept_entry_id) {
+            return Ok(by_id.get(&IndexId::parse(previous)).copied());
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn lineage_indices(
+    path: &Path,
+    index: &[EventIndex],
+    leaf_id: Option<&str>,
+) -> Result<Vec<usize>> {
     use std::collections::HashMap;
     let by_id: HashMap<&IndexId, usize> = index
         .iter()
@@ -543,10 +580,13 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
         if selected.len() > index.len() {
             return Err(Error::State("cycle in session event lineage".to_string()));
         }
-        current = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
+        current = match &index[i].parent_id {
+            Some(parent) => by_id.get(parent).copied(),
+            // A root mid-walk means a legacy detached checkpoint cut the
+            // chain; stitch across it. The true transcript root is reached
+            // when no marker claims this root as its kept tail.
+            None => detached_continuation(path, index, &by_id, &index[i].id)?,
+        };
     }
     if leaf_id.is_some() && selected.is_empty() {
         return Err(Error::State("session branch leaf not found".to_string()));
@@ -555,8 +595,12 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
     Ok(selected)
 }
 
-fn indexed_lineage(index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
-    let selected = lineage_indices(&index, leaf_id)?;
+fn indexed_lineage(
+    path: &Path,
+    index: Vec<EventIndex>,
+    leaf_id: Option<&str>,
+) -> Result<Vec<EventIndex>> {
+    let selected = lineage_indices(path, &index, leaf_id)?;
     let mut wanted = selected.into_iter().peekable();
     let mut next = wanted.next();
     let mut lineage = Vec::with_capacity(wanted.size_hint().0 + usize::from(next.is_some()));
@@ -988,9 +1032,6 @@ fn append_compaction_from(
         first_kept_entry_id: &'a str,
         summarized_range: &'a [String; 2],
         checkpointed_tail: bool,
-        detached: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        previous_leaf_id: Option<&'a str>,
         summarized: usize,
         represented: usize,
         kept: usize,
@@ -1015,7 +1056,7 @@ fn append_compaction_from(
             let event = MessageCheckpoint {
                 id: &ids[index],
                 parent_id: if index == 0 {
-                    None
+                    parent.as_deref()
                 } else {
                     Some(&ids[index - 1])
                 },
@@ -1031,7 +1072,7 @@ fn append_compaction_from(
         let marker = CompactionCheckpoint {
             id: &ids[marker_index],
             parent_id: if marker_index == 0 {
-                None
+                parent.as_deref()
             } else {
                 Some(&ids[marker_index - 1])
             },
@@ -1043,8 +1084,6 @@ fn append_compaction_from(
                 .map_or("", String::as_str),
             summarized_range,
             checkpointed_tail: true,
-            detached: true,
-            previous_leaf_id: parent.as_deref(),
             summarized: counts.summarized,
             represented: counts.represented,
             kept: counts.kept,
@@ -1321,7 +1360,7 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
             .find(|event| event.kind != IndexKind::Cursor)
             .map(|event| event.id.to_event_id()),
     };
-    let selected = lineage_indices(&index, leaf.as_deref()).ok()?;
+    let selected = lineage_indices(path, &index, leaf.as_deref()).ok()?;
     let message_count = selected
         .iter()
         .filter(|&&i| {
@@ -1654,18 +1693,8 @@ mod tests {
         };
         assert_eq!(summary, "summary");
         assert_eq!(first_kept_entry_id, &events[1].id);
-        assert_eq!(events[1].parent_id, None);
+        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
         assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-        let SessionEventKind::Compaction {
-            detached,
-            previous_leaf_id,
-            ..
-        } = &events[2].kind
-        else {
-            unreachable!();
-        };
-        assert!(*detached);
-        assert_eq!(previous_leaf_id.as_deref(), Some(events[0].id.as_str()));
         assert_ne!(events[0].id, events[1].id);
         assert_ne!(events[1].id, events[2].id);
         assert_eq!(checkpoint_leaf, events[2].id);
@@ -1695,16 +1724,9 @@ mod tests {
         .unwrap();
 
         let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events[2].parent_id, None);
+        assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
         assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
-        let SessionEventKind::Compaction {
-            previous_leaf_id, ..
-        } = &events[3].kind
-        else {
-            panic!("expected compaction marker");
-        };
-        assert_eq!(previous_leaf_id.as_deref(), Some(events[0].id.as_str()));
-        assert_eq!(active_path_from_leaf(&events), vec![2, 3]);
+        assert!(!active_path_from_leaf(&events).contains(&1));
     }
 
     #[test]
