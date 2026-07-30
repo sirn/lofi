@@ -272,9 +272,10 @@ pub fn apply_hyperlinks(
                         .saturating_add(u16::try_from(cell_pos).unwrap_or(u16::MAX));
                     if x < area.right() {
                         let symbol = buffer[(x, y)].symbol().to_string();
-                        let opening = char_pos <= link.start;
-                        let closing = next_char >= link.end;
-                        let wrapped = osc8_symbol(&link.url, &symbol, opening, closing);
+                        // Cells are diffed independently, so each one needs a
+                        // self-contained link. Otherwise repainting only a
+                        // middle cell would silently remove its hyperlink.
+                        let wrapped = osc8_symbol(&link.url, &symbol);
                         let forced = u16::try_from(cells).unwrap_or(u16::MAX);
                         if let Some(forced) = NonZeroU16::new(forced) {
                             buffer[(x, y)]
