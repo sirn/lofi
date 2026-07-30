@@ -508,6 +508,8 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
                     first_kept_entry_id: String::new(),
                     summarized_range: [String::new(), String::new()],
                     checkpointed_tail: false,
+                    detached: false,
+                    previous_leaf_id: None,
                     summarized: meta.summarized,
                     represented: meta.represented,
                     kept: meta.kept,

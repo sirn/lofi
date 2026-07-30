@@ -997,6 +997,8 @@ mod tests {
                     first_kept_entry_id: "c".to_string(),
                     summarized_range: ["a".to_string(), "b".to_string()],
                     checkpointed_tail: false,
+                    detached: false,
+                    previous_leaf_id: None,
                     summarized: 2,
                     represented: 2,
                     kept: 2,

@@ -15,6 +15,7 @@ pub(super) fn visible_index_path(
         if let SessionEventKind::Compaction {
             first_kept_entry_id,
             checkpointed_tail: true,
+            detached: false,
             ..
         } = ev.kind
         {

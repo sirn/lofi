@@ -988,6 +988,9 @@ fn append_compaction_from(
         first_kept_entry_id: &'a str,
         summarized_range: &'a [String; 2],
         checkpointed_tail: bool,
+        detached: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        previous_leaf_id: Option<&'a str>,
         summarized: usize,
         represented: usize,
         kept: usize,
@@ -1012,7 +1015,7 @@ fn append_compaction_from(
             let event = MessageCheckpoint {
                 id: &ids[index],
                 parent_id: if index == 0 {
-                    parent.as_deref()
+                    None
                 } else {
                     Some(&ids[index - 1])
                 },
@@ -1028,7 +1031,7 @@ fn append_compaction_from(
         let marker = CompactionCheckpoint {
             id: &ids[marker_index],
             parent_id: if marker_index == 0 {
-                parent.as_deref()
+                None
             } else {
                 Some(&ids[marker_index - 1])
             },
@@ -1040,6 +1043,8 @@ fn append_compaction_from(
                 .map_or("", String::as_str),
             summarized_range,
             checkpointed_tail: true,
+            detached: true,
+            previous_leaf_id: parent.as_deref(),
             summarized: counts.summarized,
             represented: counts.represented,
             kept: counts.kept,
@@ -1649,8 +1654,18 @@ mod tests {
         };
         assert_eq!(summary, "summary");
         assert_eq!(first_kept_entry_id, &events[1].id);
-        assert_eq!(events[1].parent_id.as_deref(), Some(events[0].id.as_str()));
+        assert_eq!(events[1].parent_id, None);
         assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
+        let SessionEventKind::Compaction {
+            detached,
+            previous_leaf_id,
+            ..
+        } = &events[2].kind
+        else {
+            unreachable!();
+        };
+        assert!(*detached);
+        assert_eq!(previous_leaf_id.as_deref(), Some(events[0].id.as_str()));
         assert_ne!(events[0].id, events[1].id);
         assert_ne!(events[1].id, events[2].id);
         assert_eq!(checkpoint_leaf, events[2].id);
@@ -1680,9 +1695,16 @@ mod tests {
         .unwrap();
 
         let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events[2].parent_id.as_deref(), Some(events[0].id.as_str()));
+        assert_eq!(events[2].parent_id, None);
         assert_eq!(events[3].parent_id.as_deref(), Some(events[2].id.as_str()));
-        assert!(!active_path_from_leaf(&events).contains(&1));
+        let SessionEventKind::Compaction {
+            previous_leaf_id, ..
+        } = &events[3].kind
+        else {
+            panic!("expected compaction marker");
+        };
+        assert_eq!(previous_leaf_id.as_deref(), Some(events[0].id.as_str()));
+        assert_eq!(active_path_from_leaf(&events), vec![2, 3]);
     }
 
     #[test]
