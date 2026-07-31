@@ -120,6 +120,24 @@ impl SessionSink {
         })
     }
 
+    /// Pin the agent's system prompt onto the lineage before the first
+    /// model round so every request reads it back from the transcript rather
+    /// than from runtime config. Idempotent: does nothing when a System
+    /// event is already pinned.
+    ///
+    /// # Errors
+    /// Propagates session-file creation, read, and append failures.
+    pub fn ensure_system_pinned(&mut self, model: &RunModel, system_prompt: &str) -> Result<()> {
+        if system_prompt.is_empty() {
+            return Ok(());
+        }
+        let cursor = self.cursor_or_create(model)?;
+        if !cursor.has_system()? {
+            cursor.append_system(system_prompt)?;
+        }
+        Ok(())
+    }
+
     /// Record a completed user-shell command and return its byte range.
     ///
     /// # Errors
