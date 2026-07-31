@@ -148,7 +148,8 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         };
     // Pull the agent's resolved system prompt into a plain string before
     // `agent` moves into the TUI so the transcript can pin it at each context
-    // boundary (see `SessionSink::ensure_system_pinned`).
+    // boundary (lineage birth in `SessionSink::cursor_or_create`, post-compact
+    // in `AgentLifecycle::compact`).
     let system_prompt = agent
         .as_ref()
         .map_or_else(String::new, |a| a.system_prompt().to_string());
