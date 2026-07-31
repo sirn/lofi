@@ -801,6 +801,14 @@ pub(crate) struct App {
     /// bump — otherwise background-padded lines keep the old (narrower)
     /// width after the terminal grows.
     frozen_width: usize,
+    /// After a width-only resize, frozen turns below this exclusive upper
+    /// bound still hold heights measured at the previous width. `ensure_frozen`
+    /// keeps those stale heights as the total/base source (they only differ by
+    /// re-wrap, so the thumb and bottom anchor stay stable); the tick loop
+    /// re-measures them back-to-front — visible bottom turns first — so a
+    /// resize never stalls a frame on a long transcript. `None` once every
+    /// height matches `frozen_width`.
+    height_remeasure_from: Option<usize>,
     render_profile: Box<RenderProfile>,
 }
 
@@ -1242,6 +1250,11 @@ async fn run_loop(
                     if n.at.elapsed() >= NOTIFY_TTL {
                         app.notify = None;
                     }
+                    dirty = true;
+                }
+                // Drain pending resize height re-measure a little each tick
+                // so a width change on a long transcript never stalls a frame.
+                if app.remeasure_heights_step(16) {
                     dirty = true;
                 }
             }

@@ -3,6 +3,7 @@
 use super::*;
 
 impl App {
+    #[allow(clippy::too_many_lines)]
     pub(super) fn new(
         model_label: String,
         thinking: ThinkingLevel,
@@ -108,6 +109,7 @@ impl App {
             render_epoch: 0,
             frozen_epoch: 0,
             frozen_width: 0,
+            height_remeasure_from: None,
             render_profile: Box::default(),
         }
     }
@@ -567,12 +569,31 @@ impl App {
     /// A viewport resize (width change) also drops the cache, since wrapping
     /// and background padding depend on width.
     pub(super) fn ensure_frozen(&mut self, width: usize) {
-        if self.frozen_epoch != self.render_epoch || self.frozen_width != width {
+        let epoch_changed = self.frozen_epoch != self.render_epoch;
+        let width_changed = self.frozen_width != width;
+        if epoch_changed {
+            // Content changed wholesale: every cached height is invalid, so
+            // drop and re-measure eagerly below. No incremental path here —
+            // the turns themselves are different.
             self.frozen_render.clear();
             self.frozen_heights.clear();
             self.frozen_heights_other_mode.clear();
             self.frozen_epoch = self.render_epoch;
             self.frozen_width = width;
+            self.height_remeasure_from = None;
+        } else if width_changed {
+            // Width-only resize: the styled lines in `frozen_render` are
+            // bound to the old width and must be rebuilt, but the turn
+            // content is identical — only its wrap changes. Keep the stale
+            // heights as the total/base source so the bottom anchor and
+            // thumb stay put, and re-measure incrementally (visible window
+            // now, the rest on the tick loop) instead of stalling this frame.
+            self.frozen_render.clear();
+            self.frozen_heights_other_mode.clear();
+            self.frozen_width = width;
+            // Re-measure from the end: the cursor is an exclusive upper
+            // bound that remeasure_heights_step walks down to zero.
+            self.height_remeasure_from = Some(self.frozen_heights.len());
         }
         let n = self.turns.len();
         // Normally the last turn is live (or retained in memory after resume),
@@ -589,27 +610,65 @@ impl App {
             n.saturating_sub(1)
         };
         while self.frozen_heights.len() < target {
-            let idx = self.frozen_heights.len();
-            let theme = self.theme;
-            let turn = self.materialize_turn(idx);
-            let height = {
-                let cx = view::component::Cx {
-                    app: self,
-                    theme,
-                    width,
-                    active_turn: false,
-                };
-                view::blocks::render_turn_height(&cx, &turn)
-            };
             // Heights are the compact permanent index. Measuring a newly
             // frozen verbose turn must not materialize its complete styled
             // output; the viewport pass renders only rows it needs.
+            let height = self.measure_turn_height(self.frozen_heights.len(), width);
             self.frozen_heights.push(height);
         }
         if self.frozen_heights.len() > target {
             self.frozen_heights.truncate(target);
             self.frozen_render.map.retain(|idx, _| *idx < target);
             self.frozen_render.order.retain(|idx| *idx < target);
+            // A truncated pending re-measure must not run past the new end.
+            if let Some(hi) = self.height_remeasure_from {
+                self.height_remeasure_from = if hi > target { Some(target) } else { Some(hi) };
+            }
+        }
+    }
+
+    /// Render-height of one frozen turn at `width`. Shared by the eager fill
+    /// in `ensure_frozen` and the incremental resize re-measure.
+    fn measure_turn_height(&self, idx: usize, width: usize) -> usize {
+        let theme = self.theme;
+        let turn = self.materialize_turn(idx);
+        let cx = view::component::Cx {
+            app: self,
+            theme,
+            width,
+            active_turn: false,
+        };
+        view::blocks::render_turn_height(&cx, &turn)
+    }
+
+    /// Re-measure up to `budget` stale frozen heights at the current
+    /// `frozen_width`, advancing `height_remeasure_from`. Runs on the tick
+    /// loop after a width-only resize so no single frame pays the full cost.
+    /// Returns true while work remains (so the caller keeps the frame dirty).
+    pub(super) fn remeasure_heights_step(&mut self, budget: usize) -> bool {
+        let next_hi = match self.height_remeasure_from {
+            Some(hi) => hi.min(self.frozen_heights.len()),
+            None => return false,
+        };
+        if next_hi == 0 {
+            self.height_remeasure_from = None;
+            return false;
+        }
+        let width = self.frozen_width;
+        // Work back-to-front: the viewport is almost always pinned to the
+        // bottom, so the last frozen turns are the visible ones. Measuring
+        // those first makes the on-screen content exact on the first tick;
+        // the off-screen prefix converges over the following ticks.
+        let lo = next_hi.saturating_sub(budget);
+        for idx in lo..next_hi {
+            self.frozen_heights[idx] = self.measure_turn_height(idx, width);
+        }
+        if lo == 0 {
+            self.height_remeasure_from = None;
+            false
+        } else {
+            self.height_remeasure_from = Some(lo);
+            true
         }
     }
 
