@@ -107,35 +107,28 @@ impl SessionSink {
     }
 
     /// Return the active cursor, creating the session file on first use. This
-    /// is the single place new session files come into existence.
+    /// is the single place new session files come into existence, and a fresh
+    /// lineage is pinned with its system prompt as the first event — exactly
+    /// the way a compaction re-emits its boundary. Reusing an existing cursor
+    /// never re-pins; restore re-reads the system event from the log.
     ///
     /// # Errors
-    /// Propagates session-file creation failures.
-    pub fn cursor_or_create(&mut self, model: &RunModel) -> Result<SessionCursor> {
+    /// Propagates session-file creation and transcript append failures.
+    pub fn cursor_or_create(
+        &mut self,
+        model: &RunModel,
+        system_prompt: &str,
+    ) -> Result<SessionCursor> {
         if self.cursor.is_none() {
-            self.cursor = Some(self.store.create_cursor(&self.cwd, model)?);
+            let cursor = self.store.create_cursor(&self.cwd, model)?;
+            if !system_prompt.is_empty() {
+                cursor.append_system(system_prompt)?;
+            }
+            self.cursor = Some(cursor);
         }
         self.cursor.clone().ok_or_else(|| {
             lofi_error::Error::State("session cursor missing after create".to_string())
         })
-    }
-
-    /// Pin the agent's system prompt onto the lineage before the first
-    /// model round so every request reads it back from the transcript rather
-    /// than from runtime config. Idempotent: does nothing when a System
-    /// event is already pinned.
-    ///
-    /// # Errors
-    /// Propagates session-file creation, read, and append failures.
-    pub fn ensure_system_pinned(&mut self, model: &RunModel, system_prompt: &str) -> Result<()> {
-        if system_prompt.is_empty() {
-            return Ok(());
-        }
-        let cursor = self.cursor_or_create(model)?;
-        if !cursor.has_system()? {
-            cursor.append_system(system_prompt)?;
-        }
-        Ok(())
     }
 
     /// Record a completed user-shell command and return its byte range.
@@ -147,8 +140,9 @@ impl SessionSink {
         result: &UserBashResult,
         exclude_from_context: bool,
         model: &RunModel,
+        system_prompt: &str,
     ) -> Result<(u64, u64)> {
-        let cursor = self.cursor_or_create(model)?;
+        let cursor = self.cursor_or_create(model, system_prompt)?;
         user_bash::append_user_bash(&cursor, result, exclude_from_context)
     }
 
