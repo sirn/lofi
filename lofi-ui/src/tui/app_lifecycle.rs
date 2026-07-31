@@ -57,7 +57,7 @@ impl App {
             debug: None,
             should_quit: false,
             session: SessionState {
-                store: None,
+                sink: None,
                 cursor: None,
                 cwd: PathBuf::new(),
             },

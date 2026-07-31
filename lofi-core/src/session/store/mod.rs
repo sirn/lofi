@@ -283,6 +283,30 @@ impl SessionCursor {
         Ok(())
     }
 
+    /// Move the session head to `entry_id` and return the snapshot of the
+    /// newly selected lineage. Bundles the head move with the re-read the UI
+    /// always performs immediately after, so branch switching is a single
+    /// core-side operation rather than a UI-driven write followed by a read.
+    /// # Errors
+    /// Returns an error when the head cannot be moved or re-indexed.
+    pub fn switch_branch(&self, entry_id: String) -> Result<SessionSnapshot> {
+        self.branch_from(entry_id)?;
+        self.snapshot()
+    }
+
+    /// Move the session head to `leaf` and return the snapshot of the
+    /// restored lineage, undoing a failed [`switch_branch`](Self::switch_branch).
+    /// Pass `None` to restore the detached root, or the previous leaf id to
+    /// restore a real head.
+    /// # Errors
+    /// Returns an error when the head cannot be moved or re-indexed.
+    pub fn restore_branch(&self, leaf: Option<String>) -> Result<SessionSnapshot> {
+        self.branch_from(leaf.unwrap_or_default())?;
+        self.snapshot()
+    }
+
+    /// Atomically index the transcript and project it onto this cursor's
+    /// selected lineage."""
     /// Atomically index the transcript and project it onto this cursor's
     /// selected lineage.
     /// # Errors
