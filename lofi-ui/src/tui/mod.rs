@@ -52,7 +52,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
-use lofi_core::session::store::{self, SessionEntry, SessionStore};
+use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
     ContentBlock, Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind,
     ThinkingLevel, Usage,
@@ -244,9 +244,12 @@ pub(crate) struct Turn {
     blocks: Vec<Block>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SessionState {
-    store: Option<SessionStore>,
+    /// Core-owned session write endpoint. `None` in ephemeral mode
+    /// (`--no-session`). The UI never assembles or appends session events;
+    /// every mutation flows through this sink.
+    sink: Option<lofi_core::session::sink::SessionSink>,
     cursor: Option<store::SessionCursor>,
     cwd: PathBuf,
 }
@@ -256,19 +259,22 @@ impl SessionState {
         self.cursor.as_ref().map(store::SessionCursor::path)
     }
 
-    fn cursor_or_create(&mut self, model: &RunModel) -> Option<store::SessionCursor> {
-        if self.cursor.is_none() {
-            self.cursor = self
-                .store
-                .as_ref()
-                .and_then(|store| store.create_cursor(&self.cwd, model).ok());
-        }
-        self.cursor.clone()
+    /// Sync `cursor` from the sink after any sink-side mutation. The sink owns
+    /// cursor creation and branch moves; this mirror exists only for reads.
+    fn refresh_cursor(&mut self) {
+        self.cursor = self.sink.as_ref().and_then(|s| s.cursor().cloned());
+    }
+
+    /// Borrow the sink for a core-side session mutation. Returns `None` in
+    /// ephemeral (`--no-session`) mode, so callers skip session recording.
+    fn sink_mut(&mut self) -> Option<&mut lofi_core::session::sink::SessionSink> {
+        self.sink.as_mut()
     }
 }
 
 pub(crate) struct SessionConfig {
-    store: Option<SessionStore>,
+    /// Core-owned session write endpoint; `None` for ephemeral sessions.
+    sink: Option<lofi_core::session::sink::SessionSink>,
     cursor: Option<store::SessionCursor>,
     index: Vec<store::EventIndex>,
     file_size: u64,
@@ -278,7 +284,7 @@ pub(crate) struct SessionConfig {
 impl SessionConfig {
     pub(crate) fn ephemeral(cwd: PathBuf) -> Self {
         Self {
-            store: None,
+            sink: None,
             cursor: None,
             index: Vec::new(),
             file_size: 0,
@@ -286,9 +292,11 @@ impl SessionConfig {
         }
     }
 
-    pub(crate) fn fresh(store: SessionStore, cwd: PathBuf) -> Self {
+    /// Fresh session: no file on disk yet. The sink creates it lazily on the
+    /// first run or user bash. `sink` is `None` only for `--no-session`.
+    pub(crate) fn fresh(sink: lofi_core::session::sink::SessionSink, cwd: PathBuf) -> Self {
         Self {
-            store: Some(store),
+            sink: Some(sink),
             cursor: None,
             index: Vec::new(),
             file_size: 0,
@@ -296,15 +304,16 @@ impl SessionConfig {
         }
     }
 
+    /// Resume an existing session at its selected cursor.
     pub(crate) fn resumed(
-        store: SessionStore,
+        sink: lofi_core::session::sink::SessionSink,
         cursor: store::SessionCursor,
         index: Vec<store::EventIndex>,
         file_size: u64,
         cwd: PathBuf,
     ) -> Self {
         Self {
-            store: Some(store),
+            sink: Some(sink),
             cursor: Some(cursor),
             index,
             file_size,
@@ -1007,7 +1016,7 @@ async fn run_loop(
     switcher: Option<ModelSwitcher>,
 ) -> Result<()> {
     let SessionConfig {
-        store,
+        sink,
         cursor,
         index,
         file_size,
@@ -1018,7 +1027,7 @@ async fn run_loop(
         .map_or(Vec::new(), |s| s.choices().to_vec());
     let mut app = App::new(model_label, thinking, ctx_limit, compaction);
     app.model_choices = model_choices;
-    app.session = SessionState { store, cursor, cwd };
+    app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size)?;
     }

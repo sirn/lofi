@@ -251,23 +251,14 @@ pub(super) fn finish_user_bash(
             app.notify(NotifyKind::Error, format!("update agent history: {error}"));
         }
     }
-    let byte_range = app.session.cursor.as_ref().and_then(|cursor| {
-        let mut events = [SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::UserBash {
-                command: result.command.clone(),
-                output: result.output.clone(),
-                exit_code: result.exit_code,
-                signal: result.signal,
-                duration_ms: result.duration_ms,
-                truncated: result.truncated,
-                cancelled: result.cancelled,
-                exclude_from_context,
-            },
-        }];
-        cursor.append_events(&mut events).ok()
+    // Recording the command is a core-owned session write — the UI hands the
+    // finished result to the sink rather than assembling/appending an event.
+    let run_model = app.run_model();
+    let byte_range = app.session.sink_mut().and_then(|sink| {
+        sink.record_user_bash(&result, exclude_from_context, &run_model)
+            .ok()
     });
+    app.session.refresh_cursor();
     app.apply_event(AgentEvent::UserBash {
         command: result.command,
         output: result.output,
@@ -310,7 +301,14 @@ fn spawn_agent_run(
     agent: &lofi_core::Agent,
     prompt: Option<String>,
 ) {
-    let cursor = app.session.cursor_or_create(&app.run_model());
+    // Session creation/writes are core-owned: ask the sink for the cursor,
+    // creating the session file on first use, then mirror it for reads.
+    let run_model = app.run_model();
+    let cursor = app
+        .session
+        .sink_mut()
+        .and_then(|sink| sink.cursor_or_create(&run_model).ok());
+    app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = app.lifecycle.shared_history();
     let agent = agent.clone();
@@ -350,7 +348,13 @@ pub(super) fn spawn_user_bash(
     command: String,
     exclude_from_context: bool,
 ) {
-    app.session.cursor_or_create(&app.run_model());
+    // Ensure a session exists (core-owned) so the finished command can be
+    // recorded; mirror the cursor for reads.
+    let run_model = app.run_model();
+    if let Some(sink) = app.session.sink_mut() {
+        let _ = sink.cursor_or_create(&run_model);
+    }
+    app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
