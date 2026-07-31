@@ -211,6 +211,16 @@ impl Component for AssistantText<'_> {
             vec![Span::styled("▌ ", mark)]
         })
     }
+
+    fn height(&self, cx: &Cx) -> usize {
+        let w = cx.width;
+        let content_w = w.saturating_sub(2);
+        let text = self.text.trim();
+        if text.is_empty() {
+            return 0;
+        }
+        markdown_body_height(text, content_w)
+    }
 }
 
 fn render_markdown_body(
@@ -432,6 +442,147 @@ fn render_markdown_body(
         idx += 1;
     }
     out
+}
+
+/// Count the visual rows `render_markdown_body` would emit for `text`, without
+/// allocating any styled lines. `Component::height` for the markdown-heavy
+/// components routes here so measuring a resumed transcript's heights does not
+/// build and immediately discard thousands of `RenderLine` graphs — that
+/// transient was the dominant startup/resize allocation. The row arithmetic
+/// must mirror `render_markdown_body` exactly; `markdown_height_matches_lines`
+/// (test) guards against drift.
+fn markdown_body_height(text: &str, content_w: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut row = 0usize;
+    let mut in_code = false;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw = lines[idx];
+        let trimmed = raw.trim_end();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            row += 1;
+            idx += 1;
+            continue;
+        }
+        if in_code {
+            let avail = content_w.saturating_sub(2);
+            row += prim::wrap_pre(raw, avail).len();
+            idx += 1;
+            continue;
+        }
+        if trimmed.starts_with('|')
+            && idx + 1 < lines.len()
+            && is_table_separator(lines[idx + 1].trim())
+        {
+            let start = idx;
+            while idx < lines.len() && lines[idx].trim().starts_with('|') {
+                idx += 1;
+            }
+            row += table_height(&lines[start..idx], content_w);
+            continue;
+        }
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+            let h = &trimmed[hashes + 1..];
+            row += wrap_with_map(h, hashes + 1, trimmed.len(), content_w).len();
+        } else if trimmed == ">" || trimmed.starts_with("> ") {
+            while idx < lines.len()
+                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
+            {
+                // Intentionally not pre-incrementing in the condition: handled below.
+                let qtrimmed = lines[idx].trim_end();
+                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
+                if body.is_empty() {
+                    row += 1;
+                } else {
+                    let prefix_len = qtrimmed.len() - body.len();
+                    row += wrap_with_map(
+                        body,
+                        prefix_len,
+                        qtrimmed.len(),
+                        content_w.saturating_sub(2),
+                    )
+                    .len();
+                }
+                idx += 1;
+            }
+            continue;
+        } else {
+            let mapped = inline_spans_mapped(raw, Theme::default(), Style::default());
+            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+            let line = Line::from(spans);
+            row += prim::wrap_line_styled(&line, content_w).len();
+        }
+        idx += 1;
+    }
+    row
+}
+
+/// Count the visual rows a `|`-table would occupy, mirroring `render_table` +
+/// `table_row` without allocating the styled grid. Used by `markdown_body_height`.
+fn table_height(tlines: &[&str], content_w: usize) -> usize {
+    let header = parse_table_row(tlines[0]);
+    let n_cols = header.len();
+    if n_cols == 0 {
+        return 0;
+    }
+    let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
+    let t = Theme::default();
+    let base = Style::new().fg(t.fg);
+
+    // Column widths, identical to render_table.
+    let mut col_w = vec![0usize; n_cols];
+    for (i, cell) in header.iter().enumerate() {
+        col_w[i] = col_w[i].max(rendered_width(cell, t, base));
+    }
+    for row in &data {
+        for (i, cell) in row.iter().enumerate().take(n_cols) {
+            col_w[i] = col_w[i].max(rendered_width(cell, t, base));
+        }
+    }
+    let table_w = content_w.saturating_sub(2);
+    let total: usize = col_w.iter().map(|&w| w + 2).sum::<usize>() + n_cols + 1;
+    if total > table_w {
+        let overhead = n_cols * 2 + n_cols + 1;
+        let avail = table_w.saturating_sub(overhead).max(n_cols);
+        let natural = col_w.iter().sum::<usize>().max(1);
+        let mut assigned = 0usize;
+        for cw in col_w.iter_mut().take(n_cols - 1) {
+            *cw = (*cw * avail / natural).max(1);
+            assigned += *cw;
+        }
+        col_w[n_cols - 1] = avail.saturating_sub(assigned).max(1);
+    }
+
+    // A row group occupies the tallest wrapped cell across its columns.
+    let row_group = |cells: &[String]| -> usize {
+        col_w
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                let cell = cells.get(i).map_or("", String::as_str);
+                let (spans, _) = inline_spans_and_links(cell, t, base);
+                prim::wrap_line_styled(&Line::from(spans), w).len()
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    };
+
+    let mut rows = 1; // top border
+    rows += row_group(&header);
+    rows += 1; // header separator
+    for (i, row) in data.iter().enumerate() {
+        rows += row_group(row);
+        if i + 1 < data.len() {
+            rows += 1; // interior border
+        }
+    }
+    rows + 1 // bottom border
 }
 
 fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
@@ -1154,6 +1305,29 @@ impl Component for Thinking<'_> {
             }
         }
         out
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        let text = trim_reasoning_summary(&self.block.text);
+        let working = self.block.elapsed.is_none() && cx.active_turn;
+        if text.is_empty() && !working {
+            return 0;
+        }
+        let content_w = cx.width.saturating_sub(2);
+        let md = markdown_body_height(&text, content_w);
+        if working {
+            // +1 for the "Thinking..." line, +1 for the blank separator (if body non-empty).
+            md + if md > 0 { 2 } else { 1 }
+        } else if let Some(d) = self.block.elapsed {
+            if d.is_zero() {
+                md
+            } else {
+                // +1 for the "Thought for {duration}" line, +1 blank separator (if any).
+                md + if md > 0 { 2 } else { 1 }
+            }
+        } else {
+            md
+        }
     }
 }
 
@@ -2329,8 +2503,13 @@ use active_indicator as _;
 
 #[cfg(test)]
 mod tests {
-    use super::{native_body, native_preview_range, trim_reasoning_summary};
+    use super::{
+        markdown_body_height, native_body, native_preview_range, render_markdown_body,
+        trim_reasoning_summary,
+    };
+    use crate::tui::theme::Theme;
     use crate::tui::NativeTool;
+    use ratatui::style::Style;
 
     #[test]
     fn bash_preview_keeps_tail_while_other_tools_keep_head() {
@@ -2373,5 +2552,154 @@ mod tests {
     #[test]
     fn reasoning_summary_trims_plain_empty_placeholder() {
         assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
+    }
+
+    /// Reference height via the existing renderer: count the lines produced.
+    fn reference_height(text: &str, content_w: usize) -> usize {
+        render_markdown_body(
+            text,
+            Theme::default(),
+            content_w + 2,
+            content_w,
+            Style::default(),
+            |_| vec![],
+        )
+        .len()
+    }
+
+    fn assert_height_matches(text: &str) {
+        for content_w in [10usize, 20, 30, 40, 80, 120] {
+            let expected = reference_height(text, content_w);
+            let actual = markdown_body_height(text, content_w);
+            assert_eq!(
+                actual, expected,
+                "height mismatch at content_w={content_w} for:\n{text}",
+            );
+        }
+    }
+
+    #[test]
+    fn height_simple_paragraph() {
+        assert_height_matches("hello world");
+        assert_height_matches("The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.");
+        assert_height_matches("short");
+        assert_height_matches("\n".repeat(3).as_str());
+    }
+
+    #[test]
+    fn height_markdown_structures() {
+        assert_height_matches("# Heading one\n\nSome text under it.");
+        assert_height_matches("## Sub");
+        assert_height_matches("> quote\n> more quote");
+        assert_height_matches(
+            "> \
+> not-empty",
+        );
+        assert_height_matches("- item one\n- item two");
+        assert_height_matches("1. numbered\n2. list");
+        assert_height_matches("regular\n\n```rust\nfn main() {}\n```\n\nafter");
+        assert_height_matches("```\nplain\n```");
+        assert_height_matches("| a | b |\n|---|---|\n| 1 | 2 |");
+        assert_height_matches(
+            "| very long cell content that will definitely wrap | another |\n|---|---|\n| x | y |",
+        );
+        assert_height_matches("**bold** and *italic* and `code` mixed inline");
+        assert_height_matches("a\n\n[link](https://example.com) trail");
+    }
+
+    #[test]
+    fn height_wrap_boundaries() {
+        // Words exactly at the wrap boundary.
+        assert_height_matches("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee");
+        // Long unbroken word forces character-level break.
+        assert_height_matches("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        // Mixed code and headings and wrapping.
+        assert_height_matches("# A heading that is sufficiently long to wrap across multiple lines at narrow widths for sure");
+        // Unicode.
+        assert_height_matches("こんにちは、世界。これはテストです。もっと書きます。");
+        assert_height_matches("emoji 🎉 🚀 and text together");
+    }
+
+    #[test]
+    fn height_empty() {
+        assert_height_matches("");
+    }
+
+    /// Seeded fuzz over many random markdown shapes: every line picked from a
+    /// pool of construct patterns (headings, lists, quotes, code fences,
+    /// tables, wrapping text, unicode, links) then joined. `markdown_body_height`
+    /// must agree with `render_markdown_body(...).len()` for all of them, for
+    /// each probe width. This is the drift guard for the hand-mirror.
+    #[test]
+    fn height_fuzz_seeded() {
+        // Simple deterministic PRNG (xorshift64) — no external deps.
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() % n.max(1) as u64) as usize
+            }
+        }
+
+        let lines_pool = [
+            "plain short text",
+            "The quick brown fox jumps over the lazy dog. And then some more to wrap.",
+            "# h1",
+            "## h2 with a rather long heading to force wrapping at narrow widths",
+            "### h3",
+            "#### h4",
+            "##### h5",
+            "###### h6",
+            "- bullet item",
+            "- bullet item with wrapping text to check wrapping behavior at small widths",
+            "1. numbered one",
+            "2. numbered two",
+            "> quote single line",
+            "> quote with enough content to wrap across multiple visual lines",
+            "> ",
+            "```rust",
+            "let x = 42; // code",
+            "```",
+            "| col1 | col2 | col3 |",
+            "|------|------|------|",
+            "| a    | b    | c    |",
+            "| long-cell-content-that-wraps | another | c |",
+            "**bold** inline and *italic* too",
+            "a `code span` in line",
+            "[link text](https://example.com/some/path) and trailing",
+            "unicode: こんにちは世界 🎉🚀 テスト",
+            "mixed **bold** with `code` and [link](https://example.com)",
+            "",    // blank line
+            "   ", // whitespace-only
+            ">> nested quote marker doesn\u{2019}t exist as a concept but is fine as text",
+            "text with *unclosed star and **unclosed bold",
+            "",
+        ];
+
+        for seed in 0..64u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let n_lines = 1 + rng.below(24);
+            let mut text_parts: Vec<&str> = Vec::new();
+            for _ in 0..n_lines {
+                text_parts.push(lines_pool[rng.below(lines_pool.len())]);
+            }
+            let text = text_parts.join("\n");
+
+            for content_w in [5usize, 8, 12, 16, 24, 40, 64, 96, 160] {
+                let expected = reference_height(&text, content_w);
+                let actual = markdown_body_height(&text, content_w);
+                assert_eq!(
+                    actual, expected,
+                    "height mismatch (seed={seed} content_w={content_w}) for:\n{text}",
+                );
+            }
+        }
     }
 }
