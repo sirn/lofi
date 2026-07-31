@@ -146,9 +146,9 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                 None,
             ),
         };
-    tui::run(
+    Box::pin(tui::run(
         agent, label, thinking, session, hint, ctx_limit, compaction, switcher,
-    )
+    ))
     .await
 }
 
