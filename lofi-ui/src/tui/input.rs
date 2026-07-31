@@ -296,6 +296,12 @@ fn spawn_agent_run(
     // Session creation/writes are core-owned: ask the sink for the cursor,
     // creating the session file on first use, then mirror it for reads.
     let run_model = app.run_model();
+    if let Some(sink) = app.session.sink_mut() {
+        // Pin the system prompt before the first model round so every
+        // request (including post-compact restores) reads it back from the
+        // transcript rather than runtime config. Idempotent per session.
+        let _ = sink.ensure_system_pinned(&run_model, &app.system_prompt);
+    }
     let cursor = app
         .session
         .sink_mut()

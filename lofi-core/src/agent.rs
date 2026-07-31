@@ -50,7 +50,6 @@ pub(crate) use exec::{cap_exec_result, cap_tool_result, CodePrefixDecoder};
 pub use exec::{
     exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
 };
-pub(crate) use model::initial_history;
 pub use model::{build_agent, rebuild_agent, select_model};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");

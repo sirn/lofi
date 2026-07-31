@@ -2,25 +2,6 @@
 
 use super::*;
 
-pub(crate) fn initial_history(system: &str, user_prompt: &str) -> Vec<Message> {
-    let mut messages = Vec::with_capacity(2);
-    if !system.is_empty() {
-        messages.push(Message {
-            role: Role::System,
-            blocks: vec![ContentBlock::Text {
-                text: system.to_string(),
-            }],
-        });
-    }
-    messages.push(Message {
-        role: Role::User,
-        blocks: vec![ContentBlock::Text {
-            text: user_prompt.to_string(),
-        }],
-    });
-    messages
-}
-
 /// Shared by the `lofi-ui` presentation drivers (`run_print`, `run_interactive`)
 /// so the resolution ladder (config load, registry + discovery, model +
 /// thinking-level resolution, transport construction) stays in one place.

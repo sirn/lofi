@@ -712,6 +712,11 @@ pub(crate) struct App {
     input: String,
     input_cursor: usize,
     lifecycle: AgentLifecycle,
+    /// The system prompt the agent was built with; pinned onto the durable
+    /// transcript at each context boundary so a resumed or compacted history
+    /// replays the exact governing prompt rather than what today's config
+    /// would produce.
+    system_prompt: String,
     history_nav: Vec<String>,
     history_idx: Option<usize>,
     input_stash: String,
@@ -955,6 +960,7 @@ pub(crate) async fn run(
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
     switcher: Option<ModelSwitcher>,
+    system_prompt: String,
 ) -> Result<()> {
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
@@ -996,6 +1002,7 @@ pub(crate) async fn run(
                 ctx_limit,
                 compaction,
                 switcher,
+                system_prompt,
             )
             .await
         })
@@ -1014,6 +1021,7 @@ async fn run_loop(
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
     switcher: Option<ModelSwitcher>,
+    system_prompt: String,
 ) -> Result<()> {
     let SessionConfig {
         sink,
@@ -1025,7 +1033,7 @@ async fn run_loop(
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
-    let mut app = App::new(model_label, thinking, ctx_limit, compaction);
+    let mut app = App::new(model_label, thinking, ctx_limit, compaction, system_prompt);
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {

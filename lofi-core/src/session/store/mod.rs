@@ -506,6 +506,42 @@ impl SessionCursor {
         Ok((start, end))
     }
 
+    /// Append the governing system prompt as a `Message(System)` event off the
+    /// current head so the next restore (and every subsequent request) reads it
+    /// back from the transcript, not runtime config. Called once at session
+    /// start and once right after each compaction, so the latest System event
+    /// on the active lineage is always the active one.
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn append_system(&self, system_prompt: &str) -> Result<(u64, u64)> {
+        if system_prompt.is_empty() {
+            return Ok((0, 0));
+        }
+        let mut events = vec![SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: lofi_types::Role::System,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: system_prompt.to_string(),
+                }],
+            }),
+        }];
+        self.append_events(&mut events)
+    }
+
+    /// True when the active lineage already contains a `Role::System` event.
+    /// Used by boundary code to decide whether to pin a fresh one without
+    /// duplicating what the log already knows.
+    /// # Errors
+    /// Propagates transcript read failures.
+    pub fn has_system(&self) -> Result<bool> {
+        Ok(self
+            .load_events()?
+            .iter()
+            .any(|event| matches!(&event.kind, SessionEventKind::Message(m) if m.role == lofi_types::Role::System)))
+    }
+
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn append_compaction(
