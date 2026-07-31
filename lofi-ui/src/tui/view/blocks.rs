@@ -434,6 +434,143 @@ fn render_markdown_body(
     out
 }
 
+/// Count the visual rows `render_markdown_body` would emit for `text`, without
+/// allocating any styled lines. `Component::height` for the markdown-heavy
+/// components routes here so measuring a resumed transcript's heights does not
+/// build and immediately discard thousands of `RenderLine` graphs — that
+/// transient was the dominant startup/resize allocation. The row arithmetic
+/// must mirror `render_markdown_body` exactly; `markdown_height_matches_lines`
+/// (test) guards against drift.
+fn markdown_body_height(text: &str, content_w: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut row = 0usize;
+    let mut in_code = false;
+    let lines: Vec<&str> = text.split('
+').collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw = lines[idx];
+        let trimmed = raw.trim_end();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            row += 1;
+            idx += 1;
+            continue;
+        }
+        if in_code {
+            let avail = content_w.saturating_sub(2);
+            row += prim::wrap_pre(raw, avail).len();
+            idx += 1;
+            continue;
+        }
+        if trimmed.starts_with('|')
+            && idx + 1 < lines.len()
+            && is_table_separator(lines[idx + 1].trim())
+        {
+            let start = idx;
+            while idx < lines.len() && lines[idx].trim().starts_with('|') {
+                idx += 1;
+            }
+            row += table_height(&lines[start..idx], content_w);
+            continue;
+        }
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+            let h = &trimmed[hashes + 1..];
+            row += wrap_with_map(h, hashes + 1, trimmed.len(), content_w).len();
+        } else if trimmed == ">" || trimmed.starts_with("> ") {
+            while idx < lines.len()
+                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
+            {
+                // Intentionally not pre-incrementing in the condition: handled below.
+                let qtrimmed = lines[idx].trim_end();
+                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
+                if body.is_empty() {
+                    row += 1;
+                } else {
+                    let prefix_len = qtrimmed.len() - body.len();
+                    row += wrap_with_map(body, prefix_len, qtrimmed.len(),
+                        content_w.saturating_sub(2)).len();
+                }
+                idx += 1;
+            }
+            continue;
+        } else {
+            let mapped = inline_spans_mapped(raw, Theme::default(), Style::default());
+            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+            let line = Line::from(spans);
+            row += prim::wrap_line_styled(&line, content_w).len();
+        }
+        idx += 1;
+    }
+    row
+}
+
+/// Count the visual rows a `|`-table would occupy, mirroring `render_table` +
+/// `table_row` without allocating the styled grid. Used by `markdown_body_height`.
+fn table_height(tlines: &[&str], content_w: usize) -> usize {
+    let header = parse_table_row(tlines[0]);
+    let n_cols = header.len();
+    if n_cols == 0 {
+        return 0;
+    }
+    let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
+    let t = Theme::default();
+    let base = Style::new().fg(t.fg);
+
+    // Column widths, identical to render_table.
+    let mut col_w = vec![0usize; n_cols];
+    for (i, cell) in header.iter().enumerate() {
+        col_w[i] = col_w[i].max(rendered_width(cell, t, base));
+    }
+    for row in &data {
+        for (i, cell) in row.iter().enumerate().take(n_cols) {
+            col_w[i] = col_w[i].max(rendered_width(cell, t, base));
+        }
+    }
+    let table_w = content_w.saturating_sub(2);
+    let total: usize = col_w.iter().map(|&w| w + 2).sum::<usize>() + n_cols + 1;
+    if total > table_w {
+        let overhead = n_cols * 2 + n_cols + 1;
+        let avail = table_w.saturating_sub(overhead).max(n_cols);
+        let natural = col_w.iter().sum::<usize>().max(1);
+        let mut assigned = 0usize;
+        for cw in col_w.iter_mut().take(n_cols - 1) {
+            *cw = (*cw * avail / natural).max(1);
+            assigned += *cw;
+        }
+        col_w[n_cols - 1] = avail.saturating_sub(assigned).max(1);
+    }
+
+    // A row group occupies the tallest wrapped cell across its columns.
+    let row_group = |cells: &[String]| -> usize {
+        col_w
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                let cell = cells.get(i).map_or("", String::as_str);
+                let (spans, _) = inline_spans_and_links(cell, t, base);
+                prim::wrap_line_styled(&Line::from(spans), w).len()
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    };
+
+    let mut rows = 1; // top border
+    rows += row_group(&header);
+    rows += 1; // header separator
+    for (i, row) in data.iter().enumerate() {
+        rows += row_group(row);
+        if i + 1 < data.len() {
+            rows += 1; // interior border
+        }
+    }
+    rows + 1 // bottom border
+}
+
 fn inline_spans(line: &str, t: Theme, base: Style) -> Vec<Span<'static>> {
     inline_spans_and_links(line, t, base).0
 }
