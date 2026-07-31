@@ -1,10 +1,9 @@
 //! Core-owned session write endpoint.
 //!
-//! The UI must never assemble or append session events itself. It holds a
-//! cursor purely for reading (resume, the tree picker); every mutation —
-//! creating the session file, moving the branch head, and recording
-//! user-shell output — flows through this sink so the write channel and its
-//! policy live entirely in core.
+//! Callers must never assemble or append session events themselves; every
+//! mutation — creating the session file, moving the branch head, and
+//! recording user-shell output — flows through this sink so the write
+//! channel and its policy live entirely in core.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +37,7 @@ impl SessionSink {
         })
     }
 
-    /// Wrap an existing (resumed or picker-selected) cursor.
+    /// Wrap an existing (resumed or re-selected) cursor.
     ///
     /// # Errors
     /// Propagates session-store open failures.
@@ -106,7 +105,7 @@ impl SessionSink {
         self.cursor.as_ref()
     }
 
-    /// Replace the active cursor (picker / tree switch).
+    /// Replace the active cursor (session or tree switch).
     pub fn set_cursor(&mut self, cursor: SessionCursor) {
         self.cursor = Some(cursor);
     }
@@ -167,8 +166,7 @@ impl SessionSink {
         cursor.restore_branch(leaf)
     }
 
-    /// List the session files for this workspace (read-only, for the resume
-    /// picker). Never mutates.
+    /// List the session files for this workspace. Read-only; never mutates.
     ///
     /// # Errors
     /// Propagates directory read failures.
