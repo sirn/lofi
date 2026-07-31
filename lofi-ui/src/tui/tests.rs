@@ -5792,7 +5792,6 @@ fn resize_defers_height_remeasure_off_the_frame() {
     }
 }
 
-
 #[test]
 fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     use ratatui::backend::TestBackend;
