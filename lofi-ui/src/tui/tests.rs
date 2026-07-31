@@ -5731,6 +5731,9 @@ fn frozen_cache_invalidates_on_width_change() {
 
     a.ensure_frozen(100);
     a.sync_frozen_cache_for_viewport(0, 24, 100);
+    // A width-only resize defers the re-measure to the tick loop; drain it
+    // here so the height reflects the new width.
+    while a.remeasure_heights_step(16) {}
     let h_wide = a.frozen_heights[0];
     assert!(a.frozen_render.get(0).is_some());
     assert!(
@@ -5738,6 +5741,57 @@ fn frozen_cache_invalidates_on_width_change() {
         "frozen cache should re-wrap at the new width: narrow={h_narrow} wide={h_wide}"
     );
 }
+
+#[test]
+fn resize_defers_height_remeasure_off_the_frame() {
+    let mut a = app();
+    for _ in 0..40 {
+        a.turns.push(Turn {
+            prompt: "word ".repeat(40),
+            blocks: Vec::new(),
+        });
+        push_turn(&mut a);
+    }
+
+    a.ensure_frozen(24);
+    let narrow: Vec<usize> = a.frozen_heights.clone();
+    let frozen_n = narrow.len();
+    // The live last turn is not frozen, so the frozen prefix is one shorter.
+    assert_eq!(frozen_n, a.turns.len() - 1);
+
+    // A width-only resize keeps the (stale) heights so the frame draws
+    // immediately, and schedules an incremental re-measure instead of
+    // recomputing all turns synchronously.
+    a.ensure_frozen(100);
+    assert_eq!(
+        a.frozen_heights, narrow,
+        "resize keeps prior heights until the tick loop re-measures them"
+    );
+    assert!(a.height_remeasure_from.is_some());
+
+    // Re-measure works back-to-front: the visible bottom turns are exact
+    // after the first step while the off-screen prefix is still pending.
+    a.remeasure_heights_step(8);
+    let last = frozen_n - 1;
+    assert!(
+        a.frozen_heights[last] <= narrow[last],
+        "widening should not grow the bottom turn height: {:?} vs {:?}",
+        a.frozen_heights[last],
+        narrow[last]
+    );
+    assert!(a.height_remeasure_from.is_some(), "prefix still pending");
+
+    // Draining converges every height to the wide measurement.
+    while a.remeasure_heights_step(8) {}
+    assert!(a.height_remeasure_from.is_none());
+    for (idx, (wide, narrow)) in a.frozen_heights.iter().zip(&narrow).enumerate() {
+        assert!(
+            wide <= narrow,
+            "turn {idx} should re-wrap no taller at the wider width: {wide} vs {narrow}"
+        );
+    }
+}
+
 
 #[test]
 fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
