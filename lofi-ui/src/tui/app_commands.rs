@@ -292,11 +292,17 @@ impl App {
     }
 
     pub(super) fn open_picker(&mut self) {
-        let Some(store) = &self.session.store else {
+        // Read-only listing via the core sink — the UI holds no store handle.
+        let files = self
+            .session
+            .sink
+            .as_ref()
+            .map(lofi_core::session::sink::SessionSink::workspace_sessions);
+        let Some(files) = files else {
             self.notify(NotifyKind::Warn, "sessions are disabled (--no-session)");
             return;
         };
-        match store.list_files_for_cwd(&self.session.cwd) {
+        match files {
             Ok(files) if files.is_empty() => {
                 self.notify(NotifyKind::Info, "no saved sessions for this workspace");
             }
@@ -754,27 +760,47 @@ impl App {
             self.notify(NotifyKind::Info, "selected tree row is still loading");
             return;
         }
+        // The branch-head move is a core-owned session write. The sink moves
+        // the head and returns the new lineage snapshot in one call; the UI
+        // then mirrors the cursor for reads and rolls the transcript back.
         let Some(cursor) = self.session.cursor.clone() else {
             return;
         };
         let old_leaf = cursor.leaf_id();
-        if let Err(e) = cursor.branch_from(entry.branch_point.clone()) {
-            self.notify(NotifyKind::Error, format!("persist session cursor: {e}"));
-            return;
-        }
-        let loaded = cursor.snapshot().and_then(|snapshot| {
-            self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
-        });
+        // Move the head (core-owned) and grab the snapshot in a short borrow
+        // scope so the mutable UI work below doesn't overlap the sink borrow.
+        let snapshot = {
+            let Some(sink) = self.session.sink.as_ref() else {
+                return;
+            };
+            match sink.switch_branch(entry.branch_point.clone()) {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    self.notify(NotifyKind::Error, format!("persist session cursor: {e}"));
+                    return;
+                }
+            }
+        };
+        self.session.refresh_cursor();
+        let loaded = self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size);
         if let Err(e) = loaded {
-            let restored = cursor
-                .branch_from(old_leaf.clone().unwrap_or_default())
-                .and_then(|()| cursor.snapshot())
-                .and_then(|snapshot| {
-                    self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
-                });
-            let suffix = restored.err().map_or(String::new(), |restore| {
-                format!("; restore failed: {restore}")
+            // Undo the head move (core-owned), then re-roll to the old lineage.
+            let restored_snapshot = {
+                self.session
+                    .sink
+                    .as_ref()
+                    .and_then(|sink| sink.restore_branch(old_leaf.clone()).ok())
+            };
+            self.session.refresh_cursor();
+            let restored = restored_snapshot.map(|snapshot| {
+                self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
+                    .ok()
             });
+            let suffix = if restored.is_some() {
+                String::new()
+            } else {
+                "; restore failed".to_string()
+            };
             self.notify(
                 NotifyKind::Error,
                 format!("load session for /tree: {e}{suffix}"),

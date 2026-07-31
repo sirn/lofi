@@ -207,14 +207,14 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
     if opts.no_session {
         return Ok(tui::SessionConfig::ephemeral(opts.root.clone()));
     }
-    let store = lofi_core::session::store::SessionStore::open()?;
+    // The UI never opens a session store: `--resume`/`--continue` resolve
+    // entirely inside core, returning a sink (which owns the store) plus the
+    // selected cursor and snapshot.
     if let Some(id) = &opts.resume {
-        let entry = store.find(&opts.root, id)?.ok_or_else(|| {
-            Error::State(format!("no session matching id '{id}' for this workspace"))
-        })?;
-        let (cursor, snapshot) = entry.open_snapshot()?;
+        let (sink, cursor, snapshot) =
+            lofi_core::session::sink::SessionSink::resume_by_id(&opts.root, id)?;
         return Ok(tui::SessionConfig::resumed(
-            store,
+            sink,
             cursor,
             snapshot.index,
             snapshot.file_size,
@@ -222,10 +222,11 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
         ));
     }
     if opts.continue_last {
-        if let Some(entry) = store.most_recent(&opts.root)? {
-            let (cursor, snapshot) = entry.open_snapshot()?;
+        if let Some((sink, cursor, snapshot)) =
+            lofi_core::session::sink::SessionSink::resume_last(&opts.root)?
+        {
             return Ok(tui::SessionConfig::resumed(
-                store,
+                sink,
                 cursor,
                 snapshot.index,
                 snapshot.file_size,
@@ -233,7 +234,10 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
             ));
         }
     }
-    Ok(tui::SessionConfig::fresh(store, opts.root.clone()))
+    Ok(tui::SessionConfig::fresh(
+        lofi_core::session::sink::SessionSink::open(&opts.root)?,
+        opts.root.clone(),
+    ))
 }
 
 /// Builds the agent via [`lofi_core::build_agent`], then drives

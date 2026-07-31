@@ -55,6 +55,25 @@ fn test_append_compaction(
     Ok((start, end, cursor.leaf_id().unwrap_or_default()))
 }
 
+/// Install a core-owned session sink (plus its read mirror) on a test `App`,
+/// pointing at the test's temporary store. Mirror of what production code
+/// does via `SessionConfig`/`run`. Branch switching goes through the sink in
+/// production, so tests that exercise `/tree` must seed one here.
+fn attach_session_sink(
+    a: &mut App,
+    store: store::SessionStore,
+    cwd: &Path,
+    cursor: store::SessionCursor,
+) {
+    a.session.sink = Some(lofi_core::session::sink::SessionSink::with_store(
+        store,
+        cwd,
+        Some(cursor.clone()),
+    ));
+    a.session.cursor = Some(cursor);
+    a.session.cwd = cwd.to_path_buf();
+}
+
 #[test]
 fn compact_thresholds_use_the_models_actual_small_context_window() {
     let mut config = lofi_types::CompactionConfig::default();
@@ -3093,8 +3112,12 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     let selected_leaf = turn_end1_id.clone();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     assert_eq!(picker.entries.len(), 4);
@@ -3211,8 +3234,12 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     let branch_b_end = branch_b[2].id.clone();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::new(path, Some(branch_b_end.clone())));
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        session_store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::new(path, Some(branch_b_end.clone())),
+    );
     assert!(a.slash_command("/tree"));
     let selected = a
         .tree_picker
@@ -3258,6 +3285,7 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn tree_shows_compaction_node_and_reverts_before_it() {
     use lofi_core::session::store::SessionStore;
     use lofi_types::{ContentBlock, Role};
@@ -3331,8 +3359,12 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
     let turn_end1_id = events[2].id.clone();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     assert!(picker
@@ -3404,8 +3436,12 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
     .unwrap();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        session_store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().unwrap();
     assert_eq!(
@@ -3484,8 +3520,12 @@ fn modal_tab_cycles_with_wraparound() {
         .collect();
     test_append_events(&path, &mut batch, None).unwrap();
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let len = a.tree_picker.as_ref().unwrap().entries.len();
     assert_eq!(len, 4);
@@ -3574,8 +3614,12 @@ fn tree_revert_to_root_then_reopens() {
     test_append_events(&path, &mut batch, None).unwrap();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::new(path.clone(), None));
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::new(path.clone(), None),
+    );
     // First /tree: select the root user prompt (entry 0) and revert.
     // Its branch_point is its parent (the system message), so the
     // active path becomes just the system message — the transcript is
@@ -3660,8 +3704,12 @@ fn tree_shows_tool_result_nodes() {
     let tool_result_id = events[2].id.clone();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     assert_eq!(picker.entries.len(), 3);
@@ -3773,8 +3821,12 @@ fn tree_exec_label_shows_native_tools() {
     test_append_events(&path, &mut batch, None).unwrap();
 
     let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker opened");
     let exec_entry = picker
