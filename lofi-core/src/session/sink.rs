@@ -1,10 +1,9 @@
 //! Core-owned session write endpoint.
 //!
-//! The UI must never assemble or append session events itself. It holds a
-//! cursor purely for reading (resume, the tree picker); every mutation —
-//! creating the session file, moving the branch head, and recording
-//! user-shell output — flows through this sink so the write channel and its
-//! policy live entirely in core.
+//! Callers must never assemble or append session events themselves; every
+//! mutation — creating the session file, moving the branch head, and
+//! recording user-shell output — flows through this sink so the write
+//! channel and its policy live entirely in core.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +13,6 @@ use lofi_types::RunModel;
 use super::store::{self, SessionCursor, SessionStore};
 use crate::user_bash::{self, UserBashResult};
 
-/// Owns the session store and the active cursor. Vends cursors on first use
-/// and funnels all transcript writes through core APIs.
 #[derive(Debug)]
 pub struct SessionSink {
     store: SessionStore,
@@ -24,9 +21,7 @@ pub struct SessionSink {
 }
 
 impl SessionSink {
-    /// Open a sink targeting the shared session store for this workspace. No
-    /// session file is created until one is actually needed (first run or
-    /// user bash).
+    /// Open a sink targeting the shared session store for this workspace.
     ///
     /// # Errors
     /// Propagates session-store open failures.
@@ -38,7 +33,7 @@ impl SessionSink {
         })
     }
 
-    /// Wrap an existing (resumed or picker-selected) cursor.
+    /// Wrap an existing (resumed or re-selected) cursor.
     ///
     /// # Errors
     /// Propagates session-store open failures.
@@ -50,8 +45,8 @@ impl SessionSink {
         })
     }
 
-    /// Build a sink from an explicit store (used by tests that point at a
-    /// temporary store root rather than the shared on-disk one).
+    /// Build a sink from an explicit store root instead of the shared
+    /// on-disk one, so tests can point at a temporary root.
     #[must_use]
     pub fn with_store(store: SessionStore, cwd: &Path, cursor: Option<SessionCursor>) -> Self {
         Self {
@@ -62,8 +57,8 @@ impl SessionSink {
     }
 
     /// Resolve a resume target by session id prefix, returning the sink bound
-    /// to it together withits cursor and snapshot. This is the core-side
-    /// `--resume <id>` path; the caller never opens a store itself.
+    /// to it together withits cursor and snapshot, so the caller never opens a
+    /// store itself.
     ///
     /// # Errors
     /// Propagates store open/lookup failures, and `Error::State` when no
@@ -80,8 +75,8 @@ impl SessionSink {
         Ok((Self::resumed(cwd, cursor.clone())?, cursor, snapshot))
     }
 
-    /// Resolve the most recent session for `cwd`, if any. Core-side
-    /// `--continue` path. Returns `None` when the workspace has no sessions.
+    /// Resolve the most recent session for `cwd`, if any. Returns `None`
+    /// when the workspace has no sessions.
     ///
     /// # Errors
     /// Propagates store open/lookup failures.
@@ -106,7 +101,7 @@ impl SessionSink {
         self.cursor.as_ref()
     }
 
-    /// Replace the active cursor (picker / tree switch).
+    /// Replace the active cursor (session or tree switch).
     pub fn set_cursor(&mut self, cursor: SessionCursor) {
         self.cursor = Some(cursor);
     }
@@ -125,8 +120,7 @@ impl SessionSink {
         })
     }
 
-    /// Record a completed user-shell command and return its byte range. The
-    /// session file is created on first use.
+    /// Record a completed user-shell command and return its byte range.
     ///
     /// # Errors
     /// Propagates session-file creation and transcript I/O failures.
@@ -167,8 +161,7 @@ impl SessionSink {
         cursor.restore_branch(leaf)
     }
 
-    /// List the session files for this workspace (read-only, for the resume
-    /// picker). Never mutates.
+    /// List the session files for this workspace. Read-only; never mutates.
     ///
     /// # Errors
     /// Propagates directory read failures.

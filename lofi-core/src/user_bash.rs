@@ -143,8 +143,8 @@ pub async fn run_user_bash(root: &Path, command_text: String) -> Result<UserBash
 
 /// Append a completed user-shell command to the session transcript as a
 /// `UserBash` event, returning its byte range. This is the durable write for
-/// `run_user_bash`: event construction lives here in core so the UI never
-/// assembles or appends session events itself.
+/// `run_user_bash`: event construction stays in core so callers never
+/// assemble or append session events themselves.
 ///
 /// # Errors
 /// Propagates transcript serialization and I/O failures.

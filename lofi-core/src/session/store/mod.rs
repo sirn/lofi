@@ -284,9 +284,9 @@ impl SessionCursor {
     }
 
     /// Move the session head to `entry_id` and return the snapshot of the
-    /// newly selected lineage. Bundles the head move with the re-read the UI
-    /// always performs immediately after, so branch switching is a single
-    /// core-side operation rather than a UI-driven write followed by a read.
+    /// newly selected lineage. Bundles the head move with the re-read of the
+    /// new lineage, so branch switching stays a single core-side operation
+    /// rather than a separate write and read.
     /// # Errors
     /// Returns an error when the head cannot be moved or re-indexed.
     pub fn switch_branch(&self, entry_id: String) -> Result<SessionSnapshot> {
@@ -325,7 +325,7 @@ impl SessionCursor {
     }
 
     /// Atomically index the full transcript tree together with this cursor's
-    /// selected head. Intended only for branch/tree UI.
+    /// selected head.
     /// # Errors
     /// Returns an error when indexing fails or the selected head is absent.
     pub fn tree_snapshot(&self) -> Result<SessionTreeSnapshot> {
