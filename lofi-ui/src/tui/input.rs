@@ -247,8 +247,13 @@ pub(super) fn finish_user_bash(
     // finished result to the sink rather than assembling/appending an event.
     let run_model = app.run_model();
     let byte_range = app.session.sink_mut().and_then(|sink| {
-        sink.record_user_bash(&result, exclude_from_context, &run_model)
-            .ok()
+        sink.record_user_bash(
+            &result,
+            exclude_from_context,
+            &run_model,
+            &app.system_prompt,
+        )
+        .ok()
     });
     app.session.refresh_cursor();
     app.apply_event(AgentEvent::UserBash {
@@ -296,16 +301,14 @@ fn spawn_agent_run(
     // Session creation/writes are core-owned: ask the sink for the cursor,
     // creating the session file on first use, then mirror it for reads.
     let run_model = app.run_model();
-    if let Some(sink) = app.session.sink_mut() {
-        // Pin the system prompt before the first model round so every
-        // request (including post-compact restores) reads it back from the
-        // transcript rather than runtime config. Idempotent per session.
-        let _ = sink.ensure_system_pinned(&run_model, &app.system_prompt);
-    }
+    // Ask the sink for the cursor; on brand-new lineage birth it pins the
+    // system prompt as the first event (compact-style boundary write, never
+    // detected by scanning). A reused/resumed lineage skips the pin — restore
+    // re-reads the system event already on the log.
     let cursor = app
         .session
         .sink_mut()
-        .and_then(|sink| sink.cursor_or_create(&run_model).ok());
+        .and_then(|sink| sink.cursor_or_create(&run_model, &app.system_prompt).ok());
     app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = app.lifecycle.shared_history();
@@ -350,7 +353,7 @@ pub(super) fn spawn_user_bash(
     // recorded; mirror the cursor for reads.
     let run_model = app.run_model();
     if let Some(sink) = app.session.sink_mut() {
-        let _ = sink.cursor_or_create(&run_model);
+        let _ = sink.cursor_or_create(&run_model, &app.system_prompt);
     }
     app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(1);

@@ -530,18 +530,6 @@ impl SessionCursor {
         self.append_events(&mut events)
     }
 
-    /// True when the active lineage already contains a `Role::System` event.
-    /// Used by boundary code to decide whether to pin a fresh one without
-    /// duplicating what the log already knows.
-    /// # Errors
-    /// Propagates transcript read failures.
-    pub fn has_system(&self) -> Result<bool> {
-        Ok(self
-            .load_events()?
-            .iter()
-            .any(|event| matches!(&event.kind, SessionEventKind::Message(m) if m.role == lofi_types::Role::System)))
-    }
-
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn append_compaction(
