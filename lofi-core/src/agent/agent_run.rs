@@ -3,14 +3,20 @@
 use super::*;
 
 impl Agent {
-    /// Builds the initial `system` + `user` message history, then drives
-    /// [`Self::run_once`] in a loop. If the receiver is dropped (the channel
-    /// closes), the run exits gracefully.
+    /// Seeds a fresh `[User]` history and drives [`Self::run_once`] in a loop.
+    /// The system prompt is pinned on the durable transcript by the lifecycle
+    /// before the first call here, so the engine never materializes it inline.
+    /// If the receiver is dropped (the channel closes), the run exits gracefully.
     /// # Errors
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution failures that cannot be surfaced as a `ToolResult`.
     pub async fn run(&self, user_prompt: String, tx: Sender<AgentEvent>) -> Result<()> {
-        let mut messages = initial_history(&self.system_prompt, &user_prompt);
+        let mut messages = vec![Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: user_prompt.clone(),
+            }],
+        }];
         if !emit(
             Some(&tx),
             AgentEvent::TurnStart {
@@ -74,14 +80,13 @@ impl Agent {
             }
         } else {
             let prompt_for_event = user_prompt.clone();
-            if messages.is_empty() {
-                *messages = initial_history(&self.system_prompt, &user_prompt);
-            } else {
-                messages.push(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text { text: user_prompt }],
-                });
-            }
+            // The system prompt is pinned on the durable transcript at each
+            // context boundary (create, compact) and arrives via the restored
+            // history — the engine never materializes it inline.
+            messages.push(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: user_prompt }],
+            });
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {

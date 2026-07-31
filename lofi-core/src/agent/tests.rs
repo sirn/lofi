@@ -243,16 +243,6 @@ fn code_prefix_decoder_handles_split_escape_incrementally() {
     assert_eq!(decoder.update(r#"{"code":"\nlet x\u0061"}"#), "let xa");
 }
 
-#[test]
-fn initial_history_with_and_without_system() {
-    let h = initial_history("sys", "hi");
-    assert_eq!(h.len(), 2);
-    assert_eq!(h[0].role, Role::System);
-    let h = initial_history("", "hi");
-    assert_eq!(h.len(), 1);
-    assert_eq!(h[0].role, Role::User);
-}
-
 #[tokio::test]
 async fn run_once_text_only_finishes() {
     let dir = tempdir().unwrap();
@@ -481,13 +471,12 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
     assert!(events
         .iter()
         .any(|event| matches!(&event.kind, SessionEventKind::TurnCancelled { .. })));
-    assert_eq!(messages.len(), 5);
-    assert_eq!(messages[0].role, Role::System);
-    assert_eq!(messages[1].role, Role::User);
-    assert_eq!(messages[2].role, Role::Assistant);
-    assert_eq!(messages[3].role, Role::Tool);
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[1].role, Role::Assistant);
+    assert_eq!(messages[2].role, Role::Tool);
     assert!(matches!(
-        &messages[4].blocks[..],
+        &messages[3].blocks[..],
         [ContentBlock::Text { text }] if text == "partial answer"
     ));
 }

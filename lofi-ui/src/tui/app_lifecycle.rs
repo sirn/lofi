@@ -9,6 +9,7 @@ impl App {
         thinking: ThinkingLevel,
         ctx_limit: u64,
         compaction: lofi_types::CompactionConfig,
+        system_prompt: String,
     ) -> Self {
         let thinking_label =
             (thinking != ThinkingLevel::Off).then(|| format!(":{}", thinking.as_str()));
@@ -24,6 +25,7 @@ impl App {
                     DEFAULT_CTX_LIMIT
                 },
             ),
+            system_prompt,
             history_nav: Vec::new(),
             history_idx: None,
             input_stash: String::new(),
@@ -757,7 +759,8 @@ impl App {
     /// Request an immediate core-owned compaction and render its outcome.
     pub(super) fn compact_now(&mut self) -> bool {
         let cursor = self.session.cursor.clone();
-        match self.lifecycle.compact(cursor.as_ref()) {
+        let system_prompt = self.system_prompt.clone();
+        match self.lifecycle.compact(cursor.as_ref(), &system_prompt) {
             Ok(Some(compaction)) => {
                 self.render_compaction(&compaction);
                 true
@@ -799,7 +802,11 @@ impl App {
             return;
         };
         let cursor = self.session.cursor.clone();
-        match self.lifecycle.auto_compact(usage, cursor.as_ref()) {
+        let system_prompt = self.system_prompt.clone();
+        match self
+            .lifecycle
+            .auto_compact(usage, cursor.as_ref(), &system_prompt)
+        {
             Ok(Some(compaction)) => self.render_compaction(&compaction),
             Ok(None) => {}
             Err(error) => self.notify(NotifyKind::Error, format!("could not compact: {error}")),
@@ -808,7 +815,8 @@ impl App {
 
     pub(super) fn hard_compact(&mut self) -> HardCompactOutcome {
         let cursor = self.session.cursor.clone();
-        match self.lifecycle.hard_compact(cursor.as_ref()) {
+        let system_prompt = self.system_prompt.clone();
+        match self.lifecycle.hard_compact(cursor.as_ref(), &system_prompt) {
             Ok(HardCompactOutcome::Compacted(compaction)) => {
                 self.render_compaction(&compaction);
                 HardCompactOutcome::Compacted(compaction)

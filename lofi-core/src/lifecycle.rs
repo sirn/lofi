@@ -156,7 +156,11 @@ impl AgentLifecycle {
     /// logical operation. Ok(None) means there is not enough history.
     /// # Errors
     /// Propagates history-lock and transcript persistence failures.
-    pub fn compact(&mut self, cursor: Option<&SessionCursor>) -> Result<Option<Compaction>> {
+    pub fn compact(
+        &mut self,
+        cursor: Option<&SessionCursor>,
+        system_prompt: &str,
+    ) -> Result<Option<Compaction>> {
         let Some(events) = self.compaction_events(cursor)? else {
             return Ok(None);
         };
@@ -168,7 +172,18 @@ impl AgentLifecycle {
         let Some(compaction) = compact(&events, &options) else {
             return Ok(None);
         };
-        let new_history = compacted_history(&compaction);
+        let mut new_history = compacted_history(&compaction);
+        if !system_prompt.is_empty() {
+            new_history.insert(
+                0,
+                Message {
+                    role: Role::System,
+                    blocks: vec![ContentBlock::Text {
+                        text: system_prompt.to_string(),
+                    }],
+                },
+            );
+        }
         let mut history = self
             .history
             .lock()
@@ -184,6 +199,10 @@ impl AgentLifecycle {
                     kept: compaction.kept_count,
                 },
             )?;
+            // Re-emit the System after the compaction marker so the next
+            // restore (leaf→root walk) finds this latest System first —
+            // the transcript remains self-describing about the boundary.
+            cursor.append_system(system_prompt)?;
         }
         *history = new_history;
         drop(history);
@@ -199,6 +218,7 @@ impl AgentLifecycle {
         &mut self,
         usage: Usage,
         cursor: Option<&SessionCursor>,
+        system_prompt: &str,
     ) -> Result<Option<Compaction>> {
         if !self.compaction.auto.enable {
             return Ok(None);
@@ -217,19 +237,23 @@ impl AgentLifecycle {
         {
             return Ok(None);
         }
-        self.compact(cursor)
+        self.compact(cursor, system_prompt)
     }
 
     /// Apply hard-cap cooldown policy and compact when eligible.
     /// # Errors
     /// Propagates history and transcript failures.
-    pub fn hard_compact(&mut self, cursor: Option<&SessionCursor>) -> Result<HardCompactOutcome> {
+    pub fn hard_compact(
+        &mut self,
+        cursor: Option<&SessionCursor>,
+        system_prompt: &str,
+    ) -> Result<HardCompactOutcome> {
         if self.messages_since_last_compact(cursor)?
             < self.compaction.min_messages_between_hard_compacts
         {
             return Ok(HardCompactOutcome::Cooldown);
         }
-        Ok(match self.compact(cursor)? {
+        Ok(match self.compact(cursor, system_prompt)? {
             Some(compaction) => HardCompactOutcome::Compacted(compaction),
             None => HardCompactOutcome::NotEnoughHistory,
         })
@@ -305,6 +329,7 @@ impl AgentLifecycle {
 
 fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Result<Vec<Message>> {
     let mut messages = Vec::new();
+    let mut latest_system: Option<Message> = None;
     let mut skipping_failed_turn = false;
     let mut summary = None;
     cursor.visit_events(leaf_first_offsets, |event| {
@@ -317,7 +342,17 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
             }
             SessionEventKind::TurnFailed { .. } => skipping_failed_turn = true,
             SessionEventKind::TurnEnd { .. } => skipping_failed_turn = false,
-            SessionEventKind::Message(message) if !skipping_failed_turn => messages.push(message),
+            SessionEventKind::Message(message) if !skipping_failed_turn => {
+                // Leaf→root, the first (nearest) System event is the one in
+                // force for this context; hoist it to the head instead of
+                // leaving it inline. Older System events further up the chain
+                // are pre-compaction context — never re-surfaced.
+                if message.role == Role::System && latest_system.is_none() {
+                    latest_system = Some(message);
+                } else {
+                    messages.push(message);
+                }
+            }
             SessionEventKind::UserBash {
                 command,
                 output,
@@ -351,6 +386,9 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
     messages.reverse();
     if let Some(summary) = summary {
         messages.insert(0, summary);
+    }
+    if let Some(system) = latest_system {
+        messages.insert(0, system);
     }
     Ok(messages)
 }
@@ -427,7 +465,7 @@ fn parse_recall_line(line: &str) -> RecallRequest {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -499,6 +537,71 @@ mod tests {
             &messages[1].blocks[..],
             [ContentBlock::Text { text }] if text == "partial"
         ));
+    }
+    #[test]
+    fn compact_emits_system_before_history_and_restore_recovers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        cursor.append_system("instructions v1").unwrap();
+        let make_msg = |role: Role, text: &str| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role,
+                blocks: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+            }),
+        };
+        let mut events = vec![make_msg(Role::User, "u0"), make_msg(Role::Assistant, "a0")];
+        for turn in 1..=4 {
+            events.push(make_msg(Role::User, &format!("u{turn}")));
+            events.push(make_msg(Role::Assistant, &format!("a{turn}")));
+        }
+        cursor.append_events(&mut events).unwrap();
+        let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 1_000);
+        let snapshot = cursor.snapshot().unwrap();
+        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        let live_before = lifecycle.shared_history().lock().unwrap().clone();
+        assert_eq!(live_before.len(), 11);
+        assert_eq!(live_before[0].role, Role::System);
+
+        let compaction = lifecycle
+            .compact(Some(&cursor), "instructions v1")
+            .unwrap()
+            .expect("compact produced a result");
+        assert!(!compaction.summary.is_empty());
+
+        let live = lifecycle.shared_history().lock().unwrap().clone();
+        assert!(!live.is_empty());
+        assert_eq!(live[0].role, Role::System);
+        assert_eq!(live[1].role, Role::User);
+
+        let logged = cursor.load_events().unwrap();
+        let last_pos = logged
+            .iter()
+            .rposition(|event| {
+                matches!(
+                    &event.kind,
+                    SessionEventKind::Message(m) if m.role == Role::System
+                )
+            })
+            .expect("a System event exists on the log");
+        assert!(matches!(
+            &logged[last_pos].kind,
+            SessionEventKind::Message(m) if matches!(&m.blocks[..], [ContentBlock::Text { text }] if text == "instructions v1")
+        ));
+
+        let snapshot = cursor.snapshot().unwrap();
+        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        let restored = lifecycle.shared_history().lock().unwrap().clone();
+        assert_eq!(restored[0].role, Role::System);
+        assert_eq!(
+            restored.iter().filter(|m| m.role == Role::System).count(),
+            1,
+            "exactly one System after restore: {restored:?}"
+        );
     }
 
     #[test]
