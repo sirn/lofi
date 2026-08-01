@@ -117,13 +117,7 @@ impl App {
     pub(super) fn toggle_debug(&mut self) {
         if self.debug.is_some() {
             self.debug_sample("disabled");
-            if let Some(debug) = self.debug.take() {
-                let path = debug.path.as_ref().map_or_else(
-                    || "waiting for session log".to_string(),
-                    |path| path.display().to_string(),
-                );
-                self.notify(NotifyKind::Info, format!("debug logging disabled · {path}"));
-            }
+            self.debug.take();
             return;
         }
         match DebugState::create() {
