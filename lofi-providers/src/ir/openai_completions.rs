@@ -187,20 +187,35 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
             .map_or_else(|| err.to_string(), str::to_string);
         return Err(Error::Provider(format!("provider stream error: {msg}")));
     }
-    if let Some(usage) = v.get("usage") {
-        if !usage.is_null() {
-            out.push(StreamingEvent::Done(usage_from_openai_chat(usage)));
-            return Ok(out);
+    // DeepSeek-style providers attach `usage` to every chunk; it marks turn
+    // end only on the final usage-only frame (empty `choices`), otherwise deltas
+    // must still be parsed and the accounting held for the terminator.
+    let done = v
+        .get("usage")
+        .filter(|u| !u.is_null())
+        .map(usage_from_openai_chat);
+
+    // Emit the held accounting only when the frame produces no content. A
+    // frame carrying both deltas and usage keeps its stream flowing; the usage
+    // on a contentful frame is per-chunk accounting, not turn end.
+    let drain = |out: &mut Vec<StreamingEvent>| {
+        if out.is_empty() {
+            if let Some(done) = done {
+                out.push(StreamingEvent::Done(done));
+            }
         }
-    }
+    };
 
     let Some(choices) = v.get("choices").and_then(Value::as_array) else {
+        drain(&mut out);
         return Ok(out);
     };
     if choices.is_empty() {
+        drain(&mut out);
         return Ok(out);
     }
     let Some(delta) = choices[0].get("delta") else {
+        drain(&mut out);
         return Ok(out);
     };
 
@@ -267,6 +282,7 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
         }
     }
 
+    drain(&mut out);
     Ok(out)
 }
 
@@ -358,6 +374,37 @@ mod tests {
         assert_eq!(
             map_openai_chat_event(&chunk, &mut ChatMapperState::default()).unwrap(),
             vec![StreamingEvent::TextDelta("hi".to_string())]
+        );
+    }
+
+    #[test]
+    fn per_chunk_usage_does_not_suppress_deltas() {
+        // DeepSeek-style frame shape: usage attached to a content-bearing chunk.
+        // The delta must still be emitted; usage is not turn end here.
+        let chunk = json!({
+            "choices": [{"delta": {"content": "Hi! Ready"}}],
+            "usage": {"completion_tokens": 41, "prompt_tokens": 3602, "total_tokens": 3643}
+        });
+        assert_eq!(
+            map_openai_chat_event(&chunk, &mut ChatMapperState::default()).unwrap(),
+            vec![StreamingEvent::TextDelta("Hi! Ready".to_string())]
+        );
+    }
+
+    #[test]
+    fn empty_choices_with_usage_emits_done() {
+        // Final usage-only frame (OpenAI include_usage shape).
+        let chunk = json!({
+            "choices": [],
+            "usage": {"completion_tokens": 58, "prompt_tokens": 3602, "total_tokens": 3660}
+        });
+        assert_eq!(
+            map_openai_chat_event(&chunk, &mut ChatMapperState::default()).unwrap(),
+            vec![StreamingEvent::Done(lofi_types::Usage {
+                input_tokens: 3602,
+                output_tokens: 58,
+                ..Default::default()
+            })]
         );
     }
 
