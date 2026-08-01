@@ -660,6 +660,13 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
+    /// Root directory backing every session in this store. Used by the IO
+    /// worker pool to key one background thread per store.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// # Errors
     /// Propagates [`crate::state::state_dir`] if the base state dir cannot be
     /// resolved.
