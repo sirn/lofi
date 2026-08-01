@@ -236,7 +236,7 @@ mod tests {
     }
 
     fn header() -> &'static [u8] {
-        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n"
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n"
     }
 
     fn summary(elapsed_ms: u64) -> TurnSummary {

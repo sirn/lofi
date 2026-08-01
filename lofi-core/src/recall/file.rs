@@ -453,7 +453,7 @@ mod tests {
             "{}",
             serde_json::json!({
                 "type": "meta",
-                "version": 2,
+                "version": 1,
                 "created": 0,
                 "cwd": "/tmp",
                 "model": {"provider":"p", "id":"m", "thinking":"off"}
