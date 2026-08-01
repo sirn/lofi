@@ -387,15 +387,9 @@ pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<u
         if event.kind != IndexKind::Compaction {
             continue;
         }
-        let Ok(ev) = cursor.event_at(event.offset) else {
-            continue;
-        };
-        if let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            checkpointed_tail: true,
-            ..
-        } = ev.kind
-        {
+        let (_, _, checkpointed_tail, first_kept_entry_id) =
+            cursor.compaction_details_at(event.offset);
+        if checkpointed_tail && !first_kept_entry_id.is_empty() {
             if let Some(start) = index[..pos]
                 .iter()
                 .position(|event| event.id.matches(&first_kept_entry_id))
