@@ -40,22 +40,14 @@ pub(super) fn handle_event(
     }
 
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-        if current_run.is_some() {
-            interrupt_run(app, agent, current_run);
-            return;
-        }
-        if app.mode != Mode::Input {
-            app.enter_input();
-            app.pin_to_latest();
-            return;
-        }
         handle_ctrl_c(app, agent, current_run);
         return;
     }
 
     // Pi's interrupt key is Escape: it dismisses completion first, then aborts
-    // an active stream. Keep Ctrl-C as an alias for existing lofi users and
-    // for the TODO's documented path.
+    // an active stream. Ctrl-C is deliberately not a bare interrupt alias; it
+    // first peels away the editor/nav state (see handle_ctrl_c) so it only
+    // cancels a turn from a clean, empty prompt — matching Pi.
     if k.code == KeyCode::Esc
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())
@@ -492,23 +484,36 @@ pub(super) fn handle_ctrl_c(
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
 ) {
-    if current_run.is_some() {
-        interrupt_run(app, agent, current_run);
+    // Navigate/Select: Ctrl-C is a "give me the prompt" key, not a cancel. It
+    // drops the user onto the newest transcript line and focuses the editor
+    // without ever interrupting the current turn.
+    if app.mode != Mode::Input {
+        app.enter_input();
+        app.pin_to_latest();
+        app.ctrl_c_at = None;
         return;
     }
-    if app.input.is_empty() {
-        let now = Instant::now();
-        if app
-            .ctrl_c_at
-            .is_some_and(|t| now.duration_since(t) < QUIT_DOUBLE_PRESS)
-        {
-            app.should_quit = true;
-        } else {
-            app.ctrl_c_at = Some(now);
-        }
-    } else {
+    // A non-empty prompt is the more immediate thing to dismiss; clearing it
+    // also takes priority over cancelling the turn so a single Ctrl-C never
+    // both wipes text and kills a run.
+    if !app.input.is_empty() {
         app.clear_input();
         app.ctrl_c_at = None;
+        return;
+    }
+    if current_run.is_some() {
+        interrupt_run(app, agent, current_run);
+        app.ctrl_c_at = None;
+        return;
+    }
+    let now = Instant::now();
+    if app
+        .ctrl_c_at
+        .is_some_and(|t| now.duration_since(t) < QUIT_DOUBLE_PRESS)
+    {
+        app.should_quit = true;
+    } else {
+        app.ctrl_c_at = Some(now);
     }
 }
 
