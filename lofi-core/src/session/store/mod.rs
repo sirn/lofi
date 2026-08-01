@@ -91,29 +91,6 @@ impl SessionEntry {
     }
 }
 
-fn workspace_key(cwd: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let label = cwd
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            name.chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                        ch
-                    } else {
-                        '-'
-                    }
-                })
-                .take(40)
-                .collect::<String>()
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "root".to_string());
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_os_str().as_bytes());
-    format!("{label}-{id}")
-}
 
 fn metadata_matches_cwd(meta: &SessionMeta, cwd: &Path) -> bool {
     let stored = Path::new(&meta.cwd);
@@ -704,7 +681,7 @@ impl SessionStore {
     }
 
     fn dir_for_cwd(&self, cwd: &Path) -> PathBuf {
-        self.root.join(workspace_key(cwd))
+        self.root.join(crate::state::workspace_key(cwd))
     }
 
     /// The directory is created if needed; the header is written atomically via
@@ -2169,15 +2146,5 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-    }
-
-    #[test]
-    fn workspace_key_is_readable_and_collision_resistant() {
-        let first = workspace_key(Path::new("/work/a-b/c"));
-        let second = workspace_key(Path::new("/work/a/b-c"));
-        assert!(first.starts_with("c-"));
-        assert!(second.starts_with("b-c-"));
-        assert_ne!(first, second);
-        assert_eq!(workspace_key(Path::new("/work/a-b/c")), first);
     }
 }
