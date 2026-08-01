@@ -17,7 +17,9 @@ pub use index::{EventIndex, IndexId, IndexKind};
 
 pub const SESSION_VERSION: u32 = 3;
 
-pub const SESSION_MIN_VERSION: u32 = 1;
+// v1 wrote events without ids and is no longer read; 2 is the oldest format
+// this build accepts.
+pub const SESSION_MIN_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -123,11 +125,6 @@ fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-#[cfg(test)]
-fn legacy_event_id(offset: u64) -> String {
-    format!("legacy-{offset:016x}")
-}
-
 #[derive(Debug)]
 pub struct SessionSnapshot {
     pub meta: SessionMeta,
@@ -168,8 +165,9 @@ impl SessionCursor {
         }
     }
 
-    /// Open an existing transcript at its durable selected head. Legacy files
-    /// without a cursor record fall back once to their physically last event.
+    /// Open an existing transcript at its durable selected head. A transcript
+    /// that has never selected an explicit branch head has no cursor record and
+    /// falls back once to its physically last event.
     /// # Errors
     /// Returns an error when the transcript cannot be indexed or its selected
     /// head no longer exists.
@@ -422,8 +420,8 @@ impl SessionCursor {
     /// Materialize every non-cursor event in the append-only transcript tree.
     /// This is intentionally distinct from `load_events`, which only returns
     /// the selected lineage. Full-tree consumers still read through the cursor
-    /// so path access and legacy ID migration cannot diverge from the rest of
-    /// the session API.
+    /// so tree and lineage access cannot diverge from the rest of the session
+    /// API.
     /// # Errors
     /// Propagates indexing and event parsing failures.
     pub fn load_tree_events(&self) -> Result<Vec<SessionEvent>> {
@@ -829,11 +827,9 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
             path.display()
         )));
     }
-    let legacy_v1 = header.meta.version == 1;
     let mut events = Vec::new();
     let mut offsets = Vec::new();
     let mut i = 0usize;
-    let mut prev_id: Option<String> = None;
     loop {
         buf.clear();
         let line_start = pos;
@@ -846,18 +842,12 @@ fn load(path: &Path) -> Result<(SessionMeta, Vec<SessionEvent>, Vec<u64>, u64)> 
         if line.is_empty() {
             continue;
         }
-        let mut ev = parse_event(line).map_err(|e| {
+        let ev = parse_event(line).map_err(|e| {
             Error::State(format!("parse event {} in {}: {e}", i + 1, path.display()))
         })?;
         if matches!(ev.kind, SessionEventKind::Cursor { .. }) {
             continue;
         }
-        let migrated = legacy_v1 || ev.id.is_empty();
-        if migrated {
-            ev.id = legacy_event_id(line_start);
-            ev.parent_id.clone_from(&prev_id);
-        }
-        prev_id = Some(ev.id.clone());
         events.push(ev);
         offsets.push(line_start);
         i += 1;
@@ -1162,18 +1152,9 @@ fn last_event_id(path: &Path) -> Result<Option<String>> {
 }
 
 /// # Errors
-/// Returns [`Error::State`] if the line is neither a tagged event nor a
-/// legacy `Message` object.
+/// Returns [`Error::State`] if the line is not a serialised [`SessionEvent`].
 pub fn parse_event(line: &str) -> Result<SessionEvent> {
-    if let Ok(ev) = serde_json::from_str::<SessionEvent>(line) {
-        return Ok(ev);
-    }
-    serde_json::from_str::<Message>(line)
-        .map(|m| SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::Message(m),
-        })
+    serde_json::from_str::<SessionEvent>(line)
         .map_err(|e| Error::State(format!("parse event: {e}")))
 }
 
@@ -2060,31 +2041,6 @@ mod tests {
         let m = last_run_model(&events).expect("active leaf has a turn-end");
         assert_eq!(m.id, "B");
         assert_eq!(m.thinking, ThinkingLevel::High);
-    }
-
-    #[test]
-    fn legacy_bare_message_lines_still_load() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/legacy");
-        let path = store.create(cwd, &"m".into()).unwrap();
-        let legacy = serde_json::to_string(&user("old")).unwrap();
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(format!("{legacy}\n").as_bytes())
-            .unwrap();
-        let (_meta, events, _, _) = load(&path).unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0].kind, SessionEventKind::Message(m) if m.role == Role::User));
-
-        let (_, index, _) = load_index(&path).unwrap();
-        assert!(index[0].id.matches(&events[0].id));
-        let recovered = load_event_by_id(&path, &index[0].id.to_event_id())
-            .unwrap()
-            .unwrap();
-        assert!(index[0].id.matches(&recovered.id));
-        assert!(matches!(&recovered.kind, SessionEventKind::Message(m) if m.role == Role::User));
     }
 
     #[test]
