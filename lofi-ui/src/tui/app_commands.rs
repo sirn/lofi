@@ -10,23 +10,96 @@ enum ModalSlot {
     Thinking,
 }
 
-struct ResumeLoadJob {
-    generation: u64,
-    generation_clock: Arc<AtomicU64>,
-    files: Vec<store::SessionFile>,
-    tx: tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+/// One long-lived background worker drives every picker's transcript IO. A
+/// fresh thread-spawn per action used to let glibc give each thread its
+/// own arena whose freed pages stayed mapped, so RSS ratcheted up on every
+/// picker action. A single worker reuses its arena across all of them, so
+/// the transient peak is paid once.
+enum PickerJob {
+    Resume {
+        generation: u64,
+        generation_clock: Arc<AtomicU64>,
+        files: Vec<store::SessionFile>,
+    },
+    TreeSnapshot {
+        generation: u64,
+        generation_clock: Arc<AtomicU64>,
+        cursor: store::SessionCursor,
+    },
+    TreeHydrate {
+        generation: u64,
+        generation_clock: Arc<AtomicU64>,
+        index: Arc<Vec<store::EventIndex>>,
+        cursor: store::SessionCursor,
+        requested: Vec<(usize, TreeEntry)>,
+    },
 }
 
-fn run_resume_load_job(job: &ResumeLoadJob) {
-    for (index, file) in job.files.iter().enumerate() {
-        if job.generation_clock.load(Ordering::Relaxed) != job.generation {
+fn picker_worker(
+    job_rx: &std::sync::mpsc::Receiver<PickerJob>,
+    tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) {
+    while let Ok(job) = job_rx.recv() {
+        run_picker_job(job, tx);
+    }
+}
+
+fn picker_job_tx(
+    tx: tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) -> &'static std::sync::mpsc::SyncSender<PickerJob> {
+    static JOB_TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<PickerJob>> =
+        std::sync::OnceLock::new();
+    JOB_TX.get_or_init(move || {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<PickerJob>(8);
+        std::thread::spawn(move || picker_worker(&job_rx, &tx));
+        job_tx
+    })
+}
+
+fn run_picker_job(job: PickerJob, tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>) {
+    match job {
+        PickerJob::Resume {
+            generation,
+            generation_clock,
+            files,
+        } => run_resume_load(generation, &generation_clock, &files, tx),
+        PickerJob::TreeSnapshot {
+            generation,
+            generation_clock,
+            cursor,
+        } => run_tree_snapshot(generation, &generation_clock, &cursor, tx),
+        PickerJob::TreeHydrate {
+            generation,
+            generation_clock,
+            index,
+            cursor,
+            requested,
+        } => {
+            hydrate_tree_entry_rows(
+                &index,
+                &cursor,
+                &requested,
+                |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
+                || generation_clock.load(Ordering::Relaxed) != generation,
+            );
+        }
+    }
+}
+
+fn run_resume_load(
+    generation: u64,
+    generation_clock: &AtomicU64,
+    files: &[store::SessionFile],
+    tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) {
+    for (index, file) in files.iter().enumerate() {
+        if generation_clock.load(Ordering::Relaxed) != generation {
             return;
         }
         if let Some(preview) = file.quick_preview() {
-            if job
-                .tx
+            if tx
                 .send(PickerLoad::ResumePreviews {
-                    generation: job.generation,
+                    generation,
                     rows: vec![(index, preview)],
                 })
                 .is_err()
@@ -35,22 +108,63 @@ fn run_resume_load_job(job: &ResumeLoadJob) {
             }
         }
     }
-    for (index, file) in job.files.iter().enumerate() {
-        if job.generation_clock.load(Ordering::Relaxed) != job.generation {
+    for (index, file) in files.iter().enumerate() {
+        if generation_clock.load(Ordering::Relaxed) != generation {
             return;
         }
         let Some(entry) = file.inspect() else {
             continue;
         };
-        if job
-            .tx
+        if tx
             .send(PickerLoad::ResumeRows {
-                generation: job.generation,
+                generation,
                 rows: vec![(index, entry)],
             })
             .is_err()
         {
             return;
+        }
+    }
+}
+
+fn run_tree_snapshot(
+    generation: u64,
+    generation_clock: &AtomicU64,
+    cursor: &store::SessionCursor,
+    tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) {
+    match cursor.tree_snapshot() {
+        Ok(snapshot) => {
+            if generation_clock.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let index = Arc::new(snapshot.index);
+            let skeletons = build_tree_entry_skeletons(&index, snapshot.leaf_id.as_deref(), cursor);
+            if tx
+                .send(PickerLoad::TreeReady {
+                    generation,
+                    entries: skeletons.clone(),
+                    index: Arc::clone(&index),
+                })
+                .is_err()
+            {
+                return;
+            }
+            let start = skeletons.len().saturating_sub(20);
+            hydrate_tree_entry_window(
+                &index,
+                cursor,
+                &skeletons,
+                start..skeletons.len(),
+                |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
+                || generation_clock.load(Ordering::Relaxed) != generation,
+            );
+        }
+        Err(error) => {
+            let _ = tx.send(PickerLoad::TreeFailed {
+                generation,
+                error: error.to_string(),
+            });
         }
     }
 }
@@ -370,30 +484,10 @@ impl App {
                     generation,
                 });
                 if let Some(tx) = self.picker_load_tx.clone() {
-                    // Reuse one background loader for the process lifetime. A
-                    // fresh std::thread::spawn per /resume let glibc give each
-                    // thread its own arena whose freed pages stayed mapped, so
-                    // RSS ratcheted up by the loader's transient peak on every
-                    // picker open. With one long-lived worker the arena is
-                    // allocated once and reused, so the high-water mark is paid
-                    // only the first time.
-                    static JOB_TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<ResumeLoadJob>> =
-                        std::sync::OnceLock::new();
-                    let generation_clock = Arc::clone(&self.picker_generation);
-                    let job_tx = JOB_TX.get_or_init(move || {
-                        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<ResumeLoadJob>(8);
-                        std::thread::spawn(move || {
-                            while let Ok(job) = job_rx.recv() {
-                                run_resume_load_job(&job);
-                            }
-                        });
-                        job_tx
-                    });
-                    let _ = job_tx.send(ResumeLoadJob {
+                    let _ = picker_job_tx(tx).send(PickerJob::Resume {
                         generation,
-                        generation_clock,
+                        generation_clock: Arc::clone(&self.picker_generation),
                         files,
-                        tx,
                     });
                 } else if let Some(picker) = self.picker.as_mut() {
                     for row in &mut picker.entries {
@@ -670,42 +764,10 @@ impl App {
             loading: true,
         });
         if let Some(tx) = self.picker_load_tx.clone() {
-            let cursor = cursor.clone();
-            let generation_clock = Arc::clone(&self.picker_generation);
-            std::thread::spawn(move || match cursor.tree_snapshot() {
-                Ok(snapshot) => {
-                    if generation_clock.load(Ordering::Relaxed) != generation {
-                        return;
-                    }
-                    let index = Arc::new(snapshot.index);
-                    let skeletons =
-                        build_tree_entry_skeletons(&index, snapshot.leaf_id.as_deref(), &cursor);
-                    if tx
-                        .send(PickerLoad::TreeReady {
-                            generation,
-                            entries: skeletons.clone(),
-                            index: Arc::clone(&index),
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let start = skeletons.len().saturating_sub(20);
-                    hydrate_tree_entry_window(
-                        &index,
-                        &cursor,
-                        &skeletons,
-                        start..skeletons.len(),
-                        |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
-                        || generation_clock.load(Ordering::Relaxed) != generation,
-                    );
-                }
-                Err(error) => {
-                    let _ = tx.send(PickerLoad::TreeFailed {
-                        generation,
-                        error: error.to_string(),
-                    });
-                }
+            let _ = picker_job_tx(tx).send(PickerJob::TreeSnapshot {
+                generation,
+                generation_clock: Arc::clone(&self.picker_generation),
+                cursor: cursor.clone(),
             });
         } else {
             match cursor.tree_snapshot() {
@@ -766,15 +828,12 @@ impl App {
         let Some(cursor) = self.session.cursor.clone() else {
             return;
         };
-        let generation_clock = Arc::clone(&self.picker_generation);
-        std::thread::spawn(move || {
-            hydrate_tree_entry_rows(
-                &index,
-                &cursor,
-                &requested,
-                |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
-                || generation_clock.load(Ordering::Relaxed) != generation,
-            );
+        let _ = picker_job_tx(tx).send(PickerJob::TreeHydrate {
+            generation,
+            generation_clock: Arc::clone(&self.picker_generation),
+            index,
+            cursor,
+            requested,
         });
     }
 
