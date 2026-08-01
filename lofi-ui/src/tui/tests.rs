@@ -2072,7 +2072,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
     let path = dir.path().join("round-commit.jsonl");
     std::fs::write(
         &path,
-        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"p/m\"}\n",
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"p/m\"}\n",
     )
     .unwrap();
     let cursor = store::SessionCursor::new(path, None);
@@ -3924,61 +3924,6 @@ fn tree_exec_label_shows_native_tools() {
 }
 
 #[test]
-fn tree_shows_tool_result_nodes_in_v1_session() {
-    // V1 session files have no `type` field on message lines and no
-    // turn_end events — just raw Message objects. The index scan must
-    // still classify role=tool messages as ToolResult so they appear as
-    // `tool:` nodes in /tree.
-    use lofi_types::{ContentBlock, Message, Role};
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s");
-    let header = r#"{"type":"meta","version":1,"created":1784436411351,"cwd":"/x","model":"m"}
-"#;
-    let lines = [
-        serde_json::to_string(&Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::Text {
-                text: "list files".into(),
-            }],
-        })
-        .unwrap(),
-        serde_json::to_string(&Message {
-            role: Role::Assistant,
-            blocks: vec![ContentBlock::ToolUse {
-                id: "tu1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({"cmd": "ls"}),
-            }],
-        })
-        .unwrap(),
-        serde_json::to_string(&Message {
-            role: Role::Tool,
-            blocks: vec![ContentBlock::ToolResult {
-                tool_use_id: "tu1".into(),
-                content: "file_a.txt".into(),
-                is_error: false,
-            }],
-        })
-        .unwrap(),
-    ];
-    std::fs::write(&path, format!("{header}{}\n", lines.join("\n"))).unwrap();
-
-    let mut a = app();
-    a.session.cursor = Some(store::SessionCursor::open(path).unwrap());
-    a.session.cwd = std::path::PathBuf::from("/x");
-    assert!(a.slash_command("/tree"));
-    let picker = a.tree_picker.as_ref().expect("picker opened");
-    assert!(
-        picker.entries.iter().any(|e| e.label.starts_with("user:")),
-        "should have user node"
-    );
-    assert!(
-        picker.entries.iter().any(|e| e.label.starts_with("tool:")),
-        "should have tool node in v1 session"
-    );
-}
-
-#[test]
 fn verbose_toggles() {
     let mut a = app();
     assert!(!a.verbose);
@@ -4528,7 +4473,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
     let path = dir.path().join("s.jsonl");
     std::fs::write(
         &path,
-        "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n",
+        "{\"type\":\"meta\",\"version\":1,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n",
     )
     .unwrap();
 
@@ -4616,7 +4561,7 @@ fn messages_from_events_prepends_compaction_summary() {
     let path = dir.path().join("s.jsonl");
     std::fs::write(
         &path,
-        "{\"type\":\"meta\",\"version\":2,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n",
+        "{\"type\":\"meta\",\"version\":1,\"created\":1,\"cwd\":\"/x\",\"model\":\"m\"}\n",
     )
     .unwrap();
 

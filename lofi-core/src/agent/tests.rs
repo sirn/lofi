@@ -333,7 +333,7 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let path = dir.path().join("s.jsonl");
     std::fs::write(
         &path,
-        b"{\"type\":\"meta\",\"version\":2,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
     )
     .unwrap();
     let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
