@@ -180,7 +180,7 @@ pub fn rebuild_agent(
     let agent = if let Some(a) = existing {
         a.with_model(provider, model_obj.clone())
     } else {
-        let tmp_lease = state::create_session_tmp_dir()?;
+        let tmp_lease = state::create_session_tmp_dir(root)?;
         Agent::new(
             provider,
             model_obj.clone(),

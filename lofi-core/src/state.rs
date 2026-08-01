@@ -1,6 +1,35 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lofi_error::{Error, Result};
+
+/// Stable per-workspace directory key shared by `sessions/` and `tmp/` so a
+/// project's transcripts and scratch dirs land under the same label. Derived
+/// from the workspace root path (not the basename alone, which would collide
+/// across `~/work/a/b` and `~/other/a/b`) via a v5 (name-based, deterministic)
+/// UUID — a v4 random id would change run-to-run and orphan prior state.
+pub(crate) fn workspace_key(cwd: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let label = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                        ch
+                    } else {
+                        '-'
+                    }
+                })
+                .take(40)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "root".to_string());
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_os_str().as_bytes());
+    format!("{label}-{id}")
+}
 
 /// Tests that mutate the process-global `XDG_STATE_HOME` / `LOFI_STATE_HOME`
 /// env vars acquire this lock for their whole duration. The vars are
@@ -96,6 +125,10 @@ fn entry_is_stale(entry: &std::fs::DirEntry) -> bool {
         .is_some_and(|age| age >= LEGACY_TMP_MAX_AGE)
 }
 
+/// `tmp/` holds one workspace-key dir per project, each containing leased
+/// session dirs; leased dirs never sit directly at the root, so this recurses
+/// exactly one level. A workspace-key dir has no `.lease` of its own — it is
+/// swept into and dropped once empty.
 fn collect_abandoned_tmp_dirs(root: &std::path::Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(root)? {
         let Ok(entry) = entry else { continue };
@@ -111,6 +144,13 @@ fn collect_abandoned_tmp_dirs(root: &std::path::Path) -> std::io::Result<()> {
             if entry_is_stale(&entry) {
                 let _ = std::fs::remove_dir_all(path);
             }
+            continue;
+        }
+        // Workspace-key dir: holds leased session dirs, not a `.lease` of its
+        // own; sweep into it and drop it once empty.
+        if !path.join(".lease").exists() {
+            let _ = collect_abandoned_tmp_dirs(&path);
+            let _ = std::fs::remove_dir(&path);
             continue;
         }
         let lease_path = path.join(".lease");
@@ -178,15 +218,21 @@ fn create_leased_tmp_dir(root: &std::path::Path) -> std::io::Result<SessionTempD
     }
 }
 
-/// Create a leased per-session directory for pageable tool output.
+/// Create a leased per-session directory for pageable tool output, scoped to
+/// the workspace so a project's scratch dirs group alongside its transcripts.
+/// Orphaned dirs are collected from the whole `tmp/` tree (not just this
+/// workspace), so a stale dir from any project is reclaimed at its owner's
+/// next startup.
 /// # Errors
 /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`] if the
 /// base directory cannot be resolved.
-pub(crate) fn create_session_tmp_dir() -> Result<SessionTempDir> {
+pub(crate) fn create_session_tmp_dir(cwd: &Path) -> Result<SessionTempDir> {
     let root = ensure_state_dir()?.join("tmp");
     ensure_private_dir(&root)?;
     collect_abandoned_tmp_dirs(&root)?;
-    create_leased_tmp_dir(&root).map_err(Error::Io)
+    let scoped = root.join(workspace_key(cwd));
+    ensure_private_dir(&scoped)?;
+    create_leased_tmp_dir(&scoped).map_err(Error::Io)
 }
 
 #[cfg(test)]
@@ -228,6 +274,16 @@ mod tests {
 
         std::env::remove_var("LOFI_STATE_HOME");
         std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn workspace_key_is_readable_and_collision_resistant() {
+        let first = workspace_key(Path::new("/work/a-b/c"));
+        let second = workspace_key(Path::new("/work/a/b-c"));
+        assert!(first.starts_with("c-"));
+        assert!(second.starts_with("b-c-"));
+        assert_ne!(first, second);
+        assert_eq!(workspace_key(Path::new("/work/a-b/c")), first);
     }
 
     #[test]
@@ -274,6 +330,22 @@ mod tests {
 
         drop(lease);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn collect_sweeps_workspace_scoped_abandoned_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let scoped = root.path().join(workspace_key(Path::new("/work/proj")));
+        let abandoned = scoped.join("abandoned");
+        ensure_private_dir(&abandoned).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(abandoned.join(".lease"))
+            .unwrap();
+
+        collect_abandoned_tmp_dirs(root.path()).unwrap();
+        assert!(!scoped.exists());
     }
 
     #[test]
