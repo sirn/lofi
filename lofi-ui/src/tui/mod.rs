@@ -54,7 +54,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
-    ContentBlock, Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind,
+    ContentBlock, Message, Role, RunModel, SessionEvent, SessionEventKind,
     ThinkingLevel, Usage,
 };
 use ratatui::backend::CrosstermBackend;
@@ -540,18 +540,9 @@ impl Popover for SlashComplete {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TreeEntry {
-    branch_point: String,
-    label: String,
-    prefix: String,
-    prefill: String,
-    is_active: bool,
-    source_index: usize,
-    source_offset: u64,
-    source_kind: store::IndexKind,
-    hydrated: bool,
-}
+// Tree rows are produced by the core session projection; the TUI keeps the
+// historical TreeEntry name for its picker state.
+use lofi_core::session::tree::TreeRow as TreeEntry;
 
 /// Retains compressed, width-independent display models so resizing a resumed
 /// transcript does not rescan its JSONL file. Successful native results are
