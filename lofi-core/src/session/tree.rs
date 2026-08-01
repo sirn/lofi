@@ -326,18 +326,7 @@ pub fn active_path_from_index(
     by_id: &HashMap<&IndexId, usize>,
     leaf_id: &str,
 ) -> Vec<usize> {
-    let mut path = Vec::new();
-    let leaf = IndexId::parse(leaf_id.to_string());
-    let mut cur = by_id.get(&leaf).copied();
-    while let Some(i) = cur {
-        path.push(i);
-        cur = indices[i]
-            .parent_id
-            .as_ref()
-            .and_then(|p| by_id.get(p).copied());
-    }
-    path.reverse();
-    path
+    super::store::lineage_path(indices, by_id, leaf_id)
 }
 
 fn render_branch_subtree(ctx: &TreeCtx, roots: &[usize], prefix: &str, out: &mut Vec<TreeRow>) {
@@ -771,21 +760,7 @@ pub fn load_failed_error(cursor: &SessionCursor, offset: u64) -> String {
 }
 
 fn load_compaction_details(cursor: &SessionCursor, offset: u64) -> (usize, usize, bool, String) {
-    let Ok(ev) = cursor.event_at(offset) else {
-        return (0, 0, false, String::new());
-    };
-    if let SessionEventKind::Compaction {
-        summarized,
-        kept,
-        checkpointed_tail,
-        first_kept_entry_id,
-        ..
-    } = ev.kind
-    {
-        (summarized, kept, checkpointed_tail, first_kept_entry_id)
-    } else {
-        (0, 0, false, String::new())
-    }
+    cursor.compaction_details_at(offset)
 }
 
 #[must_use]
