@@ -181,6 +181,15 @@ impl SessionSink {
         self.store.list_files_for_cwd(&self.cwd)
     }
 
+    /// List the session entries (files with message counts and previews) for
+    /// this workspace. Read-only; never mutates.
+    ///
+    /// # Errors
+    /// Propagates directory read failures.
+    pub fn workspace_entries(&self) -> Result<Vec<store::SessionEntry>> {
+        self.store.list_for_cwd(&self.cwd)
+    }
+
     /// Run a read-heavy transcript walk on the store's shared IO worker.
     /// Picker scans and tree hydration funnel here so their transient
     /// allocations reuse one arena instead of spawning a fresh thread per
