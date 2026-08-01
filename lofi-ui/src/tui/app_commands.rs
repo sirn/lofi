@@ -10,6 +10,89 @@ enum ModalSlot {
     Thinking,
 }
 
+fn run_resume_load(
+    generation: u64,
+    generation_clock: &AtomicU64,
+    files: &[store::SessionFile],
+    tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) {
+    for (index, file) in files.iter().enumerate() {
+        if generation_clock.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        if let Some(preview) = file.quick_preview() {
+            if tx
+                .send(PickerLoad::ResumePreviews {
+                    generation,
+                    rows: vec![(index, preview)],
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+    for (index, file) in files.iter().enumerate() {
+        if generation_clock.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let Some(entry) = file.inspect() else {
+            continue;
+        };
+        if tx
+            .send(PickerLoad::ResumeRows {
+                generation,
+                rows: vec![(index, entry)],
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+fn run_tree_snapshot(
+    generation: u64,
+    generation_clock: &AtomicU64,
+    cursor: &store::SessionCursor,
+    tx: &tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+) {
+    match cursor.tree_snapshot() {
+        Ok(snapshot) => {
+            if generation_clock.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let index = Arc::new(snapshot.index);
+            let skeletons = build_tree_entry_skeletons(&index, snapshot.leaf_id.as_deref(), cursor);
+            if tx
+                .send(PickerLoad::TreeReady {
+                    generation,
+                    entries: skeletons.clone(),
+                    index: Arc::clone(&index),
+                })
+                .is_err()
+            {
+                return;
+            }
+            let start = skeletons.len().saturating_sub(20);
+            hydrate_tree_entry_window(
+                &index,
+                cursor,
+                &skeletons,
+                start..skeletons.len(),
+                |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
+                || generation_clock.load(Ordering::Relaxed) != generation,
+            );
+        }
+        Err(error) => {
+            let _ = tx.send(PickerLoad::TreeFailed {
+                generation,
+                error: error.to_string(),
+            });
+        }
+    }
+}
+
 impl App {
     pub(super) fn toggle_verbose(&mut self) {
         self.debug_sample("verbose");
@@ -324,43 +407,13 @@ impl App {
                     selected: 0,
                     generation,
                 });
-                if let Some(tx) = self.picker_load_tx.clone() {
+                if let (Some(tx), Some(sink)) =
+                    (self.picker_load_tx.clone(), self.session.sink.as_ref())
+                {
                     let generation_clock = Arc::clone(&self.picker_generation);
-                    std::thread::spawn(move || {
-                        for (index, file) in files.iter().enumerate() {
-                            if generation_clock.load(Ordering::Relaxed) != generation {
-                                return;
-                            }
-                            if let Some(preview) = file.quick_preview() {
-                                if tx
-                                    .send(PickerLoad::ResumePreviews {
-                                        generation,
-                                        rows: vec![(index, preview)],
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        for (index, file) in files.iter().enumerate() {
-                            if generation_clock.load(Ordering::Relaxed) != generation {
-                                return;
-                            }
-                            let Some(entry) = file.inspect() else {
-                                continue;
-                            };
-                            if tx
-                                .send(PickerLoad::ResumeRows {
-                                    generation,
-                                    rows: vec![(index, entry)],
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    });
+                    sink.submit_io(Box::new(move || {
+                        run_resume_load(generation, &generation_clock, &files, &tx);
+                    }));
                 } else if let Some(picker) = self.picker.as_mut() {
                     for row in &mut picker.entries {
                         row.preview = row.file.quick_preview();
@@ -635,44 +688,12 @@ impl App {
             generation,
             loading: true,
         });
-        if let Some(tx) = self.picker_load_tx.clone() {
-            let cursor = cursor.clone();
+        if let (Some(tx), Some(sink)) = (self.picker_load_tx.clone(), self.session.sink.as_ref()) {
             let generation_clock = Arc::clone(&self.picker_generation);
-            std::thread::spawn(move || match cursor.tree_snapshot() {
-                Ok(snapshot) => {
-                    if generation_clock.load(Ordering::Relaxed) != generation {
-                        return;
-                    }
-                    let index = Arc::new(snapshot.index);
-                    let skeletons =
-                        build_tree_entry_skeletons(&index, snapshot.leaf_id.as_deref(), &cursor);
-                    if tx
-                        .send(PickerLoad::TreeReady {
-                            generation,
-                            entries: skeletons.clone(),
-                            index: Arc::clone(&index),
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let start = skeletons.len().saturating_sub(20);
-                    hydrate_tree_entry_window(
-                        &index,
-                        &cursor,
-                        &skeletons,
-                        start..skeletons.len(),
-                        |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
-                        || generation_clock.load(Ordering::Relaxed) != generation,
-                    );
-                }
-                Err(error) => {
-                    let _ = tx.send(PickerLoad::TreeFailed {
-                        generation,
-                        error: error.to_string(),
-                    });
-                }
-            });
+            let cursor = cursor.clone();
+            sink.submit_io(Box::new(move || {
+                run_tree_snapshot(generation, &generation_clock, &cursor, &tx);
+            }));
         } else {
             match cursor.tree_snapshot() {
                 Ok(snapshot) => {
@@ -732,8 +753,11 @@ impl App {
         let Some(cursor) = self.session.cursor.clone() else {
             return;
         };
+        let Some(sink) = self.session.sink.as_ref() else {
+            return;
+        };
         let generation_clock = Arc::clone(&self.picker_generation);
-        std::thread::spawn(move || {
+        sink.submit_io(Box::new(move || {
             hydrate_tree_entry_rows(
                 &index,
                 &cursor,
@@ -741,7 +765,7 @@ impl App {
                 |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
                 || generation_clock.load(Ordering::Relaxed) != generation,
             );
-        });
+        }));
     }
 
     /// Confirm the hovered entry: roll the transcript back to the chosen
