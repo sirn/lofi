@@ -180,4 +180,12 @@ impl SessionSink {
     pub fn workspace_sessions(&self) -> Result<Vec<store::SessionFile>> {
         self.store.list_files_for_cwd(&self.cwd)
     }
+
+    /// Run a read-heavy transcript walk on the store's shared IO worker.
+    /// Picker scans and tree hydration funnel here so their transient
+    /// allocations reuse one arena instead of spawning a fresh thread per
+    /// action.
+    pub fn submit_io(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+        super::io::submit(self.store.root().to_path_buf(), job);
+    }
 }
