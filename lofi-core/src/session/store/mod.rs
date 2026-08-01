@@ -91,13 +91,6 @@ impl SessionEntry {
     }
 }
 
-fn legacy_slug(cwd: &Path) -> String {
-    cwd.to_string_lossy()
-        .replace('/', "-")
-        .trim_start_matches('-')
-        .to_string()
-}
-
 fn workspace_key(cwd: &Path) -> String {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -716,10 +709,6 @@ impl SessionStore {
         self.root.join(workspace_key(cwd))
     }
 
-    fn dirs_for_cwd(&self, cwd: &Path) -> [PathBuf; 2] {
-        [self.dir_for_cwd(cwd), self.root.join(legacy_slug(cwd))]
-    }
-
     /// The directory is created if needed; the header is written atomically via
     /// a temp file + rename so a partial file is never visible. Returning the
     /// cursor directly prevents active callers from constructing independent
@@ -774,34 +763,35 @@ impl SessionStore {
     /// other than not existing.
     pub fn list_files_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionFile>> {
         let mut files = Vec::new();
-        for dir in self.dirs_for_cwd(cwd) {
-            let read = match std::fs::read_dir(&dir) {
-                Ok(read) => {
-                    crate::state::ensure_private_dir(&dir)?;
-                    read
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(Error::Io(error)),
-            };
-            for entry in read {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let Some(meta) = read_session_meta(&path) else {
-                    continue;
-                };
-                if !metadata_matches_cwd(&meta, cwd) {
-                    continue;
-                }
-                crate::state::ensure_private_file(&path)?;
-                let last_active = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                files.push(SessionFile { path, last_active });
+        let dir = self.dir_for_cwd(cwd);
+        let read = match std::fs::read_dir(&dir) {
+            Ok(read) => {
+                crate::state::ensure_private_dir(&dir)?;
+                read
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(files);
+            }
+            Err(error) => return Err(Error::Io(error)),
+        };
+        for entry in read {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(meta) = read_session_meta(&path) else {
+                continue;
+            };
+            if !metadata_matches_cwd(&meta, cwd) {
+                continue;
+            }
+            crate::state::ensure_private_file(&path)?;
+            let last_active = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            files.push(SessionFile { path, last_active });
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
@@ -2156,23 +2146,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_collision_does_not_cross_workspace_boundary() {
-        let (_guard, store) = isolated_store();
-        let first = Path::new("/work/a-b/c");
-        let second = Path::new("/work/a/b-c");
-        assert_eq!(legacy_slug(first), legacy_slug(second));
-
-        let original = store.create(first, &"p/m".into()).unwrap();
-        let legacy_dir = store.root.join(legacy_slug(first));
-        crate::state::ensure_private_dir(&legacy_dir).unwrap();
-        let legacy = legacy_dir.join(original.file_name().unwrap());
-        std::fs::rename(original, legacy).unwrap();
-
-        assert_eq!(store.list_for_cwd(first).unwrap().len(), 1);
-        assert!(store.list_for_cwd(second).unwrap().is_empty());
-    }
-
-    #[test]
     fn session_state_permissions_are_private_and_repaired() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -2208,11 +2181,5 @@ mod tests {
         assert!(second.starts_with("b-c-"));
         assert_ne!(first, second);
         assert_eq!(workspace_key(Path::new("/work/a-b/c")), first);
-    }
-
-    #[test]
-    fn legacy_slug_collapses_separators() {
-        assert_eq!(legacy_slug(Path::new("/home/sirn/dev")), "home-sirn-dev");
-        assert_eq!(legacy_slug(Path::new("/")), "");
     }
 }
