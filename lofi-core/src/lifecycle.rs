@@ -9,6 +9,7 @@ use crate::recall::{
     recall, recall_cursor, CompactionTarget, RecallOutcome, RecallRequest, RecallScope,
 };
 use crate::session::store::{CompactionCounts, EventIndex, IndexKind, SessionCursor};
+use crate::session::view::SessionView;
 use crate::{CodeCompactionHook, Error, Result};
 
 /// Core-owned mutable state and policy for an agent conversation.
@@ -326,31 +327,22 @@ impl AgentLifecycle {
             .count())
     }
 
+    /// Materialize the session lineage for compact/recall/context policy.
+    ///
+    /// This is the only place the lifecycle chooses between the transcript and
+    /// the in-memory tail, and it does so by building a [`SessionView`]: the view
+    /// owns the source choice, so this method is only a constructor plus a
+    /// materialize call. Every consumer (compact, auto/hard compact, recall,
+    /// messages-since-compact) reads through this one view.
     fn compaction_events(
         &self,
         cursor: Option<&SessionCursor>,
     ) -> Result<Option<Vec<SessionEvent>>> {
-        if let Some(cursor) = cursor {
-            return cursor.load_compaction_events().map(Some);
-        }
-        let messages = self
-            .history
-            .lock()
-            .map_err(|_| Error::State("agent history lock poisoned".to_string()))?;
-        if messages.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(
-            messages
-                .iter()
-                .enumerate()
-                .map(|(index, message)| SessionEvent {
-                    id: index.to_string(),
-                    parent_id: index.checked_sub(1).map(|parent| parent.to_string()),
-                    kind: SessionEventKind::Message(message.clone()),
-                })
-                .collect(),
-        ))
+        let view = cursor.map_or_else(
+            || SessionView::from_memory(&self.history),
+            SessionView::from_transcript,
+        );
+        view.session_events()
     }
 }
 
