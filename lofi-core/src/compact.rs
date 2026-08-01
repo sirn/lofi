@@ -67,17 +67,12 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         if let SessionEventKind::Compaction {
             summary,
             first_kept_entry_id,
-            summarized,
             represented,
             ..
         } = &events[i].kind
         {
             previous_summary = Some(summary.clone());
-            previously_summarized = if *represented == 0 {
-                *summarized
-            } else {
-                *represented
-            };
+            previously_summarized = *represented;
             live_start_id = Some(first_kept_entry_id.clone());
             previous_marker_pos = Some(path_pos);
             break;
@@ -1564,7 +1559,7 @@ mod tests {
                 summarized_range: ["e0".to_string(), "e4".to_string()],
                 checkpointed_tail: true,
                 summarized: 5,
-                represented: 0, // legacy marker: fall back to summarized
+                represented: 5,
                 kept: 0,
             },
         });
