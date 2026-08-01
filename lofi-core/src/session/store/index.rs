@@ -98,10 +98,8 @@ pub enum IndexKind {
     SystemMessage,
     /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
     /// so the tree can show it as a `tool:` node and `find_turn_outcome` can
-    /// follow it (it was previously `Other`, which caused `find_turn_outcome`
-    /// to miss turn outcomes for turns with tool calls — the function follows
-    /// non-`UserPrompt` children, but `Other` events were not tree nodes so the
-    /// outcome was never displayed).
+    /// follow it — the function follows non-`UserPrompt` children, so a
+    /// tool-result turn's outcome is only reachable when this is a tree node.
     ToolResult,
     NativeTool,
     TurnEnd,

@@ -323,9 +323,9 @@ fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool)
 }
 
 /// Parse one SSE block and push its mapped event (if any) onto `queued`.
-/// `data: [DONE]` empties the queue and marks the stream exhausted so the
-/// unfold terminates after any already-queued events... but per the SSE spec
-/// `[DONE]` is the terminal sentinel, so we drop pending events and stop.
+/// `data: [DONE]` is the terminal sentinel: a deferred `pending_done` is
+/// flushed first, then the stream is marked done so nothing after the marker
+/// is emitted (a peer that stays open cannot hold the caller hostage).
 fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
     for ev in parse_sse_lines(block.lines()) {
         if is_done_marker(&ev.data) && state.mapper.handles_done_marker() {

@@ -299,8 +299,6 @@ impl SessionCursor {
     }
 
     /// Atomically index the transcript and project it onto this cursor's
-    /// selected lineage."""
-    /// Atomically index the transcript and project it onto this cursor's
     /// selected lineage.
     /// # Errors
     /// Returns an error when the transcript cannot be indexed or the selected

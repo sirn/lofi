@@ -1422,7 +1422,7 @@ mod tests {
             },
             ..CompactionConfig::default()
         };
-        assert_eq!(both.soft_threshold(400_000), Some(150_000)); // min(150k, 200k)
+        assert_eq!(both.soft_threshold(400_000), Some(150_000));
     }
 
     #[test]
