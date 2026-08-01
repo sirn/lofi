@@ -495,7 +495,7 @@ impl App {
                     }
                 }
                 self.bump_render_epoch();
-                self.session.cursor = Some(cursor);
+                self.session.attach_cursor(cursor);
                 self.pinned = true;
                 self.top_line = 0;
             }
