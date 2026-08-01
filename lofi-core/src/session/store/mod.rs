@@ -308,6 +308,29 @@ impl SessionCursor {
         load_event_at(&self.path, offset)
     }
 
+    /// Read the compaction marker at offset as a
+    /// (`summarized`, `kept`, `checkpointed_tail`, `first_kept_entry_id`) tuple.
+    /// Returns the zero tuple when the event is missing or is not a
+    /// compaction, so projections can treat a corrupt marker as absent.
+    #[must_use]
+    pub fn compaction_details_at(&self, offset: u64) -> (usize, usize, bool, String) {
+        let Ok(ev) = self.event_at(offset) else {
+            return (0, 0, false, String::new());
+        };
+        if let SessionEventKind::Compaction {
+            summarized,
+            kept,
+            checkpointed_tail,
+            first_kept_entry_id,
+            ..
+        } = ev.kind
+        {
+            (summarized, kept, checkpointed_tail, first_kept_entry_id)
+        } else {
+            (0, 0, false, String::new())
+        }
+    }
+
     /// # Errors
     /// Propagates transcript seek, read, and parsing failures.
     pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
@@ -537,6 +560,37 @@ impl SessionCursor {
     }
 }
 
+/// Walk the root→leaf lineage over a caller-built `by_id` map. This is the
+/// single lineage walk; both [`lineage_indices`] and the tree projection use
+/// it so the traversal order and parent resolution live in exactly one place.
+// Callers build by_id internally with the std hasher; generalizing the hasher
+// would only add churn for an index-internal traversal.
+#[allow(clippy::implicit_hasher)]
+#[must_use]
+pub fn lineage_path(
+    index: &[EventIndex],
+    by_id: &std::collections::HashMap<&IndexId, usize>,
+    leaf_id: &str,
+) -> Vec<usize> {
+    let leaf = IndexId::parse(leaf_id.to_string());
+    let mut current = by_id.get(&leaf).copied();
+    let mut selected = Vec::new();
+    // A cyclic index would otherwise loop forever; cap the walk at the number
+    // of events so a malformed transcript terminates rather than hanging.
+    while let Some(i) = current {
+        if selected.len() > index.len() {
+            break;
+        }
+        selected.push(i);
+        current = index[i]
+            .parent_id
+            .as_ref()
+            .and_then(|id| by_id.get(id).copied());
+    }
+    selected.reverse();
+    selected
+}
+
 fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<usize>> {
     use std::collections::HashMap;
     let by_id: HashMap<&IndexId, usize> = index
@@ -545,23 +599,13 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
         .filter(|(_, event)| event.kind != IndexKind::Cursor)
         .map(|(i, event)| (&event.id, i))
         .collect();
-    let leaf = leaf_id.map(|id| IndexId::parse(id.to_string()));
-    let mut current = leaf.as_ref().and_then(|id| by_id.get(id).copied());
-    let mut selected = Vec::new();
-    while let Some(i) = current {
-        selected.push(i);
-        if selected.len() > index.len() {
-            return Err(Error::State("cycle in session event lineage".to_string()));
-        }
-        current = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
+    let selected = leaf_id.map_or_else(Vec::new, |id| lineage_path(index, &by_id, id));
+    if selected.len() > index.len() {
+        return Err(Error::State("cycle in session event lineage".to_string()));
     }
     if leaf_id.is_some() && selected.is_empty() {
         return Err(Error::State("session branch leaf not found".to_string()));
     }
-    selected.reverse();
     Ok(selected)
 }
 
