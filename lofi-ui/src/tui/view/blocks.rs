@@ -1279,18 +1279,19 @@ impl Component for Thinking<'_> {
             vec![Span::raw("  ")]
         });
         if working {
-            if !out.is_empty() {
-                out.push(prim::rblank());
-            }
+            // Reserve the separator even when the body is momentarily empty during
+            // streaming: a conditional blank would toggle row count with each
+            // markdown chunk, causing the flicker this layout avoids.
+            out.push(prim::rblank());
             out.push(prim::rline(
                 vec![Span::raw("  ")],
                 vec![Span::styled("Thinking...", body)],
             ));
         } else if let Some(d) = self.block.elapsed {
             if !d.is_zero() {
-                if !out.is_empty() {
-                    out.push(prim::rblank());
-                }
+                // Same rationale as above: keep the separator unconditional
+                // once work has run so row count never toggles with content.
+                out.push(prim::rblank());
                 let thought_lead = vec![
                     Span::raw("  "),
                     Span::styled("◇ ", Style::new().fg(t.subtle)),
@@ -1316,14 +1317,15 @@ impl Component for Thinking<'_> {
         let content_w = cx.width.saturating_sub(2);
         let md = markdown_body_height(&text, content_w);
         if working {
-            // +1 for the "Thinking..." line, +1 for the blank separator (if body non-empty).
-            md + if md > 0 { 2 } else { 1 }
+            // Reserve the separator even when the body is momentarily empty during
+            // streaming: reflow cost would toggle with each markdown chunk, causing flicker.
+            md + 2
         } else if let Some(d) = self.block.elapsed {
             if d.is_zero() {
                 md
             } else {
-                // +1 for the "Thought for {duration}" line, +1 blank separator (if any).
-                md + if md > 0 { 2 } else { 1 }
+                // Same rationale: keep the separator unconditional once work has run.
+                md + 2
             }
         } else {
             md
