@@ -4352,7 +4352,7 @@ fn checkpointed_tail_is_hidden_from_ui_but_used_for_model_resume() {
         vec![Some((0, 20)), Some((20, 80))]
     );
 
-    let messages = messages_from_events(&events, &lofi_types::EditConfig::default());
+    let messages = messages_from_events(&events);
     assert_eq!(messages.len(), 4);
     assert_eq!(user_text(&messages[0]), "SUMMARY");
     assert_eq!(user_text(&messages[1]), "kept prompt");
@@ -4546,7 +4546,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
         SessionEventKind::TurnFailed { .. }
     ));
 
-    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    let msgs = messages_from_events(&events);
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].role, Role::User);
     assert_eq!(msgs[1].role, Role::Assistant);
@@ -4608,7 +4608,7 @@ fn messages_from_events_prepends_compaction_summary() {
         }
     }
 
-    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    let msgs = messages_from_events(&events);
     assert_eq!(msgs.len(), 4);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
     assert_eq!(user_text(&msgs[1]), "kept-prompt");
@@ -4633,7 +4633,7 @@ fn messages_from_events_compact_all_does_not_restore_old_messages() {
         msg(assistant("continued")),
     ]);
 
-    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    let msgs = messages_from_events(&events);
     assert_eq!(msgs.len(), 2);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
     assert_eq!(msgs[1].role, Role::Assistant);
@@ -4696,7 +4696,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         msg(exec_result_full("t3", "post-compaction-result")),
     ]);
 
-    let msgs = messages_from_events(&events, &lofi_types::EditConfig::default());
+    let msgs = messages_from_events(&events);
     assert_eq!(msgs.len(), 7);
     assert_eq!(user_text(&msgs[0]), "SUMMARY");
 
