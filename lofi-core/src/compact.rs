@@ -101,40 +101,15 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         match &events[i].kind {
             SessionEventKind::TurnFailed { .. } => skipping = true,
             SessionEventKind::TurnEnd { .. } => skipping = false,
-            SessionEventKind::Message(m) if !skipping => {
-                live.push(LiveMessage {
-                    event_id: events[i].id.clone(),
-                    message: m.clone(),
-                });
-            }
-            SessionEventKind::UserBash {
-                command,
-                output,
-                exit_code,
-                signal,
-                duration_ms,
-                truncated,
-                cancelled,
-                exclude_from_context,
-            } if !skipping && !exclude_from_context => {
-                let result = crate::UserBashResult::from_session(
-                    command.clone(),
-                    output.clone(),
-                    *exit_code,
-                    *signal,
-                    *duration_ms,
-                    *truncated,
-                    *cancelled,
-                );
-                live.push(LiveMessage {
-                    event_id: events[i].id.clone(),
-                    message: Message {
-                        role: Role::User,
-                        blocks: vec![ContentBlock::Text {
-                            text: result.context_text(),
-                        }],
-                    },
-                });
+            SessionEventKind::Message(_) | SessionEventKind::UserBash { .. } if !skipping => {
+                if let Some(message) =
+                    crate::session::replay::agent_message_for_event(&events[i].kind)
+                {
+                    live.push(LiveMessage {
+                        event_id: events[i].id.clone(),
+                        message,
+                    });
+                }
             }
             SessionEventKind::NativeTool(rec) => {
                 native_by_parent

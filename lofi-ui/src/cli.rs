@@ -107,8 +107,8 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
 }
 
 fn list_sessions(root: &std::path::Path) -> anyhow::Result<()> {
-    let store = lofi_core::session::store::SessionStore::open().context("open session store")?;
-    let entries = store.list_for_cwd(root).context("list sessions")?;
+    let sink = lofi_core::session::sink::SessionSink::open(root).context("open session sink")?;
+    let entries = sink.workspace_entries().context("list sessions")?;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     if entries.is_empty() {
