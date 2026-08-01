@@ -6,7 +6,7 @@ use lofi_error::{Error, Result};
 use lofi_types::{SessionEvent, SessionEventKind};
 use serde::Deserialize;
 
-use super::{Header, SessionMeta, SESSION_MIN_VERSION, SESSION_VERSION};
+use super::{Header, SessionMeta, SESSION_VERSION};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexId(IndexIdRepr);
 
@@ -14,7 +14,6 @@ pub struct IndexId(IndexIdRepr);
 enum IndexIdRepr {
     Empty,
     Uuid(u128),
-    Legacy(u64),
     Other(Box<str>),
 }
 
@@ -24,21 +23,12 @@ impl IndexId {
         if value.is_empty() {
             return Self(IndexIdRepr::Empty);
         }
-        if let Some(hex) = value.strip_prefix("legacy-") {
-            if let Ok(offset) = u64::from_str_radix(hex, 16) {
-                return Self(IndexIdRepr::Legacy(offset));
-            }
-        }
         if value.len() == 32 {
             if let Ok(id) = u128::from_str_radix(&value, 16) {
                 return Self(IndexIdRepr::Uuid(id));
             }
         }
         Self(IndexIdRepr::Other(value.into_boxed_str()))
-    }
-
-    fn legacy(offset: u64) -> Self {
-        Self(IndexIdRepr::Legacy(offset))
     }
 
     #[must_use]
@@ -53,12 +43,6 @@ impl IndexId {
             IndexIdRepr::Uuid(id) => {
                 value.len() == 32 && u128::from_str_radix(value, 16).is_ok_and(|value| value == *id)
             }
-            IndexIdRepr::Legacy(offset) => {
-                value
-                    .strip_prefix("legacy-")
-                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-                    == Some(*offset)
-            }
             IndexIdRepr::Other(id) => id.as_ref() == value,
         }
     }
@@ -68,7 +52,6 @@ impl IndexId {
         match &self.0 {
             IndexIdRepr::Empty => String::new(),
             IndexIdRepr::Uuid(id) => format!("{id:032x}"),
-            IndexIdRepr::Legacy(offset) => format!("legacy-{offset:016x}"),
             IndexIdRepr::Other(id) => id.to_string(),
         }
     }
@@ -177,30 +160,9 @@ fn read_session_event<R>(
 where
     R: std::io::Read + std::io::Seek,
 {
-    use std::io::{Seek, SeekFrom};
-
-    let start = reader.stream_position()?;
-    match read_jsonl_value::<SessionEvent, _>(reader) {
-        Ok(event) => Ok(event),
-        Err(tagged_error) => {
-            reader.seek(SeekFrom::Start(start))?;
-            read_jsonl_value::<lofi_types::Message, _>(reader)
-                .map(|legacy| {
-                    legacy.map(|(start, end, message)| {
-                        (
-                            start,
-                            end,
-                            SessionEvent {
-                                id: String::new(),
-                                parent_id: None,
-                                kind: SessionEventKind::Message(message),
-                            },
-                        )
-                    })
-                })
-                .map_err(|_| tagged_error)
-        }
-    }
+    // Seek is retained in the bound because callers operate on seekable
+    // files; the read itself only advances the cursor.
+    read_jsonl_value::<SessionEvent, _>(reader)
 }
 
 /// # Errors
@@ -237,15 +199,13 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
             path.display()
         )));
     };
-    if !(SESSION_MIN_VERSION..=SESSION_VERSION).contains(&header.meta.version) {
+    if header.meta.version != SESSION_VERSION {
         return Err(Error::State(format!(
             "unsupported session version {} in {}",
             header.meta.version,
             path.display()
         )));
     }
-    let legacy_v1 = header.meta.version == 1;
-    let mut prev_id: Option<IndexId> = None;
     let mut indices = Vec::new();
     // Cursor records are append-only head metadata. Only the latest one can
     // affect a read; retaining one per committed batch would make index memory
@@ -256,13 +216,8 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
             Error::State(format!("parse index event in {}: {error}", path.display()))
         })?
     {
-        let is_cursor = skel.kind_type == "cursor";
-        let migrated = !is_cursor && (legacy_v1 || skel.id.is_empty());
-        let (id, parent_id) = if migrated {
-            (IndexId::legacy(line_start), prev_id.clone())
-        } else {
-            (IndexId::parse(skel.id), skel.parent_id.map(IndexId::parse))
-        };
+        let id = IndexId::parse(skel.id);
+        let parent_id = skel.parent_id.map(IndexId::parse);
         let kind = index_kind(&skel.kind_type, skel.role.as_deref());
         let entry = EventIndex {
             id,
@@ -275,7 +230,6 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
         if kind == IndexKind::Cursor {
             latest_cursor = Some(entry);
         } else {
-            prev_id = Some(entry.id.clone());
             indices.push(entry);
         }
     }
