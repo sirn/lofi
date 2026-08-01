@@ -309,6 +309,10 @@ fn spawn_agent_run(
         .session
         .sink_mut()
         .and_then(|sink| sink.cursor_or_create(&run_model, &app.system_prompt).ok());
+    // Mirror the lineage-birth pin into the live history so the first request
+    // carries the system prompt; resume has already rebuilt history from the
+    // log, so seed_system is a no-op there.
+    let _ = app.lifecycle.seed_system(&app.system_prompt);
     app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = app.lifecycle.shared_history();
