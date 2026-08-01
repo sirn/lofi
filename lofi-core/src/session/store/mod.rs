@@ -1264,83 +1264,161 @@ fn entry_preview(ev: &EntryPreview) -> String {
     }
 }
 
+/// Scan the file backwards in bounded chunks and return the first complete
+/// event that yields a preview. JSONL strings escape embedded newlines, so
+/// physical newlines delimit records. Reading backwards lets us return as
+/// soon as a parsable line is found without a fixed up-front tail; the
+/// common case (last event is a small cursor/turn record) is one 4KB read,
+/// and a huge tool-result line at EOF is skipped by extending the window
+/// rather than allocating its full payload.
 fn quick_entry_preview(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
 
-    // JSONL strings escape embedded newlines, so physical newlines delimit
-    // records. Keep this bounded: a huge tool-result line at EOF must not make
-    // merely opening the picker allocate that complete payload.
-    const TAIL_BYTES: u64 = 1024 * 1024;
+    const CHUNK: u64 = 4096;
+    const MAX_TAIL: u64 = 1024 * 1024;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = Vec::with_capacity(usize::try_from(len - start).ok()?);
-    file.read_to_end(&mut tail).ok()?;
-    for line in tail.rsplit(|byte| *byte == b'\n') {
-        if line.is_empty() {
+    let mut end = len;
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK).max(len.saturating_sub(MAX_TAIL));
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut chunk = vec![0u8; usize::try_from(end - start).ok()?];
+        file.read_exact(&mut chunk).ok()?;
+        // Prepend the previous tail (bytes after the last newline we already
+        // saw in later chunks) so a line spanning chunk boundaries reassembles.
+        chunk.extend_from_slice(&carry);
+        // Trailing bytes after the last newline form a partial line; save for
+        // next iteration. The final chunk (start == 0) has no predecessor, so
+        // a leading partial line there is the file's first line and is complete.
+        if let Some(nl) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            carry = chunk.split_off(nl + 1);
+        } else {
+            carry = chunk;
+            if start == 0 {
+                // Entire file is one line with no newline; nothing to scan.
+                break;
+            }
+            end = start;
             continue;
         }
-        let Ok(event) = serde_json::from_slice::<EntryPreview>(line) else {
-            continue;
-        };
-        let preview = entry_preview(&event);
-        if !preview.is_empty() {
-            return Some(preview);
+        for line in chunk.rsplit(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_slice::<EntryPreview>(line) else {
+                continue;
+            };
+            let preview = entry_preview(&event);
+            if !preview.is_empty() {
+                return Some(preview);
+            }
         }
+        end = start;
     }
-    None
+    // Nothing parsed from any full line; try the very first bytes we carried
+    // (covers a file whose first line is also its last).
+    let Ok(event) = serde_json::from_slice::<EntryPreview>(&carry) else {
+        return None;
+    };
+    let preview = entry_preview(&event);
+    (!preview.is_empty()).then_some(preview)
 }
 
+/// Stream the transcript once and retain only per-event (parent, kind,
+/// offset) triples — enough to resolve the selected lineage and count its
+/// messages without holding full events. The resume picker runs this per
+/// session at open; the previous load_index()-based version materialized a
+/// Vec<EventIndex> per transcript, and glibc keeps the worker thread's arena
+/// pages mapped at that high-water mark, so picker opens ratcheted RSS by
+/// tens of MB on workspaces with deep transcripts.
 fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
-    let (meta, index, _file_size) = load_index(path).ok()?;
-    let cursor_record = index
-        .iter()
-        .rev()
-        .find(|event| event.kind == IndexKind::Cursor);
-    let leaf = match cursor_record {
-        Some(event) => event.cursor_leaf.as_ref().map(IndexId::to_event_id),
-        None => index
-            .iter()
-            .rev()
-            .find(|event| event.kind != IndexKind::Cursor)
-            .map(|event| event.id.to_event_id()),
-    };
-    let selected = lineage_indices(&index, leaf.as_deref()).ok()?;
-    let message_count = selected
-        .iter()
-        .filter(|&&i| {
-            matches!(
-                index[i].kind,
-                IndexKind::UserPrompt
-                    | IndexKind::AssistantMessage
-                    | IndexKind::ToolResult
-                    | IndexKind::SystemMessage
-            )
-        })
-        .count();
-    // Usually the first candidate is meaningful. Read newest-to-oldest and
-    // stop immediately instead of parsing every selected event.
-    let mut last_message = String::new();
-    for &i in selected.iter().rev() {
-        if matches!(index[i].kind, IndexKind::Cursor | IndexKind::Other) {
+    use std::collections::HashMap;
+    use std::io::BufReader;
+
+    struct Row {
+        parent: Option<IndexId>,
+        message: bool,
+        offset: u64,
+    }
+
+    let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
+    let (_hs, _he, header) = index::read_jsonl_value::<Header, _>(&mut reader).ok()??;
+    if header.meta.version != SESSION_VERSION {
+        return None;
+    }
+    let mut rows: HashMap<IndexId, Row> = HashMap::new();
+    let mut last_id: Option<IndexId> = None;
+    let mut cursor_leaf: Option<Option<IndexId>> = None;
+    while let Ok(Some((line_start, _end, skel))) =
+        index::read_jsonl_value::<index::EventSkeleton, _>(&mut reader)
+    {
+        let kind = index::index_kind(&skel.kind_type, skel.role.as_deref());
+        if kind == IndexKind::Cursor {
+            cursor_leaf = Some(skel.leaf_id.filter(|id| !id.is_empty()).map(IndexId::parse));
             continue;
         }
-        let offset = index[i].offset;
-        if visit_event_values::<EntryPreview>(path, &[offset], |event| {
-            last_message = entry_preview(&event);
+        let message = matches!(
+            kind,
+            IndexKind::UserPrompt
+                | IndexKind::AssistantMessage
+                | IndexKind::ToolResult
+                | IndexKind::SystemMessage
+        );
+        let id = IndexId::parse(skel.id);
+        last_id = Some(id.clone());
+        rows.insert(
+            id,
+            Row {
+                parent: skel.parent_id.map(IndexId::parse),
+                message,
+                offset: line_start,
+            },
+        );
+    }
+    let leaf = cursor_leaf
+        .flatten()
+        .or(last_id)
+        .filter(|id| rows.contains_key(id));
+
+    // Walk the selected lineage backward from the leaf, counting message
+    // events and finding the newest one with a readable preview.
+    let mut lineage: Vec<&IndexId> = Vec::new();
+    let mut cursor = leaf.as_ref();
+    let mut steps = 0usize;
+    while let Some(id) = cursor {
+        let Some(row) = rows.get(id) else { break };
+        lineage.push(id);
+        cursor = row.parent.as_ref();
+        steps += 1;
+        if steps > rows.len() {
+            return None;
+        }
+    }
+    let message_count = lineage
+        .iter()
+        .filter(|id| rows.get(**id).is_some_and(|row| row.message))
+        .count();
+    let mut last_message = String::new();
+    for id in &lineage {
+        let Some(row) = rows.get(*id) else { continue };
+        let offset = row.offset;
+        let mut preview = String::new();
+        if visit_event_values::<EntryPreview>(path, &[offset], |ev| {
+            preview = entry_preview(&ev);
             Ok(())
         })
         .is_err()
         {
             return None;
         }
-        if !last_message.is_empty() {
+        if !preview.is_empty() {
+            last_message = preview;
             break;
         }
     }
     Some(SessionEntry {
-        meta,
+        meta: header.meta,
         file: SessionFile {
             path: path.to_path_buf(),
             last_active,
