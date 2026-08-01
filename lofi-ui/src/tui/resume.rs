@@ -1,33 +1,7 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
-pub(super) fn visible_index_path(
-    cursor: &store::SessionCursor,
-    index: &[store::EventIndex],
-) -> Result<Vec<usize>> {
-    use std::collections::HashSet;
-    let mut hidden = HashSet::new();
-    for (pos, event) in index.iter().enumerate() {
-        if event.kind != store::IndexKind::Compaction {
-            continue;
-        }
-        let ev = cursor.event_at(event.offset)?;
-        if let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            checkpointed_tail: true,
-            ..
-        } = ev.kind
-        {
-            if let Some(start) = index[..pos]
-                .iter()
-                .position(|event| event.id.matches(&first_kept_entry_id))
-            {
-                hidden.extend(start..pos);
-            }
-        }
-    }
-    Ok((0..index.len()).filter(|i| !hidden.contains(i)).collect())
-}
+pub(super) use lofi_core::session::replay::last_run_model_from_index;
 
 /// Restore the transcript as file-backed turn shells. Turns need only their
 /// prompt, offsets, and terminal accounting at startup; their full blocks are
@@ -40,7 +14,7 @@ pub(super) fn replay_indexed_session(
     index: &[store::EventIndex],
     file_size: u64,
 ) -> Result<()> {
-    let visible = visible_index_path(cursor, index)?;
+    let visible = lofi_core::session::replay::visible_index_path(cursor, index);
     let starts: Vec<usize> = visible
         .iter()
         .enumerate()
@@ -116,59 +90,13 @@ pub(super) fn replay_indexed_session(
     Ok(())
 }
 
-pub(super) fn last_run_model_from_index(
-    cursor: &store::SessionCursor,
-    index: &[store::EventIndex],
-) -> Option<RunModel> {
-    for i in (0..index.len()).rev() {
-        if !matches!(
-            index[i].kind,
-            store::IndexKind::TurnEnd
-                | store::IndexKind::TurnFailed
-                | store::IndexKind::TurnCancelled
-        ) {
-            continue;
-        }
-        match cursor.event_at(index[i].offset).ok()?.kind {
-            SessionEventKind::TurnEnd { model, .. }
-            | SessionEventKind::TurnFailed { model, .. }
-            | SessionEventKind::TurnCancelled { model, .. } => return Some(model),
-            _ => {}
-        }
-    }
-    None
-}
-
 pub(super) fn restore_compaction_from_index(
     app: &mut App,
     cursor: &store::SessionCursor,
     index: &[store::EventIndex],
 ) {
-    let mut last_compaction_pos = None;
-    let mut last_usage = None;
-    for (pos, event) in index.iter().enumerate() {
-        match event.kind {
-            store::IndexKind::Compaction => last_compaction_pos = Some(pos),
-            store::IndexKind::TurnEnd
-            | store::IndexKind::TurnFailed
-            | store::IndexKind::TurnCancelled => {
-                if let Ok(ev) = cursor.event_at(event.offset) {
-                    match ev.kind {
-                        SessionEventKind::TurnEnd { usage, .. }
-                        | SessionEventKind::TurnFailed { usage, .. }
-                        | SessionEventKind::TurnCancelled { usage, .. } => {
-                            last_usage = Some((pos, usage));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let usage_after_compaction = last_usage
-        .filter(|(pos, _)| last_compaction_pos.is_none_or(|compact_pos| *pos > compact_pos))
-        .map(|(_, usage)| usage);
-    app.compacted = last_compaction_pos.is_some() && usage_after_compaction.is_none();
-    app.status_usage = usage_after_compaction;
+    let (compacted, status_usage) =
+        lofi_core::session::replay::compaction_status_from_index(cursor, index);
+    app.compacted = compacted;
+    app.status_usage = status_usage;
 }
