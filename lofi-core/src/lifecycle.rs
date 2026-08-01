@@ -55,6 +55,33 @@ impl AgentLifecycle {
         Arc::clone(&self.history)
     }
 
+    /// Seed the live system prompt at the front of an empty history. Matches
+    /// the durable transcript's lineage-birth pin: only a history with no
+    /// messages yet is a fresh lineage, so this is a no-op after resume or any
+    /// prior turn. Returns `true` when the system was inserted.
+    ///
+    /// # Errors
+    /// Returns a state error when the shared history lock is poisoned.
+    pub fn seed_system(&self, system_prompt: &str) -> Result<bool> {
+        if system_prompt.is_empty() {
+            return Ok(false);
+        }
+        let mut history = self
+            .history
+            .lock()
+            .map_err(|_| Error::State("agent history lock poisoned".to_string()))?;
+        if !history.is_empty() {
+            return Ok(false);
+        }
+        history.push(Message {
+            role: Role::System,
+            blocks: vec![ContentBlock::Text {
+                text: system_prompt.to_string(),
+            }],
+        });
+        Ok(true)
+    }
+
     /// # Errors
     /// Returns a state error when the shared history lock is poisoned.
     pub fn replace_history(&self, messages: Vec<Message>) -> Result<()> {
@@ -486,6 +513,37 @@ mod tests {
         config.auto.context_ratio = Some(0.5);
         let lifecycle = AgentLifecycle::new(config, 100_000);
         assert_eq!(lifecycle.compact_budget(), 25_000);
+    }
+
+    #[test]
+    fn seed_system_populates_empty_history_once() {
+        let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+        assert!(lifecycle.seed_system("sys").unwrap());
+        assert!(
+            !lifecycle.seed_system("sys-again").unwrap(),
+            "second seed must be a no-op"
+        );
+        let history = lifecycle.shared_history().lock().unwrap().clone();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, Role::System);
+        assert_eq!(history.iter().filter(|m| m.role == Role::System).count(), 1);
+    }
+
+    #[test]
+    fn seed_system_skips_after_any_message_and_ignores_empty() {
+        let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+        assert!(!lifecycle.seed_system("").unwrap());
+        lifecycle
+            .push_message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: "hi".into() }],
+            })
+            .unwrap();
+        assert!(
+            !lifecycle.seed_system("sys").unwrap(),
+            "a history carrying a resume/turn is not a birth point"
+        );
+        assert_eq!(lifecycle.history_stats().messages, 1);
     }
 
     #[test]
