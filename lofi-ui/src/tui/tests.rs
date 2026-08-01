@@ -1884,6 +1884,42 @@ fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
 }
 
 #[test]
+fn resume_picker_attaches_selected_cursor_to_sink_and_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let old = store.create_cursor(cwd, &"old".into()).unwrap();
+    old.append_system("old system").unwrap();
+    let selected = store.create_cursor(cwd, &"selected".into()).unwrap();
+    selected.append_system("selected system").unwrap();
+    let selected_path = selected.path().to_path_buf();
+    let file = store
+        .list_files_for_cwd(cwd)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.open_snapshot().unwrap().0.path() == selected_path)
+        .unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, old);
+    a.picker_confirm_inner(PickerState {
+        entries: vec![PickerEntry {
+            file,
+            preview: None,
+            details: None,
+        }],
+        selected: 0,
+        generation: 0,
+    });
+
+    assert_eq!(a.session.cursor.as_ref().unwrap().path(), selected_path);
+    assert_eq!(
+        a.session.sink.as_ref().unwrap().cursor().unwrap().path(),
+        selected_path
+    );
+}
+
+#[test]
 fn resumed_user_bash_and_final_turn_are_file_backed_shells() {
     let dir = tempfile::tempdir().unwrap();
     let store = store::SessionStore::new(dir.path().join("sessions"));

@@ -259,6 +259,16 @@ impl SessionState {
         self.cursor.as_ref().map(store::SessionCursor::path)
     }
 
+    /// Attach a cursor to the session owner and refresh the read mirror.
+    /// Keeping this as one operation prevents resume from rendering one lineage
+    /// while subsequent writes and tree operations still use another.
+    fn attach_cursor(&mut self, cursor: store::SessionCursor) {
+        if let Some(sink) = self.sink.as_mut() {
+            sink.set_cursor(cursor.clone());
+        }
+        self.cursor = Some(cursor);
+    }
+
     /// Sync `cursor` from the sink after any sink-side mutation. The sink owns
     /// cursor creation and branch moves; this mirror exists only for reads.
     fn refresh_cursor(&mut self) {
