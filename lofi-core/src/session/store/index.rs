@@ -94,20 +94,22 @@ pub enum IndexKind {
 }
 
 #[derive(Deserialize)]
-struct EventSkeleton {
+pub(super) struct EventSkeleton {
     #[serde(default)]
-    id: String,
+    pub(super) id: String,
     #[serde(default)]
-    parent_id: Option<String>,
+    pub(super) parent_id: Option<String>,
     #[serde(default, rename = "type")]
-    kind_type: String,
+    pub(super) kind_type: String,
     #[serde(default)]
-    role: Option<String>,
+    pub(super) role: Option<String>,
     #[serde(default)]
-    leaf_id: Option<String>,
+    pub(super) leaf_id: Option<String>,
 }
 
-fn read_jsonl_value<T, R>(reader: &mut std::io::BufReader<R>) -> Result<Option<(u64, u64, T)>>
+pub(super) fn read_jsonl_value<T, R>(
+    reader: &mut std::io::BufReader<R>,
+) -> Result<Option<(u64, u64, T)>>
 where
     T: serde::de::DeserializeOwned,
     R: std::io::Read + std::io::Seek,
@@ -168,7 +170,7 @@ where
 /// # Errors
 /// Returns the underlying IO error if the session file cannot be read or
 /// an event line cannot be parsed.
-fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
+pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
     match kind_type {
         "message" | "" => match role {
             Some("user") => IndexKind::UserPrompt,
