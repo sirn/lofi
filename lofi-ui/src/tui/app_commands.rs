@@ -10,6 +10,51 @@ enum ModalSlot {
     Thinking,
 }
 
+struct ResumeLoadJob {
+    generation: u64,
+    generation_clock: Arc<AtomicU64>,
+    files: Vec<store::SessionFile>,
+    tx: tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+}
+
+fn run_resume_load_job(job: &ResumeLoadJob) {
+    for (index, file) in job.files.iter().enumerate() {
+        if job.generation_clock.load(Ordering::Relaxed) != job.generation {
+            return;
+        }
+        if let Some(preview) = file.quick_preview() {
+            if job
+                .tx
+                .send(PickerLoad::ResumePreviews {
+                    generation: job.generation,
+                    rows: vec![(index, preview)],
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+    for (index, file) in job.files.iter().enumerate() {
+        if job.generation_clock.load(Ordering::Relaxed) != job.generation {
+            return;
+        }
+        let Some(entry) = file.inspect() else {
+            continue;
+        };
+        if job
+            .tx
+            .send(PickerLoad::ResumeRows {
+                generation: job.generation,
+                rows: vec![(index, entry)],
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 impl App {
     pub(super) fn toggle_verbose(&mut self) {
         self.debug_sample("verbose");
@@ -325,41 +370,30 @@ impl App {
                     generation,
                 });
                 if let Some(tx) = self.picker_load_tx.clone() {
+                    // Reuse one background loader for the process lifetime. A
+                    // fresh std::thread::spawn per /resume let glibc give each
+                    // thread its own arena whose freed pages stayed mapped, so
+                    // RSS ratcheted up by the loader's transient peak on every
+                    // picker open. With one long-lived worker the arena is
+                    // allocated once and reused, so the high-water mark is paid
+                    // only the first time.
+                    static JOB_TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<ResumeLoadJob>> =
+                        std::sync::OnceLock::new();
                     let generation_clock = Arc::clone(&self.picker_generation);
-                    std::thread::spawn(move || {
-                        for (index, file) in files.iter().enumerate() {
-                            if generation_clock.load(Ordering::Relaxed) != generation {
-                                return;
+                    let job_tx = JOB_TX.get_or_init(move || {
+                        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<ResumeLoadJob>(8);
+                        std::thread::spawn(move || {
+                            while let Ok(job) = job_rx.recv() {
+                                run_resume_load_job(&job);
                             }
-                            if let Some(preview) = file.quick_preview() {
-                                if tx
-                                    .send(PickerLoad::ResumePreviews {
-                                        generation,
-                                        rows: vec![(index, preview)],
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        for (index, file) in files.iter().enumerate() {
-                            if generation_clock.load(Ordering::Relaxed) != generation {
-                                return;
-                            }
-                            let Some(entry) = file.inspect() else {
-                                continue;
-                            };
-                            if tx
-                                .send(PickerLoad::ResumeRows {
-                                    generation,
-                                    rows: vec![(index, entry)],
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                        });
+                        job_tx
+                    });
+                    let _ = job_tx.send(ResumeLoadJob {
+                        generation,
+                        generation_clock,
+                        files,
+                        tx,
                     });
                 } else if let Some(picker) = self.picker.as_mut() {
                     for row in &mut picker.entries {
