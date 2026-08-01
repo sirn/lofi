@@ -5330,6 +5330,68 @@ async fn escape_dismisses_completion_before_interrupting_run() {
     run.take().unwrap().handle.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_in_nav_does_not_interrupt_run() {
+    let mut a = app();
+    a.enter_nav();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
+
+    assert!(!cancel.load(Ordering::Relaxed), "run must survive");
+    assert_eq!(a.mode, Mode::Input);
+    assert!(a.pinned);
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_clears_draft_without_interrupting_run() {
+    let mut a = app();
+    a.set_input("keep typing".to_string());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
+
+    assert!(!cancel.load(Ordering::Relaxed), "run must survive");
+    assert_eq!(a.input, "");
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_on_empty_input_interrupts_run() {
+    let mut a = app();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
+
+    assert!(cancel.load(Ordering::Relaxed), "empty prompt + run: cancel");
+    run.take().unwrap().handle.abort();
+}
+
 #[test]
 fn navigate_jk_moves_cursor_and_clamps() {
     let mut a = app();
