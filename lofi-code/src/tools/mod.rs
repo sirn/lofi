@@ -12,6 +12,7 @@ pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
+pub mod patch;
 pub mod read;
 
 mod bash_util;
