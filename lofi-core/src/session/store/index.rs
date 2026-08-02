@@ -7,11 +7,13 @@ use lofi_types::{SessionEvent, SessionEventKind};
 use serde::Deserialize;
 
 use super::{Header, SessionMeta, SESSION_VERSION};
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct IndexId(IndexIdRepr);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 enum IndexIdRepr {
+    #[default]
     Empty,
     Uuid(u128),
     Other(Box<str>),
@@ -60,6 +62,13 @@ impl IndexId {
 /// Lightweight per-event index entry: just enough to build the event tree
 /// structure (id, `parent_id`, offset) and identify tree-node kinds, without
 /// deserializing message content. Used by `/tree` to avoid a full `load`.
+///
+/// The struct is kept small deliberately: a full-tree index holds one entry
+/// per transcript event (tens of thousands on long sessions) and both `/tree`
+/// and resume materialize lineage copies, so per-entry width directly scales
+/// resident memory. A cursor record carries its selected leaf in the `id`
+/// slot (cursor records have no event id of their own) rather than a separate
+/// mostly-None `cursor_leaf: Option<IndexId>` field.
 #[derive(Debug, Clone)]
 pub struct EventIndex {
     pub id: IndexId,
@@ -186,6 +195,30 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "compaction" => IndexKind::Compaction,
         "native_tool" => IndexKind::NativeTool,
         "cursor" => IndexKind::Cursor,
+        _ => IndexKind::Other,
+    }
+}
+
+/// Classify a materialized (in-memory) event into its [`IndexKind`]. This is
+/// the in-memory analogue of [`index_kind`]: the file index walks serialized
+/// `type`/`role` strings, while a session-view index derived from memory walks
+/// the typed [`SessionEventKind`]. Routing both through one classifier keeps
+/// the transcript and memory representations on the same lineage walk.
+#[must_use]
+pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
+    match kind {
+        SessionEventKind::Message(message) => match message.role {
+            lofi_types::Role::User => IndexKind::UserPrompt,
+            lofi_types::Role::Assistant => IndexKind::AssistantMessage,
+            lofi_types::Role::Tool => IndexKind::ToolResult,
+            lofi_types::Role::System => IndexKind::SystemMessage,
+        },
+        SessionEventKind::UserBash { .. } => IndexKind::UserBash,
+        SessionEventKind::TurnEnd { .. } => IndexKind::TurnEnd,
+        SessionEventKind::TurnFailed { .. } => IndexKind::TurnFailed,
+        SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
+        SessionEventKind::Compaction { .. } => IndexKind::Compaction,
+        SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
         _ => IndexKind::Other,
     }
 }
