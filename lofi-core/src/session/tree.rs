@@ -70,7 +70,9 @@ pub fn hydrate_tree_rows(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (index, entry) in indices.iter().enumerate() {
-        if !entry.id.is_empty() {
+        // Cursor records reuse `id` for the selected leaf; including them
+        // shadows the real leaf event (appended last) and truncates the path.
+        if entry.kind != IndexKind::Cursor && !entry.id.is_empty() {
             by_id.insert(&entry.id, index);
         }
         if let Some(parent) = entry.parent_id.as_ref().filter(|parent| !parent.is_empty()) {
@@ -194,7 +196,10 @@ fn build_tree_rows_inner(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (i, ix) in indices.iter().enumerate() {
-        if !ix.id.is_empty() {
+        // Cursor records reuse `id` to carry the selected leaf, so including
+        // them would shadow the real leaf event (they are appended last) and
+        // truncate the active path to the record, which has no parent.
+        if ix.kind != IndexKind::Cursor && !ix.id.is_empty() {
             by_id.insert(&ix.id, i);
         }
         if let Some(p) = ix.parent_id.as_ref() {
@@ -439,6 +444,28 @@ pub fn walk_chain(
 
 type TreeRowFields = (String, String, String);
 
+/// A `/tree` row's revert target for the kinds that share one rule across the
+/// skeleton and hydrated paths: a `UserPrompt`, `TurnFailed`, or
+/// `TurnCancelled` reverts to its parent (an aborted outcome has no completed
+/// assistant message, so reverting to the row itself would reselect the
+/// broken/cancelled tail and be a no-op); anything else reverts to itself.
+///
+/// `TurnEnd` and `Compaction` are deliberately *not* handled here: `TurnEnd`
+/// reverts to itself only conceptually and each path expresses it inline, and
+/// `Compaction` resolves differently per path (skeleton has no checkpoint
+/// details, hydrated consults `by_id`). Those stay local to the callers so the
+/// shared rule never has to know about them.
+fn parent_branch_point(ix: &EventIndex) -> String {
+    match ix.kind {
+        IndexKind::UserPrompt | IndexKind::TurnFailed | IndexKind::TurnCancelled => ix
+            .parent_id
+            .as_ref()
+            .map(IndexId::to_event_id)
+            .unwrap_or_default(),
+        _ => ix.id.to_event_id(),
+    }
+}
+
 fn skeleton_tree_row(ix: &EventIndex) -> Option<TreeRowFields> {
     let label = match ix.kind {
         IndexKind::UserPrompt => "user: loading\u{2026}",
@@ -451,12 +478,14 @@ fn skeleton_tree_row(ix: &EventIndex) -> Option<TreeRowFields> {
     }
     .to_string();
     let branch_point = match ix.kind {
-        IndexKind::UserPrompt | IndexKind::Compaction => ix
+        // The skeleton path has no checkpoint details, so a compaction reverts
+        // to its parent; the hydrated path resolves it through `by_id`.
+        IndexKind::Compaction => ix
             .parent_id
             .as_ref()
             .map(IndexId::to_event_id)
             .unwrap_or_default(),
-        _ => ix.id.to_event_id(),
+        _ => parent_branch_point(ix),
     };
     Some((label, String::new(), branch_point))
 }
@@ -525,10 +554,7 @@ fn hydrated_tree_row(ctx: &TreeCtx, idx: usize) -> Option<TreeRowFields> {
             Some((
                 format!("user: {}", one_line(&prompt)),
                 prefill,
-                ix.parent_id
-                    .as_ref()
-                    .map(IndexId::to_event_id)
-                    .unwrap_or_default(),
+                parent_branch_point(ix),
             ))
         }
         IndexKind::ToolResult => Some(tool_result_tree_row(ctx, idx)),
@@ -551,7 +577,7 @@ fn hydrated_tree_row(ctx: &TreeCtx, idx: usize) -> Option<TreeRowFields> {
                 one_line(&load_failed_error(ctx.cursor, ix.offset))
             ),
             String::new(),
-            ix.id.to_event_id(),
+            parent_branch_point(ix),
         )),
         IndexKind::TurnCancelled => {
             let preview = load_assistant_preview(idx, ctx.indices, ctx.by_id, ctx.cursor);
@@ -563,7 +589,7 @@ fn hydrated_tree_row(ctx: &TreeCtx, idx: usize) -> Option<TreeRowFields> {
             Some((
                 format!("agent: {preview}"),
                 String::new(),
-                ix.id.to_event_id(),
+                parent_branch_point(ix),
             ))
         }
         IndexKind::Compaction => Some(compaction_tree_row(ctx, ix)),
