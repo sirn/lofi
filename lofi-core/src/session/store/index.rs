@@ -671,36 +671,7 @@ pub(super) fn load_compaction_path(
     index: &[EventIndex],
     leaf_id: Option<&str>,
 ) -> Result<Vec<SessionEvent>> {
-    use std::collections::HashMap;
-
-    if index.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Cursor records reuse `id` to carry their selected leaf, so exclude them
-    // from the lookup or the leaf would resolve to the record, not the event.
-    let by_id: HashMap<&IndexId, usize> = index
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event.kind != IndexKind::Cursor)
-        .map(|(i, event)| (&event.id, i))
-        .collect();
-    let leaf = leaf_id.map(|id| IndexId::parse(id.to_string()));
-    let mut current = leaf.as_ref().and_then(|id| by_id.get(id).copied());
-    let mut lineage = Vec::new();
-    while let Some(i) = current {
-        lineage.push(i);
-        if lineage.len() > index.len() {
-            return Err(Error::State("cycle in session event lineage".to_string()));
-        }
-        current = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
-    }
-    if leaf_id.is_some() && lineage.is_empty() {
-        return Err(Error::State("session branch leaf not found".to_string()));
-    }
-    lineage.reverse();
+    let lineage = lineage_indices(index, leaf_id)?;
 
     let mut start = 0;
     if let Some((marker_pos, &marker_index)) = lineage
@@ -728,21 +699,17 @@ pub(super) fn load_compaction_path(
     load_index_entries(path, index, &lineage[start..])
 }
 
+/// Resolve the selected lineage of an index to event positions in root-to-leaf
+/// order. Canonical walk shared by compaction and the picker scan; cursor
+/// records reuse `id` for their selected leaf and are excluded from lookup.
 /// # Errors
-/// Returns an error when the requested leaf is absent, the lineage is cyclic,
-/// or an indexed event cannot be read or parsed.
-pub(super) fn load_indexed_path(
-    path: &Path,
-    index: &[EventIndex],
-    leaf_id: Option<&str>,
-) -> Result<Vec<SessionEvent>> {
+/// Returns an error when the lineage is cyclic or a named leaf is absent.
+pub(super) fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<usize>> {
     use std::collections::HashMap;
 
     if index.is_empty() {
         return Ok(Vec::new());
     }
-    // Cursor records reuse `id` to carry their selected leaf, so exclude them
-    // from the lookup or the leaf would resolve to the record, not the event.
     let by_id: HashMap<&IndexId, usize> = index
         .iter()
         .enumerate()
@@ -757,15 +724,24 @@ pub(super) fn load_indexed_path(
         if lineage.len() > index.len() {
             return Err(Error::State("cycle in session event lineage".to_string()));
         }
-        current = index[i]
-            .parent_id
-            .as_ref()
-            .and_then(|id| by_id.get(id).copied());
+        current = index[i].parent_id.as_ref().and_then(|id| by_id.get(id).copied());
     }
     if leaf_id.is_some() && lineage.is_empty() {
         return Err(Error::State("session branch leaf not found".to_string()));
     }
     lineage.reverse();
+    Ok(lineage)
+}
+
+/// # Errors
+/// Returns an error when the requested leaf is absent, the lineage is cyclic,
+/// or an indexed event cannot be read or parsed.
+pub(super) fn load_indexed_path(
+    path: &Path,
+    index: &[EventIndex],
+    leaf_id: Option<&str>,
+) -> Result<Vec<SessionEvent>> {
+    let lineage = lineage_indices(index, leaf_id)?;
     load_index_entries(path, index, &lineage)
 }
 
