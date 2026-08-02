@@ -46,6 +46,7 @@ impl SessionFile {
         self.last_active
     }
 
+
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
@@ -1400,87 +1401,47 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
     (!preview.is_empty()).then_some(preview)
 }
 
-/// Stream the transcript once and retain only per-event (parent, kind,
-/// offset) triples — enough to resolve the selected lineage and count its
-/// messages without holding full events. The resume picker runs this per
-/// session at open; the previous load_index()-based version materialized a
-/// Vec<EventIndex> per transcript, and glibc keeps the worker thread's arena
-/// pages mapped at that high-water mark, so picker opens ratcheted RSS by
-/// tens of MB on workspaces with deep transcripts.
+/// Derive the resume-pick entry (message count + last preview) from the shared
+/// event index, resolving the selected lineage with the same helper compaction
+/// uses instead of a dedicated per-transcript map. The picker runs this per
+/// session at open; reusing `load_index` avoids the per-call map that kept
+/// worker-arena pages mapped at the high-water mark.
 fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
-    use std::collections::HashMap;
-    use std::io::BufReader;
-
-    struct Row {
-        parent: Option<IndexId>,
-        message: bool,
-        offset: u64,
-    }
-
-    let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
-    let (_hs, _he, header) = index::read_jsonl_value::<Header, _>(&mut reader).ok()??;
-    if header.meta.version != SESSION_VERSION {
+    let (meta, index, _size) = index::load_index(path).ok()?;
+    if meta.version != SESSION_VERSION {
         return None;
     }
-    let mut rows: HashMap<IndexId, Row> = HashMap::new();
-    let mut last_id: Option<IndexId> = None;
-    let mut cursor_leaf: Option<Option<IndexId>> = None;
-    let mut buf = Vec::with_capacity(4096);
-    while let Ok(Some((line_start, _end, skel))) =
-        index::read_jsonl_borrowed::<index::EventSkeleton, _>(&mut reader, &mut buf)
-    {
-        let kind = index::index_kind(skel.kind_type, skel.role);
-        if kind == IndexKind::Cursor {
-            cursor_leaf = Some(skel.leaf_id.filter(|id| !id.is_empty()).map(IndexId::borrow));
-            continue;
-        }
-        let message = matches!(
-            kind,
-            IndexKind::UserPrompt
-                | IndexKind::AssistantMessage
-                | IndexKind::ToolResult
-                | IndexKind::SystemMessage
-        );
-        let id = IndexId::borrow(skel.id);
-        last_id = Some(id.clone());
-        rows.insert(
-            id,
-            Row {
-                parent: skel.parent_id.map(IndexId::borrow),
-                message,
-                offset: line_start,
-            },
-        );
-    }
-    let leaf = cursor_leaf
-        .flatten()
-        .or(last_id)
-        .filter(|id| rows.contains_key(id));
-
-    // Walk the selected lineage backward from the leaf, counting message
-    // events and finding the newest one with a readable preview.
-    let mut lineage: Vec<&IndexId> = Vec::new();
-    let mut cursor = leaf.as_ref();
-    let mut steps = 0usize;
-    while let Some(id) = cursor {
-        let Some(row) = rows.get(id) else { break };
-        lineage.push(id);
-        cursor = row.parent.as_ref();
-        steps += 1;
-        if steps > rows.len() {
-            return None;
-        }
-    }
+    let leaf = index
+        .iter()
+        .rev()
+        .find(|e| e.kind == IndexKind::Cursor)
+        .map(|e| e.id.to_event_id())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            index
+                .iter()
+                .rev()
+                .find(|e| e.kind != IndexKind::Cursor)
+                .map(|e| e.id.to_event_id())
+        });
+    let lineage = index::lineage_indices(&index, leaf.as_deref()).ok()?;
     let message_count = lineage
         .iter()
-        .filter(|id| rows.get(**id).is_some_and(|row| row.message))
+        .filter(|&&i| {
+            matches!(
+                index[i].kind,
+                IndexKind::UserPrompt
+                    | IndexKind::AssistantMessage
+                    | IndexKind::ToolResult
+                    | IndexKind::SystemMessage
+            )
+        })
         .count();
     let mut last_message = String::new();
-    for id in &lineage {
-        let Some(row) = rows.get(*id) else { continue };
-        let offset = row.offset;
+    for &i in lineage.iter().rev() {
+        let offset = index[i].offset;
         let mut preview = String::new();
-        if visit_event_values::<EntryPreview>(path, &[offset], |ev| {
+        if index::visit_event_values::<EntryPreview>(path, &[offset], |ev| {
             preview = entry_preview(&ev);
             Ok(())
         })
@@ -1494,7 +1455,7 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
         }
     }
     Some(SessionEntry {
-        meta: header.meta,
+        meta,
         file: SessionFile {
             path: path.to_path_buf(),
             last_active,
