@@ -46,6 +46,17 @@ impl SessionFile {
         self.last_active
     }
 
+    /// Probe/test constructor: build a file handle for a known path without
+    /// going through directory listing. Not part of the public flow.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn force(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            last_active: std::time::SystemTime::now(),
+        }
+    }
+
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
@@ -1425,12 +1436,13 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     let mut rows: HashMap<IndexId, Row> = HashMap::new();
     let mut last_id: Option<IndexId> = None;
     let mut cursor_leaf: Option<Option<IndexId>> = None;
+    let mut buf = Vec::with_capacity(4096);
     while let Ok(Some((line_start, _end, skel))) =
-        index::read_jsonl_value::<index::EventSkeleton, _>(&mut reader)
+        index::read_jsonl_borrowed::<index::EventSkeleton, _>(&mut reader, &mut buf)
     {
-        let kind = index::index_kind(&skel.kind_type, skel.role.as_deref());
+        let kind = index::index_kind(skel.kind_type, skel.role);
         if kind == IndexKind::Cursor {
-            cursor_leaf = Some(skel.leaf_id.filter(|id| !id.is_empty()).map(IndexId::parse));
+            cursor_leaf = Some(skel.leaf_id.filter(|id| !id.is_empty()).map(IndexId::borrow));
             continue;
         }
         let message = matches!(
@@ -1440,12 +1452,12 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
                 | IndexKind::ToolResult
                 | IndexKind::SystemMessage
         );
-        let id = IndexId::parse(skel.id);
+        let id = IndexId::borrow(skel.id);
         last_id = Some(id.clone());
         rows.insert(
             id,
             Row {
-                parent: skel.parent_id.map(IndexId::parse),
+                parent: skel.parent_id.map(IndexId::borrow),
                 message,
                 offset: line_start,
             },
