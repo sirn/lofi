@@ -1278,20 +1278,22 @@ impl Component for Thinking<'_> {
         let mut out = render_markdown_body(&text, t, cx.width, content_w, body, |_| {
             vec![Span::raw("  ")]
         });
+        let has_body = !text.is_empty();
         if working {
-            // Reserve the separator even when the body is momentarily empty during
-            // streaming: a conditional blank would toggle row count with each
-            // markdown chunk, causing the flicker this layout avoids.
-            out.push(prim::rblank());
+            // The blank separator only exists when the body is non-empty; the
+            // status line itself is unconditional (mirrors `height`).
+            if has_body {
+                out.push(prim::rblank());
+            }
             out.push(prim::rline(
                 vec![Span::raw("  ")],
                 vec![Span::styled("Thinking...", body)],
             ));
         } else if let Some(d) = self.block.elapsed {
             if !d.is_zero() {
-                // Same rationale as above: keep the separator unconditional
-                // once work has run so row count never toggles with content.
-                out.push(prim::rblank());
+                if has_body {
+                    out.push(prim::rblank());
+                }
                 let thought_lead = vec![
                     Span::raw("  "),
                     Span::styled("◇ ", Style::new().fg(t.subtle)),
@@ -1316,17 +1318,17 @@ impl Component for Thinking<'_> {
         }
         let content_w = cx.width.saturating_sub(2);
         let md = markdown_body_height(&text, content_w);
+        // The status line ("Thinking..."/"Thought for...") is always present
+        // while working or once a non-zero duration exists, so reserve it
+        // unconditionally (+1). The blank separator between body and status only
+        // exists when the body is non-empty, so add it conditionally: reserving it
+        // for an empty body would make every open thinking turn claim 3 rows and
+        // shift the transcript below — the jitter this layout is meant to avoid.
+        let sep = if md > 0 { 1 } else { 0 };
         if working {
-            // Reserve the separator even when the body is momentarily empty during
-            // streaming: reflow cost would toggle with each markdown chunk, causing flicker.
-            md + 2
+            md + sep + 1
         } else if let Some(d) = self.block.elapsed {
-            if d.is_zero() {
-                md
-            } else {
-                // Same rationale: keep the separator unconditional once work has run.
-                md + 2
-            }
+            if d.is_zero() { md } else { md + sep + 1 }
         } else {
             md
         }
