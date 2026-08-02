@@ -3494,10 +3494,8 @@ fn tree_revert_to_cancelled_turn_drops_aborted_tail() {
         .iter()
         .position(|e| e.label.contains("(cancelled)"))
         .expect("cancelled turn row present");
-    // Reverting to the cancelled turn branches from its parent (the aborted
-    // turn's last message), dropping only the cancelled marker. Before the fix
-    // the branch point was the cancelled outcome itself — already the leaf — so
-    // the revert was a no-op.
+    // The branch point is the aborted turn's last message, not the cancelled
+    // outcome (which is already the leaf), so the revert drops only the marker.
     let branch_point = &picker.entries[cancelled_idx].branch_point;
     assert_eq!(*branch_point, partial_id);
     assert_ne!(*branch_point, cancelled_id);
