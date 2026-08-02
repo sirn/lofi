@@ -79,7 +79,6 @@ pub struct EventIndex {
     /// instead of reading later sibling branches from the append-only file.
     pub end_offset: u64,
     pub kind: IndexKind,
-    pub cursor_leaf: Option<IndexId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,16 +250,21 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
             Error::State(format!("parse index event in {}: {error}", path.display()))
         })?
     {
-        let id = IndexId::parse(skel.id);
         let parent_id = skel.parent_id.map(IndexId::parse);
         let kind = index_kind(&skel.kind_type, skel.role.as_deref());
+        // Cursor records have no event id of their own; carry the selected
+        // leaf in `id` so downstream readers find it alongside the record.
+        let id = if kind == IndexKind::Cursor {
+            skel.leaf_id.map(IndexId::parse).unwrap_or_default()
+        } else {
+            IndexId::parse(skel.id)
+        };
         let entry = EventIndex {
             id,
             parent_id,
             offset: line_start,
             end_offset: line_end,
             kind,
-            cursor_leaf: skel.leaf_id.map(IndexId::parse),
         };
         if kind == IndexKind::Cursor {
             latest_cursor = Some(entry);
@@ -304,7 +308,6 @@ pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<
             offset: line_start,
             end_offset: line_end,
             kind: index_kind(&skel.kind_type, skel.role.as_deref()),
-            cursor_leaf: None,
         });
     }
     Ok(indices)
@@ -606,9 +609,12 @@ pub(super) fn load_compaction_path(
     if index.is_empty() {
         return Ok(Vec::new());
     }
+    // Cursor records reuse `id` to carry their selected leaf, so exclude them
+    // from the lookup or the leaf would resolve to the record, not the event.
     let by_id: HashMap<&IndexId, usize> = index
         .iter()
         .enumerate()
+        .filter(|(_, event)| event.kind != IndexKind::Cursor)
         .map(|(i, event)| (&event.id, i))
         .collect();
     let leaf = leaf_id.map(|id| IndexId::parse(id.to_string()));
@@ -668,9 +674,12 @@ pub(super) fn load_indexed_path(
     if index.is_empty() {
         return Ok(Vec::new());
     }
+    // Cursor records reuse `id` to carry their selected leaf, so exclude them
+    // from the lookup or the leaf would resolve to the record, not the event.
     let by_id: HashMap<&IndexId, usize> = index
         .iter()
         .enumerate()
+        .filter(|(_, event)| event.kind != IndexKind::Cursor)
         .map(|(i, event)| (&event.id, i))
         .collect();
     let leaf = leaf_id.map(|id| IndexId::parse(id.to_string()));

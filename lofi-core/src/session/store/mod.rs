@@ -186,7 +186,9 @@ impl SessionCursor {
             .rev()
             .find(|event| event.kind == IndexKind::Cursor);
         let leaf = match cursor_record {
-            Some(event) => event.cursor_leaf.as_ref().map(IndexId::to_event_id),
+            // The cursor record carries its selected leaf in `id`; an empty id
+            // means the record had no leaf, falling back to the latest event.
+            Some(event) => Some(event.id.to_event_id()).filter(|id| !id.is_empty()),
             None => index
                 .iter()
                 .rev()
@@ -1224,7 +1226,6 @@ fn index_for_events(events: &[SessionEvent]) -> Vec<EventIndex> {
             offset: 0,
             end_offset: 0,
             kind: index_kind_for_event(&event.kind),
-            cursor_leaf: None,
         })
         .collect()
 }
