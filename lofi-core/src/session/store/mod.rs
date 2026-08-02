@@ -1941,6 +1941,43 @@ mod tests {
     }
 
     #[test]
+    fn tree_active_path_is_not_shadowed_by_cursor_record() {
+        // A cursor record carries the selected leaf in `id`, so an id->index
+        // map that does not exclude cursor records resolves the leaf to the
+        // record (no parent) and truncates the active path to the tail. The
+        // active path must reach back to the root instead.
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/tree-cursor-shadow"), &"p/m".into())
+            .unwrap();
+        let cursor = SessionCursor::new(path.clone(), None);
+        let mut events: Vec<SessionEvent> = (0..8)
+            .map(|i| ev(user(&format!("turn {i}"))))
+            .collect();
+        cursor.append_events(&mut events).unwrap();
+
+        let reopened = SessionCursor::open(path).unwrap();
+        let snapshot = reopened.tree_snapshot().unwrap();
+        let leaf = snapshot.leaf_id.as_deref().expect("leaf set after append");
+        // Mirror the picker's map construction: id -> index, excluding cursor
+        // records, which is the invariant under test.
+        let by_id: std::collections::HashMap<&IndexId, usize> = snapshot
+            .index
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind != IndexKind::Cursor && !e.id.is_empty())
+            .map(|(i, e)| (&e.id, i))
+            .collect();
+        let path =
+            crate::session::tree::active_path_from_index(&snapshot.index, &by_id, leaf);
+        assert_eq!(
+            path.len(),
+            8,
+            "active path must walk from leaf back through every turn, not stop at the cursor record"
+        );
+    }
+
+    #[test]
     fn cursor_none_is_explicit_root_not_physical_eof() {
         let (_guard, store) = isolated_store();
         let path = store

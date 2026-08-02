@@ -3431,6 +3431,89 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
 }
 
 #[test]
+fn tree_revert_to_cancelled_turn_drops_aborted_tail() {
+    // n: user prompt
+    // n+1: agent message + TurnEnd (turn 1 completes)
+    // turn 2: user prompt, agent partial (thinking), then TurnCancelled.
+    // Reverting to the cancelled turn row must drop the aborted turn-2 tail and
+    // land the head on turn 1's TurnEnd, not stay at the cancelled outcome
+    // (which would be a visible no-op: its parent is already the head).
+    use lofi_core::session::store::{self, SessionStore};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let path = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap()
+        .path()
+        .to_path_buf();
+    let kinds = [
+        msg(user("first")),
+        msg(assistant("hello")),
+        SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 100,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+        msg(user("second")),
+        msg(assistant("partial")),
+        SessionEventKind::TurnCancelled {
+            model: "m".into(),
+            elapsed_ms: 40,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ];
+    let mut batch: Vec<SessionEvent> = kinds
+        .into_iter()
+        .map(|kind| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        })
+        .collect();
+    test_append_events(&path, &mut batch, None).unwrap();
+    let events = store::SessionCursor::open(path.clone())
+        .unwrap()
+        .load_tree_events()
+        .unwrap();
+    let partial_id = events[4].id.clone();
+    let cancelled_id = events[5].id.clone();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    assert!(a.slash_command("/tree"));
+    let picker = a.tree_picker.as_ref().expect("picker opened");
+    let cancelled_idx = picker
+        .entries
+        .iter()
+        .position(|e| e.label.contains("(cancelled)"))
+        .expect("cancelled turn row present");
+    // Reverting to the cancelled turn branches from its parent (the aborted
+    // turn's last message), dropping only the cancelled marker. Before the fix
+    // the branch point was the cancelled outcome itself — already the leaf — so
+    // the revert was a no-op.
+    let branch_point = &picker.entries[cancelled_idx].branch_point;
+    assert_eq!(*branch_point, partial_id);
+    assert_ne!(*branch_point, cancelled_id);
+    a.tree_picker.as_mut().unwrap().selected = cancelled_idx;
+    a.tree_picker_confirm();
+    assert!(a.tree_picker.is_none());
+    assert_eq!(
+        a.session
+            .cursor
+            .as_ref()
+            .and_then(store::SessionCursor::leaf_id),
+        Some(partial_id)
+    );
+}
+
+#[test]
 fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
     use lofi_core::session::store::{self, SessionStore};
     let dir = tempfile::tempdir().unwrap();
