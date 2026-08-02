@@ -70,7 +70,9 @@ pub fn hydrate_tree_rows(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (index, entry) in indices.iter().enumerate() {
-        if !entry.id.is_empty() {
+        // Cursor records reuse `id` for the selected leaf; including them
+        // shadows the real leaf event (appended last) and truncates the path.
+        if entry.kind != IndexKind::Cursor && !entry.id.is_empty() {
             by_id.insert(&entry.id, index);
         }
         if let Some(parent) = entry.parent_id.as_ref().filter(|parent| !parent.is_empty()) {
@@ -194,7 +196,10 @@ fn build_tree_rows_inner(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (i, ix) in indices.iter().enumerate() {
-        if !ix.id.is_empty() {
+        // Cursor records reuse `id` to carry the selected leaf, so including
+        // them would shadow the real leaf event (they are appended last) and
+        // truncate the active path to the record, which has no parent.
+        if ix.kind != IndexKind::Cursor && !ix.id.is_empty() {
             by_id.insert(&ix.id, i);
         }
         if let Some(p) = ix.parent_id.as_ref() {
