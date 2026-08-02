@@ -1422,7 +1422,17 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     if header.meta.version != SESSION_VERSION {
         return None;
     }
-    let mut rows: HashMap<IndexId, Row> = HashMap::new();
+    // Pre-size from the event region so the table reaches capacity by growth,
+    // not doubling: an un-sized map on a long transcript rehashes ~2x its final
+    // size through transient old+new tables, which is what made a resume picker
+    // scan push the process high-water mark. The /128 bound undercounts events
+    // (a line carries at least its skeleton), so the map may still grow, but
+    // never through repeated doublings.
+    let file_size = reader.get_ref().metadata().map_or(0, |m| m.len());
+    // Divide by the per-entry width (~88B) so with_capacity (counts entries,
+    // scaling load factor internally) reserves near the event count, not
+    // region_bytes/128 worth of buckets, which would over-allocate ~3x.
+    let mut rows: HashMap<IndexId, Row> = HashMap::with_capacity((file_size / 88) as usize);
     let mut last_id: Option<IndexId> = None;
     let mut cursor_leaf: Option<Option<IndexId>> = None;
     let mut buf = Vec::with_capacity(4096);
