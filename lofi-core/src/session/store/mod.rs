@@ -613,16 +613,24 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
 
 fn indexed_lineage(index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
     let selected = lineage_indices(&index, leaf_id)?;
+    // `selected` from lineage_path is ascending, and `retain` visits in order,
+    // so keeping the next wanted index preserves the original ordering while
+    // filtering in place. Copying into a fresh Vec would briefly hold both
+    // buffers, doubling peak index memory on long single-lineage sessions
+    // where nearly every event is retained.
     let mut wanted = selected.into_iter().peekable();
     let mut next = wanted.next();
-    let mut lineage = Vec::with_capacity(wanted.size_hint().0 + usize::from(next.is_some()));
-    for (i, event) in index.into_iter().enumerate() {
-        if next == Some(i) {
-            lineage.push(event);
+    let mut position = 0usize;
+    let mut index = index;
+    index.retain(|_| {
+        let keep = next == Some(position);
+        if keep {
             next = wanted.next();
         }
-    }
-    Ok(lineage)
+        position += 1;
+        keep
+    });
+    Ok(index)
 }
 
 fn cursor_event(leaf_id: Option<&str>) -> SessionEvent {
