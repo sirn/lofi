@@ -4,3 +4,4 @@ pub mod replay;
 pub mod sink;
 pub mod store;
 pub mod tree;
+pub mod view;
