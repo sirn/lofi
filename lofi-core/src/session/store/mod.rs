@@ -1240,16 +1240,24 @@ pub fn active_path_from_leaf(events: &[SessionEvent]) -> Vec<usize> {
 }
 
 #[must_use]
+/// The model recorded on a terminal turn marker, or None for any other event.
+/// Shared by the event-slice and index projections so both agree on which
+/// markers report a run's model.
+pub fn turn_outcome_model(kind: &SessionEventKind) -> Option<&RunModel> {
+    match kind {
+        SessionEventKind::TurnEnd { model, .. }
+        | SessionEventKind::TurnFailed { model, .. }
+        | SessionEventKind::TurnCancelled { model, .. } => Some(model),
+        _ => None,
+    }
+}
+
+#[must_use]
 pub fn last_run_model(events: &[SessionEvent]) -> Option<RunModel> {
     active_path_from_leaf(events)
         .into_iter()
         .rev()
-        .find_map(|i| match &events[i].kind {
-            SessionEventKind::TurnEnd { model, .. }
-            | SessionEventKind::TurnFailed { model, .. }
-            | SessionEventKind::TurnCancelled { model, .. } => Some(model.clone()),
-            _ => None,
-        })
+        .find_map(|i| turn_outcome_model(&events[i].kind).cloned())
 }
 
 #[derive(Deserialize)]
