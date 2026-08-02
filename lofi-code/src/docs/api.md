@@ -82,6 +82,21 @@ Replace a single occurrence of text in a file.
 **Returns:** `{ ok, old, new }` — `old`/`new` echo the replaced and replacement
 text. Errors if `old` is absent or appears more than once.
 
+## lofi.patch({ path, patch })
+
+Apply a unified-diff patch to `path`. Use when an edit has several discontiguous
+changes — the hunks locate their targets by context, not by exact string match.
+
+**Parameters:**
+- `path` (string, required) — file path relative to workspace root.
+- `patch` (string, required) — unified-diff body. `--- a/`/`+++ b/` headers
+  are optional; bare `@@` hunk blocks work. Context lines are prefixed with
+  a space, removals with `-`, additions with `+`. Each hunk must apply in
+  order; a modest context window tolerates line-number drift.
+
+**Returns:** `{ ok, path, hunks }` — number of hunks applied. Errors if the
+patch is malformed, a hunk's context is not found, or hunks are out of order.
+
 ## lofi.bash({ cmd, timeoutMs? })
 
 Run a shell command with `sh -c`, cwd pinned to the workspace root. Stdout and
