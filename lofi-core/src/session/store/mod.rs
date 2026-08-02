@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 use index::{
-    compaction_index_suffix, load_collapsed_events_at, load_compaction_path, load_event_at,
-    load_event_by_id, load_event_range, load_events_at, load_index, load_index_range,
-    load_indexed_path, visit_event_values, visit_events,
+    compaction_index_suffix, index_kind_for_event, load_collapsed_events_at, load_compaction_path,
+    load_event_at, load_event_by_id, load_event_range, load_events_at, load_index,
+    load_index_range, load_indexed_path, visit_event_values, visit_events,
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
@@ -45,6 +45,7 @@ impl SessionFile {
     pub fn last_active(&self) -> std::time::SystemTime {
         self.last_active
     }
+
 
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
@@ -186,7 +187,9 @@ impl SessionCursor {
             .rev()
             .find(|event| event.kind == IndexKind::Cursor);
         let leaf = match cursor_record {
-            Some(event) => event.cursor_leaf.as_ref().map(IndexId::to_event_id),
+            // The cursor record carries its selected leaf in `id`; an empty id
+            // means the record had no leaf, falling back to the latest event.
+            Some(event) => Some(event.id.to_event_id()).filter(|id| !id.is_empty()),
             None => index
                 .iter()
                 .rev()
@@ -611,16 +614,24 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
 
 fn indexed_lineage(index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
     let selected = lineage_indices(&index, leaf_id)?;
+    // `selected` from lineage_path is ascending, and `retain` visits in order,
+    // so keeping the next wanted index preserves the original ordering while
+    // filtering in place. Copying into a fresh Vec would briefly hold both
+    // buffers, doubling peak index memory on long single-lineage sessions
+    // where nearly every event is retained.
     let mut wanted = selected.into_iter().peekable();
     let mut next = wanted.next();
-    let mut lineage = Vec::with_capacity(wanted.size_hint().0 + usize::from(next.is_some()));
-    for (i, event) in index.into_iter().enumerate() {
-        if next == Some(i) {
-            lineage.push(event);
+    let mut position = 0usize;
+    let mut index = index;
+    index.retain(|_| {
+        let keep = next == Some(position);
+        if keep {
             next = wanted.next();
         }
-    }
-    Ok(lineage)
+        position += 1;
+        keep
+    });
+    Ok(index)
 }
 
 fn cursor_event(leaf_id: Option<&str>) -> SessionEvent {
@@ -1210,28 +1221,34 @@ pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
     events.last().map(|e| e.id.as_str())
 }
 
+/// Derive a structural [`EventIndex`] for an in-memory event slice. Both the
+/// transcript view (index-backed) and the memory view (synthesized events) must
+/// walk lineage through [`lineage_path`]; deriving the index here lets the
+/// memory view use that same walk instead of a second algorithm.
+#[must_use]
+fn index_for_events(events: &[SessionEvent]) -> Vec<EventIndex> {
+    events
+        .iter()
+        .map(|event| EventIndex {
+            id: IndexId::parse(event.id.clone()),
+            parent_id: event.parent_id.clone().map(IndexId::parse),
+            offset: 0,
+            end_offset: 0,
+            kind: index_kind_for_event(&event.kind),
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
-    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (i, ev) in events.iter().enumerate() {
-        if !ev.id.is_empty() {
-            by_id.insert(ev.id.as_str(), i);
-        }
-    }
-    let mut path = Vec::new();
-    let mut cur = by_id.get(leaf_id).copied();
-    while let Some(i) = cur {
-        path.push(i);
-        cur = events[i]
-            .parent_id
-            .as_deref()
-            .and_then(|parent| by_id.get(parent).copied());
-        if path.len() > events.len() {
-            return Vec::new();
-        }
-    }
-    path.reverse();
-    path
+    let index = index_for_events(events);
+    let by_id: std::collections::HashMap<&IndexId, usize> = index
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.id.is_empty())
+        .map(|(i, entry)| (&entry.id, i))
+        .collect();
+    lineage_path(&index, &by_id, leaf_id)
 }
 
 #[must_use]
@@ -1384,86 +1401,47 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
     (!preview.is_empty()).then_some(preview)
 }
 
-/// Stream the transcript once and retain only per-event (parent, kind,
-/// offset) triples — enough to resolve the selected lineage and count its
-/// messages without holding full events. The resume picker runs this per
-/// session at open; the previous load_index()-based version materialized a
-/// Vec<EventIndex> per transcript, and glibc keeps the worker thread's arena
-/// pages mapped at that high-water mark, so picker opens ratcheted RSS by
-/// tens of MB on workspaces with deep transcripts.
+/// Derive the resume-pick entry (message count + last preview) from the shared
+/// event index, resolving the selected lineage with the same helper compaction
+/// uses instead of a dedicated per-transcript map. The picker runs this per
+/// session at open; reusing `load_index` avoids the per-call map that kept
+/// worker-arena pages mapped at the high-water mark.
 fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
-    use std::collections::HashMap;
-    use std::io::BufReader;
-
-    struct Row {
-        parent: Option<IndexId>,
-        message: bool,
-        offset: u64,
-    }
-
-    let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
-    let (_hs, _he, header) = index::read_jsonl_value::<Header, _>(&mut reader).ok()??;
-    if header.meta.version != SESSION_VERSION {
+    let (meta, index, _size) = index::load_index(path).ok()?;
+    if meta.version != SESSION_VERSION {
         return None;
     }
-    let mut rows: HashMap<IndexId, Row> = HashMap::new();
-    let mut last_id: Option<IndexId> = None;
-    let mut cursor_leaf: Option<Option<IndexId>> = None;
-    while let Ok(Some((line_start, _end, skel))) =
-        index::read_jsonl_value::<index::EventSkeleton, _>(&mut reader)
-    {
-        let kind = index::index_kind(&skel.kind_type, skel.role.as_deref());
-        if kind == IndexKind::Cursor {
-            cursor_leaf = Some(skel.leaf_id.filter(|id| !id.is_empty()).map(IndexId::parse));
-            continue;
-        }
-        let message = matches!(
-            kind,
-            IndexKind::UserPrompt
-                | IndexKind::AssistantMessage
-                | IndexKind::ToolResult
-                | IndexKind::SystemMessage
-        );
-        let id = IndexId::parse(skel.id);
-        last_id = Some(id.clone());
-        rows.insert(
-            id,
-            Row {
-                parent: skel.parent_id.map(IndexId::parse),
-                message,
-                offset: line_start,
-            },
-        );
-    }
-    let leaf = cursor_leaf
-        .flatten()
-        .or(last_id)
-        .filter(|id| rows.contains_key(id));
-
-    // Walk the selected lineage backward from the leaf, counting message
-    // events and finding the newest one with a readable preview.
-    let mut lineage: Vec<&IndexId> = Vec::new();
-    let mut cursor = leaf.as_ref();
-    let mut steps = 0usize;
-    while let Some(id) = cursor {
-        let Some(row) = rows.get(id) else { break };
-        lineage.push(id);
-        cursor = row.parent.as_ref();
-        steps += 1;
-        if steps > rows.len() {
-            return None;
-        }
-    }
+    let leaf = index
+        .iter()
+        .rev()
+        .find(|e| e.kind == IndexKind::Cursor)
+        .map(|e| e.id.to_event_id())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            index
+                .iter()
+                .rev()
+                .find(|e| e.kind != IndexKind::Cursor)
+                .map(|e| e.id.to_event_id())
+        });
+    let lineage = index::lineage_indices(&index, leaf.as_deref()).ok()?;
     let message_count = lineage
         .iter()
-        .filter(|id| rows.get(**id).is_some_and(|row| row.message))
+        .filter(|&&i| {
+            matches!(
+                index[i].kind,
+                IndexKind::UserPrompt
+                    | IndexKind::AssistantMessage
+                    | IndexKind::ToolResult
+                    | IndexKind::SystemMessage
+            )
+        })
         .count();
     let mut last_message = String::new();
-    for id in &lineage {
-        let Some(row) = rows.get(*id) else { continue };
-        let offset = row.offset;
+    for &i in lineage.iter().rev() {
+        let offset = index[i].offset;
         let mut preview = String::new();
-        if visit_event_values::<EntryPreview>(path, &[offset], |ev| {
+        if index::visit_event_values::<EntryPreview>(path, &[offset], |ev| {
             preview = entry_preview(&ev);
             Ok(())
         })
@@ -1477,7 +1455,7 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
         }
     }
     Some(SessionEntry {
-        meta: header.meta,
+        meta,
         file: SessionFile {
             path: path.to_path_buf(),
             last_active,
@@ -1922,6 +1900,43 @@ mod tests {
 
         let reopened = SessionCursor::open(path).unwrap();
         assert_eq!(reopened.leaf_id().as_deref(), Some(branch[0].id.as_str()));
+    }
+
+    #[test]
+    fn tree_active_path_is_not_shadowed_by_cursor_record() {
+        // A cursor record carries the selected leaf in `id`, so an id->index
+        // map that does not exclude cursor records resolves the leaf to the
+        // record (no parent) and truncates the active path to the tail. The
+        // active path must reach back to the root instead.
+        let (_guard, store) = isolated_store();
+        let path = store
+            .create(Path::new("/tmp/tree-cursor-shadow"), &"p/m".into())
+            .unwrap();
+        let cursor = SessionCursor::new(path.clone(), None);
+        let mut events: Vec<SessionEvent> = (0..8)
+            .map(|i| ev(user(&format!("turn {i}"))))
+            .collect();
+        cursor.append_events(&mut events).unwrap();
+
+        let reopened = SessionCursor::open(path).unwrap();
+        let snapshot = reopened.tree_snapshot().unwrap();
+        let leaf = snapshot.leaf_id.as_deref().expect("leaf set after append");
+        // Mirror the picker's map construction: id -> index, excluding cursor
+        // records, which is the invariant under test.
+        let by_id: std::collections::HashMap<&IndexId, usize> = snapshot
+            .index
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind != IndexKind::Cursor && !e.id.is_empty())
+            .map(|(i, e)| (&e.id, i))
+            .collect();
+        let path =
+            crate::session::tree::active_path_from_index(&snapshot.index, &by_id, leaf);
+        assert_eq!(
+            path.len(),
+            8,
+            "active path must walk from leaf back through every turn, not stop at the cursor record"
+        );
     }
 
     #[test]
