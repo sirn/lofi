@@ -190,6 +190,30 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
     }
 }
 
+/// Classify a materialized (in-memory) event into its [`IndexKind`]. This is
+/// the in-memory analogue of [`index_kind`]: the file index walks serialized
+/// `type`/`role` strings, while a session-view index derived from memory walks
+/// the typed [`SessionEventKind`]. Routing both through one classifier keeps
+/// the transcript and memory representations on the same lineage walk.
+#[must_use]
+pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
+    match kind {
+        SessionEventKind::Message(message) => match message.role {
+            lofi_types::Role::User => IndexKind::UserPrompt,
+            lofi_types::Role::Assistant => IndexKind::AssistantMessage,
+            lofi_types::Role::Tool => IndexKind::ToolResult,
+            lofi_types::Role::System => IndexKind::SystemMessage,
+        },
+        SessionEventKind::UserBash { .. } => IndexKind::UserBash,
+        SessionEventKind::TurnEnd { .. } => IndexKind::TurnEnd,
+        SessionEventKind::TurnFailed { .. } => IndexKind::TurnFailed,
+        SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
+        SessionEventKind::Compaction { .. } => IndexKind::Compaction,
+        SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
+        _ => IndexKind::Other,
+    }
+}
+
 pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u64)> {
     use std::io::{BufReader, Seek};
 

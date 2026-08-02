@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 use index::{
-    compaction_index_suffix, load_collapsed_events_at, load_compaction_path, load_event_at,
-    load_event_by_id, load_event_range, load_events_at, load_index, load_index_range,
-    load_indexed_path, visit_event_values, visit_events,
+    compaction_index_suffix, index_kind_for_event, load_collapsed_events_at, load_compaction_path,
+    load_event_at, load_event_by_id, load_event_range, load_events_at, load_index,
+    load_index_range, load_indexed_path, visit_event_values, visit_events,
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
@@ -1210,28 +1210,35 @@ pub fn leaf_id(events: &[SessionEvent]) -> Option<&str> {
     events.last().map(|e| e.id.as_str())
 }
 
+/// Derive a structural [`EventIndex`] for an in-memory event slice. Both the
+/// transcript view (index-backed) and the memory view (synthesized events) must
+/// walk lineage through [`lineage_path`]; deriving the index here lets the
+/// memory view use that same walk instead of a second algorithm.
+#[must_use]
+fn index_for_events(events: &[SessionEvent]) -> Vec<EventIndex> {
+    events
+        .iter()
+        .map(|event| EventIndex {
+            id: IndexId::parse(event.id.clone()),
+            parent_id: event.parent_id.clone().map(IndexId::parse),
+            offset: 0,
+            end_offset: 0,
+            kind: index_kind_for_event(&event.kind),
+            cursor_leaf: None,
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn active_path(events: &[SessionEvent], leaf_id: &str) -> Vec<usize> {
-    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (i, ev) in events.iter().enumerate() {
-        if !ev.id.is_empty() {
-            by_id.insert(ev.id.as_str(), i);
-        }
-    }
-    let mut path = Vec::new();
-    let mut cur = by_id.get(leaf_id).copied();
-    while let Some(i) = cur {
-        path.push(i);
-        cur = events[i]
-            .parent_id
-            .as_deref()
-            .and_then(|parent| by_id.get(parent).copied());
-        if path.len() > events.len() {
-            return Vec::new();
-        }
-    }
-    path.reverse();
-    path
+    let index = index_for_events(events);
+    let by_id: std::collections::HashMap<&IndexId, usize> = index
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.id.is_empty())
+        .map(|(i, entry)| (&entry.id, i))
+        .collect();
+    lineage_path(&index, &by_id, leaf_id)
 }
 
 #[must_use]
