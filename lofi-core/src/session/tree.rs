@@ -194,7 +194,10 @@ fn build_tree_rows_inner(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (i, ix) in indices.iter().enumerate() {
-        if !ix.id.is_empty() {
+        // Cursor records reuse `id` to carry the selected leaf, so including
+        // them would shadow the real leaf event (they are appended last) and
+        // truncate the active path to the record, which has no parent.
+        if ix.kind != IndexKind::Cursor && !ix.id.is_empty() {
             by_id.insert(&ix.id, i);
         }
         if let Some(p) = ix.parent_id.as_ref() {
