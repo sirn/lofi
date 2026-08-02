@@ -20,6 +20,7 @@ enum IndexIdRepr {
 }
 
 impl IndexId {
+    /// Parse from an owned string, keeping the allocation for heap ids.
     #[must_use]
     pub fn parse(value: String) -> Self {
         if value.is_empty() {
@@ -31,6 +32,22 @@ impl IndexId {
             }
         }
         Self(IndexIdRepr::Other(value.into_boxed_str()))
+    }
+
+    /// Parse from a borrowed str. UUID ids become `u128` with no allocation;
+    /// heap ids allocate one boxed str. This is the scan path's zero-copy
+    /// constructor: callers feed it the `&str` out of the line buffer.
+    #[must_use]
+    pub fn borrow(value: &str) -> Self {
+        if value.is_empty() {
+            return Self(IndexIdRepr::Empty);
+        }
+        if value.len() == 32 {
+            if let Ok(id) = u128::from_str_radix(value, 16) {
+                return Self(IndexIdRepr::Uuid(id));
+            }
+        }
+        Self(IndexIdRepr::Other(value.into()))
     }
 
     #[must_use]
@@ -102,17 +119,17 @@ pub enum IndexKind {
 }
 
 #[derive(Deserialize)]
-pub(super) struct EventSkeleton {
-    #[serde(default)]
-    pub(super) id: String,
-    #[serde(default)]
-    pub(super) parent_id: Option<String>,
-    #[serde(default, rename = "type")]
-    pub(super) kind_type: String,
-    #[serde(default)]
-    pub(super) role: Option<String>,
-    #[serde(default)]
-    pub(super) leaf_id: Option<String>,
+pub(super) struct EventSkeleton<'a> {
+    #[serde(default, borrow)]
+    pub(super) id: &'a str,
+    #[serde(default, borrow)]
+    pub(super) parent_id: Option<&'a str>,
+    #[serde(default, borrow, rename = "type")]
+    pub(super) kind_type: &'a str,
+    #[serde(default, borrow)]
+    pub(super) role: Option<&'a str>,
+    #[serde(default, borrow)]
+    pub(super) leaf_id: Option<&'a str>,
 }
 
 pub(super) fn read_jsonl_value<T, R>(
@@ -160,6 +177,43 @@ where
         }
         reader.consume(consumed);
     }
+    let end = reader.stream_position()?;
+    Ok(Some((start, end, value)))
+}
+
+/// Read one JSON value borrowing from a reusable per-line buffer. Unlike
+/// [`read_jsonl_value`], which streams and therefore must own every string it
+/// keeps, this returns a `&'a str`-borrowing projection over the line, so a
+/// scan that keeps nothing allocates nothing per line beyond `buf`'s growth.
+pub(super) fn read_jsonl_borrowed<'a, T, R>(
+    reader: &mut std::io::BufReader<R>,
+    buf: &'a mut Vec<u8>,
+) -> Result<Option<(u64, u64, T)>>
+where
+    T: serde::Deserialize<'a>,
+    R: std::io::Read + std::io::Seek,
+{
+    use std::io::{BufRead, Seek};
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(None);
+        }
+        let whitespace = available
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+        reader.consume(whitespace);
+        if whitespace == 0 {
+            break;
+        }
+    }
+    let start = reader.stream_position()?;
+    buf.clear();
+    reader.read_until(b'\n', buf)?;
+    let value = serde_json::from_slice::<T>(buf.as_slice())
+        .map_err(|error| Error::State(format!("json: {error}")))?;
     let end = reader.stream_position()?;
     Ok(Some((start, end, value)))
 }
@@ -252,19 +306,23 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     // affect a read; retaining one per committed batch would make index memory
     // grow with writes rather than conversation events.
     let mut latest_cursor = None;
-    while let Some((line_start, line_end, skel)) = read_jsonl_value::<EventSkeleton, _>(&mut reader)
-        .map_err(|error| {
-            Error::State(format!("parse index event in {}: {error}", path.display()))
-        })?
+    // One reusable line buffer: borrowed parse keeps nothing, so UUID ids are
+    // the only allocations (heap `Other` ids), and only when retained.
+    let mut buf = Vec::with_capacity(4096);
+    while let Some((line_start, line_end, skel)) = read_jsonl_borrowed::<EventSkeleton, _>(
+        &mut reader,
+        &mut buf,
+    )
+    .map_err(|error| Error::State(format!("parse index event in {}: {error}", path.display())))?
     {
-        let parent_id = skel.parent_id.map(IndexId::parse);
-        let kind = index_kind(&skel.kind_type, skel.role.as_deref());
+        let parent_id = skel.parent_id.map(IndexId::borrow);
+        let kind = index_kind(skel.kind_type, skel.role);
         // Cursor records have no event id of their own; carry the selected
         // leaf in `id` so downstream readers find it alongside the record.
         let id = if kind == IndexKind::Cursor {
-            skel.leaf_id.map(IndexId::parse).unwrap_or_default()
+            skel.leaf_id.map(IndexId::borrow).unwrap_or_default()
         } else {
-            IndexId::parse(skel.id)
+            IndexId::borrow(skel.id)
         };
         let entry = EventIndex {
             id,
@@ -295,8 +353,10 @@ pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<
     let mut reader = BufReader::new(std::fs::File::open(path)?);
     reader.seek(SeekFrom::Start(start))?;
     let mut indices = Vec::new();
+    let mut buf = Vec::with_capacity(4096);
     while reader.stream_position()? < end {
-        let Some((line_start, line_end, skel)) = read_jsonl_value::<EventSkeleton, _>(&mut reader)?
+        let Some((line_start, line_end, skel)) =
+            read_jsonl_borrowed::<EventSkeleton, _>(&mut reader, &mut buf)?
         else {
             break;
         };
@@ -310,11 +370,11 @@ pub(super) fn load_index_range(path: &Path, start: u64, end: u64) -> Result<Vec<
             continue;
         }
         indices.push(EventIndex {
-            id: IndexId::parse(skel.id),
-            parent_id: skel.parent_id.map(IndexId::parse),
+            id: IndexId::borrow(skel.id),
+            parent_id: skel.parent_id.map(IndexId::borrow),
             offset: line_start,
             end_offset: line_end,
-            kind: index_kind(&skel.kind_type, skel.role.as_deref()),
+            kind: index_kind(skel.kind_type, skel.role),
         });
     }
     Ok(indices)
