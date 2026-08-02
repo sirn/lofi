@@ -44,7 +44,7 @@ pub use tools::BashEnv;
 
 pub const EXEC_TOOL_NAME: &str = "exec";
 
-pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, bash). Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
+pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, patch, bash). Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
 
 #[must_use]
 pub fn exec_tool_input_schema() -> serde_json::Value {
@@ -540,7 +540,7 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
             .map(std::string::ToString::to_string)
     };
     let raw = match name {
-        "write" | "edit" => pick("path"),
+        "write" | "edit" | "patch" => pick("path"),
         "bash" => pick("cmd"),
         _ => None,
     };
