@@ -215,6 +215,35 @@ fn bind_file_tools<'js>(
 
     let t = tools.clone();
     lofi.set(
+        "patch",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                let label = native_args_label("patch", &args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "patch".into(),
+                        args: label,
+                    });
+                    let res = t.patch(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
         "bash",
         Function::new(
             ctx.clone(),

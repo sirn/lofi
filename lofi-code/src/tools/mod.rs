@@ -12,6 +12,7 @@ pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
+pub mod patch;
 pub mod read;
 
 mod bash_util;
@@ -241,6 +242,36 @@ mod tests {
         let v = tools.read("a.txt", None, None).await.unwrap();
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["content"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn patch_applies_unified_diff() {
+        let (_dir, tools) = tools();
+        std::fs::write(
+            tools.root().join("p.txt"),
+            "alpha\nbeta\ngamma\ndelta\nepsilon\n",
+        )
+        .unwrap();
+        let patch = "--- a/p.txt\n+++ b/p.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n@@ -4,2 +4,2 @@\n-delta\n+DELTA\n epsilon\n";
+        let v = tools
+            .patch(json!({ "path": "p.txt", "patch": patch }))
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["hunks"], json!(2));
+        let content = std::fs::read_to_string(tools.root().join("p.txt")).unwrap();
+        assert_eq!(content, "alpha\nBETA\ngamma\nDELTA\nepsilon\n");
+    }
+
+    #[tokio::test]
+    async fn patch_errors_on_missing_context() {
+        let (_dir, tools) = tools();
+        std::fs::write(tools.root().join("q.txt"), "one\ntwo\n").unwrap();
+        let err = tools
+            .patch(json!({ "path": "q.txt", "patch": "@@ -1,2 +1,2 @@\n-nope\n+NOPE\n two\n" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("context not found"), "got: {err}");
     }
 
     #[tokio::test]
