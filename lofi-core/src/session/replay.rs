@@ -7,6 +7,7 @@
 //! defers each `ToolEnd` until the matching tool-result message arrives.
 
 use std::collections::HashMap as Map;
+use std::collections::HashSet;
 
 use lofi_types::{
     ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, Usage,
@@ -17,26 +18,49 @@ use crate::agent::AgentEvent;
 use crate::exec_input_code_and_label;
 use crate::user_bash::UserBashResult;
 
-#[must_use]
-pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
-    use std::collections::HashSet;
-    let path = store::active_path_from_leaf(events);
-    let mut hidden: HashSet<usize> = HashSet::new();
-    for (marker_pos, &event_idx) in path.iter().enumerate() {
-        if let SessionEventKind::Compaction {
-            first_kept_entry_id,
-            checkpointed_tail: true,
-            ..
-        } = &events[event_idx].kind
-        {
-            if let Some(start_pos) = path[..marker_pos]
-                .iter()
-                .position(|&i| events[i].id == *first_kept_entry_id)
-            {
-                hidden.extend(path[start_pos..marker_pos].iter().copied());
-            }
+/// Positions of pre-compaction tail events hidden by checkpointed compaction
+/// markers along `path`. `compaction_at` returns the marker's
+/// `(checkpointed_tail, first_kept_entry_id)` for the event at the given path
+/// position, or `None` when it is not a compaction; `id_matches` reports
+/// whether the event at a path position has the given id. Parameterising these
+/// two lookups lets one hiding rule serve both the in-memory event slice (kind
+/// and id read inline) and the resume index (kind via `event_at`, id via the
+/// index's normalized `IndexId`).
+fn hidden_compaction_range(
+    path: &[usize],
+    mut compaction_at: impl FnMut(usize) -> Option<(bool, String)>,
+    mut id_matches: impl FnMut(usize, &str) -> bool,
+) -> HashSet<usize> {
+    let mut hidden = HashSet::new();
+    for marker_pos in 0..path.len() {
+        let Some((true, first_kept_entry_id)) = compaction_at(marker_pos) else {
+            continue;
+        };
+        if first_kept_entry_id.is_empty() {
+            continue;
+        }
+        if let Some(start_pos) = (0..marker_pos).find(|&p| id_matches(p, &first_kept_entry_id)) {
+            hidden.extend(start_pos..marker_pos);
         }
     }
+    hidden
+}
+
+#[must_use]
+pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
+    let path = store::active_path_from_leaf(events);
+    let hidden = hidden_compaction_range(
+        &path,
+        |p| match &events[path[p]].kind {
+            SessionEventKind::Compaction {
+                checkpointed_tail,
+                first_kept_entry_id,
+                ..
+            } => Some((*checkpointed_tail, first_kept_entry_id.clone())),
+            _ => None,
+        },
+        |p, id| events[path[p]].id == id,
+    );
     path.into_iter().filter(|i| !hidden.contains(i)).collect()
 }
 
@@ -282,6 +306,45 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
     }
 }
 
+/// The agent-visible message a session event contributes, if any: a chat
+/// `Message` passes through unchanged; a `UserBash` becomes its context-text
+/// user message; excluded bashes and everything else contribute none. Shared
+/// by message reconstruction (`messages_from_events`, `compact`) so the
+/// bash-to-context transform and exclusion rule live in one place.
+#[must_use]
+pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
+    match kind {
+        SessionEventKind::Message(m) => Some(m.clone()),
+        SessionEventKind::UserBash {
+            command,
+            output,
+            exit_code,
+            signal,
+            duration_ms,
+            truncated,
+            cancelled,
+            exclude_from_context: false,
+        } => {
+            let result = UserBashResult::from_session(
+                command.clone(),
+                output.clone(),
+                *exit_code,
+                *signal,
+                *duration_ms,
+                *truncated,
+                *cancelled,
+            );
+            Some(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text {
+                    text: result.context_text(),
+                }],
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Rebuild the agent-visible message history from the durable log along the
 /// selected leaf. Mirrors `compacted_history`: compaction summary first, then
 /// the kept tail, stopping at a `TurnFailed` boundary.
@@ -325,43 +388,13 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
             SessionEventKind::TurnEnd { .. } => {
                 skipping = false;
             }
-            SessionEventKind::Message(m) if !skipping => {
-                out.push((events[i].id.clone(), m.clone()));
-                if let Some(b) = &boundary {
-                    if b == &events[i].id {
-                        break;
-                    }
-                }
-            }
-            SessionEventKind::UserBash {
-                command,
-                output,
-                exit_code,
-                signal,
-                duration_ms,
-                truncated,
-                cancelled,
-                exclude_from_context: false,
-            } if !skipping => {
-                let result = UserBashResult::from_session(
-                    command.clone(),
-                    output.clone(),
-                    *exit_code,
-                    *signal,
-                    *duration_ms,
-                    *truncated,
-                    *cancelled,
-                );
-                out.push((
-                    events[i].id.clone(),
-                    Message {
-                        role: Role::User,
-                        blocks: vec![ContentBlock::Text {
-                            text: result.context_text(),
-                        }],
-                    },
-                ));
-                if boundary.as_ref().is_some_and(|b| b == &events[i].id) {
+            SessionEventKind::Message(_) | SessionEventKind::UserBash { .. } if !skipping => {
+                let Some(message) = agent_message_for_event(&events[i].kind) else {
+                    continue;
+                };
+                let boundary_hit = boundary.as_ref().is_some_and(|b| b == &events[i].id);
+                out.push((events[i].id.clone(), message));
+                if boundary_hit {
                     break;
                 }
             }
@@ -381,23 +414,20 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
 /// memory stays bounded by projection size, not transcript size.
 #[must_use]
 pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<usize> {
-    use std::collections::HashSet;
-    let mut hidden = HashSet::new();
-    for (pos, event) in index.iter().enumerate() {
-        if event.kind != IndexKind::Compaction {
-            continue;
-        }
-        let (_, _, checkpointed_tail, first_kept_entry_id) =
-            cursor.compaction_details_at(event.offset);
-        if checkpointed_tail && !first_kept_entry_id.is_empty() {
-            if let Some(start) = index[..pos]
-                .iter()
-                .position(|event| event.id.matches(&first_kept_entry_id))
-            {
-                hidden.extend(start..pos);
-            }
-        }
-    }
+    // The resume projection spans the whole index, so the path is 0..len and
+    // hidden positions are index positions directly.
+    let all: Vec<usize> = (0..index.len()).collect();
+    let hidden = hidden_compaction_range(
+        &all,
+        |p| {
+            (index[p].kind == IndexKind::Compaction).then(|| {
+                let (_, _, checkpointed_tail, first_kept_entry_id) =
+                    cursor.compaction_details_at(index[p].offset);
+                (checkpointed_tail, first_kept_entry_id)
+            })
+        },
+        |p, id| index[p].id.matches(id),
+    );
     (0..index.len()).filter(|i| !hidden.contains(i)).collect()
 }
 
@@ -413,11 +443,9 @@ pub fn last_run_model_from_index(
         ) {
             continue;
         }
-        match cursor.event_at(index[i].offset).ok()?.kind {
-            SessionEventKind::TurnEnd { model, .. }
-            | SessionEventKind::TurnFailed { model, .. }
-            | SessionEventKind::TurnCancelled { model, .. } => return Some(model),
-            _ => {}
+        let ev = cursor.event_at(index[i].offset).ok()?;
+        if let Some(model) = store::turn_outcome_model(&ev.kind) {
+            return Some(model.clone());
         }
     }
     None
