@@ -47,6 +47,7 @@ impl SessionFile {
     }
 
 
+
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
