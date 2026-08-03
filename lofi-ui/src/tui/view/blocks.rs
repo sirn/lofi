@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pulldown_cmark::{Event, Options as MdOptions, Parser as MdParser, Tag as MdTag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
@@ -236,214 +237,973 @@ fn render_markdown_body(
     }
     let mut out = Vec::new();
     let mut row = 0usize;
-    let mut in_code = false;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        let raw = lines[idx];
-        let trimmed = raw.trim_end();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            let lang = trimmed.trim_start_matches('`');
-            let label = if in_code {
-                if lang.is_empty() {
-                    "```".to_string()
-                } else {
-                    format!("```{lang}")
-                }
-            } else {
-                "```".to_string()
-            };
-            out.push(
-                prim::rtile(
-                    lead_fn(row),
-                    vec![Span::styled(label, Style::new().fg(t.muted).bg(t.surface))],
-                    t.surface,
-                    w,
-                )
-                .with_raw(RawLine::linear(
-                    Arc::from(trimmed),
-                    0,
-                    trimmed.chars().count(),
-                    true,
-                )),
-            );
-            row += 1;
-            idx += 1;
-            continue;
-        }
-        if in_code {
-            let avail = content_w.saturating_sub(2);
-            let src: Arc<str> = Arc::from(raw);
-            let indent_len = raw.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
-            let body = &raw[indent_len..];
-            let body_offs: Vec<usize> = std::iter::once(0)
-                .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
-                .collect();
-            let indent_chars = raw[..indent_len].chars().count();
-            let segments = prim::wrap_pre(raw, avail);
-            let mut cum = 0usize;
-            for (i, seg) in segments.into_iter().enumerate() {
-                let body_chars = seg.chars().count().saturating_sub(indent_chars);
-                let map: Vec<usize> = (0..=body_chars)
-                    .map(|k| indent_len + body_offs.get(cum + k).copied().unwrap_or(body.len()))
-                    .collect();
-                out.push(
-                    prim::rtile(
-                        lead_fn(row),
-                        vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
-                        t.surface,
-                        w,
-                    )
-                    .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                );
-                row += 1;
-                cum += body_chars;
+    for block in analyze(text, t, base_style) {
+        match block {
+            MdBlock::Code { lang, lines, fence } => {
+                emit_code(&mut out, &mut row, text, lang.as_deref(), &lines, &fence, t, w, content_w, &lead_fn);
             }
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with('|')
-            && idx + 1 < lines.len()
-            && is_table_separator(lines[idx + 1].trim())
-        {
-            let start = idx;
-            while idx < lines.len() && lines[idx].trim().starts_with('|') {
-                idx += 1;
+            MdBlock::Table { header, aligns, rows, src } => {
+                emit_table(&mut out, &mut row, text, &header, &aligns, &rows, &src, t, content_w, &lead_fn);
             }
-            let tlines = &lines[start..idx];
-            let header = parse_table_row(tlines[0]);
-            let aligns: Vec<Align> = parse_table_row(tlines[1])
-                .iter()
-                .map(|c| parse_align(c))
-                .collect();
-            let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
-            let src_lines: Vec<&str> = tlines.to_vec();
-            let before = out.len();
-            out.extend(render_table(
-                &header, &data, &aligns, content_w, t, &src_lines, row, &lead_fn,
-            ));
-            row += out.len() - before;
-            continue;
-        }
-        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
-            let h = &trimmed[hashes + 1..];
-            let head_fg = if hashes <= 2 {
-                base_style.fg.unwrap_or(t.fg)
-            } else {
-                t.muted
-            };
-            let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
-            let src: Arc<str> = Arc::from(trimmed);
-            let rows = wrap_with_map(h, hashes + 1, trimmed.len(), content_w);
-            for (i, (seg, map)) in rows.into_iter().enumerate() {
-                out.push(
-                    prim::rline(lead_fn(row), vec![Span::styled(seg, style)])
-                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                );
-                row += 1;
+            MdBlock::Heading { level, content_start, src, .. } => {
+                emit_heading(&mut out, &mut row, text, level, content_start, &src, t, base_style, content_w, &lead_fn);
             }
-        } else if trimmed == ">" || trimmed.starts_with("> ") {
-            let start = idx;
-            while idx < lines.len()
-                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
-            {
-                idx += 1;
+            MdBlock::Quote { lines, .. } => {
+                emit_quote(&mut out, &mut row, text, &lines, t, content_w, &lead_fn);
             }
-            let q_lines = &lines[start..idx];
-            let quote_style = Style::new().fg(t.muted);
-            let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
-            for qraw in q_lines {
-                let qtrimmed = qraw.trim_end();
-                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
-                let src: Arc<str> = Arc::from(qtrimmed);
-                if body.is_empty() {
-                    // Empty quote line (bare ">"): just the bar.  Build
-                    // the RenderLine directly so the content span is
-                    // non-empty (a thin space) with a 2-entry map snapping
-                    // to the full ">" source — selection_text yanks the
-                    // raw markdown.
-                    let map = vec![0, src.len()];
-                    let mut lead = lead_fn(row);
-                    lead.push(bar.clone());
-                    let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
-                    let content_span = Span::styled("\u{2009}", quote_style); // thin space
-                    let content_len = content_span.content.chars().count();
-                    let mut all = lead.clone();
-                    all.push(content_span);
-                    out.push(RenderLine {
-                        line: Line::from(all),
-                        content: (deco_len, deco_len + content_len),
-                        raw: Some(RawLine::new(src, map, true)),
-                        links: Vec::new(),
-                    });
-                    row += 1;
-                    continue;
-                }
-                let prefix_len = qtrimmed.len() - body.len(); // length of "> " or ">"
-                let rows = wrap_with_map(
-                    body,
-                    prefix_len,
-                    qtrimmed.len(),
-                    content_w.saturating_sub(2),
-                );
-                for (i, (seg, map)) in rows.into_iter().enumerate() {
-                    let mut lead = lead_fn(row);
-                    lead.push(bar.clone());
-                    out.push(
-                        prim::rline(lead, vec![Span::styled(seg, quote_style)])
-                            .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                    );
-                    row += 1;
-                }
+            MdBlock::Paragraph { spans, src } => {
+                emit_paragraph(&mut out, &mut row, text, &spans, &src, content_w, &lead_fn);
             }
-            continue;
-        } else {
-            let mapped = inline_spans_mapped(raw, t, base_style);
-            let lead_ws = mapped
-                .iter()
-                .flat_map(|m| m.span.content.chars())
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .count();
-            let full_map = build_content_map(raw.len(), &mapped);
-            let links = mapped_hyperlinks(&mapped);
-            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
-            let line = Line::from(spans);
-            let src: Arc<str> = Arc::from(raw);
-            let rows = prim::wrap_line_styled(&line, content_w);
-            let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
-            let row_links = split_links_by_rows(&links, &rows);
-            for (i, wrapped) in rows.into_iter().enumerate() {
-                let lead = lead_fn(row);
-                let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
-                let links = row_links.get(i).map_or_else(Vec::new, |links| {
-                    links
-                        .iter()
-                        .map(|link| Hyperlink {
-                            start: deco_len + link.start,
-                            end: deco_len + link.end,
-                            url: link.url.clone(),
-                        })
-                        .collect()
-                });
-                out.push(
-                    prim::rline(lead, wrapped.spans)
-                        .with_raw(RawLine::new(
-                            src.clone(),
-                            row_maps.get(i).cloned().unwrap_or_default(),
-                            i == 0,
-                        ))
-                        .with_links(links),
-                );
-                row += 1;
+            MdBlock::Blank { src } => {
+                emit_blank(&mut out, &mut row, text, &src, &lead_fn);
             }
         }
-        idx += 1;
     }
     out
 }
 
+/// Emit a blank source line as a single empty content row, matching how an
+/// empty paragraph wraps (one row, no content).
+fn emit_blank(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    src: &std::ops::Range<usize>,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let lead = lead_fn(*row);
+    let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+    // The blank maps to its (empty) source line so selection reproduces the
+    // blank as an empty line rather than dropping it.
+    let raw_src = &text[src.clone()];
+    out.push(RenderLine {
+        line: Line::from(lead),
+        content: (deco_len, deco_len),
+        raw: Some(RawLine::new(Arc::from(raw_src), vec![0, raw_src.len()], true)),
+        links: Vec::new(),
+    });
+    *row += 1;
+}
+/// Emit a fenced code block: opening/closing fence tiles and one tile row per
+/// wrapped body segment. Source ranges come from `analyze`; body rows map back
+/// to their source line for yank/selection.
+#[allow(clippy::too_many_arguments)]
+fn emit_code(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    lang: Option<&str>,
+    lines: &[(String, std::ops::Range<usize>)],
+    fence: &std::ops::Range<usize>,
+    t: Theme,
+    w: usize,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let fence_text = &text[fence.clone()];
+    let open_label = match lang {
+        Some(l) => format!("```{l}"),
+        None => "```".to_string(),
+    };
+    let open_raw = fence_text.split('\n').next().unwrap_or("```");
+    out.push(
+        prim::rtile(
+            lead_fn(*row),
+            vec![Span::styled(open_label, Style::new().fg(t.muted).bg(t.surface))],
+            t.surface,
+            w,
+        )
+        .with_raw(RawLine::linear(
+            Arc::from(open_raw),
+            0,
+            open_raw.chars().count(),
+            true,
+        )),
+    );
+    *row += 1;
+    let avail = content_w.saturating_sub(2);
+    for (line_text, _line_range) in lines {
+        let src: Arc<str> = Arc::from(line_text.as_str());
+        let indent_len = line_text.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let body = &line_text[indent_len..];
+        // Byte offsets of every char boundary within `body`, including the end.
+        // Indexing past the recorded boundary (a wrap segment wider than the
+        // remaining body) clamps to `body.len()`, a valid boundary, so the map
+        // never yields a mid-UTF8 or out-of-range source offset.
+        let body_offs: Vec<usize> = std::iter::once(0)
+            .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
+            .collect();
+        let indent_chars = line_text[..indent_len].chars().count();
+        let segments = prim::wrap_pre(line_text, avail);
+        let mut cum = 0usize;
+        for (i, seg) in segments.into_iter().enumerate() {
+            let body_chars = seg.chars().count().saturating_sub(indent_chars);
+            let map: Vec<usize> = (0..=body_chars)
+                .map(|k| {
+                    let byte = body_offs
+                        .get(cum + k)
+                        .copied()
+                        .unwrap_or(body.len())
+                        .min(body.len());
+                    indent_len + byte
+                })
+                .collect();
+            out.push(
+                prim::rtile(
+                    lead_fn(*row),
+                    vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
+                    t.surface,
+                    w,
+                )
+                .with_raw(RawLine::new(src.clone(), map, i == 0)),
+            );
+            *row += 1;
+            cum += body_chars;
+        }
+    }
+    let close_raw = fence_text.split('\n').next_back().unwrap_or("```");
+    out.push(
+        prim::rtile(
+            lead_fn(*row),
+            vec![Span::styled("```", Style::new().fg(t.muted).bg(t.surface))],
+            t.surface,
+            w,
+        )
+        .with_raw(RawLine::linear(
+            Arc::from(close_raw),
+            0,
+            close_raw.chars().count(),
+            true,
+        )),
+    );
+    *row += 1;
+}
+/// Concatenate inline spans into plain text for the table grid (which
+/// re-parses inline styling itself).
+fn spans_text(spans: &[MappedSpan]) -> String {
+    spans.iter().map(|m| m.span.content.as_ref()).collect()
+}
+
+/// Emit a pipe table via the shared grid renderer. Cells carry inline spans
+/// and source ranges from `analyze`; the raw `| ... |` source lines feed yank.
+#[allow(clippy::too_many_arguments)]
+fn emit_table(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    header: &[MdCell],
+    aligns: &[Align],
+    rows: &[Vec<MdCell>],
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let src_block = &text[src.clone()];
+    let src_lines: Vec<&str> = src_block.split('\n').collect();
+    // Pass each cell's raw source text so render_table re-parses inline
+    // formatting (bold/code/links) exactly as any other inline context.
+    let cell_src = |c: &MdCell| text[c.src.clone()].trim().to_string();
+    let header_txt: Vec<String> = header.iter().map(&cell_src).collect();
+    let data_txt: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(&cell_src).collect())
+        .collect();
+    let before = out.len();
+    out.extend(render_table(
+        &header_txt, &data_txt, aligns, content_w, t, &src_lines, *row, lead_fn,
+    ));
+    *row += out.len() - before;
+}
+
+/// Emit an ATX heading. `content_start` is the byte offset of the text after
+/// the `# ` prefix; the heading text is the trimmed remainder of the source.
+#[allow(clippy::too_many_arguments)]
+fn emit_heading(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    level: u8,
+    content_start: usize,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base_style: Style,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let trimmed = text[src.clone()].trim_end();
+    let h = text[content_start..src.end].trim_end();
+    let head_fg = if level <= 2 {
+        base_style.fg.unwrap_or(t.fg)
+    } else {
+        t.muted
+    };
+    let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
+    let prefix_len = content_start - src.start;
+    let src_arc: Arc<str> = Arc::from(trimmed);
+    let rows = wrap_with_map(h, prefix_len, trimmed.len(), content_w);
+    for (i, (seg, map)) in rows.into_iter().enumerate() {
+        out.push(
+            prim::rline(lead_fn(*row), vec![Span::styled(seg, style)])
+                .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+        );
+        *row += 1;
+    }
+}
+/// Emit a block quote: a `▎ ` bar followed by each wrapped body line. Each
+/// source line maps back to its `> ...` raw text for yank.
+fn emit_quote(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    lines: &[MdQuoteLine],
+    t: Theme,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let quote_style = Style::new().fg(t.muted);
+    let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
+    for ql in lines {
+        let qtrimmed = text[ql.src.clone()].trim_end();
+        let src_arc: Arc<str> = Arc::from(qtrimmed);
+        if ql.spans.is_empty() {
+            // Bare `>` line: just the bar with a thin-space content span so
+            // selection yanks the raw `>` markdown.
+            let map = vec![0, src_arc.len()];
+            let mut lead = lead_fn(*row);
+            lead.push(bar.clone());
+            let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+            let content_span = Span::styled("\u{2009}", quote_style);
+            let content_len = content_span.content.chars().count();
+            let mut all = lead.clone();
+            all.push(content_span);
+            out.push(RenderLine {
+                line: Line::from(all),
+                content: (deco_len, deco_len + content_len),
+                raw: Some(RawLine::new(src_arc, map, true)),
+                links: Vec::new(),
+            });
+            *row += 1;
+            continue;
+        }
+        let body = &qtrimmed[ql.prefix_len..];
+        let rows = wrap_with_map(
+            body,
+            ql.prefix_len,
+            qtrimmed.len(),
+            content_w.saturating_sub(2),
+        );
+        for (i, (seg, map)) in rows.into_iter().enumerate() {
+            let mut lead = lead_fn(*row);
+            lead.push(bar.clone());
+            out.push(
+                prim::rline(lead, vec![Span::styled(seg, quote_style)])
+                    .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+            );
+            *row += 1;
+        }
+    }
+}
+
+/// Emit a paragraph: inline-parse the source sub-slice, wrap to the content
+/// width, and split the source-offset map and hyperlinks across wrapped rows.
+#[allow(clippy::too_many_arguments)]
+fn emit_paragraph(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    block_spans: &[MappedSpan],
+    src: &std::ops::Range<usize>,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let raw = text[src.clone()].trim_end();
+    // Reuse the spans already produced by `analyze`'s single inline pass. They
+    // carry global source offsets; shift them to the block-local sub-slice so
+    // the content-map / hyperlink logic below works unchanged.
+    let base_off = src.start;
+    let mapped: Vec<MappedSpan> = block_spans
+        .iter()
+        .cloned()
+        .map(|mut m| {
+            m.content_start = m.content_start.saturating_sub(base_off);
+            m.boundary_start = m.boundary_start.saturating_sub(base_off);
+            m
+        })
+        .collect();
+    let lead_ws = mapped
+        .iter()
+        .flat_map(|m| m.span.content.chars())
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    let full_map = build_content_map(raw.len(), &mapped);
+    let links = mapped_hyperlinks(&mapped);
+    let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+    let line = Line::from(spans);
+    let src_arc: Arc<str> = Arc::from(raw);
+    let rows = prim::wrap_line_styled(&line, content_w);
+    let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
+    let row_links = split_links_by_rows(&links, &rows);
+    for (i, wrapped) in rows.into_iter().enumerate() {
+        let lead = lead_fn(*row);
+        let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+        let links = row_links.get(i).map_or_else(Vec::new, |links| {
+            links
+                .iter()
+                .map(|link| Hyperlink {
+                    start: deco_len + link.start,
+                    end: deco_len + link.end,
+                    url: link.url.clone(),
+                })
+                .collect()
+        });
+        out.push(
+            prim::rline(lead, wrapped.spans)
+                .with_raw(RawLine::new(
+                    src_arc.clone(),
+                    row_maps.get(i).cloned().unwrap_or_default(),
+                    i == 0,
+                ))
+                .with_links(links),
+        );
+        *row += 1;
+    }
+}
+
+// === Block-level markdown analysis (single pulldown pass) ====================
+//
+// `analyze` is the single structural entry point for markdown. One
+// `into_offset_iter` pass produces a flat `Vec<MdBlock>` in which every block
+// carries the source byte ranges needed to rebuild yank/selection raw text.
+// Both `render_markdown_body` and `markdown_body_height` walk this same tree,
+// so the render/height row contract (guarded by `markdown_height_matches_lines`)
+// holds by construction rather than by two parallel line-scanners that drift.
+
+/// A table cell: inline content plus the source range it came from.
+#[derive(Clone)]
+struct MdCell {
+    /// Source byte range of the cell text (without surrounding `|`/padding).
+    src: std::ops::Range<usize>,
+}
+
+/// One source line inside a block quote.
+#[derive(Clone)]
+struct MdQuoteLine {
+    spans: Vec<MappedSpan>,
+    /// Byte range of the full source line including the `>` marker.
+    src: std::ops::Range<usize>,
+    /// Byte length of the `> `/`>` prefix.
+    prefix_len: usize,
+}
+
+/// One structural block of a markdown document.
+#[derive(Clone)]
+enum MdBlock {
+    /// A run of one or more blank source lines (rendered as empty rows).
+    Blank {
+        src: std::ops::Range<usize>,
+    },
+    Paragraph {
+        spans: Vec<MappedSpan>,
+        src: std::ops::Range<usize>,
+    },
+    Heading {
+        level: u8,
+        src: std::ops::Range<usize>,
+        /// Byte offset of the first content char (after the `# ` prefix).
+        content_start: usize,
+    },
+    Code {
+        lang: Option<String>,
+        /// Body source lines with byte ranges (fence markers excluded).
+        lines: Vec<(String, std::ops::Range<usize>)>,
+        fence: std::ops::Range<usize>,
+    },
+    Table {
+        header: Vec<MdCell>,
+        aligns: Vec<Align>,
+        rows: Vec<Vec<MdCell>>,
+        src: std::ops::Range<usize>,
+    },
+    Quote {
+        lines: Vec<MdQuoteLine>,
+        src: std::ops::Range<usize>,
+    },
+}
+
+/// Tracks the tightest source extent of one inline-bearing node while the block
+/// pass streams events. The node tag range is the outer bound; the inner text
+/// extent lets us re-parse exactly the inline sub-slice.
+#[derive(Clone, Copy)]
+struct InlineExtent {
+    start: usize,
+    end: usize,
+    seen: bool,
+}
+
+impl InlineExtent {
+    fn new() -> Self {
+        Self { start: 0, end: 0, seen: false }
+    }
+    fn observe(&mut self, range: &std::ops::Range<usize>) {
+        if self.seen {
+            self.start = self.start.min(range.start);
+            self.end = self.end.max(range.end);
+        } else {
+            self.start = range.start;
+            self.end = range.end;
+            self.seen = true;
+        }
+    }
+}
+
+/// Re-parse the inline sub-slice with the shared inline machine and shift its
+/// span offsets to global source bytes. The extent is narrowed to non-whitespace
+/// content first: pulldown tag ranges (notably table cells) include surrounding
+/// padding, and cell spans must point at the trimmed text.
+fn inline_extent_spans(ext: &InlineExtent, text: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
+    let raw = &text[ext.start..ext.end];
+    let trimmed = raw.trim_matches(|c: char| c.is_whitespace());
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let lead = raw.len() - raw.trim_start_matches(|c: char| c.is_whitespace()).len();
+    let base_off = ext.start + lead;
+    let mut spans = inline_spans_mapped(trimmed, t, base);
+    for m in &mut spans {
+        m.content_start += base_off;
+        m.boundary_start += base_off;
+    }
+    spans
+}
+
+/// The sub-range of `ext` with leading/trailing whitespace removed, or `None`
+/// when the extent is entirely whitespace.
+fn trimmed_range(text: &str, ext: &InlineExtent) -> Option<std::ops::Range<usize>> {
+    if !ext.seen {
+        return None;
+    }
+    let raw = &text[ext.start..ext.end];
+    let lead = raw.len() - raw.trim_start_matches(|c: char| c.is_whitespace()).len();
+    let trail = raw.len() - raw.trim_end_matches(|c: char| c.is_whitespace()).len();
+    if lead + trail >= raw.len() {
+        return None;
+    }
+    Some(ext.start + lead..ext.end - trail)
+}
+/// Numeric level (1..=6) for a `HeadingLevel`.
+fn heading_level_num(level: pulldown_cmark::HeadingLevel) -> u8 {
+    use pulldown_cmark::HeadingLevel as H;
+    match level {
+        H::H1 => 1,
+        H::H2 => 2,
+        H::H3 => 3,
+        H::H4 => 4,
+        H::H5 => 5,
+        H::H6 => 6,
+    }
+}
+
+/// In-progress block frames for `analyze`. The renderer is flat (no nested
+/// block containers), so an explicit stack suffices; quote/table frames own
+/// their inline extents and no nested block events are expected at depth.
+enum BlockFrame {
+    Para { ext: InlineExtent, src: std::ops::Range<usize> },
+    Heading { level: u8, ext: InlineExtent, src: std::ops::Range<usize> },
+    Code {
+        lang: Option<String>,
+        fence: std::ops::Range<usize>,
+        body: String,
+        body_range: Option<std::ops::Range<usize>>,
+    },
+    Table {
+        aligns: Vec<Align>,
+        src: std::ops::Range<usize>,
+        header: Vec<MdCell>,
+        rows: Vec<Vec<MdCell>>,
+        cur: Vec<MdCell>,
+        in_head: bool,
+        cell: Option<(InlineExtent, std::ops::Range<usize>)>,
+    },
+    Quote { src: std::ops::Range<usize> },
+    /// The outermost list. Rendered line-preserving (each source line a
+    /// paragraph, markers and indent intact), so the frame captures the source
+    /// range plus a depth counter for the nested lists pulldown reports inside
+    /// it (their Start/End must not close this frame).
+    List { src: std::ops::Range<usize>, depth: usize },
+}
+
+/// True when a container frame (block quote or list) remains on the stack.
+/// Nested blocks inside a container are rendered by the container, so the block
+/// pass must not also emit them at top level.
+fn stack_in_container(stack: &[BlockFrame]) -> bool {
+    stack
+        .iter()
+        .any(|f| matches!(f, BlockFrame::Quote { .. } | BlockFrame::List { .. }))
+}
+
+/// Route an inline event range to the innermost inline-owning frame. The
+/// structure is flat (no nested inline containers), so only the top frame can
+/// own inline extents; table cells delegate to their open cell.
+fn observe_inline(stack: &mut [BlockFrame], range: &std::ops::Range<usize>) {
+    match stack.last_mut() {
+        Some(BlockFrame::Para { ext, .. } | BlockFrame::Heading { ext, .. }) => {
+            ext.observe(range);
+        }
+        Some(BlockFrame::Table { cell: Some((cext, _)), .. }) => cext.observe(range),
+        _ => {}
+    }
+}
+
+/// Parse `text` into structural blocks via a single `pulldown-cmark` pass.
+fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let opts = MdOptions::ENABLE_STRIKETHROUGH
+        | MdOptions::ENABLE_TABLES
+        | MdOptions::ENABLE_FOOTNOTES
+        | MdOptions::ENABLE_TASKLISTS
+        | MdOptions::ENABLE_HEADING_ATTRIBUTES;
+    let mut blocks: Vec<MdBlock> = Vec::new();
+    let mut stack: Vec<BlockFrame> = Vec::new();
+
+    for (ev, range) in MdParser::new_ext(text, opts).into_offset_iter() {
+        match ev {
+            Event::Start(MdTag::Paragraph) => stack.push(BlockFrame::Para {
+                ext: InlineExtent::new(),
+                src: range,
+            }),
+            Event::End(TagEnd::Paragraph) => {
+                if let Some(BlockFrame::Para { ext, src }) = stack.pop() {
+                    let spans = if ext.seen {
+                        inline_extent_spans(&ext, text, t, base)
+                    } else {
+                        Vec::new()
+                    };
+                    // Skip source-blank paragraphs (whitespace-only): they carry
+                    // no renderable content and would emit a spurious block. A
+                    // paragraph inside a block quote is owned by that quote.
+                    if !spans.is_empty() && !stack_in_container(&stack) {
+                        blocks.push(MdBlock::Paragraph { spans, src });
+                    }
+                }
+            }
+            Event::Start(MdTag::Heading { level, .. }) => stack.push(BlockFrame::Heading {
+                level: heading_level_num(level),
+                ext: InlineExtent::new(),
+                src: range,
+            }),
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(BlockFrame::Heading { level, ext, src }) = stack.pop() {
+                    blocks.push(MdBlock::Heading {
+                        level,
+                        content_start: ext.start,
+                        src,
+                    });
+                }
+            }
+            Event::Start(MdTag::CodeBlock(kind)) => {
+                let lang = match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(l) if !l.is_empty() => {
+                        Some(l.to_string())
+                    }
+                    _ => None,
+                };
+                stack.push(BlockFrame::Code {
+                    lang,
+                    fence: range,
+                    body: String::new(),
+                    body_range: None,
+                });
+            }
+            Event::Text(t) => {
+                if let Some(BlockFrame::Code { body, body_range, .. }) = stack.last_mut() {
+                    body.push_str(&t);
+                    *body_range = Some(match body_range.take() {
+                        Some(br) => br.start..range.end,
+                        None => range,
+                    });
+                } else {
+                    observe_inline(&mut stack, &range);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(BlockFrame::Code {
+                    lang,
+                    fence,
+                    body,
+                    body_range,
+                }) = stack.pop()
+                {
+                    let lines = split_code_lines(&body, body_range);
+                    blocks.push(MdBlock::Code { lang, lines, fence });
+                }
+            }
+            Event::Start(MdTag::Table(aligns)) => stack.push(BlockFrame::Table {
+                aligns: aligns
+                    .iter()
+                    .map(|a| match a {
+                        pulldown_cmark::Alignment::Center => Align::Center,
+                        pulldown_cmark::Alignment::Right => Align::Right,
+                        _ => Align::Left,
+                    })
+                    .collect(),
+                src: range,
+                header: Vec::new(),
+                rows: Vec::new(),
+                cur: Vec::new(),
+                in_head: false,
+                cell: None,
+            }),
+            Event::Start(MdTag::TableHead) => {
+                if let Some(BlockFrame::Table { in_head, .. }) = stack.last_mut() {
+                    *in_head = true;
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(BlockFrame::Table { in_head, header, cur, .. }) = stack.last_mut() {
+                    *in_head = false;
+                    *header = std::mem::take(cur);
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(BlockFrame::Table { in_head, rows, cur, .. }) = stack.last_mut() {
+                    if !*in_head {
+                        rows.push(std::mem::take(cur));
+                    }
+                }
+            }
+            Event::Start(MdTag::TableCell) => {
+                if let Some(BlockFrame::Table { cell, .. }) = stack.last_mut() {
+                    *cell = Some((InlineExtent::new(), range));
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(BlockFrame::Table { cell, cur, .. }) = stack.last_mut() {
+                    if let Some((cext, csrc)) = cell.take() {
+                        let src = trimmed_range(text, &cext).unwrap_or(csrc);
+                        cur.push(MdCell { src });
+                    }
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(BlockFrame::Table {
+                    aligns,
+                    src,
+                    header,
+                    rows,
+                    ..
+                }) = stack.pop()
+                {
+                    blocks.push(MdBlock::Table {
+                        header,
+                        aligns,
+                        rows,
+                        src,
+                    });
+                }
+            }
+            Event::Start(MdTag::BlockQuote(_)) => stack.push(BlockFrame::Quote { src: range }),
+            Event::End(TagEnd::BlockQuote(_)) => {
+                if let Some(BlockFrame::Quote { src }) = stack.pop() {
+                    let lines = quote_lines(text, &src, t, base);
+                    blocks.push(MdBlock::Quote { lines, src });
+                }
+            }
+            // Lists are rendered line-preserving: only the outermost list frame
+            // is captured (nested lists fall inside its range), and on close the
+            // whole range is split into per-line paragraphs keeping the literal
+            // markers and indentation.
+            Event::Start(MdTag::List(_)) => {
+                match stack.last_mut() {
+                    // Already inside a list or quote: count the nested list so
+                    // its End does not close the outer frame.
+                    Some(BlockFrame::List { depth, .. }) => *depth += 1,
+                    Some(BlockFrame::Quote { .. }) => {}
+                    _ => stack.push(BlockFrame::List { src: range, depth: 0 }),
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some(BlockFrame::List { src, depth }) = stack.last_mut() {
+                    if *depth > 0 {
+                        *depth -= 1;
+                    } else {
+                        let src = src.clone();
+                        stack.pop();
+                        split_paragraph_lines(text, &src, t, base, &mut blocks);
+                    }
+                }
+            }
+            _ => observe_inline(&mut stack, &range),
+        }
+    }
+    preserve_lines(text, blocks, t, base)
+}
+
+/// The source byte range a block occupies.
+fn block_src(b: &MdBlock) -> std::ops::Range<usize> {
+    match b {
+        MdBlock::Blank { src }
+        | MdBlock::Paragraph { src, .. }
+        | MdBlock::Code { fence: src, .. }
+        | MdBlock::Heading { src, .. }
+        | MdBlock::Table { src, .. }
+        | MdBlock::Quote { src, .. } => src.clone(),
+    }
+}
+
+/// Restore source-line granularity over the pulldown block structure.
+///
+/// pulldown is structure-semantic: it collapses blank lines and merges
+/// soft-wrapped lines into a single paragraph. The transcript renderer is
+/// line-preserving — a user's blank lines and explicit line breaks must each
+/// occupy their own row (the user/agent rail is drawn per source line). This
+/// pass walks the emitted blocks against the raw source and:
+/// - inserts a `Blank` block for every run of empty source lines between or
+///   around blocks, and
+/// - splits any paragraph that spans multiple source lines into one paragraph
+///   per line (pulldown still owns the inline parse of each line).
+///
+/// Block classification remains entirely pulldown's; this only enforces line
+/// granularity for rendering.
+fn preserve_lines(
+    text: &str,
+    blocks: Vec<MdBlock>,
+    t: Theme,
+    base: Style,
+) -> Vec<MdBlock> {
+    let mut out: Vec<MdBlock> = Vec::new();
+    // `cursor` tracks the byte just past the prior block's content. Block
+    // ranges from pulldown inconsistently include a trailing newline, so the
+    // cursor is normalized to the end of the block's last content line
+    // (trailing newlines excluded) before each gap is measured.
+    let mut cursor = 0usize;
+    for block in blocks {
+        let src = block_src(&block);
+        // Fill any blank-line gap before this block.
+        emit_blanks(text, cursor, src.start, &mut out);
+        // Split multi-line paragraphs into per-line paragraphs.
+        match block {
+            MdBlock::Paragraph { src, .. } => {
+                split_paragraph_lines(text, &src, t, base, &mut out);
+            }
+            other => out.push(other),
+        }
+        cursor = content_end(text, &src);
+    }
+    // Trailing blank lines after the last block.
+    emit_blanks(text, cursor, text.len(), &mut out);
+    out
+}
+
+/// The byte offset just past a block's last content character, excluding any
+/// trailing newline(s) pulldown folded into the block range.
+fn content_end(text: &str, src: &std::ops::Range<usize>) -> usize {
+    let mut end = src.end;
+    while end > src.start && text.as_bytes()[end - 1] == b'\n' {
+        end -= 1;
+    }
+    end
+}
+
+/// Emit a `Blank` block for each empty source line in `text[start..end]`,
+/// tracking byte offsets so each blank maps to its (empty) source line.
+fn emit_blanks(text: &str, start: usize, end: usize, out: &mut Vec<MdBlock>) {
+    if start >= end {
+        return;
+    }
+    // The gap between two blocks opens with the newline terminating the prior
+    // block's last line; that separator is not itself a blank line. Each
+    // additional newline introduces one blank line.
+    let gap = &text[start..end];
+    let newlines = gap.bytes().filter(|&b| b == b'\n').count();
+    let blank_count = newlines.saturating_sub(1);
+    // Byte offset of each blank line: walk the gap's lines, skipping the first
+    // fragment (the separator's empty head) and the last (the next block's line
+    // start), emitting one Blank per interior empty line.
+    let mut off = start;
+    let mut emitted = 0usize;
+    for (i, line) in gap.split('\n').enumerate() {
+        let line_end = off + line.len();
+        if i > 0 && emitted < blank_count {
+            out.push(MdBlock::Blank { src: off..line_end });
+            emitted += 1;
+        }
+        off = line_end + 1;
+    }
+}
+
+/// Split a paragraph block that spans multiple source lines into one
+/// `Paragraph` per line, preserving each line's source range and inline parse.
+fn split_paragraph_lines(
+    text: &str,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base: Style,
+    out: &mut Vec<MdBlock>,
+) {
+    // Block ranges may fold in a trailing newline; strip it so the split does
+    // not yield a phantom empty final line.
+    let block = text[src.clone()].trim_end_matches('\n');
+    if !block.contains('\n') {
+        // Single line: keep spans as analyzed.
+        let spans = line_spans(block.trim_end(), t, base);
+        let mut spans = spans;
+        for m in &mut spans {
+            m.content_start += src.start;
+            m.boundary_start += src.start;
+        }
+        if !spans_text(&spans).trim().is_empty() {
+            out.push(MdBlock::Paragraph { spans, src: src.clone() });
+        }
+        return;
+    }
+    let mut off = src.start;
+    for line in block.split('\n') {
+        let trimmed = line.trim_end();
+        let line_range = off..off + trimmed.len();
+        let spans = line_spans(trimmed, t, base);
+        let mut spans = spans;
+        for m in &mut spans {
+            m.content_start += off;
+            m.boundary_start += off;
+        }
+        if trimmed.trim().is_empty() {
+            out.push(MdBlock::Blank { src: off..off + line.len() });
+        } else {
+            out.push(MdBlock::Paragraph { spans, src: line_range });
+        }
+        off += line.len() + 1;
+    }
+}
+
+/// Byte length of the list marker (bullet or ordered) plus its trailing
+/// whitespace at the start of `line`, after any indentation. Returns 0 when
+/// the line does not open with a list marker.
+fn list_marker_len(line: &str) -> usize {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let rest = &line[indent..];
+    let after_bullet = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "));
+    if let Some(r) = after_bullet {
+        return indent + (rest.len() - r.len());
+    }
+    // Ordered list: `N.` or `N)` followed by a space.
+    let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len > 0 {
+        if let Some(r) = rest[digit_len..]
+            .strip_prefix(". ")
+            .or_else(|| rest[digit_len..].strip_prefix(") "))
+        {
+            return indent + (rest.len() - r.len());
+        }
+    }
+    0
+}
+
+/// Parse one source line into spans, preserving a leading list marker as
+/// literal text. The renderer is line-preserving: a list line such as
+/// `- item` must keep its `- ` prefix on screen, but `pulldown`'s block
+/// parser consumes the marker, so re-parsing the whole line would drop it.
+/// The marker is emitted verbatim and only the item body is inline-parsed.
+fn line_spans(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
+    let marker_len = list_marker_len(line);
+    if marker_len == 0 {
+        return inline_spans_mapped(line, t, base);
+    }
+    let marker = &line[..marker_len];
+    let body = &line[marker_len..];
+    let mut spans = Vec::with_capacity(2);
+    spans.push(MappedSpan {
+        span: Span::styled(marker.to_string(), Style::new().fg(t.muted)),
+        content_start: 0,
+        boundary_start: 0,
+        link: None,
+    });
+    if !body.is_empty() {
+        for m in inline_spans_mapped(body, t, base) {
+            spans.push(MappedSpan {
+                span: m.span,
+                content_start: m.content_start + marker_len,
+                boundary_start: m.boundary_start + marker_len,
+                link: m.link,
+            });
+        }
+    }
+    spans
+}
+
+/// Split a fenced code body into per-source-line strings with byte ranges.
+/// `body_range` is the concatenated body text range; when absent (empty block)
+/// there are no body lines.
+fn split_code_lines(
+    body: &str,
+    body_range: Option<std::ops::Range<usize>>,
+) -> Vec<(String, std::ops::Range<usize>)> {
+    let Some(br) = body_range else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let base = br.start;
+    let mut line_start = 0usize;
+    for (i, &b) in body.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            out.push((body[line_start..i].to_string(), base + line_start..base + i));
+            line_start = i + 1;
+        }
+    }
+    if line_start < body.len() {
+        out.push((body[line_start..].to_string(), base + line_start..base + body.len()));
+    }
+    out
+}
+
+/// Build per-source-line quote content from the quote block source range. Each
+/// line keeps its `> ` prefix length (for yank) and inline-parsed body.
+fn quote_lines(
+    text: &str,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base: Style,
+) -> Vec<MdQuoteLine> {
+    // The quote block range may include a trailing newline; strip it so
+    // `split` does not yield a phantom empty final line.
+    let block = text[src.clone()].trim_end_matches('\n');
+    let mut out = Vec::new();
+    let mut off = src.start;
+    for line in block.split('\n') {
+        let trimmed = line.trim_end();
+        let line_len = trimmed.len();
+        let prefix_len = if trimmed == ">" {
+            1
+        } else if let Some(rest) = trimmed.strip_prefix("> ") {
+            line_len - rest.len()
+        } else {
+            0
+        };
+        let body = &trimmed[prefix_len..];
+        let spans = if body.is_empty() {
+            Vec::new()
+        } else {
+            let mut s = inline_spans_mapped(body, t, base);
+            for m in &mut s {
+                m.content_start += off + prefix_len;
+                m.boundary_start += off + prefix_len;
+            }
+            s
+        };
+        out.push(MdQuoteLine {
+            spans,
+            src: off..off + line_len,
+            prefix_len,
+        });
+        off += line.len() + 1;
+    }
+    out
+}
 /// Count the visual rows `render_markdown_body` would emit for `text`, without
 /// allocating any styled lines. `Component::height` for the markdown-heavy
 /// components routes here so measuring a resumed transcript's heights does not
@@ -455,82 +1215,82 @@ fn markdown_body_height(text: &str, content_w: usize) -> usize {
     if text.is_empty() {
         return 0;
     }
+    // Walk the same block tree the renderer emits, counting rows with the
+    // exact wrap calls each emitter uses but allocating no styled lines. This
+    // keeps `height == render(...).len()` structural rather than maintained by
+    // a parallel line-scanner.
+    let t = Theme::default();
+    let base = Style::default();
     let mut row = 0usize;
-    let mut in_code = false;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        let raw = lines[idx];
-        let trimmed = raw.trim_end();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            row += 1;
-            idx += 1;
-            continue;
-        }
-        if in_code {
-            let avail = content_w.saturating_sub(2);
-            row += prim::wrap_pre(raw, avail).len();
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with('|')
-            && idx + 1 < lines.len()
-            && is_table_separator(lines[idx + 1].trim())
-        {
-            let start = idx;
-            while idx < lines.len() && lines[idx].trim().starts_with('|') {
-                idx += 1;
+    for block in analyze(text, t, base) {
+        match block {
+            MdBlock::Blank { .. } => row += 1,
+            MdBlock::Code { lines, .. } => {
+                // Opening fence + body rows + closing fence.
+                row += 1;
+                for (line_text, _) in &lines {
+                    row += prim::wrap_pre(line_text, content_w.saturating_sub(2)).len();
+                }
+                row += 1;
             }
-            row += table_height(&lines[start..idx], content_w);
-            continue;
-        }
-        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
-            let h = &trimmed[hashes + 1..];
-            row += wrap_with_map(h, hashes + 1, trimmed.len(), content_w).len();
-        } else if trimmed == ">" || trimmed.starts_with("> ") {
-            while idx < lines.len()
-                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
-            {
-                // Intentionally not pre-incrementing in the condition: handled below.
-                let qtrimmed = lines[idx].trim_end();
-                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
-                if body.is_empty() {
-                    row += 1;
-                } else {
-                    let prefix_len = qtrimmed.len() - body.len();
+            MdBlock::Table { header, aligns, rows, .. } => {
+                let cell_text = |c: &MdCell| text[c.src.clone()].trim().to_string();
+                let header_txt: Vec<String> = header.iter().map(&cell_text).collect();
+                let data_txt: Vec<Vec<String>> = rows
+                    .iter()
+                    .map(|r| r.iter().map(&cell_text).collect())
+                    .collect();
+                row += table_height_cells(&header_txt, &data_txt, &aligns, content_w);
+            }
+            MdBlock::Heading { content_start, src, .. } => {
+                let trimmed = text[src.clone()].trim_end();
+                let h = text[content_start..src.end].trim_end();
+                row += wrap_with_map(h, content_start - src.start, trimmed.len(), content_w).len();
+            }
+            MdBlock::Quote { lines, .. } => {
+                for ql in &lines {
+                    if ql.spans.is_empty() {
+                        row += 1;
+                        continue;
+                    }
+                    let qtrimmed = text[ql.src.clone()].trim_end();
+                    let body = &qtrimmed[ql.prefix_len..];
                     row += wrap_with_map(
                         body,
-                        prefix_len,
+                        ql.prefix_len,
                         qtrimmed.len(),
                         content_w.saturating_sub(2),
                     )
                     .len();
                 }
-                idx += 1;
             }
-            continue;
-        } else {
-            let mapped = inline_spans_mapped(raw, Theme::default(), Style::default());
-            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
-            let line = Line::from(spans);
-            row += prim::wrap_line_styled(&line, content_w).len();
+            MdBlock::Paragraph { src, .. } => {
+                let raw = text[src.clone()].trim_end();
+                // Match the render path exactly: `line_spans` keeps a leading
+                // list marker literal, so a list line wraps to the same width.
+                let mapped = line_spans(raw, t, base);
+                let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+                let line = Line::from(spans);
+                row += prim::wrap_line_styled(&line, content_w).len();
+            }
         }
-        idx += 1;
     }
     row
 }
-
-/// Count the visual rows a `|`-table would occupy, mirroring `render_table` +
+/// Count the visual rows a table would occupy, mirroring `render_table` +
 /// `table_row` without allocating the styled grid. Used by `markdown_body_height`.
-fn table_height(tlines: &[&str], content_w: usize) -> usize {
-    let header = parse_table_row(tlines[0]);
+/// Operates on the same parsed cell set as `render_table`, so both agree on the
+/// grid even when pulldown classifies adjacent `|`-lines as one table.
+fn table_height_cells(
+    header: &[String],
+    data: &[Vec<String>],
+    _aligns: &[Align],
+    content_w: usize,
+) -> usize {
     let n_cols = header.len();
     if n_cols == 0 {
         return 0;
     }
-    let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
     let t = Theme::default();
     let base = Style::new().fg(t.fg);
 
@@ -539,7 +1299,7 @@ fn table_height(tlines: &[&str], content_w: usize) -> usize {
     for (i, cell) in header.iter().enumerate() {
         col_w[i] = col_w[i].max(rendered_width(cell, t, base));
     }
-    for row in &data {
+    for row in data {
         for (i, cell) in row.iter().enumerate().take(n_cols) {
             col_w[i] = col_w[i].max(rendered_width(cell, t, base));
         }
@@ -574,7 +1334,7 @@ fn table_height(tlines: &[&str], content_w: usize) -> usize {
     };
 
     let mut rows = 1; // top border
-    rows += row_group(&header);
+    rows += row_group(header);
     rows += 1; // header separator
     for (i, row) in data.iter().enumerate() {
         rows += row_group(row);
@@ -614,115 +1374,102 @@ struct MappedSpan {
     link: Option<Arc<str>>,
 }
 
+/// Render one source line to styled spans with source-offset tracking, using
+/// `pulldown-cmark` for `CommonMark` inline parsing. Unterminated markers stay
+/// literal (the parser emits them as text until a closer exists), so a
+/// still-growing streamed line keeps the same laid-out width until its span
+/// closes — the marker characters, never a reflow of settled rows.
 fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
-    let mut out = Vec::new();
-    let mut rest = line;
-    let mut pos = 0usize;
-    while let Some(start) = rest.find('`') {
-        if start > 0 {
-            out.extend(parse_markers_mapped(&rest[..start], pos, base, None));
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find('`') {
-            // Pad the code tile with one space on each side (styled with the
-            // same inline-bg) so adjacent text doesn't touch the tile and the
-            // layout doesn't shift when a code span appears/disappears.
-            let padded = format!(" {} ", &after[..end]);
-            out.push(MappedSpan {
-                span: Span::styled(padded, code_style),
-                content_start: pos + start + 1,
-                boundary_start: pos + start,
-                link: None,
-            });
-            pos += start + 1 + end + 1;
-            rest = &after[end + 1..];
-        } else {
-            out.extend(parse_markers_mapped(rest, pos, base, None));
-            return nonempty_mapped(out);
+    let mut out: Vec<MappedSpan> = Vec::new();
+    // Active inline formatting, outermost first. Each entry carries the byte
+    // offset of its opening marker so nested content snaps its selection
+    // boundary to the outermost open, plus the modifier and link it applies.
+    let mut fmt_stack: Vec<(usize, Modifier, Option<Arc<str>>)> = Vec::new();
+
+    let current_style = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
+        fmt_stack.iter().fold(base, |style, (_, m, _)| style.add_modifier(*m))
+    };
+    let current_link = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
+        fmt_stack.iter().rev().find_map(|(_, _, l)| l.clone())
+    };
+    let boundary_of = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)], fallback: usize| {
+        fmt_stack.first().map_or(fallback, |(open, _, _)| *open)
+    };
+
+    let parser = MdParser::new_ext(line, MdOptions::ENABLE_STRIKETHROUGH);
+    for (event, range) in parser.into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                let (modifier, link) = match &tag {
+                    MdTag::Strong => (Some(Modifier::BOLD), None),
+                    MdTag::Emphasis => {
+                        // `_` is lofi's underline, `*` is italic; both parse
+                        // to `Emphasis`, so disambiguate by the opening marker.
+                        let m = if line[range.start..].starts_with('_') {
+                            Modifier::UNDERLINED
+                        } else {
+                            Modifier::ITALIC
+                        };
+                        (Some(m), None)
+                    }
+                    MdTag::Strikethrough => (Some(Modifier::CROSSED_OUT), None),
+                    MdTag::Link { dest_url, .. } => {
+                        // Only hyperlink safe URLs (non-empty, no control or
+                        // whitespace); an unsafe destination renders as plain
+                        // underlined text without a clickable target.
+                        let url = dest_url.as_ref();
+                        let link = is_safe_link_url(url).then(|| Arc::from(url));
+                        (Some(Modifier::UNDERLINED), link)
+                    }
+                    _ => (None, None),
+                };
+                if modifier.is_some() || link.is_some() {
+                    fmt_stack.push((range.start, modifier.unwrap_or(Modifier::empty()), link));
+                }
+            }
+            Event::End(tag) => {
+                let pops = match tag {
+                    TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => 1,
+                    _ => 0,
+                };
+                for _ in 0..pops {
+                    fmt_stack.pop();
+                }
+            }
+            Event::Code(code) => {
+                // Content-only (no backticks, no padding): the tile width is
+                // stable across the span boundary, matching Pi.
+                out.push(MappedSpan {
+                    span: Span::styled(code.to_string(), code_style),
+                    content_start: range.start + 1,
+                    boundary_start: range.start,
+                    link: None,
+                });
+            }
+            Event::Text(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(MappedSpan {
+                    span: Span::styled(text.to_string(), current_style(&fmt_stack)),
+                    content_start: range.start,
+                    boundary_start: boundary_of(&fmt_stack, range.start),
+                    link: current_link(&fmt_stack),
+                });
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                out.push(MappedSpan {
+                    span: Span::raw(" "),
+                    content_start: range.start,
+                    boundary_start: boundary_of(&fmt_stack, range.start),
+                    link: current_link(&fmt_stack),
+                });
+            }
+            _ => {}
         }
     }
-    out.extend(parse_markers_mapped(rest, pos, base, None));
     nonempty_mapped(out)
-}
-
-/// [`parse_markers`] with source-offset tracking. `base` is the byte offset
-/// of `text` within the source line; `pending_open` carries the byte offset
-/// of an enclosing marker so the first span of an inner group snaps its
-/// boundary to it (nested markers include the outermost open).
-fn parse_markers_mapped(
-    text: &str,
-    base: usize,
-    style: Style,
-    pending_open: Option<usize>,
-) -> Vec<MappedSpan> {
-    if let Some((open, label, url, close)) = find_markdown_link(text) {
-        let before = &text[..open];
-        let after = &text[close..];
-        let mut out = parse_markers_mapped(before, base, style, pending_open);
-        let link: Arc<str> = url;
-        let mut label_spans = parse_markers_mapped(
-            label,
-            base + open + 1,
-            style.add_modifier(Modifier::UNDERLINED),
-            Some(base + open),
-        );
-        for span in &mut label_spans {
-            span.link = Some(link.clone());
-        }
-        out.extend(label_spans);
-        out.extend(parse_markers_mapped(after, base + close, style, None));
-        return out;
-    }
-
-    for (marker, modifier, check) in [
-        ("**", Modifier::BOLD, false),
-        ("__", Modifier::BOLD, true),
-        ("~~", Modifier::CROSSED_OUT, false),
-        ("*", Modifier::ITALIC, false),
-        ("_", Modifier::UNDERLINED, true),
-    ] {
-        let Some(open) = find_marker(text, marker, check, true) else {
-            continue;
-        };
-        let after_open = &text[open + marker.len()..];
-        if let Some(close) = find_marker(after_open, marker, check, false) {
-            let before = &text[..open];
-            let inner = &after_open[..close];
-            let after = &after_open[close + marker.len()..];
-            let open_pos = base + open;
-            let inner_base = base + open + marker.len();
-            let after_base = inner_base + close + marker.len();
-            // The first span of `inner` snaps to the marker open. If `before`
-            // is empty, inherit the enclosing pending_open so a nested
-            // marker's outermost open is preserved.
-            let inner_pending = if before.is_empty() {
-                pending_open.or(Some(open_pos))
-            } else {
-                Some(open_pos)
-            };
-            let mut out = Vec::new();
-            out.extend(parse_markers_mapped(before, base, style, pending_open));
-            out.extend(parse_markers_mapped(
-                inner,
-                inner_base,
-                style.add_modifier(modifier),
-                inner_pending,
-            ));
-            out.extend(parse_markers_mapped(after, after_base, style, None));
-            return out;
-        }
-    }
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![MappedSpan {
-            span: Span::styled(text.to_string(), style),
-            content_start: base,
-            boundary_start: pending_open.unwrap_or(base),
-            link: None,
-        }]
-    }
 }
 
 fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
@@ -844,29 +1591,6 @@ enum Align {
     Left,
     Right,
     Center,
-}
-
-fn is_table_separator(line: &str) -> bool {
-    line.contains('-') && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-}
-
-fn parse_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .map(|c| c.trim().to_string())
-        .collect()
-}
-
-fn parse_align(cell: &str) -> Align {
-    let left = cell.starts_with(':');
-    let right = cell.ends_with(':');
-    match (left, right) {
-        (true, true) => Align::Center,
-        (false, true) => Align::Right,
-        _ => Align::Left,
-    }
 }
 
 fn render_table(
@@ -1109,72 +1833,6 @@ fn align_spans(
     }
 }
 
-fn find_markdown_link(text: &str) -> Option<(usize, &str, Arc<str>, usize)> {
-    let mut search = 0usize;
-    while let Some(relative_open) = text[search..].find('[') {
-        let open = search + relative_open;
-        if text[..open].ends_with('!') {
-            search = open + 1;
-            continue;
-        }
-        let after_open = &text[open + 1..];
-        let label_end_rel = after_open.find("](")?;
-        let label_end = open + 1 + label_end_rel;
-        let destination_start = label_end + 2;
-        let bytes = text.as_bytes();
-        let mut depth = 1usize;
-        let mut escaped = false;
-        let mut close = destination_start;
-        while close < bytes.len() {
-            let byte = bytes[close];
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'(' {
-                depth += 1;
-            } else if byte == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            close += 1;
-        }
-        if depth != 0 {
-            return None;
-        }
-
-        let destination = text[destination_start..close].trim();
-        let destination = if let Some(angle) = destination.strip_prefix('<') {
-            angle.split_once('>').map_or("", |(url, _)| url)
-        } else {
-            destination.split_whitespace().next().unwrap_or_default()
-        };
-        let url = unescape_link_destination(destination);
-        if is_safe_link_url(&url) {
-            return Some((open, &text[open + 1..label_end], Arc::from(url), close + 1));
-        }
-        search = open + 1;
-    }
-    None
-}
-
-fn unescape_link_destination(destination: &str) -> String {
-    let mut out = String::with_capacity(destination.len());
-    let mut chars = destination.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 fn is_safe_link_url(url: &str) -> bool {
     !url.is_empty() && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace())
 }
@@ -1233,32 +1891,6 @@ fn split_links_by_rows(
         row_start = row_end;
     }
     out
-}
-
-fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<usize> {
-    let mut search = 0;
-    while let Some(rel) = text[search..].find(marker) {
-        let pos = search + rel;
-        if check {
-            let ok = if is_open {
-                text[..pos]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !c.is_alphanumeric())
-            } else {
-                text[pos + marker.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !c.is_alphanumeric())
-            };
-            if !ok {
-                search = pos + marker.len();
-                continue;
-            }
-        }
-        return Some(pos);
-    }
-    None
 }
 
 struct Thinking<'a> {
@@ -2504,12 +3136,182 @@ use active_indicator as _;
 #[cfg(test)]
 mod tests {
     use super::{
-        markdown_body_height, native_body, native_preview_range, render_markdown_body,
-        trim_reasoning_summary,
+        analyze, markdown_body_height, native_body, native_preview_range, render_markdown_body,
+        trim_reasoning_summary, Align, MdBlock,
     };
     use crate::tui::theme::Theme;
     use crate::tui::NativeTool;
     use ratatui::style::Style;
+
+    fn analyze_blocks(src: &str) -> Vec<MdBlock> {
+        analyze(src, Theme::default(), Style::default())
+    }
+    #[test]
+    fn analyze_empty_yields_no_blocks() {
+        assert!(analyze_blocks("").is_empty());
+    }
+
+    #[test]
+    fn list_lines_keep_their_markers() {
+        let rl = render_markdown_body(
+            "- Hello\n- World\n1. one\n2. two",
+            Theme::default(),
+            80,
+            78,
+            Style::default(),
+            |_| vec![],
+        );
+        let text: Vec<String> = rl
+            .iter()
+            .map(|l| l.line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text, ["- Hello", "- World", "1. one", "2. two"]);
+    }
+
+    #[test]
+    fn analyze_paragraph_records_source_range() {
+        let blocks = analyze_blocks("hello world");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Paragraph { spans, src } => {
+                assert_eq!(*src, 0..11);
+                let text: String = spans.iter().map(|m| m.span.content.as_ref()).collect();
+                assert_eq!(text, "hello world");
+            }
+            other => panic!("expected paragraph, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn analyze_heading_captures_level_and_content_offset() {
+        let src = "## Title here";
+        let blocks = analyze_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Heading {
+                level,
+                src: range,
+                content_start,
+            } => {
+                assert_eq!(*level, 2);
+                assert_eq!(*range, 0..13);
+                assert_eq!(*content_start, 3); // after "## "
+                // Content (after the `# ` prefix) slices back to the source.
+                assert_eq!(&src[*content_start..range.end], "Title here");
+            }
+            other => panic!("expected heading, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn analyze_fenced_code_splits_body_lines_with_ranges() {
+        let src = "```rust\nfn main() {}\n  more\n```";
+        let blocks = analyze_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Code { lang, lines, fence } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[0].0, "fn main() {}");
+                assert_eq!(lines[1].0, "  more");
+                // Body ranges slice back to the exact source text.
+                for (line, r) in lines {
+                    assert_eq!(&src[r.clone()], line);
+                }
+                assert_eq!(&src[fence.clone()], src);
+            }
+            other => panic!("expected code, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn analyze_table_captures_header_rows_and_aligns() {
+        let src = "| a | b |\n|---|--:|\n| 1 | 2 |";
+        let blocks = analyze_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Table {
+                header,
+                aligns,
+                rows,
+                src: range,
+            } => {
+                assert_eq!(*range, 0..src.len());
+                assert_eq!(header.len(), 2);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 2);
+                assert!(matches!(aligns[0], Align::Left));
+                assert!(matches!(aligns[1], Align::Right));
+                // Cell source ranges slice back to the raw cell text.
+                assert_eq!(&src[header[0].src.clone()], "a");
+                assert_eq!(&src[rows[0][1].src.clone()], "2");
+            }
+            other => panic!("expected table, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn analyze_blockquote_splits_lines_and_prefixes() {
+        let src = "> one\n> ``two``\n>\n";
+        let blocks = analyze_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Quote { lines, src: range } => {
+                assert_eq!(lines.len(), 3);
+                assert_eq!(lines[0].prefix_len, 2);
+                assert_eq!(lines[2].prefix_len, 1); // bare ">"
+                let l0: String = lines[0].spans.iter().map(|m| m.span.content.as_ref()).collect();
+                assert_eq!(l0, "one");
+                // Each line's source range slices back to the raw quote line.
+                assert_eq!(&src[lines[0].src.clone()], "> one");
+                assert_eq!(&src[lines[2].src.clone()], ">");
+                let _ = range;
+            }
+            other => panic!("expected quote, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn analyze_sequences_multiple_block_kinds() {
+        let src = "# H\n\npara\n\n> q\n\n```\nx\n```";
+        let blocks = analyze_blocks(src);
+        let kinds: Vec<&str> = blocks
+            .iter()
+            .map(|b| match b {
+                MdBlock::Blank { .. } => "blank",
+                MdBlock::Paragraph { .. } => "para",
+                MdBlock::Heading { .. } => "heading",
+                MdBlock::Code { .. } => "code",
+                MdBlock::Table { .. } => "table",
+                MdBlock::Quote { .. } => "quote",
+            })
+            .collect();
+        // Blank source lines between blocks are preserved as explicit blocks.
+        assert_eq!(
+            kinds,
+            ["heading", "blank", "para", "blank", "quote", "blank", "code"]
+        );
+    }
+
+    #[test]
+    fn analyze_inline_offsets_are_global_source_bytes() {
+        // Bold inside a paragraph after another block: span offsets must point
+        // into the full source, not the block-local sub-slice.
+        let src = "intro\n\nbody **bold** tail";
+        let blocks = analyze_blocks(src);
+        // Find the bold span across all paragraphs; its content_start must
+        // locate "bold" in src.
+        let bold = blocks
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::Paragraph { spans, .. } => Some(spans),
+                _ => None,
+            })
+            .flatten()
+            .find(|m| m.span.content.as_ref() == "bold")
+            .unwrap_or_else(|| panic!("bold span"));
+        assert_eq!(&src[bold.content_start..bold.content_start + 4], "bold");
+    }
 
     #[test]
     fn bash_preview_keeps_tail_while_other_tools_keep_head() {
@@ -2629,7 +3431,9 @@ mod tests {
     /// pool of construct patterns (headings, lists, quotes, code fences,
     /// tables, wrapping text, unicode, links) then joined. `markdown_body_height`
     /// must agree with `render_markdown_body(...).len()` for all of them, for
-    /// each probe width. This is the drift guard for the hand-mirror.
+    /// each probe width. Both walk the same `analyze()` tree; this guards that
+    /// the render and height paths never drift apart (the historical source of
+    /// transcript popping on scroll/resize).
     #[test]
     fn height_fuzz_seeded() {
         // Simple deterministic PRNG (xorshift64) — no external deps.
