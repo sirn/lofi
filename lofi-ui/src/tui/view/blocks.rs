@@ -237,212 +237,315 @@ fn render_markdown_body(
     }
     let mut out = Vec::new();
     let mut row = 0usize;
-    let mut in_code = false;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        let raw = lines[idx];
-        let trimmed = raw.trim_end();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            let lang = trimmed.trim_start_matches('`');
-            let label = if in_code {
-                if lang.is_empty() {
-                    "```".to_string()
-                } else {
-                    format!("```{lang}")
-                }
-            } else {
-                "```".to_string()
-            };
+    for block in analyze(text, t, base_style) {
+        match block {
+            MdBlock::Code { lang, lines, fence } => {
+                emit_code(&mut out, &mut row, text, &lang, &lines, &fence, t, w, content_w, &lead_fn);
+            }
+            MdBlock::Table { header, aligns, rows, src } => {
+                emit_table(&mut out, &mut row, text, &header, &aligns, &rows, &src, t, content_w, &lead_fn);
+            }
+            MdBlock::Heading { level, content_start, src, .. } => {
+                emit_heading(&mut out, &mut row, text, level, content_start, &src, t, base_style, content_w, &lead_fn);
+            }
+            MdBlock::Quote { lines, .. } => {
+                emit_quote(&mut out, &mut row, text, &lines, t, content_w, &lead_fn);
+            }
+            MdBlock::Paragraph { src, .. } => {
+                emit_paragraph(&mut out, &mut row, text, &src, t, base_style, content_w, &lead_fn);
+            }
+            MdBlock::Blank { src } => {
+                emit_blank(&mut out, &mut row, text, &src, &lead_fn);
+            }
+        }
+    }
+    out
+}
+
+/// Emit a blank source line as a single empty content row, matching how an
+/// empty paragraph wraps (one row, no content).
+fn emit_blank(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    src: &std::ops::Range<usize>,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let lead = lead_fn(*row);
+    let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+    // The blank maps to its (empty) source line so selection reproduces the
+    // blank as an empty line rather than dropping it.
+    let raw_src = &text[src.clone()];
+    out.push(RenderLine {
+        line: Line::from(lead),
+        content: (deco_len, deco_len),
+        raw: Some(RawLine::new(Arc::from(raw_src), vec![0, raw_src.len()], true)),
+        links: Vec::new(),
+    });
+    *row += 1;
+}
+/// Emit a fenced code block: opening/closing fence tiles and one tile row per
+/// wrapped body segment. Source ranges come from `analyze`; body rows map back
+/// to their source line for yank/selection.
+#[allow(clippy::too_many_arguments)]
+fn emit_code(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    lang: &Option<String>,
+    lines: &[(String, std::ops::Range<usize>)],
+    fence: &std::ops::Range<usize>,
+    t: Theme,
+    w: usize,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let fence_text = &text[fence.clone()];
+    let open_label = match lang {
+        Some(l) => format!("```{l}"),
+        None => "```".to_string(),
+    };
+    let open_raw = fence_text.split('\n').next().unwrap_or("```");
+    out.push(
+        prim::rtile(
+            lead_fn(*row),
+            vec![Span::styled(open_label, Style::new().fg(t.muted).bg(t.surface))],
+            t.surface,
+            w,
+        )
+        .with_raw(RawLine::linear(
+            Arc::from(open_raw),
+            0,
+            open_raw.chars().count(),
+            true,
+        )),
+    );
+    *row += 1;
+    let avail = content_w.saturating_sub(2);
+    for (line_text, _line_range) in lines {
+        let src: Arc<str> = Arc::from(line_text.as_str());
+        let indent_len = line_text.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let body = &line_text[indent_len..];
+        let body_offs: Vec<usize> = std::iter::once(0)
+            .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
+            .collect();
+        let indent_chars = line_text[..indent_len].chars().count();
+        let segments = prim::wrap_pre(line_text, avail);
+        let mut cum = 0usize;
+        for (i, seg) in segments.into_iter().enumerate() {
+            let body_chars = seg.chars().count().saturating_sub(indent_chars);
+            let map: Vec<usize> = (0..=body_chars)
+                .map(|k| indent_len + body_offs.get(cum + k).copied().unwrap_or(body.len()))
+                .collect();
             out.push(
                 prim::rtile(
-                    lead_fn(row),
-                    vec![Span::styled(label, Style::new().fg(t.muted).bg(t.surface))],
+                    lead_fn(*row),
+                    vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
                     t.surface,
                     w,
                 )
-                .with_raw(RawLine::linear(
-                    Arc::from(trimmed),
-                    0,
-                    trimmed.chars().count(),
-                    true,
-                )),
+                .with_raw(RawLine::new(src.clone(), map, i == 0)),
             );
-            row += 1;
-            idx += 1;
-            continue;
+            *row += 1;
+            cum += body_chars;
         }
-        if in_code {
-            let avail = content_w.saturating_sub(2);
-            let src: Arc<str> = Arc::from(raw);
-            let indent_len = raw.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
-            let body = &raw[indent_len..];
-            let body_offs: Vec<usize> = std::iter::once(0)
-                .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
-                .collect();
-            let indent_chars = raw[..indent_len].chars().count();
-            let segments = prim::wrap_pre(raw, avail);
-            let mut cum = 0usize;
-            for (i, seg) in segments.into_iter().enumerate() {
-                let body_chars = seg.chars().count().saturating_sub(indent_chars);
-                let map: Vec<usize> = (0..=body_chars)
-                    .map(|k| indent_len + body_offs.get(cum + k).copied().unwrap_or(body.len()))
-                    .collect();
-                out.push(
-                    prim::rtile(
-                        lead_fn(row),
-                        vec![Span::styled(seg, Style::new().fg(t.fg).bg(t.surface))],
-                        t.surface,
-                        w,
-                    )
-                    .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                );
-                row += 1;
-                cum += body_chars;
-            }
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with('|')
-            && idx + 1 < lines.len()
-            && is_table_separator(lines[idx + 1].trim())
-        {
-            let start = idx;
-            while idx < lines.len() && lines[idx].trim().starts_with('|') {
-                idx += 1;
-            }
-            let tlines = &lines[start..idx];
-            let header = parse_table_row(tlines[0]);
-            let aligns: Vec<Align> = parse_table_row(tlines[1])
-                .iter()
-                .map(|c| parse_align(c))
-                .collect();
-            let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
-            let src_lines: Vec<&str> = tlines.to_vec();
-            let before = out.len();
-            out.extend(render_table(
-                &header, &data, &aligns, content_w, t, &src_lines, row, &lead_fn,
-            ));
-            row += out.len() - before;
-            continue;
-        }
-        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
-            let h = &trimmed[hashes + 1..];
-            let head_fg = if hashes <= 2 {
-                base_style.fg.unwrap_or(t.fg)
-            } else {
-                t.muted
-            };
-            let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
-            let src: Arc<str> = Arc::from(trimmed);
-            let rows = wrap_with_map(h, hashes + 1, trimmed.len(), content_w);
-            for (i, (seg, map)) in rows.into_iter().enumerate() {
-                out.push(
-                    prim::rline(lead_fn(row), vec![Span::styled(seg, style)])
-                        .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                );
-                row += 1;
-            }
-        } else if trimmed == ">" || trimmed.starts_with("> ") {
-            let start = idx;
-            while idx < lines.len()
-                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
-            {
-                idx += 1;
-            }
-            let q_lines = &lines[start..idx];
-            let quote_style = Style::new().fg(t.muted);
-            let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
-            for qraw in q_lines {
-                let qtrimmed = qraw.trim_end();
-                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
-                let src: Arc<str> = Arc::from(qtrimmed);
-                if body.is_empty() {
-                    // Empty quote line (bare ">"): just the bar.  Build
-                    // the RenderLine directly so the content span is
-                    // non-empty (a thin space) with a 2-entry map snapping
-                    // to the full ">" source — selection_text yanks the
-                    // raw markdown.
-                    let map = vec![0, src.len()];
-                    let mut lead = lead_fn(row);
-                    lead.push(bar.clone());
-                    let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
-                    let content_span = Span::styled("\u{2009}", quote_style); // thin space
-                    let content_len = content_span.content.chars().count();
-                    let mut all = lead.clone();
-                    all.push(content_span);
-                    out.push(RenderLine {
-                        line: Line::from(all),
-                        content: (deco_len, deco_len + content_len),
-                        raw: Some(RawLine::new(src, map, true)),
-                        links: Vec::new(),
-                    });
-                    row += 1;
-                    continue;
-                }
-                let prefix_len = qtrimmed.len() - body.len(); // length of "> " or ">"
-                let rows = wrap_with_map(
-                    body,
-                    prefix_len,
-                    qtrimmed.len(),
-                    content_w.saturating_sub(2),
-                );
-                for (i, (seg, map)) in rows.into_iter().enumerate() {
-                    let mut lead = lead_fn(row);
-                    lead.push(bar.clone());
-                    out.push(
-                        prim::rline(lead, vec![Span::styled(seg, quote_style)])
-                            .with_raw(RawLine::new(src.clone(), map, i == 0)),
-                    );
-                    row += 1;
-                }
-            }
-            continue;
-        } else {
-            let mapped = inline_spans_mapped(raw, t, base_style);
-            let lead_ws = mapped
-                .iter()
-                .flat_map(|m| m.span.content.chars())
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .count();
-            let full_map = build_content_map(raw.len(), &mapped);
-            let links = mapped_hyperlinks(&mapped);
-            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
-            let line = Line::from(spans);
-            let src: Arc<str> = Arc::from(raw);
-            let rows = prim::wrap_line_styled(&line, content_w);
-            let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
-            let row_links = split_links_by_rows(&links, &rows);
-            for (i, wrapped) in rows.into_iter().enumerate() {
-                let lead = lead_fn(row);
-                let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
-                let links = row_links.get(i).map_or_else(Vec::new, |links| {
-                    links
-                        .iter()
-                        .map(|link| Hyperlink {
-                            start: deco_len + link.start,
-                            end: deco_len + link.end,
-                            url: link.url.clone(),
-                        })
-                        .collect()
-                });
-                out.push(
-                    prim::rline(lead, wrapped.spans)
-                        .with_raw(RawLine::new(
-                            src.clone(),
-                            row_maps.get(i).cloned().unwrap_or_default(),
-                            i == 0,
-                        ))
-                        .with_links(links),
-                );
-                row += 1;
-            }
-        }
-        idx += 1;
     }
-    out
+    let close_raw = fence_text.split('\n').last().unwrap_or("```");
+    out.push(
+        prim::rtile(
+            lead_fn(*row),
+            vec![Span::styled("```", Style::new().fg(t.muted).bg(t.surface))],
+            t.surface,
+            w,
+        )
+        .with_raw(RawLine::linear(
+            Arc::from(close_raw),
+            0,
+            close_raw.chars().count(),
+            true,
+        )),
+    );
+    *row += 1;
+}
+/// Concatenate inline spans into plain text for the table grid (which
+/// re-parses inline styling itself).
+fn spans_text(spans: &[MappedSpan]) -> String {
+    spans.iter().map(|m| m.span.content.as_ref()).collect()
+}
+
+/// Emit a pipe table via the shared grid renderer. Cells carry inline spans
+/// and source ranges from `analyze`; the raw `| ... |` source lines feed yank.
+#[allow(clippy::too_many_arguments)]
+fn emit_table(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    header: &[MdCell],
+    aligns: &[Align],
+    rows: &[Vec<MdCell>],
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let src_block = &text[src.clone()];
+    let src_lines: Vec<&str> = src_block.split('\n').collect();
+    // Pass each cell's raw source text so render_table re-parses inline
+    // formatting (bold/code/links) exactly as any other inline context.
+    let cell_src = |c: &MdCell| text[c.src.clone()].trim().to_string();
+    let header_txt: Vec<String> = header.iter().map(&cell_src).collect();
+    let data_txt: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(&cell_src).collect())
+        .collect();
+    let before = out.len();
+    out.extend(render_table(
+        &header_txt, &data_txt, aligns, content_w, t, &src_lines, *row, lead_fn,
+    ));
+    *row += out.len() - before;
+}
+
+/// Emit an ATX heading. `content_start` is the byte offset of the text after
+/// the `# ` prefix; the heading text is the trimmed remainder of the source.
+#[allow(clippy::too_many_arguments)]
+fn emit_heading(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    level: u8,
+    content_start: usize,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base_style: Style,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let trimmed = text[src.clone()].trim_end();
+    let h = text[content_start..src.end].trim_end();
+    let head_fg = if level <= 2 {
+        base_style.fg.unwrap_or(t.fg)
+    } else {
+        t.muted
+    };
+    let style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
+    let prefix_len = content_start - src.start;
+    let src_arc: Arc<str> = Arc::from(trimmed);
+    let rows = wrap_with_map(h, prefix_len, trimmed.len(), content_w);
+    for (i, (seg, map)) in rows.into_iter().enumerate() {
+        out.push(
+            prim::rline(lead_fn(*row), vec![Span::styled(seg, style)])
+                .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+        );
+        *row += 1;
+    }
+}
+/// Emit a block quote: a `▎ ` bar followed by each wrapped body line. Each
+/// source line maps back to its `> ...` raw text for yank.
+fn emit_quote(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    lines: &[MdQuoteLine],
+    t: Theme,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let quote_style = Style::new().fg(t.muted);
+    let bar = Span::styled("▎ ", Style::new().fg(t.subtle));
+    for ql in lines {
+        let qtrimmed = text[ql.src.clone()].trim_end();
+        let src_arc: Arc<str> = Arc::from(qtrimmed);
+        if ql.spans.is_empty() {
+            // Bare `>` line: just the bar with a thin-space content span so
+            // selection yanks the raw `>` markdown.
+            let map = vec![0, src_arc.len()];
+            let mut lead = lead_fn(*row);
+            lead.push(bar.clone());
+            let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+            let content_span = Span::styled("\u{2009}", quote_style);
+            let content_len = content_span.content.chars().count();
+            let mut all = lead.clone();
+            all.push(content_span);
+            out.push(RenderLine {
+                line: Line::from(all),
+                content: (deco_len, deco_len + content_len),
+                raw: Some(RawLine::new(src_arc, map, true)),
+                links: Vec::new(),
+            });
+            *row += 1;
+            continue;
+        }
+        let body = &qtrimmed[ql.prefix_len..];
+        let rows = wrap_with_map(
+            body,
+            ql.prefix_len,
+            qtrimmed.len(),
+            content_w.saturating_sub(2),
+        );
+        for (i, (seg, map)) in rows.into_iter().enumerate() {
+            let mut lead = lead_fn(*row);
+            lead.push(bar.clone());
+            out.push(
+                prim::rline(lead, vec![Span::styled(seg, quote_style)])
+                    .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+            );
+            *row += 1;
+        }
+    }
+}
+
+/// Emit a paragraph: inline-parse the source sub-slice, wrap to the content
+/// width, and split the source-offset map and hyperlinks across wrapped rows.
+#[allow(clippy::too_many_arguments)]
+fn emit_paragraph(
+    out: &mut Vec<RenderLine>,
+    row: &mut usize,
+    text: &str,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base_style: Style,
+    content_w: usize,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+) {
+    let raw = text[src.clone()].trim_end();
+    let mapped = inline_spans_mapped(raw, t, base_style);
+    let lead_ws = mapped
+        .iter()
+        .flat_map(|m| m.span.content.chars())
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    let full_map = build_content_map(raw.len(), &mapped);
+    let links = mapped_hyperlinks(&mapped);
+    let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+    let line = Line::from(spans);
+    let src_arc: Arc<str> = Arc::from(raw);
+    let rows = prim::wrap_line_styled(&line, content_w);
+    let row_maps = split_map_by_rows(&full_map, lead_ws, &rows);
+    let row_links = split_links_by_rows(&links, &rows);
+    for (i, wrapped) in rows.into_iter().enumerate() {
+        let lead = lead_fn(*row);
+        let deco_len: usize = lead.iter().map(|s| s.content.chars().count()).sum();
+        let links = row_links.get(i).map_or_else(Vec::new, |links| {
+            links
+                .iter()
+                .map(|link| Hyperlink {
+                    start: deco_len + link.start,
+                    end: deco_len + link.end,
+                    url: link.url.clone(),
+                })
+                .collect()
+        });
+        out.push(
+            prim::rline(lead, wrapped.spans)
+                .with_raw(RawLine::new(
+                    src_arc.clone(),
+                    row_maps.get(i).cloned().unwrap_or_default(),
+                    i == 0,
+                ))
+                .with_links(links),
+        );
+        *row += 1;
+    }
 }
 
 // === Block-level markdown analysis (single pulldown pass) ====================
@@ -475,6 +578,10 @@ struct MdQuoteLine {
 /// One structural block of a markdown document.
 #[derive(Clone)]
 enum MdBlock {
+    /// A run of one or more blank source lines (rendered as empty rows).
+    Blank {
+        src: std::ops::Range<usize>,
+    },
     Paragraph {
         spans: Vec<MappedSpan>,
         src: std::ops::Range<usize>,
@@ -599,13 +706,20 @@ enum BlockFrame {
         cell: Option<(InlineExtent, std::ops::Range<usize>)>,
     },
     Quote { src: std::ops::Range<usize> },
+    /// The outermost list. Rendered line-preserving (each source line a
+    /// paragraph, markers and indent intact), so the frame captures the source
+    /// range plus a depth counter for the nested lists pulldown reports inside
+    /// it (their Start/End must not close this frame).
+    List { src: std::ops::Range<usize>, depth: usize },
 }
 
-/// True when a container frame (block quote) remains on the stack. Nested
-/// blocks inside a quote are rendered by the quote itself, so the block pass
-/// must not also emit them at top level.
+/// True when a container frame (block quote or list) remains on the stack.
+/// Nested blocks inside a container are rendered by the container, so the block
+/// pass must not also emit them at top level.
 fn stack_in_container(stack: &[BlockFrame]) -> bool {
-    stack.iter().any(|f| matches!(f, BlockFrame::Quote { .. }))
+    stack
+        .iter()
+        .any(|f| matches!(f, BlockFrame::Quote { .. } | BlockFrame::List { .. }))
 }
 
 /// Route an inline event range to the innermost inline-owning frame. The
@@ -788,15 +902,176 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
                     blocks.push(MdBlock::Quote { lines, src });
                 }
             }
+            // Lists are rendered line-preserving: only the outermost list frame
+            // is captured (nested lists fall inside its range), and on close the
+            // whole range is split into per-line paragraphs keeping the literal
+            // markers and indentation.
+            Event::Start(MdTag::List(_)) => {
+                match stack.last_mut() {
+                    // Already inside a list or quote: count the nested list so
+                    // its End does not close the outer frame.
+                    Some(BlockFrame::List { depth, .. }) => *depth += 1,
+                    Some(BlockFrame::Quote { .. }) => {}
+                    _ => stack.push(BlockFrame::List { src: range, depth: 0 }),
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some(BlockFrame::List { src, depth }) = stack.last_mut() {
+                    if *depth > 0 {
+                        *depth -= 1;
+                    } else {
+                        let src = src.clone();
+                        stack.pop();
+                        split_paragraph_lines(text, &src, t, base, &mut blocks);
+                    }
+                }
+            }
             _ => observe_inline(&mut stack, &range),
         }
     }
-    blocks
+    preserve_lines(text, blocks, t, base)
 }
 
 /// Split a fenced code body into per-source-line strings with byte ranges.
 /// `body_range` is the concatenated body text range; when absent (empty block)
 /// there are no body lines.
+
+/// The source byte range a block occupies.
+fn block_src(b: &MdBlock) -> std::ops::Range<usize> {
+    match b {
+        MdBlock::Blank { src }
+        | MdBlock::Paragraph { src, .. }
+        | MdBlock::Code { fence: src, .. } => src.clone(),
+        MdBlock::Heading { src, .. }
+        | MdBlock::Table { src, .. }
+        | MdBlock::Quote { src, .. } => src.clone(),
+    }
+}
+
+/// Restore source-line granularity over the pulldown block structure.
+///
+/// pulldown is structure-semantic: it collapses blank lines and merges
+/// soft-wrapped lines into a single paragraph. The transcript renderer is
+/// line-preserving — a user's blank lines and explicit line breaks must each
+/// occupy their own row (the user/agent rail is drawn per source line). This
+/// pass walks the emitted blocks against the raw source and:
+/// - inserts a `Blank` block for every run of empty source lines between or
+///   around blocks, and
+/// - splits any paragraph that spans multiple source lines into one paragraph
+///   per line (pulldown still owns the inline parse of each line).
+///
+/// Block classification remains entirely pulldown's; this only enforces line
+/// granularity for rendering.
+fn preserve_lines(
+    text: &str,
+    blocks: Vec<MdBlock>,
+    t: Theme,
+    base: Style,
+) -> Vec<MdBlock> {
+    let mut out: Vec<MdBlock> = Vec::new();
+    // `cursor` tracks the byte just past the prior block's content. Block
+    // ranges from pulldown inconsistently include a trailing newline, so the
+    // cursor is normalized to the end of the block's last content line
+    // (trailing newlines excluded) before each gap is measured.
+    let mut cursor = 0usize;
+    for block in blocks {
+        let src = block_src(&block);
+        // Fill any blank-line gap before this block.
+        emit_blanks(text, cursor, src.start, &mut out);
+        // Split multi-line paragraphs into per-line paragraphs.
+        match block {
+            MdBlock::Paragraph { src, .. } => {
+                split_paragraph_lines(text, &src, t, base, &mut out);
+            }
+            other => out.push(other),
+        }
+        cursor = content_end(text, &src);
+    }
+    // Trailing blank lines after the last block.
+    emit_blanks(text, cursor, text.len(), &mut out);
+    out
+}
+
+/// The byte offset just past a block's last content character, excluding any
+/// trailing newline(s) pulldown folded into the block range.
+fn content_end(text: &str, src: &std::ops::Range<usize>) -> usize {
+    let mut end = src.end;
+    while end > src.start && text.as_bytes()[end - 1] == b'\n' {
+        end -= 1;
+    }
+    end
+}
+
+/// Emit a `Blank` block for each empty source line in `text[start..end]`,
+/// tracking byte offsets so each blank maps to its (empty) source line.
+fn emit_blanks(text: &str, start: usize, end: usize, out: &mut Vec<MdBlock>) {
+    if start >= end {
+        return;
+    }
+    // The gap between two blocks opens with the newline terminating the prior
+    // block's last line; that separator is not itself a blank line. Each
+    // additional newline introduces one blank line.
+    let gap = &text[start..end];
+    let newlines = gap.bytes().filter(|&b| b == b'\n').count();
+    let blank_count = newlines.saturating_sub(1);
+    // Byte offset of each blank line: walk the gap's lines, skipping the first
+    // fragment (the separator's empty head) and the last (the next block's line
+    // start), emitting one Blank per interior empty line.
+    let mut off = start;
+    let mut emitted = 0usize;
+    for (i, line) in gap.split('\n').enumerate() {
+        let line_end = off + line.len();
+        if i > 0 && emitted < blank_count {
+            out.push(MdBlock::Blank { src: off..line_end });
+            emitted += 1;
+        }
+        off = line_end + 1;
+    }
+}
+
+/// Split a paragraph block that spans multiple source lines into one
+/// `Paragraph` per line, preserving each line's source range and inline parse.
+fn split_paragraph_lines(
+    text: &str,
+    src: &std::ops::Range<usize>,
+    t: Theme,
+    base: Style,
+    out: &mut Vec<MdBlock>,
+) {
+    // Block ranges may fold in a trailing newline; strip it so the split does
+    // not yield a phantom empty final line.
+    let block = text[src.clone()].trim_end_matches('\n');
+    if !block.contains('\n') {
+        // Single line: keep spans as analyzed.
+        let spans = inline_spans_mapped(block.trim_end(), t, base);
+        let mut spans = spans;
+        for m in &mut spans {
+            m.content_start += src.start;
+            m.boundary_start += src.start;
+        }
+        if !spans_text(&spans).trim().is_empty() {
+            out.push(MdBlock::Paragraph { spans, src: src.clone() });
+        }
+        return;
+    }
+    let mut off = src.start;
+    for line in block.split('\n') {
+        let trimmed = line.trim_end();
+        let line_range = off..off + trimmed.len();
+        let spans = inline_spans_mapped(trimmed, t, base);
+        let mut spans = spans;
+        for m in &mut spans {
+            m.content_start += off;
+            m.boundary_start += off;
+        }
+        if trimmed.trim().is_empty() {
+            out.push(MdBlock::Blank { src: off..off + line.len() });
+        } else {
+            out.push(MdBlock::Paragraph { spans, src: line_range });
+        }
+        off += line.len() + 1;
+    }
+}
 fn split_code_lines(
     body: &str,
     body_range: Option<std::ops::Range<usize>>,
@@ -873,82 +1148,79 @@ fn markdown_body_height(text: &str, content_w: usize) -> usize {
     if text.is_empty() {
         return 0;
     }
+    // Walk the same block tree the renderer emits, counting rows with the
+    // exact wrap calls each emitter uses but allocating no styled lines. This
+    // keeps `height == render(...).len()` structural rather than maintained by
+    // a parallel line-scanner.
+    let t = Theme::default();
+    let base = Style::default();
     let mut row = 0usize;
-    let mut in_code = false;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        let raw = lines[idx];
-        let trimmed = raw.trim_end();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            row += 1;
-            idx += 1;
-            continue;
-        }
-        if in_code {
-            let avail = content_w.saturating_sub(2);
-            row += prim::wrap_pre(raw, avail).len();
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with('|')
-            && idx + 1 < lines.len()
-            && is_table_separator(lines[idx + 1].trim())
-        {
-            let start = idx;
-            while idx < lines.len() && lines[idx].trim().starts_with('|') {
-                idx += 1;
+    for block in analyze(text, t, base) {
+        match block {
+            MdBlock::Blank { .. } => row += 1,
+            MdBlock::Code { lines, .. } => {
+                // Opening fence + body rows + closing fence.
+                row += 1;
+                for (line_text, _) in &lines {
+                    row += prim::wrap_pre(line_text, content_w.saturating_sub(2)).len();
+                }
+                row += 1;
             }
-            row += table_height(&lines[start..idx], content_w);
-            continue;
-        }
-        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
-            let h = &trimmed[hashes + 1..];
-            row += wrap_with_map(h, hashes + 1, trimmed.len(), content_w).len();
-        } else if trimmed == ">" || trimmed.starts_with("> ") {
-            while idx < lines.len()
-                && (lines[idx].trim() == ">" || lines[idx].trim().starts_with("> "))
-            {
-                // Intentionally not pre-incrementing in the condition: handled below.
-                let qtrimmed = lines[idx].trim_end();
-                let body = qtrimmed.strip_prefix("> ").unwrap_or_default();
-                if body.is_empty() {
-                    row += 1;
-                } else {
-                    let prefix_len = qtrimmed.len() - body.len();
+            MdBlock::Table { header, aligns, rows, .. } => {
+                let cell_text = |c: &MdCell| text[c.src.clone()].trim().to_string();
+                let header_txt: Vec<String> = header.iter().map(&cell_text).collect();
+                let data_txt: Vec<Vec<String>> = rows
+                    .iter()
+                    .map(|r| r.iter().map(&cell_text).collect())
+                    .collect();
+                row += table_height_cells(&header_txt, &data_txt, &aligns, content_w);
+            }
+            MdBlock::Heading { content_start, src, .. } => {
+                let trimmed = text[src.clone()].trim_end();
+                let h = text[content_start..src.end].trim_end();
+                row += wrap_with_map(h, content_start - src.start, trimmed.len(), content_w).len();
+            }
+            MdBlock::Quote { lines, .. } => {
+                for ql in &lines {
+                    if ql.spans.is_empty() {
+                        row += 1;
+                        continue;
+                    }
+                    let qtrimmed = text[ql.src.clone()].trim_end();
+                    let body = &qtrimmed[ql.prefix_len..];
                     row += wrap_with_map(
                         body,
-                        prefix_len,
+                        ql.prefix_len,
                         qtrimmed.len(),
                         content_w.saturating_sub(2),
                     )
                     .len();
                 }
-                idx += 1;
             }
-            continue;
-        } else {
-            let mapped = inline_spans_mapped(raw, Theme::default(), Style::default());
-            let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
-            let line = Line::from(spans);
-            row += prim::wrap_line_styled(&line, content_w).len();
+            MdBlock::Paragraph { src, .. } => {
+                let raw = text[src.clone()].trim_end();
+                let mapped = inline_spans_mapped(raw, t, base);
+                let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
+                let line = Line::from(spans);
+                row += prim::wrap_line_styled(&line, content_w).len();
+            }
         }
-        idx += 1;
     }
     row
 }
-
-/// Count the visual rows a `|`-table would occupy, mirroring `render_table` +
+/// Count the visual rows a table would occupy, mirroring `render_table` +
 /// `table_row` without allocating the styled grid. Used by `markdown_body_height`.
-fn table_height(tlines: &[&str], content_w: usize) -> usize {
-    let header = parse_table_row(tlines[0]);
+/// Shares the exact column-width and row-group math with `render_table`.
+fn table_height_cells(
+    header: &[String],
+    data: &[Vec<String>],
+    aligns: &[Align],
+    content_w: usize,
+) -> usize {
     let n_cols = header.len();
     if n_cols == 0 {
         return 0;
     }
-    let data: Vec<Vec<String>> = tlines[2..].iter().map(|l| parse_table_row(l)).collect();
     let t = Theme::default();
     let base = Style::new().fg(t.fg);
 
@@ -957,7 +1229,7 @@ fn table_height(tlines: &[&str], content_w: usize) -> usize {
     for (i, cell) in header.iter().enumerate() {
         col_w[i] = col_w[i].max(rendered_width(cell, t, base));
     }
-    for row in &data {
+    for row in data {
         for (i, cell) in row.iter().enumerate().take(n_cols) {
             col_w[i] = col_w[i].max(rendered_width(cell, t, base));
         }
@@ -970,10 +1242,14 @@ fn table_height(tlines: &[&str], content_w: usize) -> usize {
         let natural = col_w.iter().sum::<usize>().max(1);
         let mut assigned = 0usize;
         for cw in col_w.iter_mut().take(n_cols - 1) {
-            *cw = (*cw * avail / natural).max(1);
+            *cw = ((*cw * avail) / natural).max(1);
             assigned += *cw;
         }
-        col_w[n_cols - 1] = avail.saturating_sub(assigned).max(1);
+        if n_cols > 1 {
+            col_w[n_cols - 1] = avail.saturating_sub(assigned).max(1);
+        } else {
+            col_w[0] = avail.max(1);
+        }
     }
 
     // A row group occupies the tallest wrapped cell across its columns.
@@ -992,7 +1268,7 @@ fn table_height(tlines: &[&str], content_w: usize) -> usize {
     };
 
     let mut rows = 1; // top border
-    rows += row_group(&header);
+    rows += row_group(header);
     rows += 1; // header separator
     for (i, row) in data.iter().enumerate() {
         rows += row_group(row);
@@ -2827,7 +3103,23 @@ mod tests {
     fn analyze_blocks(src: &str) -> Vec<MdBlock> {
         analyze(src, Theme::default(), Style::default())
     }
-
+    #[test]
+    fn tdiff() {
+        let cases = [
+            "table+code", // placeholder
+        ];
+        let _ = cases;
+        let full = "|------|------|------|\n|------|------|------|\nlet x = 42; // code\n\n# h1\n###### h6\n**bold** inline and *italic* too\n> quote with enough content to wrap across multiple visual lines\n> quote single line\n| long-cell-content-that-wraps | another | c |\n[link text](https://example.com/some/path) and trailing";
+        // binary search: prefix up to each newline
+        let lines: Vec<&str> = full.split('\n').collect();
+        for end in 1..=lines.len() {
+            let part = lines[..end].join("\n");
+            let r = render_markdown_body(&part, Theme::default(), 7, 5, Style::default(), |_| vec![]).len();
+            let h = markdown_body_height(&part, 5);
+            if r!=h { eprintln!("FIRST-DIVERGE at {} lines: render={} height={}\n---\n{}\n---", end, r, h, part); break; }
+        }
+        panic!("x");
+    }
     #[test]
     fn analyze_empty_yields_no_blocks() {
         assert!(analyze_blocks("").is_empty());
@@ -2949,6 +3241,7 @@ mod tests {
         let kinds: Vec<&str> = blocks
             .iter()
             .map(|b| match b {
+                MdBlock::Blank { .. } => "blank",
                 MdBlock::Paragraph { .. } => "para",
                 MdBlock::Heading { .. } => "heading",
                 MdBlock::Code { .. } => "code",
@@ -2956,7 +3249,11 @@ mod tests {
                 MdBlock::Quote { .. } => "quote",
             })
             .collect();
-        assert_eq!(kinds, ["heading", "para", "quote", "code"]);
+        // Blank source lines between blocks are preserved as explicit blocks.
+        assert_eq!(
+            kinds,
+            ["heading", "blank", "para", "blank", "quote", "blank", "code"]
+        );
     }
 
     #[test]
