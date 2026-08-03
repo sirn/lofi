@@ -287,16 +287,16 @@ fn bind_skills_tools<'js>(
         "skills",
         Function::new(
             ctx.clone(),
-            Async(move |search: Option<String>| {
+            Async(move |search: Opt<String>| {
                 let t = t1.clone();
                 async move {
                     let id = t.next_tool_id();
                     t.emit(ToolEvent::Start {
                         id,
                         name: "skills".into(),
-                        args: search.clone().unwrap_or_default(),
+                        args: search.0.clone().unwrap_or_default(),
                     });
-                    let res = t.skills(search.as_deref()).await;
+                    let res = t.skills(search.0.as_deref()).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
