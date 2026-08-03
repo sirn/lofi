@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pulldown_cmark::{Event, Options as MdOptions, Parser as MdParser, Tag as MdTag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
@@ -614,115 +615,102 @@ struct MappedSpan {
     link: Option<Arc<str>>,
 }
 
+/// Render one source line to styled spans with source-offset tracking, using
+/// `pulldown-cmark` for `CommonMark` inline parsing. Unterminated markers stay
+/// literal (the parser emits them as text until a closer exists), so a
+/// still-growing streamed line keeps the same laid-out width until its span
+/// closes — the marker characters, never a reflow of settled rows.
 fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
-    let mut out = Vec::new();
-    let mut rest = line;
-    let mut pos = 0usize;
-    while let Some(start) = rest.find('`') {
-        if start > 0 {
-            out.extend(parse_markers_mapped(&rest[..start], pos, base, None));
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find('`') {
-            // Pad the code tile with one space on each side (styled with the
-            // same inline-bg) so adjacent text doesn't touch the tile and the
-            // layout doesn't shift when a code span appears/disappears.
-            let padded = format!(" {} ", &after[..end]);
-            out.push(MappedSpan {
-                span: Span::styled(padded, code_style),
-                content_start: pos + start + 1,
-                boundary_start: pos + start,
-                link: None,
-            });
-            pos += start + 1 + end + 1;
-            rest = &after[end + 1..];
-        } else {
-            out.extend(parse_markers_mapped(rest, pos, base, None));
-            return nonempty_mapped(out);
+    let mut out: Vec<MappedSpan> = Vec::new();
+    // Active inline formatting, outermost first. Each entry carries the byte
+    // offset of its opening marker so nested content snaps its selection
+    // boundary to the outermost open, plus the modifier and link it applies.
+    let mut fmt_stack: Vec<(usize, Modifier, Option<Arc<str>>)> = Vec::new();
+
+    let current_style = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
+        fmt_stack.iter().fold(base, |style, (_, m, _)| style.add_modifier(*m))
+    };
+    let current_link = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
+        fmt_stack.iter().rev().find_map(|(_, _, l)| l.clone())
+    };
+    let boundary_of = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)], fallback: usize| {
+        fmt_stack.first().map_or(fallback, |(open, _, _)| *open)
+    };
+
+    let parser = MdParser::new_ext(line, MdOptions::ENABLE_STRIKETHROUGH);
+    for (event, range) in parser.into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                let (modifier, link) = match &tag {
+                    MdTag::Strong => (Some(Modifier::BOLD), None),
+                    MdTag::Emphasis => {
+                        // `_` is lofi's underline, `*` is italic; both parse
+                        // to `Emphasis`, so disambiguate by the opening marker.
+                        let m = if line[range.start..].starts_with('_') {
+                            Modifier::UNDERLINED
+                        } else {
+                            Modifier::ITALIC
+                        };
+                        (Some(m), None)
+                    }
+                    MdTag::Strikethrough => (Some(Modifier::CROSSED_OUT), None),
+                    MdTag::Link { dest_url, .. } => {
+                        // Only hyperlink safe URLs (non-empty, no control or
+                        // whitespace); an unsafe destination renders as plain
+                        // underlined text without a clickable target.
+                        let url = dest_url.as_ref();
+                        let link = is_safe_link_url(url).then(|| Arc::from(url));
+                        (Some(Modifier::UNDERLINED), link)
+                    }
+                    _ => (None, None),
+                };
+                if modifier.is_some() || link.is_some() {
+                    fmt_stack.push((range.start, modifier.unwrap_or(Modifier::empty()), link));
+                }
+            }
+            Event::End(tag) => {
+                let pops = match tag {
+                    TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => 1,
+                    _ => 0,
+                };
+                for _ in 0..pops {
+                    fmt_stack.pop();
+                }
+            }
+            Event::Code(code) => {
+                // Content-only (no backticks, no padding): the tile width is
+                // stable across the span boundary, matching Pi.
+                out.push(MappedSpan {
+                    span: Span::styled(code.to_string(), code_style),
+                    content_start: range.start + 1,
+                    boundary_start: range.start,
+                    link: None,
+                });
+            }
+            Event::Text(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(MappedSpan {
+                    span: Span::styled(text.to_string(), current_style(&fmt_stack)),
+                    content_start: range.start,
+                    boundary_start: boundary_of(&fmt_stack, range.start),
+                    link: current_link(&fmt_stack),
+                });
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                out.push(MappedSpan {
+                    span: Span::raw(" "),
+                    content_start: range.start,
+                    boundary_start: boundary_of(&fmt_stack, range.start),
+                    link: current_link(&fmt_stack),
+                });
+            }
+            _ => {}
         }
     }
-    out.extend(parse_markers_mapped(rest, pos, base, None));
     nonempty_mapped(out)
-}
-
-/// [`parse_markers`] with source-offset tracking. `base` is the byte offset
-/// of `text` within the source line; `pending_open` carries the byte offset
-/// of an enclosing marker so the first span of an inner group snaps its
-/// boundary to it (nested markers include the outermost open).
-fn parse_markers_mapped(
-    text: &str,
-    base: usize,
-    style: Style,
-    pending_open: Option<usize>,
-) -> Vec<MappedSpan> {
-    if let Some((open, label, url, close)) = find_markdown_link(text) {
-        let before = &text[..open];
-        let after = &text[close..];
-        let mut out = parse_markers_mapped(before, base, style, pending_open);
-        let link: Arc<str> = url;
-        let mut label_spans = parse_markers_mapped(
-            label,
-            base + open + 1,
-            style.add_modifier(Modifier::UNDERLINED),
-            Some(base + open),
-        );
-        for span in &mut label_spans {
-            span.link = Some(link.clone());
-        }
-        out.extend(label_spans);
-        out.extend(parse_markers_mapped(after, base + close, style, None));
-        return out;
-    }
-
-    for (marker, modifier, check) in [
-        ("**", Modifier::BOLD, false),
-        ("__", Modifier::BOLD, true),
-        ("~~", Modifier::CROSSED_OUT, false),
-        ("*", Modifier::ITALIC, false),
-        ("_", Modifier::UNDERLINED, true),
-    ] {
-        let Some(open) = find_marker(text, marker, check, true) else {
-            continue;
-        };
-        let after_open = &text[open + marker.len()..];
-        if let Some(close) = find_marker(after_open, marker, check, false) {
-            let before = &text[..open];
-            let inner = &after_open[..close];
-            let after = &after_open[close + marker.len()..];
-            let open_pos = base + open;
-            let inner_base = base + open + marker.len();
-            let after_base = inner_base + close + marker.len();
-            // The first span of `inner` snaps to the marker open. If `before`
-            // is empty, inherit the enclosing pending_open so a nested
-            // marker's outermost open is preserved.
-            let inner_pending = if before.is_empty() {
-                pending_open.or(Some(open_pos))
-            } else {
-                Some(open_pos)
-            };
-            let mut out = Vec::new();
-            out.extend(parse_markers_mapped(before, base, style, pending_open));
-            out.extend(parse_markers_mapped(
-                inner,
-                inner_base,
-                style.add_modifier(modifier),
-                inner_pending,
-            ));
-            out.extend(parse_markers_mapped(after, after_base, style, None));
-            return out;
-        }
-    }
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![MappedSpan {
-            span: Span::styled(text.to_string(), style),
-            content_start: base,
-            boundary_start: pending_open.unwrap_or(base),
-            link: None,
-        }]
-    }
 }
 
 fn nonempty_mapped(mut spans: Vec<MappedSpan>) -> Vec<MappedSpan> {
@@ -1109,71 +1097,6 @@ fn align_spans(
     }
 }
 
-fn find_markdown_link(text: &str) -> Option<(usize, &str, Arc<str>, usize)> {
-    let mut search = 0usize;
-    while let Some(relative_open) = text[search..].find('[') {
-        let open = search + relative_open;
-        if text[..open].ends_with('!') {
-            search = open + 1;
-            continue;
-        }
-        let after_open = &text[open + 1..];
-        let label_end_rel = after_open.find("](")?;
-        let label_end = open + 1 + label_end_rel;
-        let destination_start = label_end + 2;
-        let bytes = text.as_bytes();
-        let mut depth = 1usize;
-        let mut escaped = false;
-        let mut close = destination_start;
-        while close < bytes.len() {
-            let byte = bytes[close];
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'(' {
-                depth += 1;
-            } else if byte == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            close += 1;
-        }
-        if depth != 0 {
-            return None;
-        }
-
-        let destination = text[destination_start..close].trim();
-        let destination = if let Some(angle) = destination.strip_prefix('<') {
-            angle.split_once('>').map_or("", |(url, _)| url)
-        } else {
-            destination.split_whitespace().next().unwrap_or_default()
-        };
-        let url = unescape_link_destination(destination);
-        if is_safe_link_url(&url) {
-            return Some((open, &text[open + 1..label_end], Arc::from(url), close + 1));
-        }
-        search = open + 1;
-    }
-    None
-}
-
-fn unescape_link_destination(destination: &str) -> String {
-    let mut out = String::with_capacity(destination.len());
-    let mut chars = destination.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
 
 fn is_safe_link_url(url: &str) -> bool {
     !url.is_empty() && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace())
@@ -1233,32 +1156,6 @@ fn split_links_by_rows(
         row_start = row_end;
     }
     out
-}
-
-fn find_marker(text: &str, marker: &str, check: bool, is_open: bool) -> Option<usize> {
-    let mut search = 0;
-    while let Some(rel) = text[search..].find(marker) {
-        let pos = search + rel;
-        if check {
-            let ok = if is_open {
-                text[..pos]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !c.is_alphanumeric())
-            } else {
-                text[pos + marker.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !c.is_alphanumeric())
-            };
-            if !ok {
-                search = pos + marker.len();
-                continue;
-            }
-        }
-        return Some(pos);
-    }
-    None
 }
 
 struct Thinking<'a> {
