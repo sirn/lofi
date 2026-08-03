@@ -751,6 +751,17 @@ impl App {
                 blocks: Vec::new(),
             });
         }
+        // A file-backed turn renders from disk on demand; appending the
+        // compaction marker to its empty live shell would make that lone block
+        // the turn's entire live content, so the renderer stops re-reading the
+        // real response from disk and the transcript collapses to just the
+        // marker. Hydrate the turn first so the marker appends to, rather than
+        // replaces, the visible content.
+        let last = self.turns.len().saturating_sub(1);
+        let hydrated = (*self.materialize_turn(last)).clone();
+        if let Some(turn) = self.turns.get_mut(last) {
+            turn.blocks = hydrated.blocks;
+        }
         self.apply_event(event);
         self.bump_render_epoch();
         self.debug_sample("compaction");
