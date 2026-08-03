@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Per-round tuneables that callers usually leave unset. Grouping them keeps
+/// [`Agent::run_once_inner`] (and the public entry points that forward to it)
+/// under the argument-count lint without a long `None`-studded call shape.
+#[derive(Default, Clone)]
+struct RoundOpts<'a> {
+    recall: Option<RecallFn>,
+    result: Option<ResultFn>,
+    cancel: Option<&'a Arc<AtomicBool>>,
+    prev_input_tokens: Option<u64>,
+}
+
 impl Agent {
     /// Seeds a fresh `[User]` history and drives [`Self::run_once`] in a loop.
     /// The system prompt is pinned on the durable transcript by the lifecycle
@@ -32,7 +43,7 @@ impl Agent {
                 return Ok(());
             }
             let finished = match self
-                .run_once_inner(&mut messages, Some(&tx), None, None, None, None, None)
+                .run_once_inner(&mut messages, Some(&tx), None, RoundOpts::default())
                 .await
             {
                 Ok(f) => f,
@@ -152,10 +163,12 @@ impl Agent {
                     &mut *messages,
                     Some(&tx),
                     Some(&mut stats),
-                    recall.clone(),
-                    result.clone(),
-                    cancel.as_ref(),
-                    prev_input,
+                    RoundOpts {
+                        recall: recall.clone(),
+                        result: result.clone(),
+                        cancel: cancel.as_ref(),
+                        prev_input_tokens: prev_input,
+                    },
                 )
                 .await;
             if round.is_ok() && retry_attempt > 0 {
@@ -403,7 +416,7 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None, None, None, None, None)
+        self.run_once_inner(messages, None, None, RoundOpts::default())
             .await
     }
 
@@ -421,11 +434,14 @@ impl Agent {
         messages: &mut Vec<Message>,
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
-        recall: Option<RecallFn>,
-        result: Option<ResultFn>,
-        cancel: Option<&Arc<AtomicBool>>,
-        prev_input_tokens: Option<u64>,
+        opts: RoundOpts<'_>,
     ) -> Result<bool> {
+        let RoundOpts {
+            recall,
+            result,
+            cancel,
+            prev_input_tokens,
+        } = opts;
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
         // Clip the output cap against remaining context so strict providers
