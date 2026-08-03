@@ -6949,3 +6949,210 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
         _ => true,
     }));
 }
+
+/// Stream a long assistant message in chunks into a pinned (tail-following)
+/// viewport and assert that no content line that was already on screen
+/// disappears between consecutive frames. A disappearance means the top
+/// anchor recomputed inconsistently — the "popping" seen during streaming.
+#[test]
+fn streaming_long_text_never_drops_visible_lines() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn rows(term: &Terminal<TestBackend>) -> Vec<String> {
+        let area = term.backend().buffer().area;
+        let buf = term.backend().buffer();
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    let mut a = app();
+    a.run = Some(0);
+    a.run_start = Some(Instant::now());
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "stream a long reply".to_string(),
+    });
+    // A thinking phase first, finalized before text streams: mirrors a real
+    // reasoning turn where the "Thinking..." block precedes the body.
+    a.apply_event(AgentEvent::Thinking("working through it".to_string()));
+    a.apply_event(AgentEvent::ThinkingEnd { elapsed_ms: 1200 });
+
+    // A long multi-paragraph body streamed in chunks.
+    let full: String = (0..24)
+        .map(|i| format!("paragraph {i} with enough words to wrap onto several visual rows in a narrow viewport"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let mut term = Terminal::new(TestBackend::new(50, 18)).unwrap();
+    let mut prev: Vec<String> = Vec::new();
+    let chunk = full.len() / 24;
+    let mut idx = 0usize;
+    while idx < full.len() {
+        let end = (idx + chunk).min(full.len());
+        let delta = full[idx..end].to_string();
+        a.apply_event(AgentEvent::Text(delta));
+        term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+        let cur = rows(&term);
+        // Every wrapped body row visible last frame must still be visible
+        // this frame; order may shift, presence must not.
+        for line in &prev {
+            let t = line.trim();
+            if t.is_empty() || !t.starts_with("paragraph") {
+                continue;
+            }
+            let still = cur.iter().any(|l| l.trim() == t);
+            assert!(
+                still,
+                "line popped out between frames: {t:?}\nprev:\n{}\ncur:\n{}",
+                prev.join("\n"),
+                cur.join("\n")
+            );
+        }
+        prev = cur;
+        idx = end;
+    }
+    a.run = None;
+}
+
+/// `render_turn_height` must equal the number of rows `render_turn_lines`
+/// (and a full-range `render_turn_window`) actually emit for the same turn at
+/// the same width. The viewport total and per-turn skip logic are computed
+/// from heights; any disagreement shifts every row below and is the "popping"
+/// seen during streaming.
+#[test]
+fn turn_height_matches_emitted_line_count() {
+    use crate::tui::view::blocks::{render_turn_height, render_turn_lines, render_turn_window};
+    use crate::tui::view::component::Cx;
+
+    let long_text: String = (0..20)
+        .map(|i| format!("paragraph {i} with enough words to wrap onto several visual rows in a narrow viewport"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    for active in [false, true] {
+        for w in [28usize, 50, 90, 120] {
+            for has_thinking in [false, true] {
+                let mut a = app();
+                let mut blocks = Vec::new();
+                if has_thinking {
+                    blocks.push(Block::Thinking(ThinkingBlock {
+                        text: "reasoning about the answer".to_string(),
+                        start: Instant::now(),
+                        elapsed: Some(Duration::from_millis(1200)),
+                    }));
+                }
+                blocks.push(Block::Text(long_text.clone()));
+                blocks.push(Block::Tool(ToolCall {
+                    id: "exec-1".to_string(),
+                    name: "exec".to_string(),
+                    input: "await lofi.bash({ cmd: \"seq 1 40\" })".to_string(),
+                    label: None,
+                    native: vec![NativeTool {
+                        id: 1,
+                        name: "bash".to_string(),
+                        args: "seq 1 40".to_string(),
+                        result: Some((1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join("\n")),
+                        preview: None,
+                        is_error: false,
+                        done: true,
+                    }],
+                    result: Some((1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join("\n")),
+                    result_committed: false,
+                    is_error: false,
+                    done: true,
+                    elapsed: Some(Duration::from_millis(120)),
+                }));
+                let turn = Turn {
+                    prompt: "a long conversation turn".to_string(),
+                    blocks,
+                };
+                let theme = a.theme;
+                let cx = Cx {
+                    app: &a,
+                    theme,
+                    width: w,
+                    active_turn: active,
+                };
+                let h = render_turn_height(&cx, &turn);
+                let n_lines = render_turn_lines(&cx, &turn).len();
+                assert_eq!(
+                    h, n_lines,
+                    "height {h} != emitted lines {n_lines} (w={w}, active={active}, thinking={has_thinking})"
+                );
+                let n_window = render_turn_window(&cx, &turn, 0..h).len();
+                assert_eq!(
+                    n_lines, n_window,
+                    "full window {n_window} != lines {n_lines} (w={w}, active={active}, thinking={has_thinking})"
+                );
+            }
+        }
+    }
+}
+
+/// Streaming inline markdown must not rewrap a row that already settled.
+/// Inline code tiles are padded with a space on each side once the closing
+/// backtick arrives, so a row containing a not-yet-closed `` ` `` lays out
+/// wider (literal backtick) than the same row once the span completes. The
+/// row narrows and words jump — the mid-sentence "pop" seen while streaming.
+#[test]
+fn streaming_inline_code_does_not_rewrap_settled_rows() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    // Words stream in one at a time. A code span `alpha beta gamma` opens
+    // partway through and closes several words later; the surrounding text is
+    // long enough that the code span straddles a wrap boundary at width 40.
+    let words = [
+        "the", "quick", "brown", "fox", "jumps", "over", "`alpha", "beta",
+        "gamma`", "and", "keeps", "running", "toward", "the", "lazy", "dog",
+        "without", "stopping", "for", "anything", "at", "all", "today",
+    ];
+
+    let w = 40usize;
+    let mut a = app();
+    let theme = a.theme;
+
+    let mut text = String::new();
+    let mut prev_rows: Vec<String> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            text.push(' ');
+        }
+        text.push_str(word);
+        let cx = Cx {
+            app: &a,
+            theme,
+            width: w,
+            active_turn: true,
+        };
+        let turn = Turn {
+            prompt: String::new(),
+            blocks: vec![Block::Text(text.clone())],
+        };
+        let rows: Vec<String> = render_turn_lines(&cx, &turn)
+            .iter()
+            .map(|rl| {
+                rl.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            })
+            .collect();
+        // Rows before the current last row are settled text: a previously
+        // emitted row must not change its rendered width once it exists.
+        // (The final row is the one still being typed and may legitimately
+        // grow.)
+        let settled = rows.len().saturating_sub(1);
+        for r in 0..settled.min(prev_rows.len().saturating_sub(1)) {
+            let before = prev_rows[r].trim_end();
+            let after = rows[r].trim_end();
+            assert_eq!(
+                before, after,
+                "settled row {r} changed after word {i} ({word:?})\nbefore: {before:?}\nafter:  {after:?}\nfull text so far: {text:?}"
+            );
+        }
+        prev_rows = rows;
+    }
+}
