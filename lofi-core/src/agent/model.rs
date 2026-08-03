@@ -72,7 +72,9 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
         sections.push((dir, body));
     }
 
-    if sections.is_empty() {
+    let skills_block = skills_section(config_dir, root);
+
+    if sections.is_empty() && skills_block.is_none() {
         return SYSTEM_PROMPT.to_string();
     }
     let mut out = String::from(SYSTEM_PROMPT);
@@ -83,7 +85,35 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
         out.push_str(body.trim());
         out.push_str("\n</agents_md>");
     }
+    if let Some(block) = skills_block {
+        out.push_str("\n\n");
+        out.push_str(&block);
+    }
     out
+}
+
+/// Build the `<skills>` index the model reads with `lofi.skill(name)`, listing
+/// each available skill's name and one-line description. Returns `None` when
+/// no skills are installed, so the prompt never carries an empty index.
+fn skills_section(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> Option<String> {
+    let skills_dir = config_dir.map(|d| d.join("skills"));
+    let summaries =
+        lofi_code::tools::skills::scan_skill_summaries(root, skills_dir.as_deref()).ok()?;
+    if summaries.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "<skills>\n  <instruction>\n    Available skills. Read one with `lofi.skill(name)` before\n    following it.\n  </instruction>\n",
+    );
+    for s in summaries {
+        out.push_str("  <skill>\n    <name>");
+        out.push_str(&s.name);
+        out.push_str("</name>\n    <description>");
+        out.push_str(&s.description);
+        out.push_str("</description>\n  </skill>\n");
+    }
+    out.push_str("</skills>");
+    Some(out)
 }
 
 fn read_agents_md(path: &std::path::Path) -> Option<String> {
@@ -375,6 +405,43 @@ mod tests {
         fs::create_dir_all(&cfg).unwrap();
         let prompt = assemble_system_prompt(Some(&cfg), &root);
         assert_eq!(prompt, SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn skills_index_appended_with_name_and_description() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "").unwrap();
+        let cfg = tmp.path().join("config");
+        let skill_dir = cfg.join("skills").join("git-workflow");
+        fs::create_dir_all(&skill_dir).unwrap();
+        write(
+            &skill_dir.join("SKILL.md"),
+            "# Git Workflow\n\nStandard branching workflow.\n",
+        );
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        assert!(prompt.starts_with(SYSTEM_PROMPT));
+        assert!(prompt.contains("<skills>"));
+        assert!(prompt.contains("<instruction>"));
+        assert!(prompt.contains("</instruction>"));
+        assert!(prompt.contains("<name>git-workflow</name>"));
+        assert!(prompt.contains("<description>Standard branching workflow.</description>"));
+        assert!(prompt.contains("lofi.skill"));
+    }
+
+    #[test]
+    fn no_skills_means_no_skills_block() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "").unwrap();
+        let cfg = tmp.path().join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        let prompt = assemble_system_prompt(Some(&cfg), &root);
+        // The base prompt references a `<skills>` index in prose; assert the
+        // actual index block (which opens on its own line) is absent.
+        assert!(!prompt.contains("\n<skills>"));
     }
 
     #[test]
