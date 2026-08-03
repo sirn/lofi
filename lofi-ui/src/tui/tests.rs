@@ -7195,3 +7195,87 @@ fn streaming_inline_link_does_not_rewrap_settled_rows() {
         "link",
     );
 }
+
+
+
+
+
+
+
+
+/// Regression: /compact must not collapse the transcript to the last user
+/// prompt. A file-backed resumed turn renders its content lazily from disk;
+/// appending the compaction marker to its empty live shell used to make that
+/// lone block the turn's entire live content, so the renderer stopped
+/// re-reading the response from disk until the next prompt re-froze the turn.
+#[test]
+fn compact_keeps_file_backed_turn_content_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("s"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+
+    let mut evs = vec![SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::Message(Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "prompt 1".to_string(),
+            }],
+        }),
+    }];
+    for i in 0..6 {
+        evs.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: format!("agent round {i}"),
+                }],
+            }),
+        });
+    }
+    evs.push(SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 1,
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    });
+    test_append_events(&path, &mut evs, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store.clone(),
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    let c0 = a.session.cursor.as_ref().unwrap().clone();
+    let snap = c0.snapshot().unwrap();
+    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
+        .unwrap();
+    a.lifecycle.restore_history(&c0, &snap.index).unwrap();
+
+    assert!(a.compact_now());
+
+    // The turn must still materialize its full pre-compaction content, with
+    // the compaction marker appended rather than replacing it.
+    let rendered = a.materialize_turn(0);
+    assert!(
+        rendered.blocks.iter().any(|b| matches!(b, Block::Text(t) if t.contains("agent round"))),
+        "compacted turn lost its assistant content: {:?}",
+        rendered.blocks.len()
+    );
+    assert!(
+        rendered.blocks.iter().any(|b| matches!(b, Block::Compaction { .. })),
+        "compaction marker missing"
+    );
+}
