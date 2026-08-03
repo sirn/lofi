@@ -19,8 +19,8 @@ impl BuiltinTools {
     /// # Errors
     /// Returns an error when a configured skill root cannot be scanned safely.
     #[allow(clippy::unused_async)]
-    pub async fn skills(&self) -> Result<Value> {
-        let entries = self.scan_skills()?;
+    pub async fn skills(&self, search: Option<&str>) -> Result<Value> {
+        let entries = self.scan_skills(search)?;
         Ok(json!({ "ok": true, "skills": entries }))
     }
 
@@ -54,7 +54,7 @@ impl BuiltinTools {
         Err(Error::Tool(format!("skill `{name}` not found")))
     }
 
-    fn scan_skills(&self) -> Result<Vec<Value>> {
+    fn scan_skills(&self, search: Option<&str>) -> Result<Vec<Value>> {
         let mut map: std::collections::BTreeMap<String, (String, String, String)> =
             std::collections::BTreeMap::new();
 
@@ -71,8 +71,14 @@ impl BuiltinTools {
             )));
         }
 
+        let needle = search.map(str::to_lowercase);
         Ok(map
             .into_iter()
+            .filter(|(name, (desc, _, _))| {
+                needle.as_ref().is_none_or(|n| {
+                    name.to_lowercase().contains(n) || desc.to_lowercase().contains(n)
+                })
+            })
             .map(|(name, (desc, source, path))| {
                 json!({
                     "name": name,
@@ -165,6 +171,48 @@ impl BuiltinTools {
     }
 }
 
+/// One discovered skill: its `/`-separated name, one-line description, and
+/// origin (`workspace` or `global`).
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub location: String,
+}
+
+/// Scan the workspace and global skill roots for available skills, returning
+/// name/description/source for each. Mirrors [`BuiltinTools::skills`] but
+/// returns plain structs for prompt assembly (no JSON, no `BuiltinTools`).
+///
+/// # Errors
+/// Returns an error when a configured skill root cannot be scanned safely.
+pub fn scan_skill_summaries(
+    root: &Path,
+    skills_dir: Option<&Path>,
+) -> Result<Vec<SkillSummary>> {
+    let mut map: std::collections::BTreeMap<String, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    if let Some(dir) = skills_dir {
+        BuiltinTools::walk_skills(dir, "global", &mut map)?;
+    }
+    let ws_skills = root.join(".lofi").join("skills");
+    BuiltinTools::walk_skills(&ws_skills, "workspace", &mut map)?;
+    if map.len() > MAX_SKILLS {
+        return Err(Error::Tool(format!(
+            "skills: exceeded {MAX_SKILLS}-entry limit"
+        )));
+    }
+    Ok(map
+        .into_iter()
+        .map(|(name, (desc, source, path))| SkillSummary {
+            name,
+            description: desc,
+            source,
+            location: path,
+        })
+        .collect())
+}
+
 fn validate_skill_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Tool("skill: name must not be empty".into()));
@@ -254,7 +302,7 @@ mod tests {
             "# Git Workflow\n\nStandard branching and commit workflow.\n",
         );
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let skills_arr = v["skills"].as_array().unwrap();
@@ -278,7 +326,7 @@ mod tests {
             "# Rebase\n\nNested rebase skill.\n",
         );
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let skills_arr = v["skills"].as_array().unwrap();
@@ -299,7 +347,7 @@ mod tests {
             "# Deploy\n\nProject-specific deploy.\n",
         );
         let v = tools(dir.path(), Some(g_skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let skills_arr = v["skills"].as_array().unwrap();
@@ -314,9 +362,35 @@ mod tests {
     #[tokio::test]
     async fn skills_list_empty_when_no_dirs() {
         let dir = tempdir().unwrap();
-        let v = tools(dir.path(), None).skills().await.unwrap();
+        let v = tools(dir.path(), None).skills(None).await.unwrap();
         assert_eq!(v["skills"].as_array().unwrap().len(), 0);
     }
+    #[tokio::test]
+    async fn skills_search_filters_by_name_and_description() {
+        let dir = tempdir().unwrap();
+        let skills = tempdir().unwrap();
+        make_skill(skills.path(), "git-workflow", "# Git\n\nBranching help.\n");
+        make_skill(skills.path(), "deploy", "# Deploy\n\nShip to prod.\n");
+        make_skill(skills.path(), "review", "# Review\n\nRead a diff.\n");
+        let t = tools(dir.path(), Some(skills.path().to_path_buf()));
+
+        // Name match.
+        let v = t.skills(Some("git")).await.unwrap();
+        let arr = v["skills"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], json!("git-workflow"));
+
+        // Description match (case-insensitive).
+        let v = t.skills(Some("PROD")).await.unwrap();
+        let arr = v["skills"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], json!("deploy"));
+
+        // No match.
+        let v = t.skills(Some("nonexistent")).await.unwrap();
+        assert_eq!(v["skills"].as_array().unwrap().len(), 0);
+    }
+
 
     #[tokio::test]
     async fn skill_read_global() {
@@ -421,7 +495,7 @@ mod tests {
         std::fs::write(real.path().join(SKILL_FILE), "Symlinked skill.\n").unwrap();
         std::os::unix::fs::symlink(real.path(), skills.path().join("linked")).unwrap();
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let skills_arr = v["skills"].as_array().unwrap();
@@ -462,7 +536,7 @@ mod tests {
             "# Linting\n## Subsection\n\nRun clippy and fmt.\n",
         );
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let desc = v["skills"][0]["description"].as_str().unwrap();
@@ -475,7 +549,7 @@ mod tests {
         let skills = tempdir().unwrap();
         make_skill(skills.path(), "my-skill", "# Only Heading\n");
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let desc = v["skills"][0]["description"].as_str().unwrap();
@@ -490,7 +564,7 @@ mod tests {
         std::fs::write(skills.path().join("foo").join("README.md"), "not a skill\n").unwrap();
         make_skill(skills.path(), "bar", "a real skill\n");
         let v = tools(dir.path(), Some(skills.path().to_path_buf()))
-            .skills()
+            .skills(None)
             .await
             .unwrap();
         let skills_arr = v["skills"].as_array().unwrap();
