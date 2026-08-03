@@ -326,6 +326,10 @@ fn emit_code(
         let src: Arc<str> = Arc::from(line_text.as_str());
         let indent_len = line_text.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
         let body = &line_text[indent_len..];
+        // Byte offsets of every char boundary within `body`, including the end.
+        // Indexing past the recorded boundary (a wrap segment wider than the
+        // remaining body) clamps to `body.len()`, a valid boundary, so the map
+        // never yields a mid-UTF8 or out-of-range source offset.
         let body_offs: Vec<usize> = std::iter::once(0)
             .chain(body.char_indices().map(|(b, c)| b + c.len_utf8()))
             .collect();
@@ -335,7 +339,14 @@ fn emit_code(
         for (i, seg) in segments.into_iter().enumerate() {
             let body_chars = seg.chars().count().saturating_sub(indent_chars);
             let map: Vec<usize> = (0..=body_chars)
-                .map(|k| indent_len + body_offs.get(cum + k).copied().unwrap_or(body.len()))
+                .map(|k| {
+                    let byte = body_offs
+                        .get(cum + k)
+                        .copied()
+                        .unwrap_or(body.len())
+                        .min(body.len());
+                    indent_len + byte
+                })
                 .collect();
             out.push(
                 prim::rtile(
