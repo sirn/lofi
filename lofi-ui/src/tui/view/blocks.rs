@@ -3351,7 +3351,9 @@ mod tests {
     /// pool of construct patterns (headings, lists, quotes, code fences,
     /// tables, wrapping text, unicode, links) then joined. `markdown_body_height`
     /// must agree with `render_markdown_body(...).len()` for all of them, for
-    /// each probe width. This is the drift guard for the hand-mirror.
+    /// each probe width. Both walk the same `analyze()` tree; this guards that
+    /// the render and height paths never drift apart (the historical source of
+    /// transcript popping on scroll/resize).
     #[test]
     fn height_fuzz_seeded() {
         // Simple deterministic PRNG (xorshift64) — no external deps.
