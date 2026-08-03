@@ -1048,7 +1048,7 @@ fn split_paragraph_lines(
     let block = text[src.clone()].trim_end_matches('\n');
     if !block.contains('\n') {
         // Single line: keep spans as analyzed.
-        let spans = inline_spans_mapped(block.trim_end(), t, base);
+        let spans = line_spans(block.trim_end(), t, base);
         let mut spans = spans;
         for m in &mut spans {
             m.content_start += src.start;
@@ -1063,7 +1063,7 @@ fn split_paragraph_lines(
     for line in block.split('\n') {
         let trimmed = line.trim_end();
         let line_range = off..off + trimmed.len();
-        let spans = inline_spans_mapped(trimmed, t, base);
+        let spans = line_spans(trimmed, t, base);
         let mut spans = spans;
         for m in &mut spans {
             m.content_start += off;
@@ -1076,6 +1076,64 @@ fn split_paragraph_lines(
         }
         off += line.len() + 1;
     }
+}
+
+/// Byte length of the list marker (bullet or ordered) plus its trailing
+/// whitespace at the start of `line`, after any indentation. Returns 0 when
+/// the line does not open with a list marker.
+fn list_marker_len(line: &str) -> usize {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let rest = &line[indent..];
+    let after_bullet = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "));
+    if let Some(r) = after_bullet {
+        return indent + (rest.len() - r.len());
+    }
+    // Ordered list: `N.` or `N)` followed by a space.
+    let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len > 0 {
+        if let Some(r) = rest[digit_len..]
+            .strip_prefix(". ")
+            .or_else(|| rest[digit_len..].strip_prefix(") "))
+        {
+            return indent + (rest.len() - r.len());
+        }
+    }
+    0
+}
+
+/// Parse one source line into spans, preserving a leading list marker as
+/// literal text. The renderer is line-preserving: a list line such as
+/// `- item` must keep its `- ` prefix on screen, but `pulldown`'s block
+/// parser consumes the marker, so re-parsing the whole line would drop it.
+/// The marker is emitted verbatim and only the item body is inline-parsed.
+fn line_spans(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
+    let marker_len = list_marker_len(line);
+    if marker_len == 0 {
+        return inline_spans_mapped(line, t, base);
+    }
+    let marker = &line[..marker_len];
+    let body = &line[marker_len..];
+    let mut spans = Vec::with_capacity(2);
+    spans.push(MappedSpan {
+        span: Span::styled(marker.to_string(), Style::new().fg(t.muted)),
+        content_start: 0,
+        boundary_start: 0,
+        link: None,
+    });
+    if !body.is_empty() {
+        for m in inline_spans_mapped(body, t, base) {
+            spans.push(MappedSpan {
+                span: m.span,
+                content_start: m.content_start + marker_len,
+                boundary_start: m.boundary_start + marker_len,
+                link: m.link,
+            });
+        }
+    }
+    spans
 }
 
 /// Split a fenced code body into per-source-line strings with byte ranges.
@@ -1208,7 +1266,9 @@ fn markdown_body_height(text: &str, content_w: usize) -> usize {
             }
             MdBlock::Paragraph { src, .. } => {
                 let raw = text[src.clone()].trim_end();
-                let mapped = inline_spans_mapped(raw, t, base);
+                // Match the render path exactly: `line_spans` keeps a leading
+                // list marker literal, so a list line wraps to the same width.
+                let mapped = line_spans(raw, t, base);
                 let spans: Vec<Span> = mapped.into_iter().map(|m| m.span).collect();
                 let line = Line::from(spans);
                 row += prim::wrap_line_styled(&line, content_w).len();
@@ -3089,6 +3149,23 @@ mod tests {
     #[test]
     fn analyze_empty_yields_no_blocks() {
         assert!(analyze_blocks("").is_empty());
+    }
+
+    #[test]
+    fn list_lines_keep_their_markers() {
+        let rl = render_markdown_body(
+            "- Hello\n- World\n1. one\n2. two",
+            Theme::default(),
+            80,
+            78,
+            Style::default(),
+            |_| vec![],
+        );
+        let text: Vec<String> = rl
+            .iter()
+            .map(|l| l.line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text, ["- Hello", "- World", "1. one", "2. two"]);
     }
 
     #[test]
