@@ -7196,13 +7196,6 @@ fn streaming_inline_link_does_not_rewrap_settled_rows() {
     );
 }
 
-
-
-
-
-
-
-
 /// Regression: /compact must not collapse the transcript to the last user
 /// prompt. A file-backed resumed turn renders its content lazily from disk;
 /// appending the compaction marker to its empty live shell used to make that
