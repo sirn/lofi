@@ -962,6 +962,20 @@ pub(crate) async fn run(
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
+    // Restore the terminal before the default panic handler writes, so a crash
+    // surfaces on the normal screen instead of vanishing with the alternate
+    // screen the TUI tears down in `TerminalGuard::drop`.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        default_hook(info);
+    }));
     enable_raw_mode().map_err(Error::Io)?;
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
