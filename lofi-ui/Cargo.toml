@@ -16,6 +16,7 @@ crossterm = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 base64 = { workspace = true }
+pulldown-cmark = { workspace = true }
 dirs = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
