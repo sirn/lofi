@@ -251,8 +251,8 @@ fn render_markdown_body(
             MdBlock::Quote { lines, .. } => {
                 emit_quote(&mut out, &mut row, text, &lines, t, content_w, &lead_fn);
             }
-            MdBlock::Paragraph { src, .. } => {
-                emit_paragraph(&mut out, &mut row, text, &src, t, base_style, content_w, &lead_fn);
+            MdBlock::Paragraph { spans, src } => {
+                emit_paragraph(&mut out, &mut row, text, &spans, &src, content_w, &lead_fn);
             }
             MdBlock::Blank { src } => {
                 emit_blank(&mut out, &mut row, text, &src, &lead_fn);
@@ -501,14 +501,25 @@ fn emit_paragraph(
     out: &mut Vec<RenderLine>,
     row: &mut usize,
     text: &str,
+    block_spans: &[MappedSpan],
     src: &std::ops::Range<usize>,
-    t: Theme,
-    base_style: Style,
     content_w: usize,
     lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
 ) {
     let raw = text[src.clone()].trim_end();
-    let mapped = inline_spans_mapped(raw, t, base_style);
+    // Reuse the spans already produced by `analyze`'s single inline pass. They
+    // carry global source offsets; shift them to the block-local sub-slice so
+    // the content-map / hyperlink logic below works unchanged.
+    let base_off = src.start;
+    let mapped: Vec<MappedSpan> = block_spans
+        .iter()
+        .cloned()
+        .map(|mut m| {
+            m.content_start = m.content_start.saturating_sub(base_off);
+            m.boundary_start = m.boundary_start.saturating_sub(base_off);
+            m
+        })
+        .collect();
     let lead_ws = mapped
         .iter()
         .flat_map(|m| m.span.content.chars())
@@ -560,7 +571,6 @@ fn emit_paragraph(
 /// A table cell: inline content plus the source range it came from.
 #[derive(Clone)]
 struct MdCell {
-    spans: Vec<MappedSpan>,
     /// Source byte range of the cell text (without surrounding `|`/padding).
     src: std::ops::Range<usize>,
 }
@@ -588,7 +598,6 @@ enum MdBlock {
     },
     Heading {
         level: u8,
-        spans: Vec<MappedSpan>,
         src: std::ops::Range<usize>,
         /// Byte offset of the first content char (after the `# ` prefix).
         content_start: usize,
@@ -776,14 +785,8 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
             }),
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(BlockFrame::Heading { level, ext, src }) = stack.pop() {
-                    let spans = if ext.seen {
-                        inline_extent_spans(&ext, text, t, base)
-                    } else {
-                        Vec::new()
-                    };
                     blocks.push(MdBlock::Heading {
                         level,
-                        spans,
                         content_start: ext.start,
                         src,
                     });
@@ -868,13 +871,8 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
             Event::End(TagEnd::TableCell) => {
                 if let Some(BlockFrame::Table { cell, cur, .. }) = stack.last_mut() {
                     if let Some((cext, csrc)) = cell.take() {
-                        let spans = if cext.seen {
-                            inline_extent_spans(&cext, text, t, base)
-                        } else {
-                            Vec::new()
-                        };
                         let src = trimmed_range(text, &cext).unwrap_or(csrc);
-                        cur.push(MdCell { spans, src });
+                        cur.push(MdCell { src });
                     }
                 }
             }
@@ -3068,7 +3066,7 @@ use active_indicator as _;
 mod tests {
     use super::{
         analyze, markdown_body_height, native_body, native_preview_range, render_markdown_body,
-        trim_reasoning_summary, Align, MdBlock, MdCell,
+        trim_reasoning_summary, Align, MdBlock,
     };
     use crate::tui::theme::Theme;
     use crate::tui::NativeTool;
@@ -3104,15 +3102,14 @@ mod tests {
         match &blocks[0] {
             MdBlock::Heading {
                 level,
-                spans,
                 src: range,
                 content_start,
             } => {
                 assert_eq!(*level, 2);
                 assert_eq!(*range, 0..13);
                 assert_eq!(*content_start, 3); // after "## "
-                let text: String = spans.iter().map(|m| m.span.content.as_ref()).collect();
-                assert_eq!(text, "Title here");
+                // Content (after the `# ` prefix) slices back to the source.
+                assert_eq!(&src[*content_start..range.end], "Title here");
             }
             other => panic!("expected heading, got {:?}", std::mem::discriminant(other)),
         }
@@ -3157,11 +3154,6 @@ mod tests {
                 assert_eq!(rows[0].len(), 2);
                 assert!(matches!(aligns[0], Align::Left));
                 assert!(matches!(aligns[1], Align::Right));
-                let cell_text = |c: &MdCell| -> String {
-                    c.spans.iter().map(|m| m.span.content.as_ref()).collect()
-                };
-                assert_eq!(cell_text(&header[0]), "a");
-                assert_eq!(cell_text(&rows[0][1]), "2");
                 // Cell source ranges slice back to the raw cell text.
                 assert_eq!(&src[header[0].src.clone()], "a");
                 assert_eq!(&src[rows[0][1].src.clone()], "2");
