@@ -1214,3 +1214,44 @@ fn add_usage_falls_back_to_input_rate_when_cache_prices_unset() {
     );
     assert!((stats.cost - 6.0).abs() < 1e-9, "cost was {}", stats.cost);
 }
+
+#[test]
+fn clipped_max_tokens_respects_headroom() {
+    let root = tempdir().unwrap();
+    let mut agent = agent_with(Vec::new(), root.path());
+    agent.model.context_window = Some(100_000);
+    agent.model.max_tokens = Some(32_000);
+    // No prior usage: cap wins under headroom.
+    assert_eq!(agent.clipped_max_tokens(None), Some(32_000));
+    // Headroom above the cap: cap unchanged.
+    assert_eq!(agent.clipped_max_tokens(Some(50_000)), Some(32_000));
+    // Headroom below the cap: clip to headroom.
+    assert_eq!(agent.clipped_max_tokens(Some(90_000)), Some(10_000));
+    // No headroom: omit the field entirely.
+    assert_eq!(agent.clipped_max_tokens(Some(100_000)), None);
+}
+
+#[test]
+fn clipped_max_tokens_prefers_run_override() {
+    let root = tempdir().unwrap();
+    let mut agent = agent_with(Vec::new(), root.path());
+    agent.model.context_window = Some(100_000);
+    agent.model.max_tokens = Some(32_000);
+    agent.max_output_tokens = Some(8_000);
+    assert_eq!(agent.clipped_max_tokens(None), Some(8_000));
+    assert_eq!(agent.clipped_max_tokens(Some(95_000)), Some(5_000));
+}
+
+#[test]
+fn clipped_max_tokens_none_when_window_unknown() {
+    let root = tempdir().unwrap();
+    let mut agent = agent_with(Vec::new(), root.path());
+    agent.model.max_tokens = Some(32_000);
+    // No context_window: cannot compute headroom.
+    assert_eq!(agent.clipped_max_tokens(Some(10_000)), None);
+    agent.model.context_window = Some(100_000);
+    agent.model.max_tokens = None;
+    agent.max_output_tokens = None;
+    // No cap at all.
+    assert_eq!(agent.clipped_max_tokens(None), None);
+}
