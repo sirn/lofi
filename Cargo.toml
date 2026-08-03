@@ -53,6 +53,9 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 base64 = "0.22"
 
+# Markdown parsing (CommonMark) for transcript rendering.
+pulldown-cmark = { version = "0.13", default-features = false }
+
 # TypeScript sandbox: swc strip + QuickJS.
 rquickjs = { version = "0.9", features = ["full", "futures"] }
 swc_common = "5"
