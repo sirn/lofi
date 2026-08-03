@@ -796,9 +796,19 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
             }),
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(BlockFrame::Heading { level, ext, src }) = stack.pop() {
+                    // `InlineExtent` initializes `start` to 0 before any inline event is
+                    // observed. A bare heading marker (`#` alone, e.g. mid-stream) yields
+                    // no inline events, so `ext.start` is still 0 while `src.start > 0`,
+                    // and `content_start - src.start` would underflow. Clamp to the block
+                    // range: with no content the heading renders as one row regardless.
+                    let content_start = if ext.seen {
+                        ext.start.max(src.start)
+                    } else {
+                        src.start
+                    };
                     blocks.push(MdBlock::Heading {
                         level,
-                        content_start: ext.start,
+                        content_start,
                         src,
                     });
                 }
@@ -3356,6 +3366,30 @@ mod tests {
         assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
     }
 
+    #[test]
+    fn heading_content_start_never_precedes_block() {
+        // Bare ATX marker followed by more content: heading has no inline
+        // events, so `content_start` must clamp to the block range instead of
+        // the `InlineExtent` sentinel (0), which precedes `src.start`.
+        for c in ["foo\n# ", "foo\n#", "#\n", "## ", "#   "] {
+            for b in analyze_blocks(c) {
+                if let MdBlock::Heading { content_start, src, .. } = b {
+                    assert!(
+                        content_start >= src.start,
+                        "content_start {content_start} < src.start {} for {c:?}",
+                        src.start
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn height_matches_render_for_bare_heading() {
+        assert_height_matches("foo\n# ");
+        assert_height_matches("\n\n#\n");
+    }
+
     /// Reference height via the existing renderer: count the lines produced.
     fn reference_height(text: &str, content_w: usize) -> usize {
         render_markdown_body(
@@ -3484,6 +3518,11 @@ mod tests {
             "   ", // whitespace-only
             ">> nested quote marker doesn\u{2019}t exist as a concept but is fine as text",
             "text with *unclosed star and **unclosed bold",
+            "#   ", // bare ATX marker (empty heading)
+            "# ",
+            "## ",
+            "#
+",
             "",
         ];
 
