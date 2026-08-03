@@ -151,9 +151,13 @@ compaction elided.
 **Returns:** `string` — the raw content (a tool result's output text, or a
 tool call's input JSON). Cheap and on-demand.
 
-## lofi.skills()
+## lofi.skills(search?)
 
-List available skills.
+List available skills, optionally filtered.
+
+**Parameters:**
+- `search` (string, optional) — case-insensitive substring matched against each
+  skill's name and description. Omit to list all skills.
 
 **Returns:** `{ ok, skills }` — each entry is
 `{ name, description, source, path }`. `source` is `"global"` (from
