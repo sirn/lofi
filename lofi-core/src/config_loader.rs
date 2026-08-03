@@ -11,20 +11,26 @@ use std::path::{Path, PathBuf};
 use lofi_error::{Error, Result};
 use lofi_types::Config;
 
-/// Precedence: `$LOFI_CONFIG` (used verbatim as the full file path), then the
-/// platform default via [`dirs::config_dir`] (which honors `$XDG_CONFIG_HOME`
-/// on Linux and falls back to `~/.config`) with `lofi/config.toml` appended.
-/// If the platform's config dir cannot be resolved, fall back to `~/.config`.
+/// Precedence: `$LOFI_CONFIG` (used verbatim as the full file path), then
+/// `$XDG_CONFIG_HOME`, then `~/.config`, with `lofi/config.toml` appended.
+/// The XDG layout is used on macOS too: developer CLIs (git, nvim, fish,
+/// alacritty, ...) all read `~/.config` there, and the platform default
+/// [`dirs::config_dir`] would give (`~/Library/Application Support`) is meant
+/// for sandboxed GUI apps, so a config the user is expected to edit belongs in
+/// `~/.config`. This also keeps the config dir consistent with the state dir
+/// (`~/.local/state/lofi`, already XDG-style on every platform).
 /// # Errors
-/// Returns [`Error::Config`] only when no config base directory can be
-/// determined at all (e.g. `HOME` is unset) and `$LOFI_CONFIG` is not set.
+/// Returns [`Error::Config`] only when no `$XDG_CONFIG_HOME` and no `HOME` can
+/// be determined and `$LOFI_CONFIG` is not set.
 pub fn user_config_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("LOFI_CONFIG") {
         return Ok(PathBuf::from(p));
     }
-    let mut base = dirs::config_dir();
+    let mut base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
     if base.is_none() {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
             base = Some(PathBuf::from(home).join(".config"));
         }
     }
@@ -501,5 +507,33 @@ mod tests {
         std::env::set_var("LOFI_CONFIG", "tmp/config.toml");
         let p = user_config_path().unwrap();
         assert_eq!(p, std::path::PathBuf::from("tmp/config.toml"));
+    }
+
+    #[test]
+    fn xdg_config_home_is_used() {
+        let _g = env_lock();
+        let _l = capture_env("LOFI_CONFIG");
+        let _x = capture_env("XDG_CONFIG_HOME");
+        std::env::remove_var("LOFI_CONFIG");
+        std::env::set_var("XDG_CONFIG_HOME", "/xdg-conf");
+        let p = user_config_path().unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/xdg-conf/lofi/config.toml"));
+    }
+
+    #[test]
+    fn config_falls_back_to_home_dot_config() {
+        let _g = env_lock();
+        let _l = capture_env("LOFI_CONFIG");
+        let _x = capture_env("XDG_CONFIG_HOME");
+        std::env::remove_var("LOFI_CONFIG");
+        // An empty XDG_CONFIG_HOME is ignored per the XDG spec, so HOME drives
+        // the fallback. This is the macOS path (no platform config dir there).
+        std::env::set_var("XDG_CONFIG_HOME", "");
+        let home = std::env::var("HOME").expect("HOME must be set for tests");
+        let p = user_config_path().unwrap();
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(home).join(".config/lofi/config.toml")
+        );
     }
 }
