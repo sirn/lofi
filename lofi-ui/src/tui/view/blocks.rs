@@ -3356,6 +3356,34 @@ mod tests {
         assert_eq!(trim_reasoning_summary(" <!-- --> "), "");
     }
 
+    #[test]
+    fn markdown_body_height_handles_empty_heading() {
+        // Bare ATX marker mid-stream: heading with no inline content.
+        assert_eq!(markdown_body_height("#", 40), 1);
+        assert_eq!(markdown_body_height("##", 40), 1);
+        assert_eq!(markdown_body_height("###", 40), 1);
+    }
+
+    #[test]
+    fn emit_heading_handles_empty_heading() {
+        let rl = render_markdown_body(
+            "#",
+            Theme::default(),
+            80,
+            78,
+            Style::default(),
+            |_| vec![],
+        );
+        assert_eq!(rl.len(), 1);
+        let text: String = rl[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.is_empty() || text == "#");
+    }
+
     /// Reference height via the existing renderer: count the lines produced.
     fn reference_height(text: &str, content_w: usize) -> usize {
         render_markdown_body(
