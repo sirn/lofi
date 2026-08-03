@@ -83,13 +83,25 @@ impl AgentLifecycle {
         Ok(true)
     }
 
+    /// Reuses the existing buffer's capacity rather than dropping it and
+    /// reallocating. Resume and `/tree` rollback both rebuild the full history
+    /// each time; handing a fresh multi-MB `Vec` back to the allocator every
+    /// cycle leaves glibc arenas bloated (freed-but-not-returned-to-OS), which
+    /// surfaces as a one-time RSS step. Reusing the buffer avoids the churn.
+    ///
     /// # Errors
     /// Returns a state error when the shared history lock is poisoned.
     pub fn replace_history(&self, messages: Vec<Message>) -> Result<()> {
-        *self
+        let mut history = self
             .history
             .lock()
-            .map_err(|_| Error::State("agent history lock poisoned".to_string()))? = messages;
+            .map_err(|_| Error::State("agent history lock poisoned".to_string()))?;
+        if history.capacity() >= messages.len() {
+            history.clear();
+            history.extend(messages);
+        } else {
+            *history = messages;
+        }
         Ok(())
     }
 
