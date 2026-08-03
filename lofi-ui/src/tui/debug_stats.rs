@@ -183,7 +183,7 @@ impl App {
         )))
     }
 
-    fn component_memory_json(&self) -> serde_json::Value {
+    pub(crate) fn component_memory_json(&self) -> serde_json::Value {
         let history_bytes = self.lifecycle.history_stats().estimated_retained_bytes;
         let turns_bytes = self.turns.capacity() * size_of::<Turn>()
             + self.turns.iter().map(turn_heap_bytes).sum::<usize>();
