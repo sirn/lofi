@@ -32,7 +32,7 @@ impl Agent {
                 return Ok(());
             }
             let finished = match self
-                .run_once_inner(&mut messages, Some(&tx), None, None, None, None)
+                .run_once_inner(&mut messages, Some(&tx), None, None, None, None, None)
                 .await
             {
                 Ok(f) => f,
@@ -143,6 +143,10 @@ impl Agent {
                 detached = true;
                 break;
             }
+            // Feed the prior round's prompt size back in so the next request
+            // clips its output cap against the remaining context window.
+            let prev_input =
+                Some(stats.usage.input_tokens + stats.usage.cache_read_tokens);
             let round = self
                 .run_once_inner(
                     &mut *messages,
@@ -151,6 +155,7 @@ impl Agent {
                     recall.clone(),
                     result.clone(),
                     cancel.as_ref(),
+                    prev_input,
                 )
                 .await;
             if round.is_ok() && retry_attempt > 0 {
@@ -398,7 +403,7 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None, None, None, None)
+        self.run_once_inner(messages, None, None, None, None, None, None)
             .await
     }
 
@@ -419,12 +424,15 @@ impl Agent {
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
         cancel: Option<&Arc<AtomicBool>>,
+        prev_input_tokens: Option<u64>,
     ) -> Result<bool> {
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
-        if let Some(mt) = self.max_output_tokens {
-            model.max_tokens = Some(mt);
-        }
+        // Clip the output cap against remaining context so strict providers
+        // (`max_tokens < context_window - input_tokens`) never reject the
+        // request. `prev_input_tokens` is the prior round's usage, the best
+        // in-hand estimate of this request's input.
+        model.max_tokens = self.clipped_max_tokens(prev_input_tokens);
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }

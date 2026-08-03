@@ -353,6 +353,21 @@ impl Agent {
     pub fn max_output_tokens(&self) -> Option<u64> {
         self.max_output_tokens
     }
+
+    /// Effective `max_tokens` for the next request, clipped so the request
+    /// cannot demand more output than the remaining context window. Some
+    /// providers reject `max_tokens >= context_window - input_tokens`; the
+    /// prior round's usage (`input_tokens + cache_read_tokens`) approximates
+    /// the next request's input. Returns `None` (omit the field) when the
+    /// window or model cap is unknown.
+    #[must_use]
+    fn clipped_max_tokens(&self, prev_input_tokens: Option<u64>) -> Option<u64> {
+        let cap = self.max_output_tokens.or(self.model.max_tokens)?;
+        let window = self.model.context_window?;
+        let input = prev_input_tokens.unwrap_or(0);
+        let headroom = window.saturating_sub(input);
+        (headroom > 0).then(|| cap.min(headroom))
+    }
 }
 
 /// Lossless event emit. An awaited [`Sender::send`] applies backpressure
