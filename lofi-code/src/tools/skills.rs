@@ -165,6 +165,46 @@ impl BuiltinTools {
     }
 }
 
+/// One discovered skill: its `/`-separated name, one-line description, and
+/// origin (`workspace` or `global`).
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+}
+
+/// Scan the workspace and global skill roots for available skills, returning
+/// name/description/source for each. Mirrors [`BuiltinTools::skills`] but
+/// returns plain structs for prompt assembly (no JSON, no `BuiltinTools`).
+///
+/// # Errors
+/// Returns an error when a configured skill root cannot be scanned safely.
+pub fn scan_skill_summaries(
+    root: &Path,
+    skills_dir: Option<&Path>,
+) -> Result<Vec<SkillSummary>> {
+    let mut map: std::collections::BTreeMap<String, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    if let Some(dir) = skills_dir {
+        BuiltinTools::walk_skills(dir, "global", &mut map)?;
+    }
+    let ws_skills = root.join(".lofi").join("skills");
+    BuiltinTools::walk_skills(&ws_skills, "workspace", &mut map)?;
+    if map.len() > MAX_SKILLS {
+        return Err(Error::Tool(format!(
+            "skills: exceeded {MAX_SKILLS}-entry limit"
+        )));
+    }
+    Ok(map
+        .into_iter()
+        .map(|(name, (desc, source, _path))| SkillSummary {
+            name,
+            description: desc,
+            source,
+        })
+        .collect())
+}
+
 fn validate_skill_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Tool("skill: name must not be empty".into()));
