@@ -1,11 +1,5 @@
-use super::truncate::{format_size, truncate_tail_with};
-
-/// Bash results stay deliberately compact because the same value is shown to
-/// the user and sent back to the model. The complete output remains pageable
-/// through the per-session log named in the truncation notice.
-const BASH_MAX_LINES: usize = 20;
-const BASH_MAX_BYTES: usize = 4 * 1024;
 use super::bash_util::{read_capped, PgrpKillGuard};
+use super::truncate::{format_size, truncate_tail_with};
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use lofi_error::{Error, Result};
@@ -283,7 +277,8 @@ impl BuiltinTools {
         // A command's conventional final newline terminates its last line; it
         // is not an additional blank line and must not consume one tail slot.
         let truncation_input = full.strip_suffix('\n').unwrap_or(full);
-        let t = truncate_tail_with(truncation_input, BASH_MAX_LINES, BASH_MAX_BYTES);
+        let cap = self.truncate;
+        let t = truncate_tail_with(truncation_input, cap.max_lines, cap.max_bytes);
         if !t.truncated && !pipe_capped {
             return full.to_string();
         }
@@ -298,7 +293,7 @@ impl BuiltinTools {
             let _ = write!(
             out,
             "\n\n[Showing 0 lines; first line exceeds {} limit. Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
-            format_size(BASH_MAX_BYTES),
+            format_size(cap.max_bytes),
         );
         } else if pipe_capped && !t.truncated {
             let _ = write!(
@@ -311,7 +306,7 @@ impl BuiltinTools {
             out,
             "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {path}. Use lofi.read(\"{path}\") to page through.]",
             t.total_lines,
-            format_size(BASH_MAX_BYTES)
+            format_size(cap.max_bytes)
         );
         }
         out
