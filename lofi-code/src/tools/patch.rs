@@ -11,7 +11,7 @@ struct Hunk {
 }
 
 impl BuiltinTools {
-    /// Apply a unified-diff patch to `path`. Accepts conventional `--- a/ / 
+    /// Apply a unified-diff patch to `path`. Accepts conventional `--- a/ /
     /// +++ b/` headers, bare `@@` hunks, and `*** Begin/Update File` markers;
     /// the path header is advisory. Hunk context is matched with a fuzz window
     /// so a modest line-number drift does not reject a otherwise-correct patch.
@@ -48,11 +48,12 @@ impl BuiltinTools {
         })
         .await
         .map_err(|e| Error::Tool(format!("patch {label}: {e}")))??;
-        let updated =
-            apply_hunks(&content, &hunks).map_err(|e| Error::Tool(format!("patch {label}: {e}")))?;
+        let updated = apply_hunks(&content, &hunks)
+            .map_err(|e| Error::Tool(format!("patch {label}: {e}")))?;
         let resolved2 = resolve_under(&self.root, &path)?;
         tokio::task::spawn_blocking(move || {
-            atomic_write(&resolved2, updated.as_bytes()).map_err(|e| Error::Tool(format!("patch: {e}")))
+            atomic_write(&resolved2, updated.as_bytes())
+                .map_err(|e| Error::Tool(format!("patch: {e}")))
         })
         .await
         .map_err(|e| Error::Tool(format!("patch {label}: {e}")))??;
@@ -97,7 +98,10 @@ fn parse_unified_patch(patch: &str) -> std::result::Result<Vec<Hunk>, String> {
         }
     }
     if in_hunk {
-        hunks.push(Hunk { old: cur_old, new: cur_new });
+        hunks.push(Hunk {
+            old: cur_old,
+            new: cur_new,
+        });
     }
     Ok(hunks)
 }
@@ -112,11 +116,17 @@ fn find_hunk(lines: &[&str], old: &[String], near: usize) -> Option<usize> {
             if pos >= lines.len() || pos.saturating_add(n) > lines.len() {
                 continue;
             }
-            let exact = lines[pos..pos + n].iter().zip(old.iter()).all(|(a, b)| a == &b.as_str());
+            let exact = lines[pos..pos + n]
+                .iter()
+                .zip(old.iter())
+                .all(|(a, b)| a == &b.as_str());
             if exact {
                 return Some(pos);
             }
-            let trimmed = lines[pos..pos + n].iter().zip(old.iter()).all(|(a, b)| a.trim_end() == b.trim_end());
+            let trimmed = lines[pos..pos + n]
+                .iter()
+                .zip(old.iter())
+                .all(|(a, b)| a.trim_end() == b.trim_end());
             if trimmed {
                 return Some(pos);
             }
