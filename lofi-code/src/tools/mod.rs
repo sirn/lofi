@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -22,7 +22,7 @@ pub mod truncate;
 pub mod write;
 
 pub use bash_env::BashEnv;
-pub use bash_util::{read_capped, PgrpKillGuard};
+pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
     atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
     reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkCeilings,
@@ -57,6 +57,7 @@ pub struct BuiltinTools {
     auto_mode: Option<crate::AutoModeFn>,
     skills_dir: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl BuiltinTools {
@@ -124,7 +125,18 @@ impl BuiltinTools {
             auto_mode,
             skills_dir,
             read_roots,
+            cancel: None,
         }
+    }
+
+    /// Attaches the run's cooperative cancellation flag. Long-running tools
+    /// (`bash`) race their work against it so user cancellation takes effect
+    /// even while the guest is suspended awaiting the tool — the QuickJS
+    /// interrupt handler cannot fire there, so this is the only path.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     #[must_use]
