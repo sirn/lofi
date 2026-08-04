@@ -40,6 +40,7 @@ use bind::bind_tools;
 pub mod tools;
 
 use crate::tools::BuiltinTools;
+pub use tools::truncate::TruncatedCap;
 pub use tools::BashEnv;
 
 pub const EXEC_TOOL_NAME: &str = "exec";
@@ -177,6 +178,9 @@ pub struct ExecCtx {
     pub confirm: Option<ConfirmFn>,
     pub auto_mode: Option<AutoModeFn>,
     pub skills_dir: Option<PathBuf>,
+    /// Visible-output cap applied to file reads and bash output. Defaults to
+    /// Pi's 2000 lines / 50 KiB.
+    pub truncate: crate::tools::truncate::TruncatedCap,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -378,7 +382,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
             ctx.auto_mode.clone(),
             ctx.skills_dir.clone(),
         )
-        .with_cancel(opts.cancel.clone()),
+        .with_cancel(opts.cancel.clone())
+        .with_truncate(ctx.truncate),
     );
     let strings = ctx.strings.clone();
     let recall = ctx.recall.clone();
@@ -606,6 +611,7 @@ mod tests {
             confirm: None,
             auto_mode: None,
             skills_dir: None,
+            truncate: crate::tools::truncate::TruncatedCap::default(),
         }
     }
 
@@ -782,6 +788,7 @@ mod tests {
             confirm: None,
             auto_mode: None,
             skills_dir: None,
+            truncate: crate::tools::truncate::TruncatedCap::default(),
         };
         let res = exec(
             "return lofi_strings.greeting;",

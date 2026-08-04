@@ -24,6 +24,7 @@ fn ctx(root: &Path) -> ExecCtx {
         confirm: None,
         auto_mode: None,
         skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
     }
 }
 
@@ -229,6 +230,7 @@ async fn strings_exposed_as_lofi_strings() {
         confirm: None,
         auto_mode: None,
         skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -315,6 +317,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         confirm: None,
         auto_mode: None,
         skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
                await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \
@@ -351,4 +354,32 @@ async fn exec_returns_undefined_as_null() {
         .unwrap();
     assert_eq!(res.value, Value::Null);
     assert!(res.logs.contains("hi"));
+}
+
+#[tokio::test]
+async fn exec_honours_configured_truncate_cap() {
+    // The configured cap flows from ExecCtx into the read tool: a tiny cap
+    // truncates a 10-line file to the first lines and flags truncation.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("big.txt"),
+        (1..=10).map(|i| format!("line {i}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let mut c = ctx(dir.path());
+    c.truncate = lofi_code::TruncatedCap {
+        max_lines: 3,
+        max_bytes: 1 << 30,
+    };
+    let res = exec(
+        "const r = await lofi.read('big.txt'); return r;",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["truncated"], json!(true));
+    let content = res.value["content"].as_str().unwrap();
+    assert!(content.contains("line 1"));
+    assert!(!content.contains("line 10"));
 }
