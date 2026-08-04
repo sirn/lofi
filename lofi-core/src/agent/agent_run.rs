@@ -655,37 +655,59 @@ impl Agent {
             if !partial.blocks.is_empty() {
                 messages.push(partial);
             }
+            close_orphaned_tool_uses(messages);
             return Err(error);
         }
 
         let assistant_index = messages.len();
         messages.push(assembler.finish());
-        let results = {
+        // Collect the requested tool uses, then end the borrow so the rest
+        // of the round (and any orphaned-close on early exit) can mutate
+        // `messages`.
+        let tool_uses: Vec<(String, String, serde_json::Value)> = {
             let assistant = &messages[assistant_index];
-            let tool_uses: Vec<(&str, &str, &serde_json::Value)> = assistant
+            assistant
                 .blocks
                 .iter()
                 .filter_map(|block| match block {
                     ContentBlock::ToolUse { id, name, input } => {
-                        Some((id.as_str(), name.as_str(), input))
+                        Some((id.clone(), name.clone(), input.clone()))
                     }
                     _ => None,
                 })
-                .collect();
+                .collect()
+        };
 
-            if tool_uses.is_empty() {
-                return Ok(true);
-            }
+        if tool_uses.is_empty() {
+            return Ok(true);
+        }
 
-            self.execute_tools(
-                &tool_uses,
+        let tool_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
+            .iter()
+            .map(|(id, name, input)| (id.as_str(), name.as_str(), input))
+            .collect();
+        let results = match self
+            .execute_tools(
+                &tool_refs,
                 tx,
                 stats,
                 recall.clone(),
                 result.clone(),
                 cancel,
             )
-            .await?
+            .await
+        {
+            Ok(results) => results,
+            Err(error) => {
+                // Abandoning the turn here (cancel, closed channel, tool
+                // error) leaves the pushed assistant message's `ToolUse`
+                // blocks without matching results. Close the orphans so a
+                // retained cancel partial stays provider-valid (Anthropic
+                // 400s: "did not find any tool_result blocks"); a full failure
+                // later truncates the whole turn, making this a no-op there.
+                close_orphaned_tool_uses(messages);
+                return Err(error);
+            }
         };
 
         messages.push(Message {
@@ -953,5 +975,175 @@ impl Agent {
             });
         }
         Ok(results)
+    }
+}
+
+/// Enforces the pairing invariant: every trailing assistant `ToolUse` block
+/// must be answered by a `ToolResult` before the message list is handed back
+/// to the caller. Providers like the Anthropic Messages API reject an orphaned
+/// `tool_use` (400 "did not find any tool_result blocks"), and the transcript
+/// keeps cancelled partials for replay — so pairing is structural, not a
+/// per-outcome fallback. Idempotent: appends an error `ToolResult` only for
+/// `ToolUse` blocks in the last assistant message that have no matching result
+/// after it; a fully paired tail is left untouched.
+///
+/// Called on every abandoned completion of `run_once_inner` (provider error,
+/// cancel, closed channel). The fully-failed turn is truncated by the caller
+/// afterwards, so the synthesized results are dropped there; on a cancelled
+/// turn they are what keep the retained partial provider-valid.
+fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
+    let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
+        return;
+    };
+    // Only the tail matters: scan the last assistant message's tool uses and
+    // the results that came after it.
+    let pending: Vec<String> = messages[assistant_index]
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let answered: std::collections::HashSet<&str> = messages[assistant_index + 1..]
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let synthesized: Vec<ContentBlock> = pending
+        .iter()
+        .filter(|id| !answered.contains(id.as_str()))
+        .map(|id| ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: "cancelled: tool run interrupted before producing a result".to_string(),
+            is_error: true,
+        })
+        .collect();
+    if synthesized.is_empty() {
+        return;
+    }
+    messages.push(Message {
+        role: Role::Tool,
+        blocks: synthesized,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use serde_json::json;
+
+    fn assistant_with_tool_use(id: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "exec".to_string(),
+                input: json!({"code": "x"}),
+            }],
+        }
+    }
+
+    #[test]
+    fn orphaned_tool_use_gets_a_cancelled_error_result() {
+        let mut messages = vec![assistant_with_tool_use("tool-1")];
+        close_orphaned_tool_uses(&mut messages);
+        assert_eq!(messages.len(), 2);
+        let results = &messages[1];
+        assert_eq!(results.role, Role::Tool);
+        match &results.blocks[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool-1");
+                assert!(is_error);
+                assert!(content.contains("cancelled"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn answered_tool_use_is_left_alone() {
+        let mut messages = vec![
+            assistant_with_tool_use("tool-1"),
+            Message {
+                role: Role::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        close_orphaned_tool_uses(&mut messages);
+        assert_eq!(messages.len(), 2);
+        match &messages[1].blocks[0] {
+            ContentBlock::ToolResult { content, .. } => assert_eq!(content, "ok"),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_only_assistant_message_is_untouched() {
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: "partial text".to_string(),
+            }],
+        }];
+        close_orphaned_tool_uses(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn only_unanswered_tool_uses_are_closed() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                blocks: vec![
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "exec".to_string(),
+                        input: json!({"code": "a"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-2".to_string(),
+                        name: "exec".to_string(),
+                        input: json!({"code": "b"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        close_orphaned_tool_uses(&mut messages);
+        assert_eq!(messages.len(), 3);
+        match &messages[2].blocks[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tool-2");
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 }
