@@ -525,7 +525,7 @@ mod tests {
         // An empty XDG_CONFIG_HOME is ignored per the XDG spec, so HOME drives
         // the fallback. This is the macOS path (no platform config dir there).
         std::env::set_var("XDG_CONFIG_HOME", "");
-        let home = std::env::var("HOME").expect("HOME must be set for tests");
+        let home = std::env::var("HOME").unwrap();
         let p = user_config_path().unwrap();
         assert_eq!(
             p,
