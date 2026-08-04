@@ -58,6 +58,9 @@ pub struct BuiltinTools {
     skills_dir: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
+    /// Visible-output caps for tool results (file reads and bash output).
+    /// Defaults to Pi values; see [`truncate::TruncatedCap`].
+    truncate: truncate::TruncatedCap,
 }
 
 impl BuiltinTools {
@@ -126,6 +129,7 @@ impl BuiltinTools {
             skills_dir,
             read_roots,
             cancel: None,
+            truncate: truncate::TruncatedCap::default(),
         }
     }
 
@@ -136,6 +140,13 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Sets the visible-output cap applied to reads and bash output.
+    #[must_use]
+    pub fn with_truncate(mut self, truncate: truncate::TruncatedCap) -> Self {
+        self.truncate = truncate;
         self
     }
 
@@ -698,7 +709,18 @@ mod tests {
 
     #[tokio::test]
     async fn bash_keeps_only_a_compact_tail_and_saves_full_output() {
-        let (_dir, tools) = tools();
+        // A bash output cap this small forces truncation of a 30-line output
+        // so the tail behavior is pinchable in a tiny fixture.
+        let (_dir, tools) = {
+            let (d, t) = tools();
+            (
+                d,
+                t.with_truncate(crate::tools::truncate::TruncatedCap {
+                    max_lines: 20,
+                    max_bytes: 4096,
+                }),
+            )
+        };
         let v = tools
             .bash(json!({
                 "cmd": "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done"
