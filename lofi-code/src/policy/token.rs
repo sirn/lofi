@@ -120,12 +120,16 @@ impl<'a> Parser<'a> {
                 _ => {
                     let word = self.read_word()?;
                     if word.is_empty() {
-                        // No progress — the character is unparseable.
-                        // Fail closed rather than spin forever.
-                        return Err(format!(
-                            "unexpected character: {:?}",
-                            self.input[self.pos] as char
-                        ));
+                        // No progress. When `read_word` stopped at a byte it
+                        // could not consume, report it; when it consumed a
+                        // trailing escape up to end-of-input there is no such
+                        // byte, so report the truncation instead of indexing
+                        // past the end.
+                        return Err(if let Some(&b) = self.input.get(self.pos) {
+                            format!("unexpected character: {:?}", b as char)
+                        } else {
+                            "unexpected end of input".to_string()
+                        });
                     }
                     self.tokens.push(Token::Word(word));
                 }
@@ -547,6 +551,15 @@ mod tests {
     fn basic_word() {
         let t = tokenize("ls").unwrap();
         assert_eq!(words(&t), vec!["ls"]);
+    }
+    #[test]
+    fn trailing_backslash_errors_instead_of_panicking() {
+        // A backslash at a word start consumes input to end-of-input inside
+        // `read_word`, leaving an empty word and `pos == len`; the error path
+        // must not index past the end. This used to panic out of bounds.
+        let err = tokenize("\\").unwrap_err();
+        assert!(err.contains("end of input"), "got: {err}");
+        assert!(tokenize("ls \\").is_err());
     }
     #[test]
     fn multiple_words() {
