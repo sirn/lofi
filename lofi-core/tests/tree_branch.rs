@@ -2,6 +2,7 @@
 //! branches whether or not the branched-off line is the active leaf, and
 //! however deeply nested. Guards the branch-detection walk against silently
 //! dropping forks when the active leaf moves between branches.
+#![allow(clippy::unwrap_used)]
 
 use lofi_core::session::store::SessionStore;
 use lofi_core::session::tree::build_tree_rows;
