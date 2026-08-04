@@ -552,6 +552,7 @@ mod tests {
         let t = tokenize("ls").unwrap();
         assert_eq!(words(&t), vec!["ls"]);
     }
+
     #[test]
     fn trailing_backslash_errors_instead_of_panicking() {
         // A backslash at a word start consumes input to end-of-input inside
@@ -561,76 +562,91 @@ mod tests {
         assert!(err.contains("end of input"), "got: {err}");
         assert!(tokenize("ls \\").is_err());
     }
+
     #[test]
     fn multiple_words() {
         let t = tokenize("echo hello world").unwrap();
         assert_eq!(words(&t), vec!["echo", "hello", "world"]);
     }
+
     #[test]
     fn single_quotes() {
         let t = tokenize("echo 'hello world'").unwrap();
         assert_eq!(words(&t), vec!["echo", "hello world"]);
     }
+
     #[test]
     fn double_quotes() {
         let t = tokenize("echo \"hello world\"").unwrap();
         assert_eq!(words(&t), vec!["echo", "hello world"]);
     }
+
     #[test]
     fn escaped_dollar() {
         let t = tokenize("echo \\$VAR").unwrap();
         assert_eq!(words(&t), vec!["echo", "$VAR"]);
     }
+
     #[test]
     fn pipe() {
         let t = tokenize("ls | grep foo").unwrap();
         assert_eq!(ops(&t), vec!["|"]);
     }
+
     #[test]
     fn and_or() {
         let t = tokenize("true && false || echo nope").unwrap();
         assert_eq!(ops(&t), vec!["&&", "||"]);
     }
+
     #[test]
     fn semicolon() {
         let t = tokenize("cd foo; ls").unwrap();
         assert_eq!(ops(&t), vec![";"]);
     }
+
     #[test]
     fn output_redirect() {
         let t = tokenize("echo hi > file.txt").unwrap();
         assert_eq!(rds(&t), vec![(">".into(), "file.txt".into())]);
     }
+
     #[test]
     fn append_redirect() {
         let t = tokenize("echo hi >> file.txt").unwrap();
         assert_eq!(rds(&t), vec![(">>".into(), "file.txt".into())]);
     }
+
     #[test]
     fn fd_redirect() {
         let t = tokenize("cmd 2> err.txt").unwrap();
         assert_eq!(rds(&t), vec![("2>".into(), "err.txt".into())]);
     }
+
     #[test]
     fn fd_dup() {
         let t = tokenize("cmd 2>&1").unwrap();
         assert_eq!(rds(&t), vec![("2>&".into(), "1".into())]);
     }
+
     #[test]
     fn input_redirect() {
         let t = tokenize("cat < file.txt").unwrap();
         assert_eq!(rds(&t), vec![("<".into(), "file.txt".into())]);
     }
+
     #[test]
     fn heredoc() {
         let t = tokenize("cat <<EOF\nhello\nEOF").unwrap();
         assert_eq!(rds(&t), vec![("<<".into(), "EOF".into())]);
     }
+
     #[test]
     fn here_string() {
         let t = tokenize("cat <<< \"hello\"").unwrap();
         assert_eq!(rds(&t), vec![("<<<".into(), "hello".into())]);
     }
+
     #[test]
     fn subshell() {
         let t = tokenize("(echo hi)").unwrap();
@@ -642,6 +658,7 @@ mod tests {
             other => panic!("expected group, got {other:?}"),
         }
     }
+
     #[test]
     fn cmd_substitution() {
         let t = tokenize("echo $(date)").unwrap();
@@ -654,6 +671,7 @@ mod tests {
             .collect();
         assert_eq!(g, vec![GroupKind::Substitution]);
     }
+
     #[test]
     fn backtick_sub() {
         let t = tokenize("echo `date`").unwrap();
@@ -666,30 +684,36 @@ mod tests {
             .collect();
         assert_eq!(g, vec![GroupKind::Backtick]);
     }
+
     #[test]
     fn variable_skipped() {
         let t = tokenize("echo $VAR").unwrap();
         assert_eq!(words(&t), vec!["echo"]);
     }
+
     #[test]
     fn braced_var_skipped() {
         let t = tokenize("echo ${VAR}").unwrap();
         assert_eq!(words(&t), vec!["echo"]);
     }
+
     #[test]
     fn comment_ignored() {
         let t = tokenize("echo hi # comment").unwrap();
         assert_eq!(words(&t), vec!["echo", "hi"]);
     }
+
     #[test]
     fn unclosed_quote() {
         assert!(tokenize("echo 'unclosed").is_err());
         assert!(tokenize("echo \"unclosed").is_err());
     }
+
     #[test]
     fn unclosed_subshell() {
         assert!(tokenize("(echo hi").is_err());
     }
+
     #[test]
     fn complex_pipeline() {
         let t = tokenize("cat file | grep foo | sort | uniq -c").unwrap();
