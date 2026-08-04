@@ -239,11 +239,7 @@ impl WalkGuard {
 /// `filtered` is set, `.gitignore`/`.ignore`/global-ignore rules and
 /// hidden-file pruning apply (rg/fd-style); otherwise every entry under the
 /// root is visited.
-fn build_walk(
-    base: &Path,
-    guard: &Arc<WalkGuard>,
-    filtered: bool,
-) -> ignore::WalkBuilder {
+fn build_walk(base: &Path, guard: &Arc<WalkGuard>, filtered: bool) -> ignore::WalkBuilder {
     let mut builder = ignore::WalkBuilder::new(base);
     builder
         .standard_filters(filtered)
@@ -284,7 +280,10 @@ impl WalkCaps {
     /// Account for one walked entry and the current hit count, returning
     /// whether the walk should stop. The first ceiling to trip wins.
     fn tally(&self, hits: usize) -> ignore::WalkState {
-        let visited = self.visited.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let visited = self
+            .visited
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let tripped = if hits >= self.max_hits {
             WalkLimit::TooManyHits
         } else if visited >= self.max_visited {
@@ -446,4 +445,3 @@ pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, bo
         _ => Err(Error::Tool("grep: pattern must be string or object".into())),
     }
 }
-

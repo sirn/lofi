@@ -186,10 +186,7 @@ pub struct SkillSummary {
 ///
 /// # Errors
 /// Returns an error when a configured skill root cannot be scanned safely.
-pub fn scan_skill_summaries(
-    root: &Path,
-    skills_dir: Option<&Path>,
-) -> Result<Vec<SkillSummary>> {
+pub fn scan_skill_summaries(root: &Path, skills_dir: Option<&Path>) -> Result<Vec<SkillSummary>> {
     let mut map: std::collections::BTreeMap<String, (String, String, String)> =
         std::collections::BTreeMap::new();
     if let Some(dir) = skills_dir {
@@ -390,7 +387,6 @@ mod tests {
         let v = t.skills(Some("nonexistent")).await.unwrap();
         assert_eq!(v["skills"].as_array().unwrap().len(), 0);
     }
-
 
     #[tokio::test]
     async fn skill_read_global() {

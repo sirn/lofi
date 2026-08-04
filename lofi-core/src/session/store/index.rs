@@ -10,7 +10,6 @@ use super::{Header, SessionMeta, SESSION_VERSION};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct IndexId(IndexIdRepr);
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 enum IndexIdRepr {
     #[default]
@@ -309,11 +308,10 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     // One reusable line buffer: borrowed parse keeps nothing, so UUID ids are
     // the only allocations (heap `Other` ids), and only when retained.
     let mut buf = Vec::with_capacity(4096);
-    while let Some((line_start, line_end, skel)) = read_jsonl_borrowed::<EventSkeleton, _>(
-        &mut reader,
-        &mut buf,
-    )
-    .map_err(|error| Error::State(format!("parse index event in {}: {error}", path.display())))?
+    while let Some((line_start, line_end, skel)) =
+        read_jsonl_borrowed::<EventSkeleton, _>(&mut reader, &mut buf).map_err(|error| {
+            Error::State(format!("parse index event in {}: {error}", path.display()))
+        })?
     {
         let parent_id = skel.parent_id.map(IndexId::borrow);
         let kind = index_kind(skel.kind_type, skel.role);
@@ -724,7 +722,10 @@ pub(super) fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Re
         if lineage.len() > index.len() {
             return Err(Error::State("cycle in session event lineage".to_string()));
         }
-        current = index[i].parent_id.as_ref().and_then(|id| by_id.get(id).copied());
+        current = index[i]
+            .parent_id
+            .as_ref()
+            .and_then(|id| by_id.get(id).copied());
     }
     if leaf_id.is_some() && lineage.is_empty() {
         return Err(Error::State("session branch leaf not found".to_string()));

@@ -7056,12 +7056,22 @@ fn turn_height_matches_emitted_line_count() {
                         id: 1,
                         name: "bash".to_string(),
                         args: "seq 1 40".to_string(),
-                        result: Some((1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join("\n")),
+                        result: Some(
+                            (1..=40)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
                         preview: None,
                         is_error: false,
                         done: true,
                     }],
-                    result: Some((1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join("\n")),
+                    result: Some(
+                        (1..=40)
+                            .map(|i| i.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     result_committed: false,
                     is_error: false,
                     done: true,
@@ -7125,7 +7135,11 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
         let rows: Vec<String> = render_turn_lines(&cx, &turn)
             .iter()
             .map(|rl| {
-                rl.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                rl.line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
             })
             .collect();
         // Row count may only grow as text streams in; it must never shrink.
@@ -7140,7 +7154,10 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
         let prev_settled_rows = prev_rows.len().saturating_sub(1);
         for r in 0..prev_settled_rows {
             let row_text = rows.concat();
-            for wd in prev_rows[r].split_whitespace().filter(|wd| *wd != "\u{258C}") {
+            for wd in prev_rows[r]
+                .split_whitespace()
+                .filter(|wd| *wd != "\u{258C}")
+            {
                 let bare = wd.trim_matches(|c: char| "`*_~[]()#".contains(c));
                 if bare.is_empty() {
                     continue;
@@ -7163,9 +7180,9 @@ fn streaming_inline_code_does_not_rewrap_settled_rows() {
     // words later, straddling a wrap boundary at width 40.
     assert_streaming_words_never_move_rows(
         &[
-            "the", "quick", "brown", "fox", "jumps", "over", "`alpha", "beta",
-            "gamma`", "and", "keeps", "running", "toward", "the", "lazy", "dog",
-            "without", "stopping", "for", "anything", "at", "all", "today",
+            "the", "quick", "brown", "fox", "jumps", "over", "`alpha", "beta", "gamma`", "and",
+            "keeps", "running", "toward", "the", "lazy", "dog", "without", "stopping", "for",
+            "anything", "at", "all", "today",
         ],
         "code",
     );
@@ -7175,9 +7192,9 @@ fn streaming_inline_code_does_not_rewrap_settled_rows() {
 fn streaming_inline_bold_does_not_rewrap_settled_rows() {
     assert_streaming_words_never_move_rows(
         &[
-            "the", "quick", "brown", "fox", "jumps", "over", "**alpha", "beta",
-            "gamma**", "and", "keeps", "running", "toward", "the", "lazy", "dog",
-            "without", "stopping", "for", "anything", "at", "all", "today",
+            "the", "quick", "brown", "fox", "jumps", "over", "**alpha", "beta", "gamma**", "and",
+            "keeps", "running", "toward", "the", "lazy", "dog", "without", "stopping", "for",
+            "anything", "at", "all", "today",
         ],
         "bold",
     );
@@ -7188,9 +7205,26 @@ fn streaming_inline_link_does_not_rewrap_settled_rows() {
     // A link opens mid-line and its destination completes several words later.
     assert_streaming_words_never_move_rows(
         &[
-            "the", "quick", "brown", "fox", "jumps", "over", "[alpha", "beta",
-            "gamma](https://example.com)", "and", "keeps", "running", "toward",
-            "the", "lazy", "dog", "without", "stopping", "for", "anything",
+            "the",
+            "quick",
+            "brown",
+            "fox",
+            "jumps",
+            "over",
+            "[alpha",
+            "beta",
+            "gamma](https://example.com)",
+            "and",
+            "keeps",
+            "running",
+            "toward",
+            "the",
+            "lazy",
+            "dog",
+            "without",
+            "stopping",
+            "for",
+            "anything",
         ],
         "link",
     );
@@ -7263,12 +7297,18 @@ fn compact_keeps_file_backed_turn_content_visible() {
     // the compaction marker appended rather than replacing it.
     let rendered = a.materialize_turn(0);
     assert!(
-        rendered.blocks.iter().any(|b| matches!(b, Block::Text(t) if t.contains("agent round"))),
+        rendered
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Text(t) if t.contains("agent round"))),
         "compacted turn lost its assistant content: {:?}",
         rendered.blocks.len()
     );
     assert!(
-        rendered.blocks.iter().any(|b| matches!(b, Block::Compaction { .. })),
+        rendered
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Compaction { .. })),
         "compaction marker missing"
     );
 }
