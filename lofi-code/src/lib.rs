@@ -367,16 +367,19 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         .await;
     }
 
-    let tools = Arc::new(BuiltinTools::with_skills_dir(
-        ctx.root.clone(),
-        ctx.on_tool_event.clone(),
-        ctx.tmp_dir.clone(),
-        ctx.bash_env.clone(),
-        ctx.shell_policy.clone(),
-        ctx.confirm.clone(),
-        ctx.auto_mode.clone(),
-        ctx.skills_dir.clone(),
-    ));
+    let tools = Arc::new(
+        BuiltinTools::with_skills_dir(
+            ctx.root.clone(),
+            ctx.on_tool_event.clone(),
+            ctx.tmp_dir.clone(),
+            ctx.bash_env.clone(),
+            ctx.shell_policy.clone(),
+            ctx.confirm.clone(),
+            ctx.auto_mode.clone(),
+            ctx.skills_dir.clone(),
+        )
+        .with_cancel(opts.cancel.clone()),
+    );
     let strings = ctx.strings.clone();
     let recall = ctx.recall.clone();
     let result = ctx.result.clone();

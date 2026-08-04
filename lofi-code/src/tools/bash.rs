@@ -183,24 +183,51 @@ impl BuiltinTools {
             .take()
             .ok_or_else(|| Error::Tool("bash: stderr pipe unavailable".into()))?;
 
-        let result = tokio::time::timeout(
-            dur,
-            Box::pin(async {
-                // Read both pipes AND wait for the child inside the timeout,
-                // so a command that closes its pipes early but keeps running
-                // (e.g. `exec >/dev/null 2>&1; sleep 1000`) can't outlive
-                // `timeoutMs` by deferring the wait past the timed future.
-                // `MAX_BASH_OUTPUT_BYTES` is a memory safety cap only; the
-                // user-visible truncation is applied below via `truncate_tail`.
-                let (out, err, status) = tokio::try_join!(
-                    read_capped(&mut stdout, MAX_BASH_OUTPUT_BYTES),
-                    read_capped(&mut stderr, MAX_BASH_OUTPUT_BYTES),
-                    child.wait(),
-                )?;
-                Ok::<_, std::io::Error>((out, err, status))
-            }),
-        )
-        .await;
+        // Run reads and the child wait inside the timeout so a command that
+        // closes its pipes early but keeps running (`exec >/dev/null 2>&1;
+        // sleep 1000`) can't outlive `timeoutMs`. `MAX_BASH_OUTPUT_BYTES` is
+        // the pipe-level memory safety cap; user-visible truncation is below.
+        let run = Box::pin(async {
+            let (out, err, status) = tokio::try_join!(
+                read_capped(&mut stdout, MAX_BASH_OUTPUT_BYTES),
+                read_capped(&mut stderr, MAX_BASH_OUTPUT_BYTES),
+                child.wait(),
+            )?;
+            Ok::<_, std::io::Error>((out, err, status))
+        });
+        let timed = Box::pin(tokio::time::timeout(dur, run));
+
+        // Race the run against user cancellation: while the guest awaits the
+        // process, no QuickJS bytecode ticks, so the sandbox interrupt handler
+        // can't observe `cancel`. Map cancel onto the same elapsed-timeout
+        // outcome — that tears down identically (kill the process group, which
+        // EOFs the pipes) and reports a non-ok result.
+        // Yield once so a fast command resolves inside the race before we
+        // consult the flag, mirroring the unbiased timeout path when unset.
+        let result = match &self.cancel {
+            Some(flag) => {
+                let cancel_wait = crate::tools::wait_for_cancel(flag);
+                tokio::pin!(cancel_wait);
+                tokio::select! {
+                    biased;
+                    r = timed => r,
+                    () = &mut cancel_wait => {
+                        // `timeout(dur, pending())` always elapses; borrow the
+                        // error shape rather than name its type.
+                        match tokio::time::timeout(
+                            Duration::ZERO,
+                            std::future::pending::<std::result::Result<((),(),std::process::ExitStatus), std::io::Error>>(),
+                        )
+                        .await
+                        {
+                            Err(elapsed) => Err(elapsed),
+                            Ok(_) => unreachable!(),
+                        }
+                    }
+                }
+            }
+            None => timed.await,
+        };
 
         match result {
             Ok(Ok((out, err, status))) => {
@@ -323,6 +350,7 @@ mod tests {
 
     use super::*;
     use std::future;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     fn tools_with_auto(
@@ -440,5 +468,56 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             "writes outside the workspace"
         );
+    }
+
+    fn tools_with_cancel(cancel: Arc<AtomicBool>) -> (tempfile::TempDir, BuiltinTools) {
+        let dir = tempfile::tempdir().unwrap();
+        let auto: crate::AutoModeFn =
+            Arc::new(|_| Box::pin(async { crate::AutoModeOutcome::Allow { reason: "t".into() } }));
+        let tools = BuiltinTools::with_skills_dir(
+            dir.path().to_path_buf(),
+            None,
+            super::default_tmp_dir(),
+            crate::BashEnv::default(),
+            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            None,
+            Some(auto),
+            None,
+        )
+        .with_cancel(Some(cancel));
+        (dir, tools)
+    }
+
+    #[tokio::test]
+    async fn cancel_terminates_a_long_running_command_promptly() {
+        let marker_dir = tempfile::tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel.clone());
+        let marker = marker_dir.path().to_path_buf();
+        let bash = tokio::spawn(async move {
+            tools
+                .bash(json!({
+                    "cmd": format!("sleep 30; touch {}/ran", marker.display()),
+                    "timeoutMs": 60_000
+                }))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.store(true, Ordering::Relaxed);
+        let settled = tokio::time::timeout(Duration::from_secs(5), bash).await;
+        assert!(settled.is_ok(), "bash must settle promptly on cancel");
+        let res = settled.unwrap().unwrap();
+        assert_eq!(res["ok"], json!(false), "got: {res}");
+        assert!(!marker_dir.path().join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn bash_completes_normally_without_cancel() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let res = tools.bash(json!({ "cmd": "echo hi" })).await.unwrap();
+        assert_eq!(res["ok"], json!(true), "got: {res}");
+        assert_eq!(res["status"], json!("exited"));
     }
 }
