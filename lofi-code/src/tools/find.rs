@@ -11,7 +11,7 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if `dir` escapes the root, the glob is invalid,
     /// or a safety ceiling is exceeded.
     #[allow(clippy::unused_async)]
-    pub async fn find(&self, glob: &str, dir: Option<&str>) -> Result<Value> {
+    pub async fn find(&self, glob: &str, dir: Option<&str>, filtered: bool) -> Result<Value> {
         let base = self.resolve_for_read(dir.unwrap_or(""))?;
         let matcher = Glob::new(glob)
             .map_err(|e| Error::Tool(format!("invalid glob {glob:?}: {e}")))?
@@ -26,9 +26,12 @@ impl BuiltinTools {
                 &root,
                 &matcher,
                 &mut hits,
-                MAX_FIND_RESULTS,
+                WalkCeilings {
+                    max_hits: MAX_FIND_RESULTS,
+                    max_visited: MAX_FIND_VISITED,
+                },
                 &mut visited,
-                MAX_FIND_VISITED,
+                filtered,
             )? {
                 WalkLimit::Complete => {
                     hits.sort();

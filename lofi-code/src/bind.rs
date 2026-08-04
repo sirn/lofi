@@ -97,9 +97,10 @@ fn bind_file_tools<'js>(
         "find",
         Function::new(
             ctx.clone(),
-            Async(move |glob: String, dir: Opt<String>| {
+            Async(move |glob: String, dir: Opt<String>, filtered: Opt<bool>| {
                 let t = t.clone();
                 let d = dir.0.as_deref().unwrap_or("").to_string();
+                let filtered = filtered.0.unwrap_or(true);
                 let args = if d.is_empty() {
                     glob.clone()
                 } else {
@@ -112,7 +113,7 @@ fn bind_file_tools<'js>(
                         name: "find".into(),
                         args: cap_first_line(&args, 120),
                     });
-                    let res = t.find(&glob, Some(d.as_str())).await;
+                    let res = t.find(&glob, Some(d.as_str()), filtered).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,

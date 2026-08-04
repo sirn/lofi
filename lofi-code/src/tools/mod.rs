@@ -25,7 +25,8 @@ pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, PgrpKillGuard};
 use fs::{
     atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
-    reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkLimit,
+    reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkCeilings,
+    WalkLimit,
 };
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
@@ -383,7 +384,7 @@ mod tests {
         std::fs::write(tools.root().join("src/a.rs"), "").unwrap();
         std::fs::write(tools.root().join("src/b.txt"), "").unwrap();
         std::fs::write(tools.root().join("root.rs"), "").unwrap();
-        let v = tools.find("**/*.rs", None).await.unwrap();
+        let v = tools.find("**/*.rs", None, false).await.unwrap();
         let matches: Vec<&str> = v["matches"]
             .as_array()
             .unwrap()
@@ -403,7 +404,7 @@ mod tests {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("real.rs"), "").unwrap();
         symlink("real.rs", tools.root().join("link.rs")).unwrap();
-        let v = tools.find("**/*.rs", None).await.unwrap();
+        let v = tools.find("**/*.rs", None, false).await.unwrap();
         let matches: Vec<&str> = v["matches"]
             .as_array()
             .unwrap()
@@ -422,7 +423,7 @@ mod tests {
         std::fs::create_dir_all(tools.root().join("realdir")).unwrap();
         std::fs::write(tools.root().join("realdir/inner.rs"), "").unwrap();
         symlink("realdir", tools.root().join("linkdir")).unwrap();
-        let v = tools.find("**/*.rs", None).await.unwrap();
+        let v = tools.find("**/*.rs", None, false).await.unwrap();
         let matches: Vec<&str> = v["matches"]
             .as_array()
             .unwrap()
@@ -444,7 +445,7 @@ mod tests {
         std::fs::write(outside.path().join("secret.rs"), "secret").unwrap();
         symlink(outside.path(), tools.root().join("outside")).unwrap();
 
-        let v = tools.find("**/*.rs", None).await.unwrap();
+        let v = tools.find("**/*.rs", None, false).await.unwrap();
         let matches: Vec<&str> = v["matches"]
             .as_array()
             .unwrap()
@@ -481,7 +482,7 @@ mod tests {
         std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
         symlink(outside.path(), tools.root().join("sub/outside")).unwrap();
 
-        let found = tools.find("**/*.txt", Some("sub")).await.unwrap();
+        let found = tools.find("**/*.txt", Some("sub"), false).await.unwrap();
         assert!(
             found["matches"].as_array().unwrap().is_empty(),
             "result: {found}"
@@ -502,7 +503,7 @@ mod tests {
         std::fs::write(tools.root().join("sub/a.txt"), "needle\n").unwrap();
         symlink("..", tools.root().join("sub/loop")).unwrap();
 
-        let found = tools.find("**/*.txt", None).await.unwrap();
+        let found = tools.find("**/*.txt", None, false).await.unwrap();
         assert_eq!(found["matches"], json!(["sub/a.txt"]));
         let grepped = tools.grep(json!("needle"), None).await.unwrap();
         assert_eq!(grepped["matches"].as_array().unwrap().len(), 1);
@@ -757,5 +758,60 @@ mod tests {
             !marker.exists(),
             "background child survived timeout; process group was not killed"
         );
+    }
+    #[tokio::test]
+    async fn find_filtered_prunes_ignored_and_hidden() {
+        let (_dir, tools) = tools();
+        std::fs::create_dir_all(tools.root().join("target")).unwrap();
+        std::fs::create_dir_all(tools.root().join(".hidden")).unwrap();
+        std::fs::create_dir_all(tools.root().join("src")).unwrap();
+        std::fs::write(tools.root().join("target/built.rs"), "needle\n").unwrap();
+        std::fs::write(tools.root().join(".hidden/dot.rs"), "needle\n").unwrap();
+        std::fs::write(tools.root().join("src/main.rs"), "needle\n").unwrap();
+        std::fs::write(tools.root().join(".gitignore"), "target/\n").unwrap();
+
+        let names = |v: &Value| -> Vec<String> {
+            v["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|m| m.as_str().map(str::to_owned))
+                .collect()
+        };
+
+        // Filtered (the default): target/ is gitignored, .hidden/ is hidden.
+        let v = tools.find("**/*.rs", None, true).await.unwrap();
+        assert_eq!(names(&v), vec!["src/main.rs".to_string()]);
+
+        // Unfiltered: every file is visited.
+        let v = tools.find("**/*.rs", None, false).await.unwrap();
+        let got = names(&v);
+        assert!(got.contains(&"target/built.rs".to_string()), "got: {got:?}");
+        assert!(got.contains(&".hidden/dot.rs".to_string()), "got: {got:?}");
+        assert!(got.contains(&"src/main.rs".to_string()), "got: {got:?}");
+
+        // Grep honours `filtered` too (default true via parse_grep_args).
+        let v = tools.grep(json!("needle"), None).await.unwrap();
+        let files: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["file"].as_str())
+            .collect();
+        assert_eq!(files, vec!["src/main.rs"]);
+
+        let v = tools
+            .grep(json!({ "regex": "needle", "filtered": false }), None)
+            .await
+            .unwrap();
+        let files: std::collections::HashSet<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["file"].as_str())
+            .collect();
+        assert!(files.contains("target/built.rs"), "files: {files:?}");
+        assert!(files.contains(".hidden/dot.rs"), "files: {files:?}");
+        assert!(files.contains("src/main.rs"), "files: {files:?}");
     }
 }
