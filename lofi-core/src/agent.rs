@@ -172,6 +172,7 @@ pub struct Agent {
     reserved_context_tokens: u64,
     bash_env: BashEnv,
     shell_policy: ResolvedPolicy,
+    truncate: lofi_code::TruncatedCap,
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
@@ -190,9 +191,14 @@ impl Agent {
         max_output_tokens: Option<u64>,
         reserved_context_tokens: u64,
         bash: &BashConfig,
+        truncate: lofi_types::TruncateConfig,
         shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
         let bash_env = crate::bash_env::resolve_bash_env(bash);
+        let truncate = lofi_code::TruncatedCap {
+            max_lines: truncate.max_lines,
+            max_bytes: truncate.max_bytes,
+        };
         let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
         Self {
             provider: Arc::from(provider),
@@ -206,6 +212,7 @@ impl Agent {
             reserved_context_tokens,
             bash_env,
             shell_policy,
+            truncate,
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
@@ -234,6 +241,7 @@ impl Agent {
             reserved_context_tokens: self.reserved_context_tokens,
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
+            truncate: self.truncate,
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
@@ -259,6 +267,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
+            truncate: self.truncate,
         }
     }
 
@@ -280,6 +289,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir,
+            truncate: self.truncate,
         }
     }
 
