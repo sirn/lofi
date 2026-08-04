@@ -1,4 +1,17 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
+
+/// Polls `cancel` until it is set. Raced against a long-running tool's work so
+/// a tool awaiting I/O (which produces no JS bytecode ticks for the QuickJS
+/// interrupt handler) can still observe user cancellation. Mirrors
+/// `agent.rs::wait_for_cancel`.
+pub async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 pub struct PgrpKillGuard {
     pid: Option<u32>,
