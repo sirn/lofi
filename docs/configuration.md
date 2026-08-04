@@ -415,7 +415,7 @@ Maximum number of lines a tool returns before truncating to the first (`read`) o
 - Type: integer (bytes)
 - Default: `51200` (50 KiB)
 
-Maximum number of bytes a tool returns before truncating and linking a full log. Both limits default to Pi's truncation thresholds.
+Maximum number of bytes a tool returns before truncating and linking a full log. Both limits default to the same 2000 lines / 50 KiB cap.
 
 ## Retries
 

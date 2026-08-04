@@ -178,8 +178,7 @@ pub struct ExecCtx {
     pub confirm: Option<ConfirmFn>,
     pub auto_mode: Option<AutoModeFn>,
     pub skills_dir: Option<PathBuf>,
-    /// Visible-output cap applied to file reads and bash output. Defaults to
-    /// Pi's 2000 lines / 50 KiB.
+    /// Visible-output cap applied to file reads and bash output.
     pub truncate: crate::tools::truncate::TruncatedCap,
 }
 

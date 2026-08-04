@@ -59,7 +59,6 @@ pub struct BuiltinTools {
     read_roots: Vec<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     /// Visible-output caps for tool results (file reads and bash output).
-    /// Defaults to Pi values; see [`truncate::TruncatedCap`].
     truncate: truncate::TruncatedCap,
 }
 

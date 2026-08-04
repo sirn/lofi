@@ -844,8 +844,7 @@ impl Default for BashConfig {
 
 /// Visible-output caps for tool results. Both file reads and bash output
 /// apply this cap head- or tail-first: content within the limits is returned
-/// verbatim, and overflow is replaced by a pointer to the full output. The
-/// defaults match Pi.
+/// verbatim, and overflow is replaced by a pointer to the full output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TruncateConfig {
     /// Maximum number of lines returned before truncation. Defaults to
