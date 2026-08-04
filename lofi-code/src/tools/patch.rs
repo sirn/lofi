@@ -158,6 +158,8 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> std::result::Result<String, Str
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
