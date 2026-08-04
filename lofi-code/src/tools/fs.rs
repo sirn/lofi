@@ -190,82 +190,168 @@ pub(super) fn reject_symlink_leaf(root: &Path, p: &str, label: &str) -> Result<(
     Ok(())
 }
 
-/// Symlinks are followed (via `metadata`) so symlinked files and directories
-/// appear in results; broken symlinks are skipped. The canonicalization + root
-/// check in `resolve_for_read` is the security boundary for path escapes.
-/// Walk `dir` recursively, collecting regular-file paths into `out`.
-/// Every `read_dir` entry (files, directories, skipped specials) increments
-/// `visited`, and the traversal stops at `max_visited` entries so a tree of
-/// many empty directories can't make the walk effectively unbounded.
-/// Non-regular entries (FIFOs, sockets, devices) are skipped so a special
-/// file can't block in a later read. Returns `true` when truncated.
+/// Containment state shared by the `grep`/`find` walkers. The workspace's
+/// canonical root is the security boundary: every directory is canonicalized
+/// once as it is visited, and any directory (or symlinked leaf) resolving
+/// outside it is skipped. Canonicalized directories are deduplicated in
+/// `seen_dirs` so a symlinked directory is not descended into twice.
+struct WalkGuard {
+    canonical_root: PathBuf,
+    seen_dirs: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+}
+
+impl WalkGuard {
+    fn new(allowed_root: &Path) -> Result<Self> {
+        Ok(Self {
+            canonical_root: allowed_root.canonicalize()?,
+            seen_dirs: std::sync::Mutex::new(std::collections::HashSet::new()),
+        })
+    }
+
+    /// Whether `entry` may be descended into (directories) or opened (files).
+    /// Directories are canonicalized once and deduplicated; symlinked leaves
+    /// are resolved so a link pointing outside the root is not followed.
+    /// Regular files inside an already-contained directory are admitted
+    /// without a syscall.
+    fn admit(&self, entry: &ignore::DirEntry) -> bool {
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        if is_dir || entry.path_is_symlink() {
+            let Ok(canon) = entry.path().canonicalize() else {
+                return false;
+            };
+            if !canon.starts_with(&self.canonical_root) {
+                return false;
+            }
+            if is_dir {
+                let mut seen = match self.seen_dirs.lock() {
+                    Ok(seen) => seen,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                return seen.insert(canon);
+            }
+        }
+        true
+    }
+}
+
+/// Build a recursive walker over `base` with `guard` enforcing root
+/// containment. Symlinks are followed (loop-safe via `walkdir`). When
+/// `filtered` is set, `.gitignore`/`.ignore`/global-ignore rules and
+/// hidden-file pruning apply (rg/fd-style); otherwise every entry under the
+/// root is visited.
+fn build_walk(
+    base: &Path,
+    guard: &Arc<WalkGuard>,
+    filtered: bool,
+) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(base);
+    builder
+        .standard_filters(filtered)
+        .hidden(filtered)
+        // Honor `.gitignore`/`.ignore` even when the walk root is not inside
+        // a git work tree: a lofi workspace is not necessarily a repo.
+        .require_git(false)
+        .follow_links(true)
+        .sort_by_file_path(std::cmp::Ord::cmp);
+    let guard = Arc::clone(guard);
+    builder.filter_entry(move |entry| guard.admit(entry));
+    builder
+}
+
+/// Walk ceilings shared by `grep`/`find`, enforced across the parallel
+/// walker. `visited` counts every walked entry (files and directories);
+/// `capped` records which ceiling first tripped so the walk can stop
+/// scheduling new work. Because traversal is parallel, the ceilings are a
+/// stop point rather than an exact cut: in-flight entries may push the count
+/// past the limit before the walk halts.
+struct WalkCaps {
+    visited: std::sync::atomic::AtomicUsize,
+    max_visited: usize,
+    max_hits: usize,
+    limit: std::sync::Mutex<WalkLimit>,
+}
+
+impl WalkCaps {
+    fn new(max_hits: usize, max_visited: usize) -> Self {
+        Self {
+            visited: std::sync::atomic::AtomicUsize::new(0),
+            max_visited,
+            max_hits,
+            limit: std::sync::Mutex::new(WalkLimit::Complete),
+        }
+    }
+
+    /// Account for one walked entry and the current hit count, returning
+    /// whether the walk should stop. The first ceiling to trip wins.
+    fn tally(&self, hits: usize) -> ignore::WalkState {
+        let visited = self.visited.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let tripped = if hits >= self.max_hits {
+            WalkLimit::TooManyHits
+        } else if visited >= self.max_visited {
+            WalkLimit::TooManyVisited
+        } else {
+            return ignore::WalkState::Continue;
+        };
+        let mut limit = match self.limit.lock() {
+            Ok(limit) => limit,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *limit == WalkLimit::Complete {
+            *limit = tripped;
+        }
+        ignore::WalkState::Quit
+    }
+
+    fn limit(&self) -> WalkLimit {
+        match self.limit.lock() {
+            Ok(limit) => *limit,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+}
+
+/// Recursively collect regular-file paths under `dir` into `out`, bounded by
+/// `max_visited` walked entries. Traversal is parallel; `out` is unsorted on
+/// return (callers sort). Returns `true` when the traversal ceiling was hit.
 pub(super) fn walk_files_capped(
     dir: &Path,
     allowed_root: &Path,
     out: &mut Vec<PathBuf>,
     visited: &mut usize,
     max_visited: usize,
+    filtered: bool,
 ) -> Result<bool> {
     if !dir.is_dir() {
         return Ok(false);
     }
-    let canonical_root = allowed_root.canonicalize()?;
-    walk_files_capped_inner(
-        dir,
-        &canonical_root,
-        out,
-        visited,
-        max_visited,
-        &mut Vec::new(),
-    )
-}
-
-fn walk_files_capped_inner(
-    dir: &Path,
-    canonical_root: &Path,
-    out: &mut Vec<PathBuf>,
-    visited: &mut usize,
-    max_visited: usize,
-    ancestors: &mut Vec<PathBuf>,
-) -> Result<bool> {
-    let canonical_dir = dir.canonicalize()?;
-    if !canonical_dir.starts_with(canonical_root) || ancestors.contains(&canonical_dir) {
-        return Ok(false);
-    }
-    ancestors.push(canonical_dir);
-    for entry in std::fs::read_dir(dir)? {
-        if *visited >= max_visited {
-            return Ok(true);
-        }
-        *visited += 1;
-        let entry = entry?;
-        let ft = match std::fs::metadata(entry.path()) {
-            Ok(m) => m.file_type(),
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            if walk_files_capped_inner(
-                &entry.path(),
-                canonical_root,
-                out,
-                visited,
-                max_visited,
-                ancestors,
-            )? {
-                ancestors.pop();
-                return Ok(true);
-            }
-        } else if ft.is_file() {
-            let Ok(canonical_file) = entry.path().canonicalize() else {
-                continue;
+    let guard = Arc::new(WalkGuard::new(allowed_root)?);
+    let caps = Arc::new(WalkCaps::new(usize::MAX, max_visited));
+    let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+    build_walk(dir, &guard, filtered).build_parallel().run(|| {
+        let caps = Arc::clone(&caps);
+        let collected = Arc::clone(&collected);
+        Box::new(move |entry| {
+            let Ok(entry) = entry else {
+                return ignore::WalkState::Continue;
             };
-            if canonical_file.starts_with(canonical_root) {
-                out.push(entry.path());
+            let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
+            if is_file {
+                let mut collected = match collected.lock() {
+                    Ok(c) => c,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                collected.push(entry.path().to_path_buf());
             }
-        }
-    }
-    ancestors.pop();
-    Ok(false)
+            caps.tally(0)
+        })
+    });
+    *visited = caps.visited.load(std::sync::atomic::Ordering::Relaxed);
+    let collected = match collected.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    out.extend(collected.iter().cloned());
+    Ok(caps.limit() != WalkLimit::Complete)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,109 +361,73 @@ pub(super) enum WalkLimit {
     TooManyVisited,
 }
 
-/// Traverse `dir` applying `matcher` to each regular file's path relative to
-/// `root`, collecting matching relative paths into `hits`. Every `read_dir`
-/// entry increments `visited`; the traversal reports which safety ceiling was
-/// reached.
+/// The two safety ceilings a recursive walk enforces: how many results to
+/// collect and how many entries to visit before halting.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WalkCeilings {
+    pub max_hits: usize,
+    pub max_visited: usize,
+}
+
+/// Traverse `dir` in parallel applying `matcher` to each regular file's path
+/// relative to `root`, collecting matching relative paths into `hits`
+/// (unsorted; callers sort). Reports which safety ceiling was hit.
 pub(super) fn find_walk(
     dir: &Path,
     root: &Path,
     matcher: &globset::GlobMatcher,
     hits: &mut Vec<String>,
-    max_hits: usize,
+    ceilings: WalkCeilings,
     visited: &mut usize,
-    max_visited: usize,
+    filtered: bool,
 ) -> Result<WalkLimit> {
     if !dir.is_dir() {
         return Ok(WalkLimit::Complete);
     }
-    let canonical_root = root.canonicalize()?;
-    find_walk_inner(
-        dir,
-        root,
-        &canonical_root,
-        matcher,
-        hits,
-        max_hits,
-        visited,
-        max_visited,
-        &mut Vec::new(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn find_walk_inner(
-    dir: &Path,
-    root: &Path,
-    canonical_root: &Path,
-    matcher: &globset::GlobMatcher,
-    hits: &mut Vec<String>,
-    max_hits: usize,
-    visited: &mut usize,
-    max_visited: usize,
-    ancestors: &mut Vec<PathBuf>,
-) -> Result<WalkLimit> {
-    let canonical_dir = dir.canonicalize()?;
-    if !canonical_dir.starts_with(canonical_root) || ancestors.contains(&canonical_dir) {
-        return Ok(WalkLimit::Complete);
-    }
-    ancestors.push(canonical_dir);
-    for entry in std::fs::read_dir(dir)? {
-        if hits.len() >= max_hits {
-            ancestors.pop();
-            return Ok(WalkLimit::TooManyHits);
-        }
-        if *visited >= max_visited {
-            ancestors.pop();
-            return Ok(WalkLimit::TooManyVisited);
-        }
-        *visited += 1;
-        let entry = entry?;
-        let ft = match std::fs::metadata(entry.path()) {
-            Ok(m) => m.file_type(),
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if ft.is_dir() {
-            match find_walk_inner(
-                &path,
-                root,
-                canonical_root,
-                matcher,
-                hits,
-                max_hits,
-                visited,
-                max_visited,
-                ancestors,
-            )? {
-                WalkLimit::Complete => {}
-                other => {
-                    ancestors.pop();
-                    return Ok(other);
-                }
-            }
-        } else if ft.is_file() {
-            let Ok(canonical_file) = path.canonicalize() else {
-                continue;
+    let guard = Arc::new(WalkGuard::new(root)?);
+    let caps = Arc::new(WalkCaps::new(ceilings.max_hits, ceilings.max_visited));
+    let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+    build_walk(dir, &guard, filtered).build_parallel().run(|| {
+        let caps = Arc::clone(&caps);
+        let collected = Arc::clone(&collected);
+        Box::new(move |entry| {
+            let Ok(entry) = entry else {
+                return ignore::WalkState::Continue;
             };
-            if !canonical_file.starts_with(canonical_root) {
-                continue;
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return caps.tally(0);
             }
+            let path = entry.path();
+            let mut n_hits = 0usize;
             if let Ok(rel) = path.strip_prefix(root) {
                 let rel = rel.to_string_lossy().into_owned();
                 if matcher.is_match(&rel) {
-                    hits.push(rel);
+                    let mut collected = match collected.lock() {
+                        Ok(c) => c,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    collected.push(rel);
+                    n_hits = collected.len();
                 }
             }
-        }
-    }
-    ancestors.pop();
-    Ok(WalkLimit::Complete)
+            caps.tally(n_hits)
+        })
+    });
+    *visited = caps.visited.load(std::sync::atomic::Ordering::Relaxed);
+    let collected = match collected.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    hits.extend(collected.iter().cloned());
+    Ok(caps.limit())
 }
 
-pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize)> {
+/// Returns `(regex, case_insensitive, context_lines, filtered)`. `filtered`
+/// defaults to `true` so ignored and hidden files are pruned unless the
+/// caller opts into an exhaustive walk.
+pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, bool)> {
     match pattern {
-        Value::String(s) => Ok((s, false, 0)),
+        Value::String(s) => Ok((s, false, 0, true)),
         Value::Object(_) => {
             let re_src = pattern
                 .get("regex")
@@ -387,8 +437,13 @@ pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize)> {
             let ic = pattern.get("ic").and_then(Value::as_bool).unwrap_or(false);
             let ctx = usize::try_from(pattern.get("ctx").and_then(Value::as_u64).unwrap_or(0))
                 .unwrap_or(0);
-            Ok((re_src, ic, ctx))
+            let filtered = pattern
+                .get("filtered")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            Ok((re_src, ic, ctx, filtered))
         }
         _ => Err(Error::Tool("grep: pattern must be string or object".into())),
     }
 }
+

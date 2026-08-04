@@ -24,5 +24,6 @@ You are lofi, a helpful coding agent.
 - `lofi.edit({ path, old, new })` — replace one unambiguous occurrence.
 - `lofi.patch({ path, patch })` — apply a unified-diff patch to `path`. Use when an edit has several discontiguous changes.
 - `lofi.grep(pattern, path?)` — search files with a regular expression.
-- `lofi.find(glob, dir?)` — recursively find paths matching a glob.
+- `lofi.find(glob, dir?, filtered?)` — recursively find paths matching a glob.
+- Both skip `.gitignore`d and hidden files by default (`filtered: true`); pass `filtered: false` (or `{ ..., filtered: false }` for grep) to include them.
 - `lofi.ls(dir?)` — list directory entries.
