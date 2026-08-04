@@ -558,6 +558,43 @@ mod tests {
     }
 
     #[test]
+    fn closed_cancel_pairing_serializes_matched_blocks() {
+        // The transcript-of-default for a cancelled tool run is an assistant
+        // message with `ToolUse` blocks followed by synthesized error
+        // `ToolResult`s. Assert the request pairs them: Anthropic rejects an
+        // orphaned `tool_use` with 400 "did not find any tool_result blocks".
+        let msgs = [
+            Message {
+                role: Role::Assistant,
+                blocks: vec![lofi_types::ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "sleep 999"}),
+                }],
+            },
+            Message {
+                role: Role::Tool,
+                blocks: vec![lofi_types::ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "cancelled: tool run interrupted before producing a result"
+                        .to_string(),
+                    is_error: true,
+                }],
+            },
+        ];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let assistant = &req["messages"][0];
+        assert_eq!(assistant["content"][0]["type"], json!("tool_use"));
+        assert_eq!(assistant["content"][0]["id"], json!("tool-1"));
+        let tool_msg = &req["messages"][1];
+        assert_eq!(tool_msg["role"], json!("user"));
+        let result = &tool_msg["content"][0];
+        assert_eq!(result["type"], json!("tool_result"));
+        assert_eq!(result["tool_use_id"], json!("tool-1"));
+        assert_eq!(result["is_error"], json!(true));
+    }
+
+    #[test]
     fn maps_text_delta() {
         let data = json!({"delta":{"type":"text_delta","text":"hi"}});
         assert_eq!(
