@@ -46,7 +46,6 @@ impl SessionFile {
         self.last_active
     }
 
-
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
@@ -1913,9 +1912,8 @@ mod tests {
             .create(Path::new("/tmp/tree-cursor-shadow"), &"p/m".into())
             .unwrap();
         let cursor = SessionCursor::new(path.clone(), None);
-        let mut events: Vec<SessionEvent> = (0..8)
-            .map(|i| ev(user(&format!("turn {i}"))))
-            .collect();
+        let mut events: Vec<SessionEvent> =
+            (0..8).map(|i| ev(user(&format!("turn {i}")))).collect();
         cursor.append_events(&mut events).unwrap();
 
         let reopened = SessionCursor::open(path).unwrap();
@@ -1930,8 +1928,7 @@ mod tests {
             .filter(|(_, e)| e.kind != IndexKind::Cursor && !e.id.is_empty())
             .map(|(i, e)| (&e.id, i))
             .collect();
-        let path =
-            crate::session::tree::active_path_from_index(&snapshot.index, &by_id, leaf);
+        let path = crate::session::tree::active_path_from_index(&snapshot.index, &by_id, leaf);
         assert_eq!(
             path.len(),
             8,

@@ -156,8 +156,7 @@ impl Agent {
             }
             // Feed the prior round's prompt size back in so the next request
             // clips its output cap against the remaining context window.
-            let prev_input =
-                Some(stats.usage.input_tokens + stats.usage.cache_read_tokens);
+            let prev_input = Some(stats.usage.input_tokens + stats.usage.cache_read_tokens);
             let round = self
                 .run_once_inner(
                     &mut *messages,

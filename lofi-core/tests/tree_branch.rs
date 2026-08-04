@@ -59,7 +59,9 @@ fn row_labels(cursor: &lofi_core::session::store::SessionCursor) -> Vec<String> 
 /// Shared two-branch topology rooted at p1: trunk continues into branch A
 /// (p2) and branch B forks off t1 (pB, then nested pB2). Returns the cursor
 /// plus both branch tips.
-fn two_branch_fixture(dir: &tempfile::TempDir) -> (lofi_core::session::store::SessionCursor, String, String) {
+fn two_branch_fixture(
+    dir: &tempfile::TempDir,
+) -> (lofi_core::session::store::SessionCursor, String, String) {
     let store = SessionStore::new(dir.path().join("sessions"));
     let cursor = store.create_cursor(Path::new("/x"), &"m".into()).unwrap();
     let mut trunk = vec![user_ev("p1"), assistant_ev("a1"), turn_end()];
@@ -86,7 +88,10 @@ fn tree_lists_branched_off_branch_when_active_is_original() {
     cursor.branch_from(a_tip).unwrap();
     let labels = row_labels(&cursor);
     for expect in ["user: p1", "user: p2", "user: pB", "user: pB2"] {
-        assert!(labels.iter().any(|l| l.contains(expect)), "missing {expect}: {labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains(expect)),
+            "missing {expect}: {labels:?}"
+        );
     }
 }
 
@@ -97,7 +102,10 @@ fn tree_lists_original_branch_when_active_is_branched_off() {
     cursor.branch_from(b_tip).unwrap();
     let labels = row_labels(&cursor);
     for expect in ["user: p1", "user: p2", "user: pB", "user: pB2"] {
-        assert!(labels.iter().any(|l| l.contains(expect)), "missing {expect}: {labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains(expect)),
+            "missing {expect}: {labels:?}"
+        );
     }
 }
 
@@ -123,6 +131,9 @@ fn tree_lists_all_root_sibling_branches() {
     cursor.branch_from(a_tip).unwrap();
     let labels = row_labels(&cursor);
     for expect in ["user: P2", "user: P3", "user: P4"] {
-        assert!(labels.iter().any(|l| l.contains(expect)), "missing {expect}: {labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains(expect)),
+            "missing {expect}: {labels:?}"
+        );
     }
 }
