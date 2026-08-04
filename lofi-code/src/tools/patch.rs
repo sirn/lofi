@@ -158,29 +158,30 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> std::result::Result<String, Str
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
 
     #[test]
-    fn parses_hunk() {
-        let h = parse_unified_patch("@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n").unwrap();
+    fn parses_hunk() -> std::result::Result<(), String> {
+        let h = parse_unified_patch("@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n")?;
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].old, vec!["keep", "old", "keep"]);
         assert_eq!(h[0].new, vec!["keep", "new", "keep"]);
+        Ok(())
     }
 
     #[test]
-    fn applies_in_order() {
+    fn applies_in_order() -> std::result::Result<(), String> {
         let content = "a\nb\nc\n";
-        let h = parse_unified_patch("@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n").unwrap();
-        assert_eq!(apply_hunks(content, &h).unwrap(), "a\nB\nc\n");
+        let h = parse_unified_patch("@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n")?;
+        assert_eq!(apply_hunks(content, &h)?, "a\nB\nc\n");
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_context() {
+    fn rejects_missing_context() -> std::result::Result<(), String> {
         let content = "x\ny\n";
-        let h = parse_unified_patch("@@ -2,1 +2,1 @@\n q\n").unwrap();
+        let h = parse_unified_patch("@@ -2,1 +2,1 @@\n q\n")?;
         assert!(apply_hunks(content, &h).is_err());
+        Ok(())
     }
 }
