@@ -240,13 +240,47 @@ fn render_markdown_body(
     for block in analyze(text, t, base_style) {
         match block {
             MdBlock::Code { lang, lines, fence } => {
-                emit_code(&mut out, &mut row, text, lang.as_deref(), &lines, &fence, t, w, content_w, &lead_fn);
+                emit_code(
+                    &mut out,
+                    &mut row,
+                    text,
+                    lang.as_deref(),
+                    &lines,
+                    &fence,
+                    t,
+                    w,
+                    content_w,
+                    &lead_fn,
+                );
             }
-            MdBlock::Table { header, aligns, rows, src } => {
-                emit_table(&mut out, &mut row, text, &header, &aligns, &rows, &src, t, content_w, &lead_fn);
+            MdBlock::Table {
+                header,
+                aligns,
+                rows,
+                src,
+            } => {
+                emit_table(
+                    &mut out, &mut row, text, &header, &aligns, &rows, &src, t, content_w, &lead_fn,
+                );
             }
-            MdBlock::Heading { level, content_start, src, .. } => {
-                emit_heading(&mut out, &mut row, text, level, content_start, &src, t, base_style, content_w, &lead_fn);
+            MdBlock::Heading {
+                level,
+                content_start,
+                src,
+                ..
+            } => {
+                emit_heading(
+                    &mut out,
+                    &mut row,
+                    text,
+                    level,
+                    content_start,
+                    &src,
+                    t,
+                    base_style,
+                    content_w,
+                    &lead_fn,
+                );
             }
             MdBlock::Quote { lines, .. } => {
                 emit_quote(&mut out, &mut row, text, &lines, t, content_w, &lead_fn);
@@ -279,7 +313,11 @@ fn emit_blank(
     out.push(RenderLine {
         line: Line::from(lead),
         content: (deco_len, deco_len),
-        raw: Some(RawLine::new(Arc::from(raw_src), vec![0, raw_src.len()], true)),
+        raw: Some(RawLine::new(
+            Arc::from(raw_src),
+            vec![0, raw_src.len()],
+            true,
+        )),
         links: Vec::new(),
     });
     *row += 1;
@@ -309,7 +347,10 @@ fn emit_code(
     out.push(
         prim::rtile(
             lead_fn(*row),
-            vec![Span::styled(open_label, Style::new().fg(t.muted).bg(t.surface))],
+            vec![Span::styled(
+                open_label,
+                Style::new().fg(t.muted).bg(t.surface),
+            )],
             t.surface,
             w,
         )
@@ -324,7 +365,10 @@ fn emit_code(
     let avail = content_w.saturating_sub(2);
     for (line_text, _line_range) in lines {
         let src: Arc<str> = Arc::from(line_text.as_str());
-        let indent_len = line_text.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+        let indent_len = line_text
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
         let body = &line_text[indent_len..];
         // Byte offsets of every char boundary within `body`, including the end.
         // Indexing past the recorded boundary (a wrap segment wider than the
@@ -411,7 +455,14 @@ fn emit_table(
         .collect();
     let before = out.len();
     out.extend(render_table(
-        &header_txt, &data_txt, aligns, content_w, t, &src_lines, *row, lead_fn,
+        &header_txt,
+        &data_txt,
+        aligns,
+        content_w,
+        t,
+        &src_lines,
+        *row,
+        lead_fn,
     ));
     *row += out.len() - before;
 }
@@ -444,8 +495,11 @@ fn emit_heading(
     let rows = wrap_with_map(h, prefix_len, trimmed.len(), content_w);
     for (i, (seg, map)) in rows.into_iter().enumerate() {
         out.push(
-            prim::rline(lead_fn(*row), vec![Span::styled(seg, style)])
-                .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+            prim::rline(lead_fn(*row), vec![Span::styled(seg, style)]).with_raw(RawLine::new(
+                src_arc.clone(),
+                map,
+                i == 0,
+            )),
         );
         *row += 1;
     }
@@ -497,8 +551,11 @@ fn emit_quote(
             let mut lead = lead_fn(*row);
             lead.push(bar.clone());
             out.push(
-                prim::rline(lead, vec![Span::styled(seg, quote_style)])
-                    .with_raw(RawLine::new(src_arc.clone(), map, i == 0)),
+                prim::rline(lead, vec![Span::styled(seg, quote_style)]).with_raw(RawLine::new(
+                    src_arc.clone(),
+                    map,
+                    i == 0,
+                )),
             );
             *row += 1;
         }
@@ -600,9 +657,7 @@ struct MdQuoteLine {
 #[derive(Clone)]
 enum MdBlock {
     /// A run of one or more blank source lines (rendered as empty rows).
-    Blank {
-        src: std::ops::Range<usize>,
-    },
+    Blank { src: std::ops::Range<usize> },
     Paragraph {
         spans: Vec<MappedSpan>,
         src: std::ops::Range<usize>,
@@ -643,7 +698,11 @@ struct InlineExtent {
 
 impl InlineExtent {
     fn new() -> Self {
-        Self { start: 0, end: 0, seen: false }
+        Self {
+            start: 0,
+            end: 0,
+            seen: false,
+        }
     }
     fn observe(&mut self, range: &std::ops::Range<usize>) {
         if self.seen {
@@ -708,8 +767,15 @@ fn heading_level_num(level: pulldown_cmark::HeadingLevel) -> u8 {
 /// block containers), so an explicit stack suffices; quote/table frames own
 /// their inline extents and no nested block events are expected at depth.
 enum BlockFrame {
-    Para { ext: InlineExtent, src: std::ops::Range<usize> },
-    Heading { level: u8, ext: InlineExtent, src: std::ops::Range<usize> },
+    Para {
+        ext: InlineExtent,
+        src: std::ops::Range<usize>,
+    },
+    Heading {
+        level: u8,
+        ext: InlineExtent,
+        src: std::ops::Range<usize>,
+    },
     Code {
         lang: Option<String>,
         fence: std::ops::Range<usize>,
@@ -725,12 +791,17 @@ enum BlockFrame {
         in_head: bool,
         cell: Option<(InlineExtent, std::ops::Range<usize>)>,
     },
-    Quote { src: std::ops::Range<usize> },
+    Quote {
+        src: std::ops::Range<usize>,
+    },
     /// The outermost list. Rendered line-preserving (each source line a
     /// paragraph, markers and indent intact), so the frame captures the source
     /// range plus a depth counter for the nested lists pulldown reports inside
     /// it (their Start/End must not close this frame).
-    List { src: std::ops::Range<usize>, depth: usize },
+    List {
+        src: std::ops::Range<usize>,
+        depth: usize,
+    },
 }
 
 /// True when a container frame (block quote or list) remains on the stack.
@@ -750,7 +821,10 @@ fn observe_inline(stack: &mut [BlockFrame], range: &std::ops::Range<usize>) {
         Some(BlockFrame::Para { ext, .. } | BlockFrame::Heading { ext, .. }) => {
             ext.observe(range);
         }
-        Some(BlockFrame::Table { cell: Some((cext, _)), .. }) => cext.observe(range),
+        Some(BlockFrame::Table {
+            cell: Some((cext, _)),
+            ..
+        }) => cext.observe(range),
         _ => {}
     }
 }
@@ -828,7 +902,10 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
                 });
             }
             Event::Text(t) => {
-                if let Some(BlockFrame::Code { body, body_range, .. }) = stack.last_mut() {
+                if let Some(BlockFrame::Code {
+                    body, body_range, ..
+                }) = stack.last_mut()
+                {
                     body.push_str(&t);
                     *body_range = Some(match body_range.take() {
                         Some(br) => br.start..range.end,
@@ -872,13 +949,22 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
                 }
             }
             Event::End(TagEnd::TableHead) => {
-                if let Some(BlockFrame::Table { in_head, header, cur, .. }) = stack.last_mut() {
+                if let Some(BlockFrame::Table {
+                    in_head,
+                    header,
+                    cur,
+                    ..
+                }) = stack.last_mut()
+                {
                     *in_head = false;
                     *header = std::mem::take(cur);
                 }
             }
             Event::End(TagEnd::TableRow) => {
-                if let Some(BlockFrame::Table { in_head, rows, cur, .. }) = stack.last_mut() {
+                if let Some(BlockFrame::Table {
+                    in_head, rows, cur, ..
+                }) = stack.last_mut()
+                {
                     if !*in_head {
                         rows.push(std::mem::take(cur));
                     }
@@ -931,7 +1017,10 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
                     // its End does not close the outer frame.
                     Some(BlockFrame::List { depth, .. }) => *depth += 1,
                     Some(BlockFrame::Quote { .. }) => {}
-                    _ => stack.push(BlockFrame::List { src: range, depth: 0 }),
+                    _ => stack.push(BlockFrame::List {
+                        src: range,
+                        depth: 0,
+                    }),
                 }
             }
             Event::End(TagEnd::List(_)) => {
@@ -977,12 +1066,7 @@ fn block_src(b: &MdBlock) -> std::ops::Range<usize> {
 ///
 /// Block classification remains entirely pulldown's; this only enforces line
 /// granularity for rendering.
-fn preserve_lines(
-    text: &str,
-    blocks: Vec<MdBlock>,
-    t: Theme,
-    base: Style,
-) -> Vec<MdBlock> {
+fn preserve_lines(text: &str, blocks: Vec<MdBlock>, t: Theme, base: Style) -> Vec<MdBlock> {
     let mut out: Vec<MdBlock> = Vec::new();
     // `cursor` tracks the byte just past the prior block's content. Block
     // ranges from pulldown inconsistently include a trailing newline, so the
@@ -1065,7 +1149,10 @@ fn split_paragraph_lines(
             m.boundary_start += src.start;
         }
         if !spans_text(&spans).trim().is_empty() {
-            out.push(MdBlock::Paragraph { spans, src: src.clone() });
+            out.push(MdBlock::Paragraph {
+                spans,
+                src: src.clone(),
+            });
         }
         return;
     }
@@ -1080,9 +1167,14 @@ fn split_paragraph_lines(
             m.boundary_start += off;
         }
         if trimmed.trim().is_empty() {
-            out.push(MdBlock::Blank { src: off..off + line.len() });
+            out.push(MdBlock::Blank {
+                src: off..off + line.len(),
+            });
         } else {
-            out.push(MdBlock::Paragraph { spans, src: line_range });
+            out.push(MdBlock::Paragraph {
+                spans,
+                src: line_range,
+            });
         }
         off += line.len() + 1;
     }
@@ -1166,7 +1258,10 @@ fn split_code_lines(
         }
     }
     if line_start < body.len() {
-        out.push((body[line_start..].to_string(), base + line_start..base + body.len()));
+        out.push((
+            body[line_start..].to_string(),
+            base + line_start..base + body.len(),
+        ));
     }
     out
 }
@@ -1243,7 +1338,12 @@ fn markdown_body_height(text: &str, content_w: usize) -> usize {
                 }
                 row += 1;
             }
-            MdBlock::Table { header, aligns, rows, .. } => {
+            MdBlock::Table {
+                header,
+                aligns,
+                rows,
+                ..
+            } => {
                 let cell_text = |c: &MdCell| text[c.src.clone()].trim().to_string();
                 let header_txt: Vec<String> = header.iter().map(&cell_text).collect();
                 let data_txt: Vec<Vec<String>> = rows
@@ -1252,7 +1352,9 @@ fn markdown_body_height(text: &str, content_w: usize) -> usize {
                     .collect();
                 row += table_height_cells(&header_txt, &data_txt, &aligns, content_w);
             }
-            MdBlock::Heading { content_start, src, .. } => {
+            MdBlock::Heading {
+                content_start, src, ..
+            } => {
                 let trimmed = text[src.clone()].trim_end();
                 let h = text[content_start..src.end].trim_end();
                 row += wrap_with_map(h, content_start - src.start, trimmed.len(), content_w).len();
@@ -1398,7 +1500,9 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let mut fmt_stack: Vec<(usize, Modifier, Option<Arc<str>>)> = Vec::new();
 
     let current_style = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
-        fmt_stack.iter().fold(base, |style, (_, m, _)| style.add_modifier(*m))
+        fmt_stack
+            .iter()
+            .fold(base, |style, (_, m, _)| style.add_modifier(*m))
     };
     let current_link = |fmt_stack: &[(usize, Modifier, Option<Arc<str>>)]| {
         fmt_stack.iter().rev().find_map(|(_, _, l)| l.clone())
@@ -3188,7 +3292,10 @@ mod tests {
                 let text: String = spans.iter().map(|m| m.span.content.as_ref()).collect();
                 assert_eq!(text, "hello world");
             }
-            other => panic!("expected paragraph, got {:?}", std::mem::discriminant(other)),
+            other => panic!(
+                "expected paragraph, got {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
 
@@ -3206,7 +3313,7 @@ mod tests {
                 assert_eq!(*level, 2);
                 assert_eq!(*range, 0..13);
                 assert_eq!(*content_start, 3); // after "## "
-                // Content (after the `# ` prefix) slices back to the source.
+                                               // Content (after the `# ` prefix) slices back to the source.
                 assert_eq!(&src[*content_start..range.end], "Title here");
             }
             other => panic!("expected heading, got {:?}", std::mem::discriminant(other)),
@@ -3270,7 +3377,11 @@ mod tests {
                 assert_eq!(lines.len(), 3);
                 assert_eq!(lines[0].prefix_len, 2);
                 assert_eq!(lines[2].prefix_len, 1); // bare ">"
-                let l0: String = lines[0].spans.iter().map(|m| m.span.content.as_ref()).collect();
+                let l0: String = lines[0]
+                    .spans
+                    .iter()
+                    .map(|m| m.span.content.as_ref())
+                    .collect();
                 assert_eq!(l0, "one");
                 // Each line's source range slices back to the raw quote line.
                 assert_eq!(&src[lines[0].src.clone()], "> one");
@@ -3373,7 +3484,10 @@ mod tests {
         // the `InlineExtent` sentinel (0), which precedes `src.start`.
         for c in ["foo\n# ", "foo\n#", "#\n", "## ", "#   "] {
             for b in analyze_blocks(c) {
-                if let MdBlock::Heading { content_start, src, .. } = b {
+                if let MdBlock::Heading {
+                    content_start, src, ..
+                } = b
+                {
                     assert!(
                         content_start >= src.start,
                         "content_start {content_start} < src.start {} for {c:?}",
