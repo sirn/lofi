@@ -842,6 +842,39 @@ impl Default for BashConfig {
     }
 }
 
+/// Visible-output caps for tool results. Both file reads and bash output
+/// apply this cap head- or tail-first: content within the limits is returned
+/// verbatim, and overflow is replaced by a pointer to the full output. The
+/// defaults match Pi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruncateConfig {
+    /// Maximum number of lines returned before truncation. Defaults to
+    /// `2000`.
+    #[serde(default = "default_truncate_max_lines")]
+    pub max_lines: usize,
+    /// Maximum number of bytes returned before truncation. Defaults to
+    /// `51200` (50 KiB).
+    #[serde(default = "default_truncate_max_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for TruncateConfig {
+    fn default() -> Self {
+        Self {
+            max_lines: default_truncate_max_lines(),
+            max_bytes: default_truncate_max_bytes(),
+        }
+    }
+}
+
+fn default_truncate_max_lines() -> usize {
+    2000
+}
+
+fn default_truncate_max_bytes() -> usize {
+    50 * 1024
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellPolicyMode {
@@ -1111,6 +1144,8 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub bash: BashConfig,
+    #[serde(default)]
+    pub truncate: TruncateConfig,
     #[serde(skip)]
     pub shell_policy: ShellPolicyConfig,
     #[serde(default)]
@@ -1297,6 +1332,7 @@ mod tests {
             agent: AgentConfig::default(),
             compaction: CompactionConfig::default(),
             bash: BashConfig::default(),
+            truncate: TruncateConfig::default(),
             shell_policy: ShellPolicyConfig::default(),
             retry: RetryConfig::default(),
             default_provider: None,
