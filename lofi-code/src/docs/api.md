@@ -32,13 +32,16 @@ List entries under a directory.
 is always complete: if the directory has more than 50,000 entries the call
 throws (narrow with a more specific `dir`).
 
-## lofi.find(glob, dir?)
+## lofi.find(glob, dir?, filtered?)
 
 Recursive glob match.
 
 **Parameters:**
 - `glob` (string, required) — glob pattern.
 - `dir` (string, optional) — directory to search in (default root).
+- `filtered` (boolean, optional, default `true`) — when `true`, files ignored
+  by `.gitignore`/`.ignore` and hidden (dot) files are pruned from the walk,
+  like `rg`/`fd`. Pass `false` to traverse every file.
 
 **Returns:** `{ ok, matches }` — a sorted array of relative paths. The call
 throws if it exceeds 50,000 matches or 65,536 traversed entries (narrow the
@@ -50,8 +53,9 @@ Search file contents with a regex.
 
 **Parameters:**
 - `pattern` (string or object, required) — a regex string, or
-  `{ regex, ic?, ctx? }` (`ic` = case-insensitive, `ctx` = context lines
-  around each match).
+  `{ regex, ic?, ctx?, filtered? }` (`ic` = case-insensitive, `ctx` = context
+  lines around each match, `filtered` = prune ignored/hidden files, default
+  `true`).
 - `path` (string, optional) — file or directory to search (default root).
 
 **Returns:** `{ ok, matches, skipped }`. `matches` is an array of
