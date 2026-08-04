@@ -2,6 +2,24 @@ pub const DEFAULT_MAX_LINES: usize = 2000;
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
+/// The line/byte caps a tool applies to its visible output. File reads and
+/// bash output share one cap by design.
+/// Defaults match [`DEFAULT_MAX_LINES`] / [`DEFAULT_MAX_BYTES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TruncatedCap {
+    pub max_lines: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for TruncatedCap {
+    fn default() -> Self {
+        Self {
+            max_lines: DEFAULT_MAX_LINES,
+            max_bytes: DEFAULT_MAX_BYTES,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Truncated {
     pub content: String,
