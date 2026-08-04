@@ -133,6 +133,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
     }
 }
 
@@ -528,6 +529,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -817,6 +819,7 @@ fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry)
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: None,
@@ -964,6 +967,7 @@ fn select_model_uses_default_model_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: None,
@@ -1001,6 +1005,7 @@ fn select_model_uses_default_provider_when_no_query() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
@@ -1038,6 +1043,7 @@ fn select_model_default_model_overrides_default_provider() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
@@ -1075,6 +1081,7 @@ fn select_model_explicit_query_overrides_defaults() {
         agent: AgentConfig::default(),
         compaction: CompactionConfig::default(),
         bash: lofi_types::BashConfig::default(),
+        truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),

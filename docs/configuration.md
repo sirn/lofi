@@ -393,6 +393,30 @@ Copies named variables from the parent environment into the child. Their values 
 
 Loads `KEY=VALUE` entries into the child environment, overriding values from `pass_env`. `~` is expanded. Keep this file outside the workspace so the agent's file tools cannot read it. Values are redacted from command output.
 
+## Truncation
+
+`[truncate]` sets the visible-output cap that both `lofi.read` and `lofi.bash` apply to their results.
+
+```toml
+[truncate]
+max_lines = 2000
+max_bytes = 51200
+```
+
+### `max_lines`
+
+- Type: integer
+- Default: `2000`
+
+Maximum number of lines a tool returns before truncating to the first (`read`) or last (`bash`) lines and linking a full log.
+
+### `max_bytes`
+
+- Type: integer (bytes)
+- Default: `51200` (50 KiB)
+
+Maximum number of bytes a tool returns before truncating and linking a full log. Both limits default to the same 2000 lines / 50 KiB cap.
+
 ## Retries
 
 `[retry]` controls retries for transient provider and transport failures.

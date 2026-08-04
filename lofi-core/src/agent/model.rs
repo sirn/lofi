@@ -222,6 +222,7 @@ pub fn rebuild_agent(
             None,
             config.compaction.reserved_context_tokens,
             &config.bash,
+            config.truncate,
             &config.shell_policy,
         )
         .with_tmp_lease(tmp_lease)
