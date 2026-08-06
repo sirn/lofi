@@ -406,6 +406,9 @@ fn render_assistant(
             }
             ContentBlock::Text { text } => text_parts.push(text.clone()),
             ContentBlock::Thinking { text, .. } => thinking_parts.push(text.clone()),
+            ContentBlock::Image { media_type, .. } => {
+                text_parts.push(format!("[image: {media_type}]"));
+            }
             ContentBlock::ToolResult { .. } => {}
         }
     }
@@ -644,6 +647,7 @@ fn for_each_search_text(message: &Message, mut visit: impl FnMut(&str)) {
                     visit(code);
                 }
             }
+            ContentBlock::Image { media_type, .. } => visit(media_type),
         }
     }
 }

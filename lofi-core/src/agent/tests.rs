@@ -553,6 +553,86 @@ async fn run_continuation_force_stops_at_hard_cap() {
 }
 
 #[tokio::test]
+async fn run_continuation_image_byte_pressure_stops_before_send() {
+    let dir = tempdir().unwrap();
+    // A vision model so the image is NOT stripped by the non-vision guard and
+    // its bytes actually count toward the request payload budget.
+    let provider = Arc::new(MockProvider {
+        rounds: std::sync::Mutex::new(vec![vec![
+            StreamingEvent::TextDelta("unreachable".to_string()),
+            StreamingEvent::Done(Usage::default()),
+        ]]),
+    });
+    let agent = Agent {
+        provider: provider.clone(),
+        model: {
+            let mut m = model();
+            m.supports_image = true;
+            m
+        },
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
+        tmp_lease: None,
+        retry: crate::retry::RetryPolicy::default(),
+        system_prompt: "sys".to_string(),
+        max_output_tokens: None,
+        reserved_context_tokens: 0, // token cap disabled; byte cap is the trigger
+        bash_env: lofi_code::BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
+        confirm_tx: None,
+        confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        auto_mode: None,
+        skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
+    let mut messages = vec![Message {
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                bytes: vec![0u8; 7 * 1024 * 1024],
+                media_type: "image/jpeg".to_string(),
+            },
+        ],
+    }];
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .await
+        .unwrap();
+
+    let mut saw_pressure = false;
+    let mut saw_failed = false;
+    let mut saw_notice = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::ContextPressure { .. } => saw_pressure = true,
+            AgentEvent::TurnFailed { .. } => saw_failed = true,
+            AgentEvent::Notice(n) if n.contains("compacting to fit") => saw_notice = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_pressure,
+        "byte pressure must surface as ContextPressure"
+    );
+    assert!(!saw_failed, "byte pressure must not fail the turn");
+    assert!(saw_notice, "byte pressure must explain the stop");
+    // The provider was never called: its single round is still queued.
+    assert_eq!(provider.rounds.lock().unwrap().len(), 1);
+    // The durable history keeps the original image untouched.
+    assert!(messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .any(|b| matches!(b, ContentBlock::Image { .. })));
+}
+
+#[tokio::test]
 async fn run_once_tool_error_marks_result_error() {
     let dir = tempdir().unwrap();
     let tool_input =
@@ -735,8 +815,8 @@ async fn run_exits_when_receiver_dropped() {
 
 use indexmap::IndexMap;
 use lofi_types::{
-    AgentConfig, ApiTypeMapping, CompactionConfig, Config, ModelConfig, PricingConvention,
-    PricingFieldMappings, ProviderConfig, ThinkingLevel,
+    ApiTypeMapping, Config, ModelConfig, PricingConvention, PricingFieldMappings, ProviderConfig,
+    ThinkingLevel,
 };
 
 fn mc() -> ModelConfig {
@@ -816,15 +896,8 @@ fn provider(
 
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     (cfg, reg)
@@ -964,15 +1037,9 @@ fn select_model_uses_default_model_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1002,15 +1069,9 @@ fn select_model_uses_default_provider_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1040,15 +1101,10 @@ fn select_model_default_model_overrides_default_provider() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1078,15 +1134,10 @@ fn select_model_explicit_query_overrides_defaults() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, Some("anthropic/claude")).unwrap();
@@ -1261,4 +1312,64 @@ fn clipped_max_tokens_none_when_window_unknown() {
     agent.max_output_tokens = None;
     // No cap at all.
     assert_eq!(agent.clipped_max_tokens(None), None);
+}
+#[tokio::test]
+async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
+    // The omit notice must fire exactly once for the whole turn, not once
+    // per tool round. Two rounds: a tool-use round then a text round.
+    let dir = tempdir().unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let round1 = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: tool_input,
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let round2 = vec![
+        StreamingEvent::TextDelta("done".to_string()),
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let agent = agent_with(vec![round1, round2], dir.path());
+    let mut messages = vec![Message {
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                bytes: vec![1, 2, 3],
+                media_type: "image/jpeg".to_string(),
+            },
+        ],
+    }];
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, true, None, None)
+        .await
+        .unwrap();
+
+    let mut notices = 0usize;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AgentEvent::Notice(_)) {
+            notices += 1;
+        }
+    }
+    assert_eq!(
+        notices, 1,
+        "expected one omit notice per turn, got {notices}"
+    );
+    // The send-time strip leaves the durable history untouched.
+    assert!(messages[0]
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. })));
 }
