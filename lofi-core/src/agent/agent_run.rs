@@ -69,6 +69,7 @@ impl Agent {
     /// sole writer of the session log so a resumed session reconstructs
     /// identically to the live one.
     /// # Errors
+    /// Propagates [`Error`] from [`run_continuation_with_attachments`](Self::run_continuation_with_attachments).
     #[allow(clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
@@ -1078,37 +1079,6 @@ impl Agent {
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
-/// Count attached images across the request history, for the omit notice.
-fn count_image_blocks(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .flat_map(|m| m.blocks.iter())
-        .filter(|b| matches!(b, ContentBlock::Image { .. }))
-        .count()
-}
-
-/// Return a copy of `messages` with every `Image` block replaced by a text
-/// marker, so a model without image support still sees that an attachment was
-/// present. Used only on the send path; the durable transcript is untouched.
-fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
-    messages
-        .iter()
-        .map(|m| Message {
-            role: m.role,
-            blocks: m
-                .blocks
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Image { media_type, .. } => ContentBlock::Text {
-                        text: format!("[image omitted: model does not support images; media_type={media_type}]"),
-                    },
-                    other => other.clone(),
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return;
@@ -1150,6 +1120,37 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
         role: Role::Tool,
         blocks: synthesized,
     });
+}
+
+/// Count attached images across the request history, for the omit notice.
+fn count_image_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count()
+}
+
+/// Return a copy of `messages` with every `Image` block replaced by a text
+/// marker, so a model without image support still sees that an attachment was
+/// present. Used only on the send path; the durable transcript is untouched.
+fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| Message {
+            role: m.role,
+            blocks: m
+                .blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Image { media_type, .. } => ContentBlock::Text {
+                        text: format!("[image omitted: model does not support images; media_type={media_type}]"),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
