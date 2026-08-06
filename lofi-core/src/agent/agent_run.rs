@@ -310,6 +310,17 @@ impl Agent {
                     break;
                 }
                 Err(e) => {
+                    // An oversized image payload stopped before send; route
+                    // to the existing force-compact + continue recovery. The
+                    // round never ran, so the partial-turn suffix is empty
+                    // and the recorder's `ContextPressure => None` arm leaves
+                    // the durable transcript untouched.
+                    // Match the variant payload, not `Display`: `Provider`
+                    // prefixes its message with "provider error: ".
+                    if matches!(&e, Error::Provider(m) if m == IMAGE_PRESSURE_SENTINEL) {
+                        context_pressure = true;
+                        break;
+                    }
                     if retry.can_retry(retry_attempt) && crate::retry::is_retryable_error(&e) {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
@@ -543,6 +554,25 @@ impl Agent {
             }
         };
         let send_messages: &Vec<Message> = stripped.as_ref().unwrap_or(messages);
+        // Send-time byte guard: the provider caps the request body, not just
+        // the token count, so an image-heavy history can be rejected (HTTP
+        // 413) while the token-threshold compaction never trips. Stop before
+        // the doomed request and surface the sentinel; the run loop maps it
+        // to `ContextPressure`, which force-compacts and continues. Runs at
+        // send time (not after a round) because the oversized request is
+        // usually the first one carrying fresh attachments.
+        let image_bytes = image_payload_bytes(send_messages);
+        if image_bytes > MAX_REQUEST_IMAGE_BYTES {
+            if let Some(tx) = tx {
+                let _ = tx
+                    .send(AgentEvent::Notice(format!(
+                        "attached images total {} MiB; compacting to fit the request size limit",
+                        image_bytes / (1024 * 1024)
+                    )))
+                    .await;
+            }
+            return Err(Error::Provider(IMAGE_PRESSURE_SENTINEL.to_string()));
+        }
         let schemas = [schema];
         let stream = match cancel {
             Some(flag) => {
@@ -1162,6 +1192,36 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
+/// Request image payload budget (base64 bytes). Providers cap the request
+/// *body*, not just the token count: Anthropic rejects a body over 32 MiB
+/// with HTTP 413 `request_too_large` even when the token estimate is well
+/// under the context window. Images are the dominant unbounded term (text,
+/// tool results, and schemas are bounded elsewhere), so the byte pressure
+/// signal thresholds just the image payload. 8 MiB sits far under every
+/// provider body cap after base64 inflation (x4/3) plus envelope overhead.
+const MAX_REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Sentinel error message marking a stop-before-send due to an oversized
+/// image payload. The run loop intercepts it and routes to the existing
+/// `ContextPressure` recovery (force-compact + continue) instead of failing
+/// the turn. A sentinel string, not a new `Error` variant, because only this
+/// send/loop pair needs to distinguish it and a variant would leak an
+/// internal control-flow detail into the shared error type.
+const IMAGE_PRESSURE_SENTINEL: &str = "__lofi_image_pressure__";
+
+/// Sum the base64 payload bytes of every attached image across the request
+/// history. Base64 length is `4 * ceil(n/3)` for `n` raw bytes.
+fn image_payload_bytes(messages: &[Message]) -> u64 {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .map(|b| match b {
+            ContentBlock::Image { bytes, .. } => 4 * bytes.len().div_ceil(3) as u64,
+            _ => 0,
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1325,5 +1385,47 @@ mod tests {
         assert_eq!(count_image_blocks(&messages), 0);
         let stripped = strip_image_blocks(&messages);
         assert_eq!(stripped, messages);
+    }
+
+    #[test]
+    fn image_payload_bytes_counts_base64_length() {
+        let image = |n: usize| ContentBlock::Image {
+            bytes: vec![0u8; n],
+            media_type: "image/jpeg".to_string(),
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "not counted".to_string(),
+                },
+                image(3), // 4 base64 bytes
+                image(4), // 8 base64 bytes (4 -> ceil(4/3)=2 -> 8)
+                image(1), // 4 base64 bytes
+            ],
+        }];
+        assert_eq!(image_payload_bytes(&messages), 16);
+        // Text and empty histories contribute nothing.
+        assert_eq!(image_payload_bytes(&[]), 0);
+    }
+
+    #[test]
+    fn image_payload_budget_distinguishes_over_and_under() {
+        let image = |n: usize| ContentBlock::Image {
+            bytes: vec![0u8; n],
+            media_type: "image/jpeg".to_string(),
+        };
+        // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB budget.
+        let over = vec![Message {
+            role: Role::User,
+            blocks: vec![image(7 * 1024 * 1024)],
+        }];
+        assert!(image_payload_bytes(&over) > MAX_REQUEST_IMAGE_BYTES);
+        // 1 MiB raw stays well under.
+        let under = vec![Message {
+            role: Role::User,
+            blocks: vec![image(1024 * 1024)],
+        }];
+        assert!(image_payload_bytes(&under) <= MAX_REQUEST_IMAGE_BYTES);
     }
 }

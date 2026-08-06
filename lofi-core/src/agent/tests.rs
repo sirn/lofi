@@ -553,6 +553,86 @@ async fn run_continuation_force_stops_at_hard_cap() {
 }
 
 #[tokio::test]
+async fn run_continuation_image_byte_pressure_stops_before_send() {
+    let dir = tempdir().unwrap();
+    // A vision model so the image is NOT stripped by the non-vision guard and
+    // its bytes actually count toward the request payload budget.
+    let provider = Arc::new(MockProvider {
+        rounds: std::sync::Mutex::new(vec![vec![
+            StreamingEvent::TextDelta("unreachable".to_string()),
+            StreamingEvent::Done(Usage::default()),
+        ]]),
+    });
+    let agent = Agent {
+        provider: provider.clone(),
+        model: {
+            let mut m = model();
+            m.supports_image = true;
+            m
+        },
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
+        tmp_lease: None,
+        retry: crate::retry::RetryPolicy::default(),
+        system_prompt: "sys".to_string(),
+        max_output_tokens: None,
+        reserved_context_tokens: 0, // token cap disabled; byte cap is the trigger
+        bash_env: lofi_code::BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
+        confirm_tx: None,
+        confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        auto_mode: None,
+        skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
+    let mut messages = vec![Message {
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                bytes: vec![0u8; 7 * 1024 * 1024],
+                media_type: "image/jpeg".to_string(),
+            },
+        ],
+    }];
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .await
+        .unwrap();
+
+    let mut saw_pressure = false;
+    let mut saw_failed = false;
+    let mut saw_notice = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::ContextPressure { .. } => saw_pressure = true,
+            AgentEvent::TurnFailed { .. } => saw_failed = true,
+            AgentEvent::Notice(n) if n.contains("compacting to fit") => saw_notice = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_pressure,
+        "byte pressure must surface as ContextPressure"
+    );
+    assert!(!saw_failed, "byte pressure must not fail the turn");
+    assert!(saw_notice, "byte pressure must explain the stop");
+    // The provider was never called: its single round is still queued.
+    assert_eq!(provider.rounds.lock().unwrap().len(), 1);
+    // The durable history keeps the original image untouched.
+    assert!(messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .any(|b| matches!(b, ContentBlock::Image { .. })));
+}
+
+#[tokio::test]
 async fn run_once_tool_error_marks_result_error() {
     let dir = tempdir().unwrap();
     let tool_input =
