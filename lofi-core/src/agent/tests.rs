@@ -735,8 +735,8 @@ async fn run_exits_when_receiver_dropped() {
 
 use indexmap::IndexMap;
 use lofi_types::{
-    AgentConfig, ApiTypeMapping, CompactionConfig, Config, ModelConfig, PricingConvention,
-    PricingFieldMappings, ProviderConfig, ThinkingLevel,
+    ApiTypeMapping, Config, ModelConfig, PricingConvention, PricingFieldMappings, ProviderConfig,
+    ThinkingLevel,
 };
 
 fn mc() -> ModelConfig {
@@ -816,15 +816,8 @@ fn provider(
 
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     (cfg, reg)
@@ -964,15 +957,9 @@ fn select_model_uses_default_model_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1002,15 +989,9 @@ fn select_model_uses_default_provider_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1040,15 +1021,10 @@ fn select_model_default_model_overrides_default_provider() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1078,15 +1054,10 @@ fn select_model_explicit_query_overrides_defaults() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, Some("anthropic/claude")).unwrap();
@@ -1261,4 +1232,64 @@ fn clipped_max_tokens_none_when_window_unknown() {
     agent.max_output_tokens = None;
     // No cap at all.
     assert_eq!(agent.clipped_max_tokens(None), None);
+}
+#[tokio::test]
+async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
+    // The omit notice must fire exactly once for the whole turn, not once
+    // per tool round. Two rounds: a tool-use round then a text round.
+    let dir = tempdir().unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let round1 = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: tool_input,
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let round2 = vec![
+        StreamingEvent::TextDelta("done".to_string()),
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let agent = agent_with(vec![round1, round2], dir.path());
+    let mut messages = vec![Message {
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                bytes: vec![1, 2, 3],
+                media_type: "image/jpeg".to_string(),
+            },
+        ],
+    }];
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, true, None, None)
+        .await
+        .unwrap();
+
+    let mut notices = 0usize;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AgentEvent::Notice(_)) {
+            notices += 1;
+        }
+    }
+    assert_eq!(
+        notices, 1,
+        "expected one omit notice per turn, got {notices}"
+    );
+    // The send-time strip leaves the durable history untouched.
+    assert!(messages[0]
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. })));
 }
