@@ -5,6 +5,7 @@ pub use lofi_code::docs;
 pub mod compact;
 pub mod config_loader;
 pub mod context_edit;
+pub mod image;
 mod lifecycle;
 pub mod models;
 pub mod recall;

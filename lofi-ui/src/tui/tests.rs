@@ -17,6 +17,8 @@ fn app() -> App {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     )
 }
 
@@ -86,6 +88,8 @@ fn compact_thresholds_use_the_models_actual_small_context_window() {
         100_000,
         config,
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
 
     assert_eq!(a.lifecycle.compact_budget(), 25_000);
@@ -2104,6 +2108,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
                     tool_use_id: "e1".into(),
                     content: durable_result.into(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             }),
         },
@@ -3000,6 +3005,105 @@ fn help_modal_scrolls_and_dismisses() {
     assert!(a.info.is_none());
 }
 
+// A minimal valid 1x1 transparent PNG (67 bytes).
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+#[test]
+fn attach_image_refuses_when_model_lacks_support() {
+    let mut a = app(); // model_supports_image = false
+    a.attach_image_path("/tmp/x.png");
+    assert!(a.pending_attachments.is_empty());
+    let note = a.notify.as_ref().expect("notify set");
+    assert!(note.msg.contains("does not support images"));
+}
+
+#[test]
+fn attach_image_attaches_and_stages() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-img-{}.png", std::process::id()));
+    std::fs::write(&path, TINY_PNG).unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    a.attach_image_path(&path.display().to_string());
+    assert_eq!(a.pending_attachments.len(), 1);
+    match &a.pending_attachments[0] {
+        lofi_types::ContentBlock::Image { media_type, bytes } => {
+            assert_eq!(media_type, "image/jpeg");
+            assert!(!bytes.is_empty());
+        }
+        other => panic!("expected Image attachment, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn attach_image_rejects_non_image_bytes() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-notimg-{}.png", std::process::id()));
+    std::fs::write(&path, b"not an image").unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    a.attach_image_path(&path.display().to_string());
+    assert!(a.pending_attachments.is_empty());
+    assert!(a.notify.as_ref().unwrap().msg.contains("attach"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_image_path_attaches() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-paste-{}.png", std::process::id()));
+    std::fs::write(&path, TINY_PNG).unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    handle_event(
+        &Event::Paste(path.display().to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    // The image staged and no literal path text landed in the input buffer.
+    assert_eq!(a.pending_attachments.len(), 1);
+    assert!(a.input.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_non_image_or_prose_inserts_text() {
+    let mut a = app();
+    a.model_supports_image = true;
+    // A path that does not resolve pastes as literal text.
+    handle_event(
+        &Event::Paste("/no/such/file.png".to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    assert!(a.pending_attachments.is_empty());
+    assert_eq!(a.input, "/no/such/file.png");
+
+    // Multi-line paste is never an image path. Fresh app for a clean buffer.
+    let mut b = app();
+    b.model_supports_image = true;
+    handle_event(
+        &Event::Paste("line one\nline two".to_string()),
+        &mut b,
+        None,
+        &mut None,
+    );
+    assert!(b.pending_attachments.is_empty());
+    assert_eq!(b.input, "line one\nline two");
+}
+
 #[test]
 fn slash_complete_filters_and_accepts() {
     let mut a = app();
@@ -3010,7 +3114,13 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
-    assert_eq!(sc.candidates, vec![9]); // /tree is index 9
+    // `/tr` matches only /tree; resolve its index rather than hardcoding it so
+    // adding a command does not shift the assertion.
+    let tree_idx = SLASH_COMMANDS
+        .iter()
+        .position(|(c, _)| *c == "/tree")
+        .unwrap();
+    assert_eq!(sc.candidates, vec![tree_idx]);
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
     assert!(a.slash_complete.is_none());
@@ -3792,6 +3902,7 @@ fn tree_shows_tool_result_nodes() {
                 tool_use_id: "tu1".into(),
                 content: "file_a.txt file_b.txt".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -3890,6 +4001,7 @@ fn tree_exec_label_shows_native_tools() {
                 tool_use_id: "exec_0".into(),
                 content: "exec result".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         SessionEventKind::NativeTool(NativeToolRecord {
@@ -4248,6 +4360,8 @@ fn footer_shows_model_and_thinking() {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     let r: String = a
         .render_footer_right()
@@ -4267,6 +4381,8 @@ fn footer_hides_thinking_when_off() {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     let r: String = a
         .render_footer_right()
@@ -4464,6 +4580,7 @@ fn turns_from_events_links_tool_results() {
                 tool_use_id: "t1".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
         Message {
@@ -4504,6 +4621,7 @@ fn turns_from_events_restores_timings() {
                 tool_use_id: "t1".to_string(),
                 content: "1".to_string(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         msg(Message {
@@ -4739,6 +4857,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             tool_use_id: id.to_string(),
             content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
             is_error: false,
+            images: Vec::new(),
         }],
     };
     let exec_call_full = |id: &str| Message {
@@ -4755,6 +4874,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             tool_use_id: id.to_string(),
             content: out.to_string(),
             is_error: false,
+            images: Vec::new(),
         }],
     };
 
@@ -4848,6 +4968,8 @@ fn footer_and_header_show_cost_and_usage() {
         200_000,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
@@ -6560,6 +6682,8 @@ fn resumed_compaction_restores_summarized_message_count() {
         0,
         config,
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     a.session.cursor = Some(resumed.clone());
     a.lifecycle.restore_history(&resumed, &index).unwrap();

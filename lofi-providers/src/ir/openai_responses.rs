@@ -26,11 +26,25 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
         match m.role {
             Role::System | Role::User => {
                 let text = collect_text(&m.blocks);
+                let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
+                    content.push(json!({"type": "input_text", "text": text}));
+                }
+                if m.role == Role::User {
+                    for b in &m.blocks {
+                        if let ContentBlock::Image { bytes, media_type } = b {
+                            content.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{}", super::b64(bytes)),
+                            }));
+                        }
+                    }
+                }
+                if !content.is_empty() {
                     out.push(json!({
                         "type": "message",
                         "role": m.role.as_str(),
-                        "content": [{"type": "input_text", "text": text}],
+                        "content": content,
                     }));
                 }
             }
@@ -61,14 +75,39 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        images,
                         ..
                     } = b
                     {
+                        // Keep `output` a plain string and carry any images on a
+                        // following user `message`. Some OpenAI-compatible
+                        // Responses gateways accept a request where
+                        // `function_call_output.output` is an array of content
+                        // items but silently drop the image items; a user-role
+                        // `message` with `input_image` content is the
+                        // universally supported position for an image.
                         out.push(json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
                             "output": content,
                         }));
+                        if !images.is_empty() {
+                            let content: Vec<Value> = images
+                                .iter()
+                                .map(|img| {
+                                    json!({
+                                        "type": "input_image",
+                                        "detail": "auto",
+                                        "image_url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+                                    })
+                                })
+                                .collect();
+                            out.push(json!({
+                                "type": "message",
+                                "role": "user",
+                                "content": content,
+                            }));
+                        }
                     }
                 }
             }
@@ -614,5 +653,82 @@ mod tests {
         assert_eq!(u.input_tokens, 2);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, 1);
+    }
+
+    #[test]
+    fn tool_result_with_images_serializes_output_as_items() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        let input = to_openai_responses_input(&msgs);
+        // The function_call_output keeps a plain-string output; the image is
+        // carried on a following user `message` in the universally supported
+        // position, because some Responses gateways drop images inside an
+        // array-valued tool output.
+        assert_eq!(input[0]["type"], json!("function_call_output"));
+        assert_eq!(input[0]["output"], json!("read image.png"));
+        assert_eq!(input[1]["type"], json!("message"));
+        assert_eq!(input[1]["role"], json!("user"));
+        assert_eq!(
+            input[1]["content"][0],
+            json!({
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": "data:image/png;base64,AQID",
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_without_images_stays_string() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "plain".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        }];
+        let input = to_openai_responses_input(&msgs);
+        assert_eq!(input[0]["output"], json!("plain"));
+    }
+
+    #[test]
+    fn user_image_block_serializes_as_input_image() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "describe".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+            ],
+        }];
+        let req = build_openai_responses_request(&model(), &msgs, &[]);
+        let content = &req["input"][0]["content"];
+        assert_eq!(
+            content[0],
+            json!({"type": "input_text", "text": "describe"})
+        );
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/jpeg;base64,AQID",
+            })
+        );
     }
 }
