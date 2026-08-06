@@ -1,8 +1,7 @@
 //! Image attachment processing: decode, downscale, and re-encode an attached
 //! image so the base64 payload that lands in the context window and the
-//! durable transcript stays bounded. Mirrors Pi's `autoResizeImages` behavior
-//! (on by default there; unconditional here): downscale to fit a bounding box,
-//! then sweep JPEG quality down until the encoded payload fits a byte cap.
+//! durable transcript stays bounded: downscale to fit a bounding box, then
+//! sweep JPEG quality down until the encoded payload fits a byte cap.
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView};
@@ -10,12 +9,11 @@ use lofi_error::{Error, Result};
 use lofi_types::ImageConfig;
 
 /// JPEG media type produced by [`normalize`]. Re-encoding always targets JPEG
-/// (Pi's resize candidate format) regardless of the source format, so the
-/// output media type is constant.
+/// regardless of the source format, so the output media type is constant.
 pub const OUTPUT_MEDIA_TYPE: &str = "image/jpeg";
 
-/// Quality sweep bounds. Pi iterates JPEG quality downward; we step from 90
-/// down to 40, halving dimensions once if the lowest quality still overflows.
+/// Quality sweep bounds. Step from 90 down to 40, halving dimensions once
+/// if the lowest quality still overflows.
 const QUALITY_START: u8 = 90;
 const QUALITY_MIN: u8 = 40;
 const QUALITY_STEP: u8 = 10;
@@ -48,7 +46,7 @@ pub fn normalize(bytes: &[u8], cfg: &ImageConfig) -> Result<(Vec<u8>, String)> {
     let mut img = fit_within(&img, cfg.max_width, cfg.max_height);
 
     // Sweep JPEG quality down; if the floor still overflows, halve the frame
-    // and sweep again. Pi follows the same quality-then-dimension fallback.
+    // and sweep again.
     for round in 0..2 {
         let mut quality = QUALITY_START;
         loop {

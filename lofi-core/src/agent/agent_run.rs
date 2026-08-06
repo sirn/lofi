@@ -451,8 +451,8 @@ impl Agent {
         if matches!(&outcome, Some(TurnOutcome::Failed(_))) {
             // `TurnFailed` is a durable display boundary: replay keeps the
             // failed branch visible but context rebuild excludes it. User
-            // cancellation deliberately does not enter this path: Pi retains
-            // an aborted assistant message in context for the next prompt.
+            // cancellation deliberately does not enter this path: an aborted
+            // assistant message stays in context for the next prompt.
             messages.truncate(prev_len);
         }
         match err {
@@ -776,7 +776,7 @@ impl Agent {
             // durable replay cannot make visible output disappear. The
             // terminal outcome decides context semantics: failures
             // are rolled back, while explicit user cancellation retains the
-            // partial assistant message like Pi's aborted message.
+            // partial assistant message.
             let partial = assembler.finish();
             if !partial.blocks.is_empty() {
                 messages.push(partial);

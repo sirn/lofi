@@ -419,7 +419,7 @@ Maximum number of bytes a tool returns before truncating and linking a full log.
 
 ## Images
 
-`[image]` sets the limits applied when an image is attached with `/image <path>` in the interactive TUI. The image is downscaled to fit `max_width`×`max_height` (preserving aspect ratio) and re-encoded as JPEG, sweeping quality down until the payload fits `max_bytes`. These bounds keep the base64 payload that enters the context window and the durable transcript small. Defaults match Pi's `autoResizeImages` behavior.
+`[image]` sets the limits applied when an image is attached with `/image <path>` in the interactive TUI. The image is downscaled to fit `max_width`×`max_height` (preserving aspect ratio) and re-encoded as JPEG, sweeping quality down until the payload fits `max_bytes`. These bounds keep the base64 payload that enters the context window and the durable transcript small.
 
 A model receives images only when its static or discovered metadata sets `supports_image = true` (see [Model fields](#static-models)). When the active model does not support images, `/image` refuses up front and, if an image is already in the history, the engine omits it from the request with a warning rather than failing.
 

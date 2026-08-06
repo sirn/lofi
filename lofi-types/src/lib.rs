@@ -364,9 +364,9 @@ pub enum SessionEventKind {
         cost: f64,
         usage: Usage,
     },
-    /// A turn explicitly interrupted by the user. Like Pi's aborted assistant
-    /// message, completed rounds and the partial current response remain both
-    /// visible and available to subsequent model turns.
+    /// A turn explicitly interrupted by the user. Completed rounds and the
+    /// partial current response remain both visible and available to
+    /// subsequent model turns.
     TurnCancelled {
         #[serde(alias = "label", default)]
         model: RunModel,
@@ -901,21 +901,21 @@ fn default_truncate_max_bytes() -> usize {
     50 * 1024
 }
 
-/// Limits applied when an image is attached, matched to Pi's defaults. An
+/// Limits applied when an image is attached. An
 /// attached image is downscaled to fit `max_width`×`max_height` and re-encoded
 /// as JPEG, sweeping quality down until the payload fits `max_bytes`. Bounds
 /// the base64 payload that lands in the context window and the durable
 /// transcript (whose turn cache caps at 64 MiB).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageConfig {
-    /// Maximum pixel width after downscaling. Defaults to `2000` (Pi).
+    /// Maximum pixel width after downscaling. Defaults to `2000`.
     #[serde(default = "default_image_max_width")]
     pub max_width: u32,
-    /// Maximum pixel height after downscaling. Defaults to `2000` (Pi).
+    /// Maximum pixel height after downscaling. Defaults to `2000`.
     #[serde(default = "default_image_max_height")]
     pub max_height: u32,
     /// Maximum byte size of the re-encoded JPEG payload. Defaults to `1048576`
-    /// (1 MiB, Pi's byte cap).
+    /// (1 MiB).
     #[serde(default = "default_image_max_bytes")]
     pub max_bytes: usize,
 }
