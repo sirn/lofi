@@ -69,6 +69,7 @@ impl Agent {
     /// sole writer of the session log so a resumed session reconstructs
     /// identically to the live one.
     /// # Errors
+    /// Propagates [`Error`] from [`run_continuation_with_attachments`](Self::run_continuation_with_attachments).
     #[allow(clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
@@ -1078,6 +1079,7 @@ impl Agent {
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
+
 /// Count attached images across the request history, for the omit notice.
 fn count_image_blocks(messages: &[Message]) -> usize {
     messages

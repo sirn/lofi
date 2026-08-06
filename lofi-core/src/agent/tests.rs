@@ -735,8 +735,8 @@ async fn run_exits_when_receiver_dropped() {
 
 use indexmap::IndexMap;
 use lofi_types::{
-    AgentConfig, ApiTypeMapping, CompactionConfig, Config, ModelConfig, PricingConvention,
-    PricingFieldMappings, ProviderConfig, ThinkingLevel,
+    ApiTypeMapping, Config, ModelConfig, PricingConvention, PricingFieldMappings, ProviderConfig,
+    ThinkingLevel,
 };
 
 fn mc() -> ModelConfig {
@@ -957,12 +957,6 @@ fn select_model_uses_default_model_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_model: Some("anthropic/claude".to_string()),
         providers,
         ..Config::default()

@@ -770,8 +770,8 @@ pub(crate) struct App {
     /// switch so `/image` can refuse up front instead of relying solely on
     /// the engine's send-time omission.
     model_supports_image: bool,
-    /// Attachments staged by `/image` for the next submitted prompt. Cleared
-    /// once a run consumes them (or on `/clear` of the input line).
+    /// Attachments staged by `/image` for the next submitted prompt. A run
+    /// consumes them on the next submitted prompt.
     pending_attachments: Vec<lofi_types::ContentBlock>,
     no_models_hint: Option<String>,
     theme: Theme,
