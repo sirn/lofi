@@ -17,6 +17,8 @@ fn app() -> App {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     )
 }
 
@@ -86,6 +88,8 @@ fn compact_thresholds_use_the_models_actual_small_context_window() {
         100_000,
         config,
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
 
     assert_eq!(a.lifecycle.compact_budget(), 25_000);
@@ -4248,6 +4252,8 @@ fn footer_shows_model_and_thinking() {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     let r: String = a
         .render_footer_right()
@@ -4267,6 +4273,8 @@ fn footer_hides_thinking_when_off() {
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     let r: String = a
         .render_footer_right()
@@ -4848,6 +4856,8 @@ fn footer_and_header_show_cost_and_usage() {
         200_000,
         lofi_types::CompactionConfig::default(),
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     push_turn(&mut a);
     a.apply_event(AgentEvent::TurnEnd {
@@ -6560,6 +6570,8 @@ fn resumed_compaction_restores_summarized_message_count() {
         0,
         config,
         String::new(),
+        lofi_types::ImageConfig::default(),
+        false,
     );
     a.session.cursor = Some(resumed.clone());
     a.lifecycle.restore_history(&resumed, &index).unwrap();
