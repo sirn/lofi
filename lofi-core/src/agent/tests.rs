@@ -1233,3 +1233,63 @@ fn clipped_max_tokens_none_when_window_unknown() {
     // No cap at all.
     assert_eq!(agent.clipped_max_tokens(None), None);
 }
+#[tokio::test]
+async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
+    // The omit notice must fire exactly once for the whole turn, not once
+    // per tool round. Two rounds: a tool-use round then a text round.
+    let dir = tempdir().unwrap();
+    let tool_input = serde_json::json!({ "code": "return 1" }).to_string();
+    let round1 = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: tool_input,
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let round2 = vec![
+        StreamingEvent::TextDelta("done".to_string()),
+        StreamingEvent::Done(Usage::default()),
+    ];
+    let agent = agent_with(vec![round1, round2], dir.path());
+    let mut messages = vec![Message {
+        role: Role::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                bytes: vec![1, 2, 3],
+                media_type: "image/jpeg".to_string(),
+            },
+        ],
+    }];
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    agent
+        .run_continuation(&mut messages, String::new(), tx, None, true, None, None)
+        .await
+        .unwrap();
+
+    let mut notices = 0usize;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AgentEvent::Notice(_)) {
+            notices += 1;
+        }
+    }
+    assert_eq!(
+        notices, 1,
+        "expected one omit notice per turn, got {notices}"
+    );
+    // The send-time strip leaves the durable history untouched.
+    assert!(messages[0]
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. })));
+}

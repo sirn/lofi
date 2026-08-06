@@ -11,6 +11,9 @@ struct RoundOpts<'a> {
     result: Option<ResultFn>,
     cancel: Option<&'a Arc<AtomicBool>>,
     prev_input_tokens: Option<u64>,
+    /// Suppress the image-omit notice when true, so it fires once per turn
+    /// at the continuation loop, not once per tool round in `run_once_inner`.
+    suppress_omit_notice: bool,
 }
 
 impl Agent {
@@ -204,6 +207,9 @@ impl Agent {
         let mut err: Option<Error> = None;
         let retry = self.retry;
         let mut retry_attempt = 0u32;
+        // The image-omit notice fires once per turn (on the first round),
+        // not once per tool round.
+        let mut omit_notice_sent = false;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -222,9 +228,11 @@ impl Agent {
                         result: result.clone(),
                         cancel: cancel.as_ref(),
                         prev_input_tokens: prev_input,
+                        suppress_omit_notice: omit_notice_sent,
                     },
                 )
                 .await;
+            omit_notice_sent = true;
             if round.is_ok() && retry_attempt > 0 {
                 let _ = tx
                     .send(AgentEvent::RetryEnd {
@@ -495,6 +503,7 @@ impl Agent {
             result,
             cancel,
             prev_input_tokens,
+            suppress_omit_notice,
         } = opts;
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
@@ -507,26 +516,26 @@ impl Agent {
             return Err(Error::Cancelled);
         }
         // Send-time guard: a model that does not support images cannot
-        // receive them, so strip Image blocks (replacing each with a text
-        // marker) and warn once. Runs at send time, not attach time, so a
-        // `/model` switch mid-session is honored — the model is re-read per
-        // request. The durable transcript keeps the original image.
-        // `Cow`-like: borrow the live history when the model supports
-        // images, otherwise own a stripped copy so the durable transcript
-        // keeps the original image blocks.
+        // receive them, so replace each Image block with a text marker and
+        // warn the consumer once per turn (`suppress_omit_notice`). Runs at
+        // send time, not attach time, so a `/model` switch mid-session is
+        // honored — the model is re-read per request. The durable transcript
+        // keeps the original image; only the request payload is stripped.
         let stripped: Option<Vec<Message>> = if model.supports_image {
             None
         } else {
             let omitted = count_image_blocks(messages);
             if omitted > 0 {
-                if let Some(tx) = tx {
-                    let noun = if omitted == 1 { "image" } else { "images" };
-                    let _ = tx
-                        .send(AgentEvent::Notice(format!(
-                            "{} does not support images; omitted {omitted} {noun} from this request",
-                            model.id
-                        )))
-                        .await;
+                if !suppress_omit_notice {
+                    if let Some(tx) = tx {
+                        let noun = if omitted == 1 { "image" } else { "images" };
+                        let _ = tx
+                            .send(AgentEvent::Notice(format!(
+                                "{} does not support images; omitted {omitted} {noun} from this request",
+                                model.id
+                            )))
+                            .await;
+                    }
                 }
                 Some(strip_image_blocks(messages))
             } else {
