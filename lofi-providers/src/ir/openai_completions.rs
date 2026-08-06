@@ -30,7 +30,29 @@ pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
             }
             Role::User => {
                 let text = collect_text(&m.blocks);
-                if !text.is_empty() {
+                let has_image = m
+                    .blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Image { .. }));
+                if has_image {
+                    // Multipart content array: text parts plus one image_url
+                    // part per attached image, as a data: URL.
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(json!({"type": "text", "text": text}));
+                    }
+                    for b in &m.blocks {
+                        if let ContentBlock::Image { bytes, media_type } = b {
+                            parts.push(json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{media_type};base64,{}", super::b64(bytes)),
+                                },
+                            }));
+                        }
+                    }
+                    out.push(json!({"role": "user", "content": parts}));
+                } else if !text.is_empty() {
                     out.push(json!({"role": "user", "content": text}));
                 }
             }
@@ -482,5 +504,43 @@ mod tests {
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("rate limited"), "{msg}");
+    }
+
+    #[test]
+    fn user_image_block_serializes_as_multipart_content() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "describe".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+            ],
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        let content = &req["messages"][0]["content"];
+        assert_eq!(content[0], json!({"type": "text", "text": "describe"}));
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,AQID"},
+            })
+        );
+    }
+
+    #[test]
+    fn user_text_without_image_stays_a_plain_string() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["content"], "hello");
     }
 }

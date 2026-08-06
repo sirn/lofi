@@ -119,33 +119,48 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .flatten()
         .map(|m| format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str()));
 
-    let (agent, label, thinking, hint, ctx_limit, compaction, switcher) =
-        match resolve_startup_agent(&opts, restored.as_deref()).await? {
-            StartupAgent::Ready(built) => {
-                let (agent, model, thinking, config, registry) = *built;
-                let root = opts.root.clone();
-                let compaction = config.compaction.clone();
-                let switcher = tui::ModelSwitcher::new(registry, config, root);
-                (
-                    Some(agent),
-                    format!("{}/{}", model.provider, model.id),
-                    thinking,
-                    None,
-                    model.context_window.unwrap_or(0),
-                    compaction,
-                    Some(switcher),
-                )
-            }
-            StartupAgent::NoModel(hint) => (
+    let (
+        agent,
+        label,
+        thinking,
+        hint,
+        ctx_limit,
+        compaction,
+        image_config,
+        supports_image,
+        switcher,
+    ) = match resolve_startup_agent(&opts, restored.as_deref()).await? {
+        StartupAgent::Ready(built) => {
+            let (agent, model, thinking, config, registry) = *built;
+            let root = opts.root.clone();
+            let compaction = config.compaction.clone();
+            let image_config = config.image;
+            let supports_image = model.supports_image;
+            let switcher = tui::ModelSwitcher::new(registry, config, root);
+            (
+                Some(agent),
+                format!("{}/{}", model.provider, model.id),
+                thinking,
                 None,
-                "(no model)".to_string(),
-                ThinkingLevel::Off,
-                Some(hint),
-                0,
-                lofi_types::CompactionConfig::default(),
-                None,
-            ),
-        };
+                model.context_window.unwrap_or(0),
+                compaction,
+                image_config,
+                supports_image,
+                Some(switcher),
+            )
+        }
+        StartupAgent::NoModel(hint) => (
+            None,
+            "(no model)".to_string(),
+            ThinkingLevel::Off,
+            Some(hint),
+            0,
+            lofi_types::CompactionConfig::default(),
+            lofi_types::ImageConfig::default(),
+            false,
+            None,
+        ),
+    };
     // Pull the agent's resolved system prompt into a plain string before
     // `agent` moves into the TUI so the transcript can pin it at each context
     // boundary (lineage birth in `SessionSink::cursor_or_create`, post-compact
@@ -161,6 +176,8 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         hint,
         ctx_limit,
         compaction,
+        image_config,
+        supports_image,
         switcher,
         system_prompt,
     ))
@@ -319,6 +336,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                         "error: context limit reached; use the interactive TUI to compact and continue"
                     )
                 }
+                AgentEvent::Notice(msg) => writeln!(stderr, "warning: {msg}"),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),
