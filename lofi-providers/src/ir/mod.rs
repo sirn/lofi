@@ -12,6 +12,14 @@ pub(crate) use anthropic_messages::AnthropicMessagesIr;
 pub(crate) use openai_completions::OpenAiCompletionsIr;
 pub(crate) use openai_responses::OpenAiResponsesIr;
 
+/// Base64-encodes an image payload for the wire. All three protocols take
+/// image bytes base64-encoded; the in-memory block stores raw bytes, so the
+/// encoding happens here at the IR boundary rather than on the block itself.
+pub(crate) fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// Converts provider-neutral messages to one protocol's wire request and
 /// maps that protocol's streaming payloads back to provider-neutral events.
 pub(crate) trait ProtocolIr: Send + 'static {
