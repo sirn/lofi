@@ -194,7 +194,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                                     }
                                 }
                             }
-                            ContentBlock::ToolResult { .. } => {}
+                            ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => {}
                         }
                     }
                 }
