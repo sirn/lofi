@@ -69,11 +69,40 @@ impl Agent {
     /// sole writer of the session log so a resumed session reconstructs
     /// identically to the live one.
     /// # Errors
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        tx: Sender<AgentEvent>,
+        session: Option<&crate::session::store::SessionCursor>,
+        continuation: bool,
+        cancel: Option<Arc<AtomicBool>>,
+        preempt: Option<Arc<AtomicBool>>,
+    ) -> Result<()> {
+        self.run_continuation_with_attachments(
+            messages,
+            user_prompt,
+            Vec::new(),
+            tx,
+            session,
+            continuation,
+            cancel,
+            preempt,
+        )
+        .await
+    }
+
+    /// [`run_continuation`](Self::run_continuation) plus attachment blocks
+    /// (e.g. images) appended to the user message after its text. Attachments
+    /// travel with the prompt into the durable transcript and the request
+    /// history, so the send-time image guard and per-provider IR see them.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub async fn run_continuation_with_attachments(
+        &self,
+        messages: &mut Vec<Message>,
+        user_prompt: String,
+        attachments: Vec<ContentBlock>,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
         continuation: bool,
@@ -94,9 +123,11 @@ impl Agent {
             // The system prompt is pinned on the durable transcript at each
             // context boundary (create, compact) and arrives via the restored
             // history — the engine never materializes it inline.
+            let mut blocks = vec![ContentBlock::Text { text: user_prompt }];
+            blocks.extend(attachments);
             messages.push(Message {
                 role: Role::User,
-                blocks: vec![ContentBlock::Text { text: user_prompt }],
+                blocks,
             });
             if !emit(
                 Some(&tx),
@@ -451,16 +482,44 @@ impl Agent {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }
+        // Send-time guard: a model that does not support images cannot
+        // receive them, so strip Image blocks (replacing each with a text
+        // marker) and warn once. Runs at send time, not attach time, so a
+        // `/model` switch mid-session is honored — the model is re-read per
+        // request. The durable transcript keeps the original image.
+        // `Cow`-like: borrow the live history when the model supports
+        // images, otherwise own a stripped copy so the durable transcript
+        // keeps the original image blocks.
+        let stripped: Option<Vec<Message>> = if model.supports_image {
+            None
+        } else {
+            let omitted = count_image_blocks(messages);
+            if omitted > 0 {
+                if let Some(tx) = tx {
+                    let noun = if omitted == 1 { "image" } else { "images" };
+                    let _ = tx
+                        .send(AgentEvent::Notice(format!(
+                            "{} does not support images; omitted {omitted} {noun} from this request",
+                            model.id
+                        )))
+                        .await;
+                }
+                Some(strip_image_blocks(messages))
+            } else {
+                None
+            }
+        };
+        let send_messages: &Vec<Message> = stripped.as_ref().unwrap_or(messages);
         let schemas = [schema];
         let stream = match cancel {
             Some(flag) => {
                 tokio::select! {
                     biased;
                     () = wait_for_cancel(flag) => return Err(Error::Cancelled),
-                    stream = self.provider.stream(&model, messages, &schemas) => stream?,
+                    stream = self.provider.stream(&model, send_messages, &schemas) => stream?,
                 }
             }
-            None => self.provider.stream(&model, messages, &schemas).await?,
+            None => self.provider.stream(&model, send_messages, &schemas).await?,
         };
         let mut stream = stream;
 
@@ -992,6 +1051,37 @@ impl Agent {
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
+/// Count attached images across the request history, for the omit notice.
+fn count_image_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count()
+}
+
+/// Return a copy of `messages` with every `Image` block replaced by a text
+/// marker, so a model without image support still sees that an attachment was
+/// present. Used only on the send path; the durable transcript is untouched.
+fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| Message {
+            role: m.role,
+            blocks: m
+                .blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Image { media_type, .. } => ContentBlock::Text {
+                        text: format!("[image omitted: model does not support images; media_type={media_type}]"),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return;
@@ -1146,5 +1236,57 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_image_blocks_replaces_images_with_text_markers() {
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "look".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![4, 5],
+                    media_type: "image/png".to_string(),
+                },
+            ],
+        }];
+        assert_eq!(count_image_blocks(&messages), 2);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(count_image_blocks(&stripped), 0);
+        // The original history is untouched.
+        assert_eq!(count_image_blocks(&messages), 2);
+        match &stripped[0].blocks[1] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("image omitted"));
+                assert!(text.contains("image/jpeg"));
+            }
+            other => panic!("expected Text marker, got {other:?}"),
+        }
+        // Non-image blocks are preserved verbatim.
+        assert_eq!(
+            stripped[0].blocks[0],
+            ContentBlock::Text {
+                text: "look".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn strip_image_blocks_is_a_noop_without_images() {
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
+        }];
+        assert_eq!(count_image_blocks(&messages), 0);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(stripped, messages);
     }
 }
