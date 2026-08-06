@@ -434,7 +434,9 @@ fn normalize(
                                 native: Vec::new(),
                             });
                         }
-                        ContentBlock::Thinking { .. } | ContentBlock::ToolResult { .. } => {}
+                        ContentBlock::Thinking { .. }
+                        | ContentBlock::ToolResult { .. }
+                        | ContentBlock::Image { .. } => {}
                     }
                 }
                 if !text_buf.is_empty() {
@@ -1430,6 +1432,11 @@ fn estimate_message_tokens(m: &Message) -> usize {
             ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => text.len(),
             ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             ContentBlock::ToolResult { content, .. } => content.len(),
+            // Image tokens scale with pixel dimensions, not byte length, and
+            // we don't retain dimensions on the block. Use a fixed per-image
+            // estimate (in chars so the outer `/4` yields ~1000 tokens, the
+            // ballpark of a full-frame image at Anthropic's ~750px/token).
+            ContentBlock::Image { .. } => 4000,
         })
         .sum();
     chars / 4

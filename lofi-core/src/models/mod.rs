@@ -374,15 +374,8 @@ mod tests {
 
     fn config_with(providers: IndexMap<String, ProviderConfig>) -> Config {
         Config {
-            agent: lofi_types::AgentConfig::default(),
-            compaction: lofi_types::CompactionConfig::default(),
-            bash: lofi_types::BashConfig::default(),
-            truncate: lofi_types::TruncateConfig::default(),
-            shell_policy: lofi_types::ShellPolicyConfig::default(),
-            retry: lofi_types::RetryConfig::default(),
-            default_provider: None,
-            default_model: None,
             providers,
+            ..Config::default()
         }
     }
 

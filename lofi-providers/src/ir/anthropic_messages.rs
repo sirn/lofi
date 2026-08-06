@@ -92,6 +92,14 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             }
             obj
         }
+        ContentBlock::Image { bytes, media_type } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": super::b64(bytes),
+            },
+        }),
     }
 }
 
@@ -694,6 +702,40 @@ mod tests {
         assert_eq!(
             map_anthropic_event(None, &data, &mut AnthropicMapperState::default()).unwrap(),
             vec![]
+        );
+    }
+
+    #[test]
+    fn user_image_block_serializes_as_base64_source() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![
+                lofi_types::ContentBlock::Text {
+                    text: "what is this?".to_string(),
+                },
+                lofi_types::ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+            ],
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let content = &req["messages"][0]["content"];
+        // The terminal user message carries a prompt-cache breakpoint on its
+        // first block, so assert the text/image fields rather than exact
+        // object equality (which would also capture the injected marker).
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "AQID",
+                },
+            })
         );
     }
 }
