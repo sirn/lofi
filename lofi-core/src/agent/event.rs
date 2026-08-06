@@ -85,7 +85,7 @@ pub enum AgentEvent {
     },
     /// The user interrupted the turn. Completed rounds and any partial
     /// assistant response have already been retained in history and in the
-    /// durable transcript, matching Pi's aborted-message semantics.
+    /// durable transcript.
     TurnCancelled {
         model: RunModel,
         elapsed_ms: u64,
@@ -106,6 +106,11 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
+    /// A non-fatal notice the consumer may surface as a warning, such as an
+    /// image omitted because the active model does not support images.
+    /// Live-only: never persisted as a `SessionEvent`, matching
+    /// `ContextPressure`.
+    Notice(String),
     /// A provider error that ended the run after retry classification.
     /// Transient errors that will be retried use RetryStart/RetryEnd instead,
     /// so they never appear as fatal transcript rows.

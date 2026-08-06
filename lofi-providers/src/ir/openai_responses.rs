@@ -26,11 +26,25 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
         match m.role {
             Role::System | Role::User => {
                 let text = collect_text(&m.blocks);
+                let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
+                    content.push(json!({"type": "input_text", "text": text}));
+                }
+                if m.role == Role::User {
+                    for b in &m.blocks {
+                        if let ContentBlock::Image { bytes, media_type } = b {
+                            content.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{}", super::b64(bytes)),
+                            }));
+                        }
+                    }
+                }
+                if !content.is_empty() {
                     out.push(json!({
                         "type": "message",
                         "role": m.role.as_str(),
-                        "content": [{"type": "input_text", "text": text}],
+                        "content": content,
                     }));
                 }
             }
@@ -614,5 +628,34 @@ mod tests {
         assert_eq!(u.input_tokens, 2);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, 1);
+    }
+
+    #[test]
+    fn user_image_block_serializes_as_input_image() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "describe".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+            ],
+        }];
+        let req = build_openai_responses_request(&model(), &msgs, &[]);
+        let content = &req["input"][0]["content"];
+        assert_eq!(
+            content[0],
+            json!({"type": "input_text", "text": "describe"})
+        );
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/jpeg;base64,AQID",
+            })
+        );
     }
 }

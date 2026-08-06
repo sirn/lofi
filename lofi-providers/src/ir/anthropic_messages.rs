@@ -92,6 +92,14 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             }
             obj
         }
+        ContentBlock::Image { bytes, media_type } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": super::b64(bytes),
+            },
+        }),
     }
 }
 
@@ -172,7 +180,7 @@ fn ephemeral_cache_control() -> Value {
 /// next tool round can read the previous round and write only its appended
 /// suffix. Restrict this to block types documented for user content; in
 /// particular, never attach cache control to assistant thinking or tool-use
-/// blocks. This matches Pi's placement strategy. Keeping it as a wire-only
+/// blocks. Keeping it as a wire-only
 /// mutation leaves provider-neutral history and transcripts untouched.
 fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     let Some(message) = messages
@@ -694,6 +702,40 @@ mod tests {
         assert_eq!(
             map_anthropic_event(None, &data, &mut AnthropicMapperState::default()).unwrap(),
             vec![]
+        );
+    }
+
+    #[test]
+    fn user_image_block_serializes_as_base64_source() {
+        let msgs = [Message {
+            role: Role::User,
+            blocks: vec![
+                lofi_types::ContentBlock::Text {
+                    text: "what is this?".to_string(),
+                },
+                lofi_types::ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+            ],
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let content = &req["messages"][0]["content"];
+        // The terminal user message carries a prompt-cache breakpoint on its
+        // first block, so assert the text/image fields rather than exact
+        // object equality (which would also capture the injected marker).
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "AQID",
+                },
+            })
         );
     }
 }
