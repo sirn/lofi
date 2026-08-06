@@ -1449,7 +1449,7 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
             }
             Event::Code(code) => {
                 // Content-only (no backticks, no padding): the tile width is
-                // stable across the span boundary, matching Pi.
+                // stable across the span boundary.
                 out.push(MappedSpan {
                     span: Span::styled(code.to_string(), code_style),
                     content_start: range.start + 1,
