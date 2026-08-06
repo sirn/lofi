@@ -85,7 +85,7 @@ pub enum AgentEvent {
     },
     /// The user interrupted the turn. Completed rounds and any partial
     /// assistant response have already been retained in history and in the
-    /// durable transcript, matching Pi's aborted-message semantics.
+    /// durable transcript.
     TurnCancelled {
         model: RunModel,
         elapsed_ms: u64,

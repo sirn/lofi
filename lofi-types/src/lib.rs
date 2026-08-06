@@ -364,9 +364,9 @@ pub enum SessionEventKind {
         cost: f64,
         usage: Usage,
     },
-    /// A turn explicitly interrupted by the user. Like Pi's aborted assistant
-    /// message, completed rounds and the partial current response remain both
-    /// visible and available to subsequent model turns.
+    /// A turn explicitly interrupted by the user. Completed rounds and the
+    /// partial current response remain both visible and available to
+    /// subsequent model turns.
     TurnCancelled {
         #[serde(alias = "label", default)]
         model: RunModel,
