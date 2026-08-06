@@ -1598,6 +1598,47 @@ mod tests {
     }
 
     #[test]
+    fn compact_drops_image_blocks() {
+        // The byte-pressure recovery depends on this: an oversized image
+        // payload stops before send, the UI force-compacts, and the continued
+        // request must be small. That only holds because compaction drops
+        // `Image` blocks from the summarized prefix. If compaction ever
+        // starts keeping images, the recovery loops forever — this test pins
+        // the contract.
+        let with_image = Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "look at this".into(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![0u8; 16],
+                    media_type: "image/jpeg".into(),
+                },
+            ],
+        };
+        let msgs = [
+            with_image,
+            assistant("I see it."),
+            exec_call("t1", "return 1"),
+            exec_result("t1", "1"),
+            assistant("Done."),
+            user("next"),
+            assistant("ok"),
+        ];
+        let events = events_of(&msgs);
+        let c = compact(&events, &CompactOptions::default()).expect("some compaction");
+        let history = compacted_history(&c);
+        assert!(
+            !history
+                .iter()
+                .flat_map(|m| m.blocks.iter())
+                .any(|b| matches!(b, ContentBlock::Image { .. })),
+            "compacted history must not carry Image blocks"
+        );
+    }
+
+    #[test]
     fn compact_files_and_changes_from_native_tools() {
         let mut events = events_of(&[
             user("edit auth.ts"),
