@@ -6,7 +6,7 @@ workspace root; paths that escape the root are rejected.
 
 ## lofi.read(path, opts?)
 
-Read a file as UTF-8 with optional line range.
+Read a file as UTF-8 with optional line range, or attach an image.
 
 **Parameters:**
 - `path` (string, required) — file path relative to workspace root.
@@ -14,11 +14,17 @@ Read a file as UTF-8 with optional line range.
   line to start from (default 1); `limit` caps the number of lines returned
   (default 2000).
 
-**Returns:** `{ ok, content, start_line, total_lines, truncated }`.
+**Returns (text):** `{ ok, content, start_line, total_lines, truncated }`.
 `content` is the requested lines (head-truncated to 2000 lines / 50 KB).
 `start_line` is the 1-indexed first line returned. `total_lines` is the file's
 line count. `truncated` is true when more lines remain below either cap. Page
 large files with a higher `offset`.
+
+**Returns (image):** for a path with an image extension (`.png`, `.jpg`,
+`.jpeg`, `.gif`, `.webp`, `.bmp`), returns `{ ok, type: "image", media_type,
+data_b64 }` instead. The host decodes `data_b64` and attaches the image to the
+conversation as vision input, so reading an image file is how you look at it.
+The image path ignores `offset`/`limit`.
 
 ## lofi.ls(dir?)
 

@@ -417,6 +417,40 @@ Maximum number of lines a tool returns before truncating to the first (`read`) o
 
 Maximum number of bytes a tool returns before truncating and linking a full log. Both limits default to the same 2000 lines / 50 KiB cap.
 
+## Images
+
+`[image]` sets the limits applied when an image is attached in the interactive TUI by pasting or typing its path. The image is downscaled to fit `max_width`×`max_height` (preserving aspect ratio) and re-encoded as JPEG, sweeping quality down until the payload fits `max_bytes`. These bounds keep the base64 payload that enters the context window and the durable transcript small.
+
+A model receives images only when its static or discovered metadata sets `supports_image = true` (see [Model fields](#static-models)). When the active model does not support images, attaching refuses up front and, if an image is already in the history, the engine omits it from the request with a warning rather than failing.
+
+```toml
+[image]
+max_width = 2000
+max_height = 2000
+max_bytes = 1048576
+```
+
+### `max_width`
+
+- Type: integer (pixels)
+- Default: `2000`
+
+Maximum image width after downscaling.
+
+### `max_height`
+
+- Type: integer (pixels)
+- Default: `2000`
+
+Maximum image height after downscaling.
+
+### `max_bytes`
+
+- Type: integer (bytes)
+- Default: `1048576` (1 MiB)
+
+Maximum size of the re-encoded JPEG payload.
+
 ## Retries
 
 `[retry]` controls retries for transient provider and transport failures.

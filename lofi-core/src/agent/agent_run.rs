@@ -11,6 +11,9 @@ struct RoundOpts<'a> {
     result: Option<ResultFn>,
     cancel: Option<&'a Arc<AtomicBool>>,
     prev_input_tokens: Option<u64>,
+    /// Suppress the image-omit notice when true, so it fires once per turn
+    /// at the continuation loop, not once per tool round in `run_once_inner`.
+    suppress_omit_notice: bool,
 }
 
 impl Agent {
@@ -69,11 +72,44 @@ impl Agent {
     /// sole writer of the session log so a resumed session reconstructs
     /// identically to the live one.
     /// # Errors
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    /// Propagates [`Error`] from [`run_continuation_with_attachments`](Self::run_continuation_with_attachments).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_continuation(
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        tx: Sender<AgentEvent>,
+        session: Option<&crate::session::store::SessionCursor>,
+        continuation: bool,
+        cancel: Option<Arc<AtomicBool>>,
+        preempt: Option<Arc<AtomicBool>>,
+    ) -> Result<()> {
+        self.run_continuation_with_attachments(
+            messages,
+            user_prompt,
+            Vec::new(),
+            tx,
+            session,
+            continuation,
+            cancel,
+            preempt,
+        )
+        .await
+    }
+
+    /// [`run_continuation`](Self::run_continuation) plus attachment blocks
+    /// (e.g. images) appended to the user message after its text. Attachments
+    /// travel with the prompt into the durable transcript and the request
+    /// history, so the send-time image guard and per-provider IR see them.
+    /// # Errors
+    /// Propagates [`Error`] from provider streaming, timeouts, or tool
+    /// execution failures that cannot be surfaced as a `ToolResult`.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub async fn run_continuation_with_attachments(
+        &self,
+        messages: &mut Vec<Message>,
+        user_prompt: String,
+        attachments: Vec<ContentBlock>,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
         continuation: bool,
@@ -90,13 +126,35 @@ impl Agent {
                 return Ok(());
             }
         } else {
-            let prompt_for_event = user_prompt.clone();
+            // Surface attachments on the turn header (TurnStart.prompt and,
+            // via the recorder, the durable turn label) as a marker per image,
+            // so the live and replayed views both show that an image was
+            // attached. The image bytes themselves never appear in the label.
+            let attachment_markers: Vec<String> = attachments
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Image { media_type, .. } => {
+                        let short = media_type.strip_prefix("image/").unwrap_or(media_type);
+                        Some(format!("[image: {short}]"))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let prompt_for_event = if attachment_markers.is_empty() {
+                user_prompt.clone()
+            } else if user_prompt.is_empty() {
+                attachment_markers.join(" ")
+            } else {
+                format!("{}\n{}", user_prompt, attachment_markers.join(" "))
+            };
             // The system prompt is pinned on the durable transcript at each
             // context boundary (create, compact) and arrives via the restored
             // history — the engine never materializes it inline.
+            let mut blocks = vec![ContentBlock::Text { text: user_prompt }];
+            blocks.extend(attachments);
             messages.push(Message {
                 role: Role::User,
-                blocks: vec![ContentBlock::Text { text: user_prompt }],
+                blocks,
             });
             if !emit(
                 Some(&tx),
@@ -149,6 +207,9 @@ impl Agent {
         let mut err: Option<Error> = None;
         let retry = self.retry;
         let mut retry_attempt = 0u32;
+        // The image-omit notice fires once per turn (on the first round),
+        // not once per tool round.
+        let mut omit_notice_sent = false;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -167,9 +228,11 @@ impl Agent {
                         result: result.clone(),
                         cancel: cancel.as_ref(),
                         prev_input_tokens: prev_input,
+                        suppress_omit_notice: omit_notice_sent,
                     },
                 )
                 .await;
+            omit_notice_sent = true;
             if round.is_ok() && retry_attempt > 0 {
                 let _ = tx
                     .send(AgentEvent::RetryEnd {
@@ -247,6 +310,17 @@ impl Agent {
                     break;
                 }
                 Err(e) => {
+                    // An oversized image payload stopped before send; route
+                    // to the existing force-compact + continue recovery. The
+                    // round never ran, so the partial-turn suffix is empty
+                    // and the recorder's `ContextPressure => None` arm leaves
+                    // the durable transcript untouched.
+                    // Match the variant payload, not `Display`: `Provider`
+                    // prefixes its message with "provider error: ".
+                    if matches!(&e, Error::Provider(m) if m == IMAGE_PRESSURE_SENTINEL) {
+                        context_pressure = true;
+                        break;
+                    }
                     if retry.can_retry(retry_attempt) && crate::retry::is_retryable_error(&e) {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
@@ -440,6 +514,7 @@ impl Agent {
             result,
             cancel,
             prev_input_tokens,
+            suppress_omit_notice,
         } = opts;
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
@@ -451,16 +526,67 @@ impl Agent {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }
+        // Send-time guard: a model that does not support images cannot
+        // receive them, so replace each Image block with a text marker and
+        // warn the consumer once per turn (`suppress_omit_notice`). Runs at
+        // send time, not attach time, so a `/model` switch mid-session is
+        // honored — the model is re-read per request. The durable transcript
+        // keeps the original image; only the request payload is stripped.
+        let stripped: Option<Vec<Message>> = if model.supports_image {
+            None
+        } else {
+            let omitted = count_image_blocks(messages);
+            if omitted > 0 {
+                if !suppress_omit_notice {
+                    if let Some(tx) = tx {
+                        let noun = if omitted == 1 { "image" } else { "images" };
+                        let _ = tx
+                            .send(AgentEvent::Notice(format!(
+                                "{} does not support images; omitted {omitted} {noun} from this request",
+                                model.id
+                            )))
+                            .await;
+                    }
+                }
+                Some(strip_image_blocks(messages))
+            } else {
+                None
+            }
+        };
+        let send_messages: &Vec<Message> = stripped.as_ref().unwrap_or(messages);
+        // Send-time byte guard: the provider caps the request body, not just
+        // the token count, so an image-heavy history can be rejected (HTTP
+        // 413) while the token-threshold compaction never trips. Stop before
+        // the doomed request and surface the sentinel; the run loop maps it
+        // to `ContextPressure`, which force-compacts and continues. Runs at
+        // send time (not after a round) because the oversized request is
+        // usually the first one carrying fresh attachments.
+        let image_bytes = image_payload_bytes(send_messages);
+        if image_bytes > MAX_REQUEST_IMAGE_BYTES {
+            if let Some(tx) = tx {
+                let _ = tx
+                    .send(AgentEvent::Notice(format!(
+                        "attached images total {} MiB; compacting to fit the request size limit",
+                        image_bytes / (1024 * 1024)
+                    )))
+                    .await;
+            }
+            return Err(Error::Provider(IMAGE_PRESSURE_SENTINEL.to_string()));
+        }
         let schemas = [schema];
         let stream = match cancel {
             Some(flag) => {
                 tokio::select! {
                     biased;
                     () = wait_for_cancel(flag) => return Err(Error::Cancelled),
-                    stream = self.provider.stream(&model, messages, &schemas) => stream?,
+                    stream = self.provider.stream(&model, send_messages, &schemas) => stream?,
                 }
             }
-            None => self.provider.stream(&model, messages, &schemas).await?,
+            None => {
+                self.provider
+                    .stream(&model, send_messages, &schemas)
+                    .await?
+            }
         };
         let mut stream = stream;
 
@@ -717,7 +843,7 @@ impl Agent {
         Ok(false)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     async fn execute_tools(
         &self,
         tool_uses: &[(&str, &str, &serde_json::Value)],
@@ -772,6 +898,7 @@ impl Agent {
                     tool_use_id: id.to_string(),
                     content,
                     is_error: true,
+                    images: Vec::new(),
                 });
                 continue;
             }
@@ -796,6 +923,7 @@ impl Agent {
                     tool_use_id: id.to_string(),
                     content,
                     is_error: true,
+                    images: Vec::new(),
                 });
                 continue;
             }
@@ -915,14 +1043,21 @@ impl Agent {
             if let Some(s) = stats.as_deref_mut() {
                 s.native_tools.extend(captured);
             }
-            let (content, is_error) = match outcome {
+            // A tool may return a tagged image (`read` on an image file).
+            // Upgrade it to a `ToolResultImage` carried on this result block,
+            // so the model sees the image in the same round as the result on
+            // every provider. The heavyweight base64 is stripped out of the
+            // text payload, leaving a compact `bytes` count in the transcript.
+            let (content, is_error, result_images) = match outcome {
                 Ok(r) => {
-                    let payload = serde_json::json!({ "value": r.value, "logs": r.logs });
+                    let mut value = r.value;
+                    let img = upgrade_tagged_image(&mut value);
+                    let payload = serde_json::json!({ "value": value, "logs": r.logs });
                     let content =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-                    (cap_exec_result(&content), false)
+                    (cap_exec_result(&content), false, img)
                 }
-                Err(e) => (cap_exec_result(&e.to_string()), true),
+                Err(e) => (cap_exec_result(&e.to_string()), true, None),
             };
             if is_error {
                 // A rejected guest promise can short-circuit concurrent native
@@ -973,6 +1108,7 @@ impl Agent {
                 tool_use_id: id.to_string(),
                 content,
                 is_error,
+                images: result_images.into_iter().collect(),
             });
         }
         Ok(results)
@@ -1024,6 +1160,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
             tool_use_id: id.clone(),
             content: "cancelled: tool run interrupted before producing a result".to_string(),
             is_error: true,
+            images: Vec::new(),
         })
         .collect();
     if synthesized.is_empty() {
@@ -1035,10 +1172,129 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     });
 }
 
+/// Count attached images across the request history, for the omit notice.
+fn count_image_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .map(|b| match b {
+            ContentBlock::Image { .. } => 1,
+            ContentBlock::ToolResult { images, .. } => images.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Return a copy of `messages` with every image dropped for a model without
+/// image support: standalone `Image` blocks become text markers, and the
+/// images carried on a `ToolResult` are dropped with a marker appended to its
+/// text. The model still sees that an attachment was present. Used only on the
+/// send path; the durable transcript is untouched.
+fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| Message {
+            role: m.role,
+            blocks: m
+                .blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Image { media_type, .. } => ContentBlock::Text {
+                        text: format!("[image omitted: model does not support images; media_type={media_type}]"),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        images,
+                    } if !images.is_empty() => {
+                        let mut content = content.clone();
+                        for img in images {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(&format!("[image omitted: model does not support images; media_type={}]", img.media_type));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content,
+                            is_error: *is_error,
+                            images: Vec::new(),
+                        }
+                    }
+                    other => other.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Recognize a tagged image payload from a tool result and upgrade it to a
+/// [`lofi_types::ToolResultImage`] carried on that result block. `lofi.read`
+/// returns `{type:"image", media_type, data_b64}` when it reads an image file
+/// (the sandbox boundary is JSON, so bytes cannot cross directly). On a match
+/// the base64 is decoded into `bytes` and the `data_b64` field is replaced with
+/// a compact `bytes` count, so the durable transcript keeps a small marker
+/// while the decoded image rides the `ToolResult` for same-round vision.
+/// Returns `None` (and leaves `value` untouched) for any non-image payload.
+fn upgrade_tagged_image(value: &mut serde_json::Value) -> Option<lofi_types::ToolResultImage> {
+    use base64::Engine as _;
+    let obj = value.as_object()?;
+    if obj.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    let media_type = obj.get("media_type")?.as_str()?.to_string();
+    let data_b64 = obj.get("data_b64")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .ok()?;
+    let byte_len = bytes.len();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("data_b64");
+        obj.insert("bytes".to_string(), serde_json::json!(byte_len));
+    }
+    Some(lofi_types::ToolResultImage { bytes, media_type })
+}
+
+/// Request image payload budget (base64 bytes). Providers cap the request
+/// *body*, not just the token count: Anthropic rejects a body over 32 MiB
+/// with HTTP 413 `request_too_large` even when the token estimate is well
+/// under the context window. Images are the dominant unbounded term (text,
+/// tool results, and schemas are bounded elsewhere), so the byte pressure
+/// signal thresholds just the image payload. 8 MiB sits far under every
+/// provider body cap after base64 inflation (x4/3) plus envelope overhead.
+const MAX_REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Sentinel error message marking a stop-before-send due to an oversized
+/// image payload. The run loop intercepts it and routes to the existing
+/// `ContextPressure` recovery (force-compact + continue) instead of failing
+/// the turn. A sentinel string, not a new `Error` variant, because only this
+/// send/loop pair needs to distinguish it and a variant would leak an
+/// internal control-flow detail into the shared error type.
+const IMAGE_PRESSURE_SENTINEL: &str = "__lofi_image_pressure__";
+
+/// Sum the base64 payload bytes of every attached image across the request
+/// history. Base64 length is `4 * ceil(n/3)` for `n` raw bytes.
+fn image_payload_bytes(messages: &[Message]) -> u64 {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .map(|b| match b {
+            ContentBlock::Image { bytes, .. } => 4 * bytes.len().div_ceil(3) as u64,
+            ContentBlock::ToolResult { images, .. } => images
+                .iter()
+                .map(|img| 4 * img.bytes.len().div_ceil(3) as u64)
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
 
     fn assistant_with_tool_use(id: &str) -> Message {
@@ -1064,6 +1320,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "tool-1");
                 assert!(is_error);
@@ -1083,6 +1340,7 @@ mod tests {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -1130,6 +1388,7 @@ mod tests {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -1146,5 +1405,164 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upgrade_tagged_image_decodes_and_strips_base64() {
+        let raw = vec![1u8, 2, 3, 4, 5];
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let mut value = serde_json::json!({
+            "ok": true,
+            "type": "image",
+            "media_type": "image/png",
+            "data_b64": data_b64,
+        });
+        let img = upgrade_tagged_image(&mut value).unwrap();
+        assert_eq!(img.bytes, raw);
+        assert_eq!(img.media_type, "image/png");
+        // The heavyweight base64 is gone; a compact byte count remains.
+        assert!(value.get("data_b64").is_none());
+        assert_eq!(value["bytes"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn upgrade_tagged_image_ignores_non_image_payloads() {
+        let mut text = serde_json::json!({"ok": true, "content": "hi"});
+        assert!(upgrade_tagged_image(&mut text).is_none());
+        assert_eq!(text["content"], serde_json::json!("hi"));
+        // Wrong type tag.
+        let mut other = serde_json::json!({"type": "text", "data_b64": "AAAA"});
+        assert!(upgrade_tagged_image(&mut other).is_none());
+        // Bad base64 must not produce a block.
+        let mut bad =
+            serde_json::json!({"type": "image", "media_type": "image/png", "data_b64": "!!!"});
+        assert!(upgrade_tagged_image(&mut bad).is_none());
+    }
+
+    #[test]
+    fn strip_image_blocks_replaces_images_with_text_markers() {
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "look".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/jpeg".to_string(),
+                },
+                ContentBlock::Image {
+                    bytes: vec![4, 5],
+                    media_type: "image/png".to_string(),
+                },
+            ],
+        }];
+        assert_eq!(count_image_blocks(&messages), 2);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(count_image_blocks(&stripped), 0);
+        // The original history is untouched.
+        assert_eq!(count_image_blocks(&messages), 2);
+        match &stripped[0].blocks[1] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("image omitted"));
+                assert!(text.contains("image/jpeg"));
+            }
+            other => panic!("expected Text marker, got {other:?}"),
+        }
+        // Non-image blocks are preserved verbatim.
+        assert_eq!(
+            stripped[0].blocks[0],
+            ContentBlock::Text {
+                text: "look".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn strip_image_blocks_downgrades_tool_result_images() {
+        let messages = vec![Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        assert_eq!(count_image_blocks(&messages), 1);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(count_image_blocks(&stripped), 0);
+        match &stripped[0].blocks[0] {
+            ContentBlock::ToolResult {
+                content, images, ..
+            } => {
+                assert!(content.contains("read image.png"));
+                assert!(content.contains("image omitted"));
+                assert!(content.contains("image/png"));
+                assert!(images.is_empty());
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        // Payload bytes count both standalone and tool-result images.
+        assert!(image_payload_bytes(&messages) > 0);
+        assert_eq!(image_payload_bytes(&stripped), 0);
+    }
+
+    #[test]
+    fn strip_image_blocks_is_a_noop_without_images() {
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
+        }];
+        assert_eq!(count_image_blocks(&messages), 0);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(stripped, messages);
+    }
+
+    #[test]
+    fn image_payload_bytes_counts_base64_length() {
+        let image = |n: usize| ContentBlock::Image {
+            bytes: vec![0u8; n],
+            media_type: "image/jpeg".to_string(),
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "not counted".to_string(),
+                },
+                image(3), // 4 base64 bytes
+                image(4), // 8 base64 bytes (4 -> ceil(4/3)=2 -> 8)
+                image(1), // 4 base64 bytes
+            ],
+        }];
+        assert_eq!(image_payload_bytes(&messages), 16);
+        // Text and empty histories contribute nothing.
+        assert_eq!(image_payload_bytes(&[]), 0);
+    }
+
+    #[test]
+    fn image_payload_budget_distinguishes_over_and_under() {
+        let image = |n: usize| ContentBlock::Image {
+            bytes: vec![0u8; n],
+            media_type: "image/jpeg".to_string(),
+        };
+        // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB budget.
+        let over = vec![Message {
+            role: Role::User,
+            blocks: vec![image(7 * 1024 * 1024)],
+        }];
+        assert!(image_payload_bytes(&over) > MAX_REQUEST_IMAGE_BYTES);
+        // 1 MiB raw stays well under.
+        let under = vec![Message {
+            role: Role::User,
+            blocks: vec![image(1024 * 1024)],
+        }];
+        assert!(image_payload_bytes(&under) <= MAX_REQUEST_IMAGE_BYTES);
     }
 }

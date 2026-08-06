@@ -13,7 +13,7 @@ fn category(b: &ContentBlock) -> Cat {
         ContentBlock::ToolResult { .. } => Cat::ToolResult,
         ContentBlock::Thinking { .. } => Cat::Thinking,
         ContentBlock::ToolUse { .. } => Cat::ToolUse,
-        ContentBlock::Text { .. } => Cat::Other,
+        ContentBlock::Text { .. } | ContentBlock::Image { .. } => Cat::Other,
     }
 }
 
@@ -109,6 +109,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                         tool_use_id: tool_use_id.clone(),
                         content: result_stub(event_id, *is_error),
                         is_error: *is_error,
+                        images: Vec::new(),
                     }),
                     ContentBlock::Thinking { .. } => {}
                     ContentBlock::ToolUse { id, name, input } => {
@@ -118,7 +119,9 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                             input: trim_tool_use_input(input, event_id),
                         });
                     }
-                    text @ ContentBlock::Text { .. } => blocks.push(text.clone()),
+                    other @ (ContentBlock::Text { .. } | ContentBlock::Image { .. }) => {
+                        blocks.push(other.clone());
+                    }
                 }
             }
             Message {
@@ -200,6 +203,7 @@ mod tests {
             tool_use_id: id.to_string(),
             content: content.to_string(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
