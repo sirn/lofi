@@ -37,7 +37,7 @@ pub fn normalize(bytes: &[u8], cfg: &ImageConfig) -> Result<(Vec<u8>, String)> {
     // input still decodes so it can be downscaled, while a file claiming
     // pathological dimensions fails before its pixel buffer is committed.
     let max_alloc = u64::from(cfg.max_width) * u64::from(cfg.max_height) * 4 * 8;
-    let mut limits = image::io::Limits::default();
+    let mut limits = image::Limits::default();
     limits.max_alloc = Some(max_alloc);
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
     reader.limits(limits);
