@@ -1,0 +1,8 @@
+core: add image attachment support with byte-bounded normalization
+
+Let users attach images to a turn via /image. Attached images are
+decoded, downscaled to a bounding box, and re-encoded to JPEG under a
+byte cap so the base64 payload stays bounded in the context window and
+the durable transcript. Providers serialize image blocks per-API,
+models opt in via supports_image, and a byte-pressure guard stops and
+compacts when total image bytes exceed the request budget.
