@@ -138,6 +138,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
+    ("/image", "attach an image to the next prompt"),
     ("/new", "start a fresh session"),
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
@@ -763,6 +764,15 @@ pub(crate) struct App {
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,
     slash_complete: Option<SlashComplete>,
+    /// Image attach limits from config (`[image]`), applied by `/image`.
+    image_config: lofi_types::ImageConfig,
+    /// Whether the active model accepts image input. Updated on `/model`
+    /// switch so `/image` can refuse up front instead of relying solely on
+    /// the engine's send-time omission.
+    model_supports_image: bool,
+    /// Attachments staged by `/image` for the next submitted prompt. Cleared
+    /// once a run consumes them (or on `/clear` of the input line).
+    pending_attachments: Vec<lofi_types::ContentBlock>,
     no_models_hint: Option<String>,
     theme: Theme,
     kill_ring: String,
@@ -959,6 +969,8 @@ pub(crate) async fn run(
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
+    image_config: lofi_types::ImageConfig,
+    model_supports_image: bool,
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
@@ -1015,6 +1027,8 @@ pub(crate) async fn run(
                 no_models_hint,
                 ctx_limit,
                 compaction,
+                image_config,
+                model_supports_image,
                 switcher,
                 system_prompt,
             )
@@ -1034,6 +1048,8 @@ async fn run_loop(
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
+    image_config: lofi_types::ImageConfig,
+    model_supports_image: bool,
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
@@ -1047,7 +1063,15 @@ async fn run_loop(
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
-    let mut app = App::new(model_label, thinking, ctx_limit, compaction, system_prompt);
+    let mut app = App::new(
+        model_label,
+        thinking,
+        ctx_limit,
+        compaction,
+        system_prompt,
+        image_config,
+        model_supports_image,
+    );
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {

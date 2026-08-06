@@ -10,6 +10,8 @@ impl App {
         ctx_limit: u64,
         compaction: lofi_types::CompactionConfig,
         system_prompt: String,
+        image_config: lofi_types::ImageConfig,
+        model_supports_image: bool,
     ) -> Self {
         let thinking_label =
             (thinking != ThinkingLevel::Off).then(|| format!(":{}", thinking.as_str()));
@@ -75,6 +77,9 @@ impl App {
             pending_model_switch: None,
             info: None,
             slash_complete: None,
+            image_config,
+            model_supports_image,
+            pending_attachments: Vec::new(),
             no_models_hint: None,
             theme: Theme::default(),
             kill_ring: String::new(),
@@ -158,6 +163,10 @@ impl App {
             return;
         }
         match ev {
+            AgentEvent::Notice(msg) => {
+                self.notify(NotifyKind::Warn, msg);
+                return;
+            }
             AgentEvent::RetryStart {
                 attempt,
                 max_attempts,

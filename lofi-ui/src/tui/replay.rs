@@ -266,6 +266,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnStart { .. }
         | AgentEvent::UserBash { .. }
         | AgentEvent::TurnContinue
+        | AgentEvent::Notice(_)
         | AgentEvent::ContextPressure { .. } => {}
     }
 }

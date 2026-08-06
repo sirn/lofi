@@ -186,6 +186,33 @@ pub enum ContentBlock {
         text: String,
         signature: Option<String>,
     },
+    /// An attached image, held as raw bytes plus its media type and only
+    /// base64-encoded at the serde and per-provider IR boundaries. Encoding
+    /// on demand keeps the in-memory block and the durable transcript free
+    /// of a duplicated 33%-larger base64 copy.
+    Image {
+        #[serde(with = "base64_bytes")]
+        bytes: Vec<u8>,
+        media_type: String,
+    },
+}
+
+/// Serde adapter that encodes a byte buffer as a base64 string in JSON, so
+/// [`ContentBlock::Image`] round-trips through the tagged-union transcript
+/// format alongside the text variants.
+mod base64_bytes {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -874,6 +901,47 @@ fn default_truncate_max_bytes() -> usize {
     50 * 1024
 }
 
+/// Limits applied when an image is attached, matched to Pi's defaults. An
+/// attached image is downscaled to fit `max_width`×`max_height` and re-encoded
+/// as JPEG, sweeping quality down until the payload fits `max_bytes`. Bounds
+/// the base64 payload that lands in the context window and the durable
+/// transcript (whose turn cache caps at 64 MiB).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageConfig {
+    /// Maximum pixel width after downscaling. Defaults to `2000` (Pi).
+    #[serde(default = "default_image_max_width")]
+    pub max_width: u32,
+    /// Maximum pixel height after downscaling. Defaults to `2000` (Pi).
+    #[serde(default = "default_image_max_height")]
+    pub max_height: u32,
+    /// Maximum byte size of the re-encoded JPEG payload. Defaults to `1048576`
+    /// (1 MiB, Pi's byte cap).
+    #[serde(default = "default_image_max_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            max_width: default_image_max_width(),
+            max_height: default_image_max_height(),
+            max_bytes: default_image_max_bytes(),
+        }
+    }
+}
+
+fn default_image_max_width() -> u32 {
+    2000
+}
+
+fn default_image_max_height() -> u32 {
+    2000
+}
+
+fn default_image_max_bytes() -> usize {
+    1024 * 1024
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellPolicyMode {
@@ -1145,6 +1213,8 @@ pub struct Config {
     pub bash: BashConfig,
     #[serde(default)]
     pub truncate: TruncateConfig,
+    #[serde(default)]
+    pub image: ImageConfig,
     #[serde(skip)]
     pub shell_policy: ShellPolicyConfig,
     #[serde(default)]
@@ -1154,6 +1224,23 @@ pub struct Config {
     #[serde(default)]
     pub default_model: Option<String>,
     pub providers: IndexMap<String, ProviderConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            agent: AgentConfig::default(),
+            compaction: CompactionConfig::default(),
+            bash: BashConfig::default(),
+            truncate: TruncateConfig::default(),
+            image: ImageConfig::default(),
+            shell_policy: ShellPolicyConfig::default(),
+            retry: RetryConfig::default(),
+            default_provider: None,
+            default_model: None,
+            providers: IndexMap::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1208,6 +1295,30 @@ mod tests {
             text: "hmm".to_string(),
             signature: None,
         });
+        round_trip(&ContentBlock::Image {
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            media_type: "image/jpeg".to_string(),
+        });
+    }
+
+    #[test]
+    fn image_block_serializes_bytes_as_base64() {
+        let json = serde_json::to_value(&ContentBlock::Image {
+            bytes: vec![1, 2, 3],
+            media_type: "image/jpeg".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["bytes"], "AQID");
+        assert_eq!(json["media_type"], "image/jpeg");
+        let back: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back,
+            ContentBlock::Image {
+                bytes: vec![1, 2, 3],
+                media_type: "image/jpeg".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1328,15 +1439,8 @@ mod tests {
             },
         );
         let cfg = Config {
-            agent: AgentConfig::default(),
-            compaction: CompactionConfig::default(),
-            bash: BashConfig::default(),
-            truncate: TruncateConfig::default(),
-            shell_policy: ShellPolicyConfig::default(),
-            retry: RetryConfig::default(),
-            default_provider: None,
-            default_model: None,
             providers,
+            ..Config::default()
         };
         round_trip(&cfg);
     }
