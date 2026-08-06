@@ -31,7 +31,18 @@ const QUALITY_STEP: u8 = 10;
 pub fn normalize(bytes: &[u8], cfg: &ImageConfig) -> Result<(Vec<u8>, String)> {
     let format = image::guess_format(bytes)
         .map_err(|e| Error::Tool(format!("unrecognized image format: {e}")))?;
-    let img = image::load_from_memory_with_format(bytes, format)
+
+    // Decode under an allocation cap, not the 512 MiB decoder default. The
+    // cap is sized to the output bounding box with 8x headroom: an oversized
+    // input still decodes so it can be downscaled, while a file claiming
+    // pathological dimensions fails before its pixel buffer is committed.
+    let max_alloc = u64::from(cfg.max_width) * u64::from(cfg.max_height) * 4 * 8;
+    let mut limits = image::io::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(limits);
+    let img = reader
+        .decode()
         .map_err(|e| Error::Tool(format!("failed to decode {format:?} image: {e}")))?;
 
     let mut img = fit_within(&img, cfg.max_width, cfg.max_height);
@@ -162,5 +173,18 @@ mod tests {
             bytes.len(),
             cfg.max_bytes
         );
+    }
+
+    #[test]
+    fn rejects_pathological_dimensions_before_committing_pixels() {
+        // A PNG whose header claims ~100k x 100k pixels would need ~40 GB
+        // decoded; the capped decode must refuse it rather than allocate.
+        // Forge a minimal valid PNG header with huge IHDR dimensions.
+        let mut png = solid_png(1, 1);
+        // IHDR width is big-endian at bytes 16..20, height at 20..24.
+        png[16..20].copy_from_slice(&100_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&100_000u32.to_be_bytes());
+        let r = normalize(&png, &ImageConfig::default());
+        assert!(r.is_err(), "oversized decode must be rejected");
     }
 }
