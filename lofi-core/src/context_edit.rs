@@ -13,7 +13,7 @@ fn category(b: &ContentBlock) -> Cat {
         ContentBlock::ToolResult { .. } => Cat::ToolResult,
         ContentBlock::Thinking { .. } => Cat::Thinking,
         ContentBlock::ToolUse { .. } => Cat::ToolUse,
-        ContentBlock::Text { .. } => Cat::Other,
+        ContentBlock::Text { .. } | ContentBlock::Image { .. } => Cat::Other,
     }
 }
 
@@ -118,7 +118,9 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                             input: trim_tool_use_input(input, event_id),
                         });
                     }
-                    text @ ContentBlock::Text { .. } => blocks.push(text.clone()),
+                    other @ (ContentBlock::Text { .. } | ContentBlock::Image { .. }) => {
+                        blocks.push(other.clone());
+                    }
                 }
             }
             Message {

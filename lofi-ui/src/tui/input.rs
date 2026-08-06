@@ -324,12 +324,20 @@ fn spawn_agent_run(
     let preempt_clone = preempt.clone();
     let continuation = prompt.is_none();
     let prompt = prompt.unwrap_or_default();
+    // Attachments staged by `/image` ride this prompt into the engine and the
+    // durable transcript. A continuation (no new prompt) carries none.
+    let attachments = if continuation {
+        Vec::new()
+    } else {
+        std::mem::take(&mut app.pending_attachments)
+    };
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
         let result = agent
-            .run_continuation(
+            .run_continuation_with_attachments(
                 &mut messages,
                 prompt,
+                attachments,
                 tx,
                 cursor.as_ref(),
                 continuation,
