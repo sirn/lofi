@@ -97,6 +97,9 @@ impl Agent {
     /// (e.g. images) appended to the user message after its text. Attachments
     /// travel with the prompt into the durable transcript and the request
     /// history, so the send-time image guard and per-provider IR see them.
+    /// # Errors
+    /// Propagates [`Error`] from provider streaming, timeouts, or tool
+    /// execution failures that cannot be surfaced as a `ToolResult`.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub async fn run_continuation_with_attachments(
         &self,
@@ -539,7 +542,11 @@ impl Agent {
                     stream = self.provider.stream(&model, send_messages, &schemas) => stream?,
                 }
             }
-            None => self.provider.stream(&model, send_messages, &schemas).await?,
+            None => {
+                self.provider
+                    .stream(&model, send_messages, &schemas)
+                    .await?
+            }
         };
         let mut stream = stream;
 

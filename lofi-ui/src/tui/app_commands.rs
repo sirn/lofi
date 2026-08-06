@@ -309,6 +309,11 @@ impl App {
         lines.push(info_kv(t, "/debug", "toggle resource diagnostics"));
         lines.push(info_kv(
             t,
+            "/image <path>",
+            "attach an image to the next prompt",
+        ));
+        lines.push(info_kv(
+            t,
             "/recall [query]",
             "search session history (incl. compacted)",
         ));

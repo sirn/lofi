@@ -93,6 +93,7 @@ fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
 
@@ -155,6 +156,11 @@ mod tests {
             max_bytes: 64 * 1024,
         };
         let (bytes, _) = normalize(&png, &cfg).unwrap();
-        assert!(bytes.len() <= cfg.max_bytes, "{} > {}", bytes.len(), cfg.max_bytes);
+        assert!(
+            bytes.len() <= cfg.max_bytes,
+            "{} > {}",
+            bytes.len(),
+            cfg.max_bytes
+        );
     }
 }
