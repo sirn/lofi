@@ -109,6 +109,10 @@ pub enum AgentEvent {
     /// A provider error that ended the run after retry classification.
     /// Transient errors that will be retried use RetryStart/RetryEnd instead,
     /// so they never appear as fatal transcript rows.
+    /// A non-fatal notice the consumer may surface as a warning, such as an
+    /// image omitted because the active model does not support images.
+    /// Live-only: never persisted as a SessionEvent, matching ContextPressure.
+    Notice(String),
     Error(String),
     RetryStart {
         attempt: u32,

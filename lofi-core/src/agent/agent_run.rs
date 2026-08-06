@@ -451,16 +451,42 @@ impl Agent {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }
+        // Send-time guard: a model that does not support images cannot
+        // receive them, so strip Image blocks (replacing each with a text
+        // marker) and warn once. Runs at send time, not attach time, so a
+        // `/model` switch mid-session is honored — the model is re-read per
+        // request. The durable transcript keeps the original image.
+        let mut request_messages: Vec<Message>;
+        let send_messages: &Vec<Message> = if model.supports_image {
+            messages
+        } else {
+            let omitted = count_image_blocks(messages);
+            if omitted > 0 {
+                request_messages = strip_image_blocks(messages);
+                if let Some(tx) = tx {
+                    let noun = if omitted == 1 { "image" } else { "images" };
+                    let _ = tx
+                        .send(AgentEvent::Notice(format!(
+                            "{} does not support images; omitted {omitted} {noun} from this request",
+                            model.id
+                        )))
+                        .await;
+                }
+                &request_messages
+            } else {
+                messages
+            }
+        };
         let schemas = [schema];
         let stream = match cancel {
             Some(flag) => {
                 tokio::select! {
                     biased;
                     () = wait_for_cancel(flag) => return Err(Error::Cancelled),
-                    stream = self.provider.stream(&model, messages, &schemas) => stream?,
+                    stream = self.provider.stream(&model, send_messages, &schemas) => stream?,
                 }
             }
-            None => self.provider.stream(&model, messages, &schemas).await?,
+            None => self.provider.stream(&model, send_messages, &schemas).await?,
         };
         let mut stream = stream;
 
@@ -992,6 +1018,37 @@ impl Agent {
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
+/// Count attached images across the request history, for the omit notice.
+fn count_image_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count()
+}
+
+/// Return a copy of `messages` with every `Image` block replaced by a text
+/// marker, so a model without image support still sees that an attachment was
+/// present. Used only on the send path; the durable transcript is untouched.
+fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| Message {
+            role: m.role,
+            blocks: m
+                .blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Image { media_type, .. } => ContentBlock::Text {
+                        text: format!("[image omitted: model does not support images; media_type={media_type}]"),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return;

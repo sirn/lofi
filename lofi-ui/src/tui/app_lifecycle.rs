@@ -158,6 +158,10 @@ impl App {
             return;
         }
         match ev {
+            AgentEvent::Notice(msg) => {
+                self.notify(NotifyKind::Warn, msg);
+                return;
+            }
             AgentEvent::RetryStart {
                 attempt,
                 max_attempts,
