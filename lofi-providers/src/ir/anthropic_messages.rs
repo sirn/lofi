@@ -172,7 +172,7 @@ fn ephemeral_cache_control() -> Value {
 /// next tool round can read the previous round and write only its appended
 /// suffix. Restrict this to block types documented for user content; in
 /// particular, never attach cache control to assistant thinking or tool-use
-/// blocks. This matches Pi's placement strategy. Keeping it as a wire-only
+/// blocks. Keeping it as a wire-only
 /// mutation leaves provider-neutral history and transcripts untouched.
 fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     let Some(message) = messages

@@ -337,7 +337,7 @@ pub enum SessionEventKind {
         cost: f64,
         usage: Usage,
     },
-    /// A turn explicitly interrupted by the user. Like Pi's aborted assistant
+    /// A turn explicitly interrupted by the user.
     /// message, completed rounds and the partial current response remain both
     /// visible and available to subsequent model turns.
     TurnCancelled {

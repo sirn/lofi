@@ -44,10 +44,10 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Pi's interrupt key is Escape: it dismisses completion first, then aborts
+    // Escape is the interrupt key: it dismisses completion first, then aborts
     // an active stream. Ctrl-C is deliberately not a bare interrupt alias; it
     // first peels away the editor/nav state (see handle_ctrl_c) so it only
-    // cancels a turn from a clean, empty prompt — matching Pi.
+    // cancels a turn from a clean, empty prompt.
     if k.code == KeyCode::Esc
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())
@@ -455,7 +455,7 @@ fn interrupt_run(
 ) {
     if let Some(r) = current_run.as_mut() {
         if r.user_bash.is_none() {
-            // Pi restores steering/follow-up messages to the editor when a
+            // Restore steering/follow-up messages to the editor when a
             // stream is aborted instead of submitting them automatically.
             restore_queued_prompts(app);
         }

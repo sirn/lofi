@@ -2413,7 +2413,7 @@ impl Component for TurnFailed {
     }
 }
 
-/// Turn-cancelled separator. Mirrors Pi's "Operation aborted" status while
+/// Turn-cancelled separator. Shows an "Operation aborted" status while
 /// keeping partial assistant content immediately above it.
 struct TurnCancelled {
     label: String,
