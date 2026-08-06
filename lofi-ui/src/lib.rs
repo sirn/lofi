@@ -319,6 +319,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                         "error: context limit reached; use the interactive TUI to compact and continue"
                     )
                 }
+                AgentEvent::Notice(msg) => writeln!(stderr, "warning: {msg}"),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
                 AgentEvent::ToolInput { code, .. } => writeln!(stderr, "{code}"),

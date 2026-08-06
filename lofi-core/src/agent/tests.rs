@@ -816,15 +816,8 @@ fn provider(
 
 fn build(providers: IndexMap<String, ProviderConfig>) -> (Config, ModelRegistry) {
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     (cfg, reg)
@@ -970,9 +963,9 @@ fn select_model_uses_default_model_when_no_query() {
         truncate: lofi_types::TruncateConfig::default(),
         shell_policy: lofi_types::ShellPolicyConfig::default(),
         retry: lofi_types::RetryConfig::default(),
-        default_provider: None,
         default_model: Some("anthropic/claude".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1002,15 +995,9 @@ fn select_model_uses_default_provider_when_no_query() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
-        default_model: None,
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1040,15 +1027,10 @@ fn select_model_default_model_overrides_default_provider() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("anthropic".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, None).unwrap();
@@ -1078,15 +1060,10 @@ fn select_model_explicit_query_overrides_defaults() {
         ),
     );
     let cfg = Config {
-        agent: AgentConfig::default(),
-        compaction: CompactionConfig::default(),
-        bash: lofi_types::BashConfig::default(),
-        truncate: lofi_types::TruncateConfig::default(),
-        shell_policy: lofi_types::ShellPolicyConfig::default(),
-        retry: lofi_types::RetryConfig::default(),
         default_provider: Some("openai".to_string()),
         default_model: Some("openai/gpt-4o".to_string()),
         providers,
+        ..Config::default()
     };
     let reg = ModelRegistry::load(&cfg).unwrap();
     let (m, _) = select_model(&reg, &cfg, Some("anthropic/claude")).unwrap();
