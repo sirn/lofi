@@ -3004,6 +3004,67 @@ fn help_modal_scrolls_and_dismisses() {
     assert!(a.info.is_none());
 }
 
+// A minimal valid 1x1 transparent PNG (67 bytes).
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+#[test]
+fn image_command_refuses_when_model_lacks_support() {
+    let mut a = app(); // model_supports_image = false
+    assert!(a.slash_command("/image /tmp/x.png"));
+    assert!(a.pending_attachments.is_empty());
+    let note = a.notify.as_ref().expect("notify set");
+    assert!(note.msg.contains("does not support images"));
+}
+
+#[test]
+fn image_command_requires_a_path() {
+    let mut a = app();
+    a.model_supports_image = true;
+    assert!(a.slash_command("/image"));
+    assert!(a.pending_attachments.is_empty());
+    assert!(a.notify.as_ref().unwrap().msg.contains("usage: /image"));
+}
+
+#[test]
+fn image_command_attaches_and_stages() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-img-{}.png", std::process::id()));
+    std::fs::write(&path, TINY_PNG).unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    assert!(a.slash_command(&format!("/image {}", path.display())));
+    assert_eq!(a.pending_attachments.len(), 1);
+    match &a.pending_attachments[0] {
+        lofi_types::ContentBlock::Image { media_type, bytes } => {
+            assert_eq!(media_type, "image/jpeg");
+            assert!(!bytes.is_empty());
+        }
+        other => panic!("expected Image attachment, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn image_command_rejects_non_image_bytes() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-notimg-{}.txt", std::process::id()));
+    std::fs::write(&path, b"not an image").unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    assert!(a.slash_command(&format!("/image {}", path.display())));
+    assert!(a.pending_attachments.is_empty());
+    assert!(a.notify.as_ref().unwrap().msg.contains("attach"));
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn slash_complete_filters_and_accepts() {
     let mut a = app();
@@ -3014,7 +3075,13 @@ fn slash_complete_filters_and_accepts() {
     a.input = "/tr".to_string();
     a.refresh_slash_complete();
     let sc = a.slash_complete.as_ref().expect("popover open");
-    assert_eq!(sc.candidates, vec![9]); // /tree is index 9
+    // `/tr` matches only /tree; resolve its index rather than hardcoding it so
+    // adding a command does not shift the assertion.
+    let tree_idx = SLASH_COMMANDS
+        .iter()
+        .position(|(c, _)| *c == "/tree")
+        .unwrap();
+    assert_eq!(sc.candidates, vec![tree_idx]);
     a.input = "/tree".to_string();
     a.refresh_slash_complete();
     assert!(a.slash_complete.is_none());

@@ -201,8 +201,8 @@ pub enum ContentBlock {
 /// [`ContentBlock::Image`] round-trips through the tagged-union transcript
 /// format alongside the text variants.
 mod base64_bytes {
-    use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {

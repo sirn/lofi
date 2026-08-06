@@ -646,7 +646,10 @@ mod tests {
         }];
         let req = build_openai_responses_request(&model(), &msgs, &[]);
         let content = &req["input"][0]["content"];
-        assert_eq!(content[0], json!({"type": "input_text", "text": "describe"}));
+        assert_eq!(
+            content[0],
+            json!({"type": "input_text", "text": "describe"})
+        );
         assert_eq!(
             content[1],
             json!({
