@@ -843,7 +843,7 @@ impl Agent {
         Ok(false)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     async fn execute_tools(
         &self,
         tool_uses: &[(&str, &str, &serde_json::Value)],
@@ -898,6 +898,7 @@ impl Agent {
                     tool_use_id: id.to_string(),
                     content,
                     is_error: true,
+                    images: Vec::new(),
                 });
                 continue;
             }
@@ -922,6 +923,7 @@ impl Agent {
                     tool_use_id: id.to_string(),
                     content,
                     is_error: true,
+                    images: Vec::new(),
                 });
                 continue;
             }
@@ -1041,14 +1043,21 @@ impl Agent {
             if let Some(s) = stats.as_deref_mut() {
                 s.native_tools.extend(captured);
             }
-            let (content, is_error) = match outcome {
+            // A tool may return a tagged image (`read` on an image file).
+            // Upgrade it to a `ToolResultImage` carried on this result block,
+            // so the model sees the image in the same round as the result on
+            // every provider. The heavyweight base64 is stripped out of the
+            // text payload, leaving a compact `bytes` count in the transcript.
+            let (content, is_error, result_images) = match outcome {
                 Ok(r) => {
-                    let payload = serde_json::json!({ "value": r.value, "logs": r.logs });
+                    let mut value = r.value;
+                    let img = upgrade_tagged_image(&mut value);
+                    let payload = serde_json::json!({ "value": value, "logs": r.logs });
                     let content =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-                    (cap_exec_result(&content), false)
+                    (cap_exec_result(&content), false, img)
                 }
-                Err(e) => (cap_exec_result(&e.to_string()), true),
+                Err(e) => (cap_exec_result(&e.to_string()), true, None),
             };
             if is_error {
                 // A rejected guest promise can short-circuit concurrent native
@@ -1099,6 +1108,7 @@ impl Agent {
                 tool_use_id: id.to_string(),
                 content,
                 is_error,
+                images: result_images.into_iter().collect(),
             });
         }
         Ok(results)
@@ -1150,6 +1160,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
             tool_use_id: id.clone(),
             content: "cancelled: tool run interrupted before producing a result".to_string(),
             is_error: true,
+            images: Vec::new(),
         })
         .collect();
     if synthesized.is_empty() {
@@ -1166,13 +1177,19 @@ fn count_image_blocks(messages: &[Message]) -> usize {
     messages
         .iter()
         .flat_map(|m| m.blocks.iter())
-        .filter(|b| matches!(b, ContentBlock::Image { .. }))
-        .count()
+        .map(|b| match b {
+            ContentBlock::Image { .. } => 1,
+            ContentBlock::ToolResult { images, .. } => images.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
-/// Return a copy of `messages` with every `Image` block replaced by a text
-/// marker, so a model without image support still sees that an attachment was
-/// present. Used only on the send path; the durable transcript is untouched.
+/// Return a copy of `messages` with every image dropped for a model without
+/// image support: standalone `Image` blocks become text markers, and the
+/// images carried on a `ToolResult` are dropped with a marker appended to its
+/// text. The model still sees that an attachment was present. Used only on the
+/// send path; the durable transcript is untouched.
 fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
@@ -1185,11 +1202,58 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
                     ContentBlock::Image { media_type, .. } => ContentBlock::Text {
                         text: format!("[image omitted: model does not support images; media_type={media_type}]"),
                     },
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        images,
+                    } if !images.is_empty() => {
+                        let mut content = content.clone();
+                        for img in images {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(&format!("[image omitted: model does not support images; media_type={}]", img.media_type));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content,
+                            is_error: *is_error,
+                            images: Vec::new(),
+                        }
+                    }
                     other => other.clone(),
                 })
                 .collect(),
         })
         .collect()
+}
+
+/// Recognize a tagged image payload from a tool result and upgrade it to a
+/// [`lofi_types::ToolResultImage`] carried on that result block. `lofi.read`
+/// returns `{type:"image", media_type, data_b64}` when it reads an image file
+/// (the sandbox boundary is JSON, so bytes cannot cross directly). On a match
+/// the base64 is decoded into `bytes` and the `data_b64` field is replaced with
+/// a compact `bytes` count, so the durable transcript keeps a small marker
+/// while the decoded image rides the `ToolResult` for same-round vision.
+/// Returns `None` (and leaves `value` untouched) for any non-image payload.
+fn upgrade_tagged_image(value: &mut serde_json::Value) -> Option<lofi_types::ToolResultImage> {
+    use base64::Engine as _;
+    let obj = value.as_object()?;
+    if obj.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    let media_type = obj.get("media_type")?.as_str()?.to_string();
+    let data_b64 = obj.get("data_b64")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .ok()?;
+    let byte_len = bytes.len();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("data_b64");
+        obj.insert("bytes".to_string(), serde_json::json!(byte_len));
+    }
+    Some(lofi_types::ToolResultImage { bytes, media_type })
 }
 
 /// Request image payload budget (base64 bytes). Providers cap the request
@@ -1217,6 +1281,10 @@ fn image_payload_bytes(messages: &[Message]) -> u64 {
         .flat_map(|m| m.blocks.iter())
         .map(|b| match b {
             ContentBlock::Image { bytes, .. } => 4 * bytes.len().div_ceil(3) as u64,
+            ContentBlock::ToolResult { images, .. } => images
+                .iter()
+                .map(|img| 4 * img.bytes.len().div_ceil(3) as u64)
+                .sum(),
             _ => 0,
         })
         .sum()
@@ -1226,6 +1294,7 @@ fn image_payload_bytes(messages: &[Message]) -> u64 {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
 
     fn assistant_with_tool_use(id: &str) -> Message {
@@ -1251,6 +1320,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "tool-1");
                 assert!(is_error);
@@ -1270,6 +1340,7 @@ mod tests {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -1317,6 +1388,7 @@ mod tests {
                     tool_use_id: "tool-1".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -1333,6 +1405,38 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upgrade_tagged_image_decodes_and_strips_base64() {
+        let raw = vec![1u8, 2, 3, 4, 5];
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let mut value = serde_json::json!({
+            "ok": true,
+            "type": "image",
+            "media_type": "image/png",
+            "data_b64": data_b64,
+        });
+        let img = upgrade_tagged_image(&mut value).unwrap();
+        assert_eq!(img.bytes, raw);
+        assert_eq!(img.media_type, "image/png");
+        // The heavyweight base64 is gone; a compact byte count remains.
+        assert!(value.get("data_b64").is_none());
+        assert_eq!(value["bytes"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn upgrade_tagged_image_ignores_non_image_payloads() {
+        let mut text = serde_json::json!({"ok": true, "content": "hi"});
+        assert!(upgrade_tagged_image(&mut text).is_none());
+        assert_eq!(text["content"], serde_json::json!("hi"));
+        // Wrong type tag.
+        let mut other = serde_json::json!({"type": "text", "data_b64": "AAAA"});
+        assert!(upgrade_tagged_image(&mut other).is_none());
+        // Bad base64 must not produce a block.
+        let mut bad =
+            serde_json::json!({"type": "image", "media_type": "image/png", "data_b64": "!!!"});
+        assert!(upgrade_tagged_image(&mut bad).is_none());
     }
 
     #[test]
@@ -1372,6 +1476,39 @@ mod tests {
                 text: "look".to_string()
             }
         );
+    }
+
+    #[test]
+    fn strip_image_blocks_downgrades_tool_result_images() {
+        let messages = vec![Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        assert_eq!(count_image_blocks(&messages), 1);
+        let stripped = strip_image_blocks(&messages);
+        assert_eq!(count_image_blocks(&stripped), 0);
+        match &stripped[0].blocks[0] {
+            ContentBlock::ToolResult {
+                content, images, ..
+            } => {
+                assert!(content.contains("read image.png"));
+                assert!(content.contains("image omitted"));
+                assert!(content.contains("image/png"));
+                assert!(images.is_empty());
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        // Payload bytes count both standalone and tool-result images.
+        assert!(image_payload_bytes(&messages) > 0);
+        assert_eq!(image_payload_bytes(&stripped), 0);
     }
 
     #[test]

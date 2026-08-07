@@ -109,6 +109,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                         tool_use_id: tool_use_id.clone(),
                         content: result_stub(event_id, *is_error),
                         is_error: *is_error,
+                        images: Vec::new(),
                     }),
                     ContentBlock::Thinking { .. } => {}
                     ContentBlock::ToolUse { id, name, input } => {
@@ -202,6 +203,7 @@ mod tests {
             tool_use_id: id.to_string(),
             content: content.to_string(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 

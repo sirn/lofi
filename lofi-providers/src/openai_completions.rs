@@ -25,6 +25,14 @@ impl super::Provider for OpenAiCompletionsProvider {
         tools: &[ToolSchema],
     ) -> Result<BoxStream<'static, Result<StreamingEvent>>> {
         let body = OpenAiCompletionsIr::build_request(model, messages, tools);
+        {
+            let has_img = body.to_string().contains("\"image_url\"");
+            let m = format!("CHAT_PROVIDER_HAS_FIX has_image={has_img}");
+            match std::fs::write("/tmp/LOFI_CHAT_MARKER.json", &m) {
+                Ok(()) => eprintln!("[lofi-chat-marker] {m}"),
+                Err(e) => eprintln!("[lofi-chat-marker] WRITE FAILED {e}"),
+            }
+        }
         let req = apply_headers(
             with_bearer(
                 self.client
