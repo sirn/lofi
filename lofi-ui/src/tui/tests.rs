@@ -2108,6 +2108,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
                     tool_use_id: "e1".into(),
                     content: durable_result.into(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             }),
         },
@@ -3014,32 +3015,23 @@ const TINY_PNG: &[u8] = &[
 ];
 
 #[test]
-fn image_command_refuses_when_model_lacks_support() {
+fn attach_image_refuses_when_model_lacks_support() {
     let mut a = app(); // model_supports_image = false
-    assert!(a.slash_command("/image /tmp/x.png"));
+    a.attach_image_path("/tmp/x.png");
     assert!(a.pending_attachments.is_empty());
     let note = a.notify.as_ref().expect("notify set");
     assert!(note.msg.contains("does not support images"));
 }
 
 #[test]
-fn image_command_requires_a_path() {
-    let mut a = app();
-    a.model_supports_image = true;
-    assert!(a.slash_command("/image"));
-    assert!(a.pending_attachments.is_empty());
-    assert!(a.notify.as_ref().unwrap().msg.contains("usage: /image"));
-}
-
-#[test]
-fn image_command_attaches_and_stages() {
+fn attach_image_attaches_and_stages() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("lofi-test-img-{}.png", std::process::id()));
     std::fs::write(&path, TINY_PNG).unwrap();
 
     let mut a = app();
     a.model_supports_image = true;
-    assert!(a.slash_command(&format!("/image {}", path.display())));
+    a.attach_image_path(&path.display().to_string());
     assert_eq!(a.pending_attachments.len(), 1);
     match &a.pending_attachments[0] {
         lofi_types::ContentBlock::Image { media_type, bytes } => {
@@ -3052,17 +3044,64 @@ fn image_command_attaches_and_stages() {
 }
 
 #[test]
-fn image_command_rejects_non_image_bytes() {
+fn attach_image_rejects_non_image_bytes() {
     let dir = std::env::temp_dir();
-    let path = dir.join(format!("lofi-test-notimg-{}.txt", std::process::id()));
+    let path = dir.join(format!("lofi-test-notimg-{}.png", std::process::id()));
     std::fs::write(&path, b"not an image").unwrap();
 
     let mut a = app();
     a.model_supports_image = true;
-    assert!(a.slash_command(&format!("/image {}", path.display())));
+    a.attach_image_path(&path.display().to_string());
     assert!(a.pending_attachments.is_empty());
     assert!(a.notify.as_ref().unwrap().msg.contains("attach"));
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_image_path_attaches() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-paste-{}.png", std::process::id()));
+    std::fs::write(&path, TINY_PNG).unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    handle_event(
+        &Event::Paste(path.display().to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    // The image staged and no literal path text landed in the input buffer.
+    assert_eq!(a.pending_attachments.len(), 1);
+    assert!(a.input.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_non_image_or_prose_inserts_text() {
+    let mut a = app();
+    a.model_supports_image = true;
+    // A path that does not resolve pastes as literal text.
+    handle_event(
+        &Event::Paste("/no/such/file.png".to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    assert!(a.pending_attachments.is_empty());
+    assert_eq!(a.input, "/no/such/file.png");
+
+    // Multi-line paste is never an image path. Fresh app for a clean buffer.
+    let mut b = app();
+    b.model_supports_image = true;
+    handle_event(
+        &Event::Paste("line one\nline two".to_string()),
+        &mut b,
+        None,
+        &mut None,
+    );
+    assert!(b.pending_attachments.is_empty());
+    assert_eq!(b.input, "line one\nline two");
 }
 
 #[test]
@@ -3863,6 +3902,7 @@ fn tree_shows_tool_result_nodes() {
                 tool_use_id: "tu1".into(),
                 content: "file_a.txt file_b.txt".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -3961,6 +4001,7 @@ fn tree_exec_label_shows_native_tools() {
                 tool_use_id: "exec_0".into(),
                 content: "exec result".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         SessionEventKind::NativeTool(NativeToolRecord {
@@ -4539,6 +4580,7 @@ fn turns_from_events_links_tool_results() {
                 tool_use_id: "t1".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
         Message {
@@ -4579,6 +4621,7 @@ fn turns_from_events_restores_timings() {
                 tool_use_id: "t1".to_string(),
                 content: "1".to_string(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }),
         msg(Message {
@@ -4814,6 +4857,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             tool_use_id: id.to_string(),
             content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
             is_error: false,
+            images: Vec::new(),
         }],
     };
     let exec_call_full = |id: &str| Message {
@@ -4830,6 +4874,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             tool_use_id: id.to_string(),
             content: out.to_string(),
             is_error: false,
+            images: Vec::new(),
         }],
     };
 

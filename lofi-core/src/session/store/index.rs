@@ -550,6 +550,7 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
                             tool_use_id: block.tool_use_id,
                             content: String::new(),
                             is_error: false,
+                            images: Vec::new(),
                         })
                         .collect(),
                 }),
