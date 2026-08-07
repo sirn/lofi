@@ -75,13 +75,14 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        images,
                         ..
                     } = b
                     {
                         out.push(json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
-                            "output": content,
+                            "output": responses_tool_result_output(content, images),
                         }));
                     }
                 }
@@ -89,6 +90,29 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
         }
     }
     out
+}
+
+/// Build the `output` of a `function_call_output` item. With no images it
+/// stays a plain string; with images it becomes a list of content items — a
+/// text item (the string, or a note when empty) followed by one `input_image`
+/// item per attached image — so the model sees the image in the same round as
+/// the tool result.
+fn responses_tool_result_output(text: &str, images: &[lofi_types::ToolResultImage]) -> Value {
+    if images.is_empty() {
+        return Value::String(text.to_string());
+    }
+    let mut parts: Vec<Value> = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        parts.push(json!({"type": "input_text", "text": text}));
+    }
+    for img in images {
+        parts.push(json!({
+            "type": "input_image",
+            "detail": "auto",
+            "image_url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+        }));
+    }
+    Value::Array(parts)
 }
 
 pub(crate) struct OpenAiResponsesIr;
@@ -628,6 +652,51 @@ mod tests {
         assert_eq!(u.input_tokens, 2);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, 1);
+    }
+
+    #[test]
+    fn tool_result_with_images_serializes_output_as_items() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        let input = to_openai_responses_input(&msgs);
+        let output = &input[0]["output"];
+        assert_eq!(
+            output[0],
+            json!({"type": "input_text", "text": "read image.png"})
+        );
+        assert_eq!(
+            output[1],
+            json!({
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": "data:image/png;base64,AQID",
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_without_images_stays_string() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "plain".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        }];
+        let input = to_openai_responses_input(&msgs);
+        assert_eq!(input[0]["output"], json!("plain"));
     }
 
     #[test]
