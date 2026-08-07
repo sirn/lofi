@@ -180,6 +180,15 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        /// Images attached to this tool result (e.g. a `read` of an image
+        /// file). Each entry is `(bytes, media_type)`, base64-encoded at the
+        /// serde and per-provider IR boundaries like the standalone `Image`
+        /// block. Carrying images here (rather than on a separate user
+        /// message) lets the model see the image in the same round that
+        /// produced the result, on every provider. Empty for text-only
+        /// results; omitted from the wire form when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolResultImage>,
     },
     /// Chain-of-thought / reasoning trace (where the API exposes it).
     Thinking {

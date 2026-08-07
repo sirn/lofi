@@ -1616,6 +1616,7 @@ dependencies = [
 name = "lofi-code"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "globset",
  "ignore",
@@ -1640,6 +1641,7 @@ name = "lofi-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "dirs",
  "futures",
  "globset",
