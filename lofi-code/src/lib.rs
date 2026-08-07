@@ -676,6 +676,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_read_image_returns_tagged_payload() {
+        // 1x1 transparent PNG.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x64, 0xF8, 0xCF, 0x50, 0x0F, 0x00, 0x03, 0x86, 0x01, 0x80, 0x5A, 0x34,
+            0x7D, 0x6B, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("img.png"), PNG).unwrap();
+        let res = exec(
+            "return await lofi.read('img.png');",
+            &ctx(dir.path()),
+            &ExecOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.value["type"], json!("image"));
+        assert_eq!(res.value["media_type"], json!("image/png"));
+        let data_b64 = res.value["data_b64"].as_str().unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .unwrap();
+        assert_eq!(decoded, PNG);
+        // The text path must NOT have run (no content/lines keys).
+        assert!(res.value.get("content").is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_read_non_image_still_text() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), "plain").unwrap();
+        let res = exec(
+            "return await lofi.read('note.txt');",
+            &ctx(dir.path()),
+            &ExecOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.value["content"], json!("plain"));
+        assert!(res.value.get("type").is_none());
+    }
+
+    #[tokio::test]
     async fn exec_pi_write_then_read_round_trip() {
         let dir = tempdir().unwrap();
         let src = "await lofi.write({ path: 'nested/x.txt', text: 'hi' }); return await lofi.read('nested/x.txt');";

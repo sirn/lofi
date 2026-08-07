@@ -180,6 +180,15 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        /// Images attached to this tool result (e.g. a `read` of an image
+        /// file). Each entry is `(bytes, media_type)`, base64-encoded at the
+        /// serde and per-provider IR boundaries like the standalone `Image`
+        /// block. Carrying images here (rather than on a separate user
+        /// message) lets the model see the image in the same round that
+        /// produced the result, on every provider. Empty for text-only
+        /// results; omitted from the wire form when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolResultImage>,
     },
     /// Chain-of-thought / reasoning trace (where the API exposes it).
     Thinking {
@@ -195,6 +204,15 @@ pub enum ContentBlock {
         bytes: Vec<u8>,
         media_type: String,
     },
+}
+
+/// An image attached to a [`ContentBlock::ToolResult`]. Raw bytes plus media
+/// type, base64-encoded in serde via the shared `base64_bytes` adapter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
+    pub media_type: String,
 }
 
 /// Serde adapter that encodes a byte buffer as a base64 string in JSON, so
@@ -1290,6 +1308,16 @@ mod tests {
             tool_use_id: "t1".to_string(),
             content: "2".to_string(),
             is_error: false,
+            images: Vec::new(),
+        });
+        round_trip(&ContentBlock::ToolResult {
+            tool_use_id: "t2".to_string(),
+            content: "img".to_string(),
+            is_error: false,
+            images: vec![ToolResultImage {
+                bytes: vec![0x89, 0x50],
+                media_type: "image/png".to_string(),
+            }],
         });
         round_trip(&ContentBlock::Thinking {
             text: "hmm".to_string(),

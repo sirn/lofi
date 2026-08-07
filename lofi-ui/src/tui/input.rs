@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// Image file extensions recognized for paste-to-attach.
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// Detect a pasted image file path. Returns the trimmed path when the paste is
+/// a single line that names an existing file with an image extension — the
+/// drag-drop / copy-path flow. Anything else (multi-line, prose, a path that
+/// does not resolve, a non-image file) returns `None` and pastes as text.
+fn sniff_image_path(s: &str, app: &App) -> Option<String> {
+    let trimmed = s.trim();
+    // One path only: no newlines, no surrounding prose.
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return None;
+    }
+    let ext = trimmed.rsplit('.').next()?.to_ascii_lowercase();
+    if !IMAGE_EXTS.contains(&ext.as_str()) {
+        return None;
+    }
+    let expanded = super::app_commands::shellexpand_tilde(trimmed);
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        app.session.cwd.join(&expanded)
+    };
+    if resolved.is_file() {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(super) fn handle_event(
     ev: &Event,
@@ -18,7 +48,14 @@ pub(super) fn handle_event(
     if let Event::Paste(s) = ev {
         if app.mode == Mode::Input && !app.modal_open() {
             app.sel = None;
-            app.insert_str(s);
+            // A pasted image file path attaches the image instead of
+            // inserting literal text — the standard drag-drop / paste flow,
+            // no dedicated command. Anything else pastes as text verbatim.
+            if let Some(path) = sniff_image_path(s, app) {
+                app.attach_image_path(&path);
+            } else {
+                app.insert_str(s);
+            }
         }
         return;
     }
@@ -324,7 +361,7 @@ fn spawn_agent_run(
     let preempt_clone = preempt.clone();
     let continuation = prompt.is_none();
     let prompt = prompt.unwrap_or_default();
-    // Attachments staged by `/image` ride this prompt into the engine and the
+    // Attachments staged by paste-to-attach ride this prompt into the engine and the
     // durable transcript. A continuation (no new prompt) carries none.
     let attachments = if continuation {
         Vec::new()

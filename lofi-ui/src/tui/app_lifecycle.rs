@@ -383,6 +383,7 @@ impl App {
                         tool_use_id,
                         content,
                         is_error: false,
+                        ..
                     } = block
                     {
                         results.insert(tool_use_id, content);
@@ -501,6 +502,7 @@ impl App {
                             tool_use_id,
                             content,
                             is_error: false,
+                            ..
                         } = block
                         {
                             if exec_ids.contains(tool_use_id) {
