@@ -117,6 +117,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                                 tool_use_id,
                                 content,
                                 is_error,
+                                ..
                             } = b
                             {
                                 emit(AgentEvent::ToolEnd {
@@ -204,6 +205,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                             tool_use_id,
                             content,
                             is_error,
+                            ..
                         } = b
                         {
                             emit(AgentEvent::ToolEnd {

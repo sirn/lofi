@@ -90,14 +90,37 @@ pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        images,
                         ..
                     } = b
                     {
+                        // Chat-completions `tool` messages carry only string
+                        // content — an image cannot ride the tool result.
+                        // Emit it on a following user message instead, the
+                        // universally supported position for an image, so the
+                        // model sees it in the same round as the result.
                         out.push(json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
                             "content": content,
                         }));
+                        if !images.is_empty() {
+                            let parts: Vec<Value> = images
+                                .iter()
+                                .map(|img| {
+                                    json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+                                        },
+                                    })
+                                })
+                                .collect();
+                            out.push(json!({
+                                "role": "user",
+                                "content": parts,
+                            }));
+                        }
                     }
                 }
             }
@@ -528,6 +551,40 @@ mod tests {
             json!({
                 "type": "image_url",
                 "image_url": {"url": "data:image/jpeg;base64,AQID"},
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_with_images_serializes_image_as_user_message() {
+        // Chat-completions `tool` messages only carry string content, so a
+        // tool-result image must be re-emitted on a following user message —
+        // otherwise the model never sees it.
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(
+            req["messages"][0],
+            json!({"role": "tool", "tool_call_id": "c1", "content": "read image.png"})
+        );
+        assert_eq!(
+            req["messages"][1],
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AQID"},
+                }],
             })
         );
     }
