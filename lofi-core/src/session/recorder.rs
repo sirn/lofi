@@ -280,6 +280,7 @@ mod tests {
                     tool_use_id: "t1".into(),
                     content: "2".into(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];

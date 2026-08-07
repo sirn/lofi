@@ -387,6 +387,7 @@ fn normalize(
                         tool_use_id,
                         content,
                         is_error,
+                        ..
                     } = b
                     {
                         out.push(CompactBlock::ToolResult {
@@ -449,6 +450,7 @@ fn normalize(
                         tool_use_id,
                         content,
                         is_error,
+                        ..
                     } = b
                     {
                         out.push(CompactBlock::ToolResult {
@@ -1482,6 +1484,7 @@ mod tests {
                 tool_use_id: id.into(),
                 content: serde_json::json!({ "value": value, "logs": [] }).to_string(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }
     }

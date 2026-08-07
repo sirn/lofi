@@ -90,14 +90,36 @@ pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                        ..
+                        images,
                     } = b
                     {
+                        // Chat-completions `tool` messages carry only string
+                        // content — an image cannot ride the tool result.
+                        // Emit it on a following user message instead, the
+                        // universally supported position for an image, so the
+                        // model sees it in the same round as the result.
                         out.push(json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
                             "content": content,
                         }));
+                        if !images.is_empty() {
+                            let parts: Vec<Value> = images
+                                .iter()
+                                .map(|img| {
+                                    json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+                                        },
+                                    })
+                                })
+                                .collect();
+                            out.push(json!({
+                                "role": "user",
+                                "content": parts,
+                            }));
+                        }
                     }
                 }
             }

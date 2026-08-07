@@ -46,10 +46,11 @@ pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<
                             tool_use_id,
                             content,
                             is_error,
+                            images,
                         } => Some(json!({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": content,
+                            "content": anthropic_tool_result_content(content, images),
                             "is_error": is_error,
                         })),
                         _ => None,
@@ -69,6 +70,35 @@ pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<
     (system, out)
 }
 
+/// Build the `content` of an Anthropic `tool_result`. With no images it stays
+/// a plain string (the common case and what most servers expect); with images
+/// it becomes an array of content blocks — a text part (the string, or a note
+/// when empty) followed by one `image` source block per attached image — so
+/// the model sees the image in the same round as the tool result.
+fn anthropic_tool_result_content(text: &str, images: &[lofi_types::ToolResultImage]) -> Value {
+    if images.is_empty() {
+        return Value::String(text.to_string());
+    }
+    let mut parts: Vec<Value> = Vec::with_capacity(images.len() + 1);
+    let note = if text.is_empty() {
+        "(see attached image)"
+    } else {
+        text
+    };
+    parts.push(json!({"type": "text", "text": note}));
+    for img in images {
+        parts.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.media_type,
+                "data": super::b64(&img.bytes),
+            },
+        }));
+    }
+    Value::Array(parts)
+}
+
 fn block_to_anthropic(b: &ContentBlock) -> Value {
     match b {
         ContentBlock::Text { text } => json!({"type": "text", "text": text}),
@@ -79,10 +109,11 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             tool_use_id,
             content,
             is_error,
+            images,
         } => json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": content,
+            "content": anthropic_tool_result_content(content, images),
             "is_error": is_error,
         }),
         ContentBlock::Thinking { text, signature } => {
@@ -508,6 +539,55 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_with_images_serializes_content_as_parts() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![lofi_types::ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "read image.png".to_string(),
+                is_error: false,
+                images: vec![lofi_types::ToolResultImage {
+                    bytes: vec![1, 2, 3],
+                    media_type: "image/png".to_string(),
+                }],
+            }],
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let content = &req["messages"][0]["content"][0]["content"];
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "read image.png"})
+        );
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "AQID",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_without_images_stays_string() {
+        let msgs = [Message {
+            role: Role::Tool,
+            blocks: vec![lofi_types::ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "plain".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let content = &req["messages"][0]["content"][0]["content"];
+        assert_eq!(content, &json!("plain"));
+    }
+
+    #[test]
     fn conversation_breakpoint_marks_terminal_tool_result() {
         let msgs = [
             Message {
@@ -524,6 +604,7 @@ mod tests {
                     tool_use_id: "tool-1".to_string(),
                     content: "1".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -587,6 +668,7 @@ mod tests {
                     content: "cancelled: tool run interrupted before producing a result"
                         .to_string(),
                     is_error: true,
+                    images: Vec::new(),
                 }],
             },
         ];
