@@ -4,7 +4,7 @@ use super::*;
 
 /// Expand a leading `~` or `~/` to the user's home directory. Other path
 /// forms pass through unchanged.
-fn shellexpand_tilde(path: &str) -> PathBuf {
+pub(super) fn shellexpand_tilde(path: &str) -> PathBuf {
     if path == "~" {
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home);
@@ -182,10 +182,6 @@ impl App {
                 self.open_thinking_picker();
                 true
             }
-            _ if cmd == "/image" || cmd.starts_with("/image ") => {
-                self.attach_image(cmd);
-                true
-            }
             _ if cmd.starts_with('/') => {
                 self.notify(
                     NotifyKind::Error,
@@ -307,11 +303,6 @@ impl App {
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
         lines.push(info_kv(t, "/debug", "toggle resource diagnostics"));
-        lines.push(info_kv(
-            t,
-            "/image <path>",
-            "attach an image to the next prompt",
-        ));
         lines.push(info_kv(
             t,
             "/recall [query]",
@@ -688,17 +679,13 @@ impl App {
         self.bump_render_epoch();
     }
 
-    /// '/image <path>': read an image file, normalize it (decode, downscale,
-    /// re-encode as JPEG within the configured limits), and stage it for the
-    /// next submitted prompt. Refuses up front when the active model does not
+    /// Attach an image file to the next submitted prompt: read it, normalize
+    /// it (decode, downscale, re-encode as JPEG within the configured limits),
+    /// and stage it. Reached by pasting or typing an image path in the input
+    /// — no dedicated command. Refuses up front when the active model does not
     /// support images so the user is not surprised by the engine's send-time
     /// omission.
-    pub(super) fn attach_image(&mut self, cmd: &str) {
-        let path_str = cmd.trim_start_matches("/image").trim();
-        if path_str.is_empty() {
-            self.notify(NotifyKind::Warn, "usage: /image <path>");
-            return;
-        }
+    pub(super) fn attach_image_path(&mut self, path_str: &str) {
         if !self.model_supports_image {
             self.notify(
                 NotifyKind::Warn,
