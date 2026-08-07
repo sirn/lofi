@@ -25,6 +25,18 @@ impl super::Provider for OpenAiResponsesProvider {
         tools: &[ToolSchema],
     ) -> Result<BoxStream<'static, Result<StreamingEvent>>> {
         let body = OpenAiResponsesIr::build_request(model, messages, tools);
+        if let Ok(path) = std::env::var("LOFI_DUMP_REQUEST") {
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&body).unwrap_or_default());
+        }
+        // Unconditional marker dump: proves this build's stream() runs and
+        // records whether any image rides the request. /tmp is shared.
+        {
+            let has_img = body.to_string().contains("input_image");
+            let _ = std::fs::write(
+                "/tmp/LOFI_STREAM_MARKER_ZZ.json",
+                format!("BUILD_WITH_DUMP_CODE has_image={has_img}"),
+            );
+        }
         let req = apply_headers(
             with_bearer(
                 self.client

@@ -1573,6 +1573,7 @@ mod tests {
                         tool_use_id: "exec-1".to_string(),
                         content: large.clone(),
                         is_error: false,
+                        images: Vec::new(),
                     }],
                 }),
             },

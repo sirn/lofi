@@ -25,6 +25,7 @@ globset = { workspace = true }
 nix = { workspace = true }
 uuid = { workspace = true }
 image = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
