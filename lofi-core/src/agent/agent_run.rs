@@ -812,6 +812,7 @@ impl Agent {
             .iter()
             .map(|(id, name, input)| (id.as_str(), name.as_str(), input))
             .collect();
+        let mut images: Vec<ContentBlock> = Vec::new();
         let results = match self
             .execute_tools(
                 &tool_refs,
@@ -820,6 +821,7 @@ impl Agent {
                 recall.clone(),
                 result.clone(),
                 cancel,
+                &mut images,
             )
             .await
         {
@@ -840,10 +842,23 @@ impl Agent {
             role: Role::Tool,
             blocks: results,
         });
+        // Images decoded from tagged tool results ride a user-role message.
+        // Providers only serialize `Image` blocks for vision from user
+        // messages; placed in the `Role::Tool` results they are dropped.
+        if !images.is_empty() {
+            let mut blocks = vec![ContentBlock::Text {
+                text: "[image attached from tool result]".to_string(),
+            }];
+            blocks.extend(images);
+            messages.push(Message {
+                role: Role::User,
+                blocks,
+            });
+        }
         Ok(false)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     async fn execute_tools(
         &self,
         tool_uses: &[(&str, &str, &serde_json::Value)],
@@ -852,6 +867,7 @@ impl Agent {
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
         cancel: Option<&Arc<AtomicBool>>,
+        images: &mut Vec<ContentBlock>,
     ) -> Result<Vec<ContentBlock>> {
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
@@ -1043,7 +1059,17 @@ impl Agent {
             }
             let (content, is_error) = match outcome {
                 Ok(r) => {
-                    let payload = serde_json::json!({ "value": r.value, "logs": r.logs });
+                    // A tool may return a tagged image (`read` on an image
+                    // file). Upgrade it to a real `ContentBlock::Image` that
+                    // rides a following user-role message — providers only
+                    // serialize images for vision from user messages — and
+                    // strip the heavyweight base64 out of the text payload so
+                    // the transcript keeps a compact marker instead.
+                    let mut value = r.value;
+                    if let Some(block) = upgrade_tagged_image(&mut value) {
+                        images.push(block);
+                    }
+                    let payload = serde_json::json!({ "value": value, "logs": r.logs });
                     let content =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     (cap_exec_result(&content), false)
@@ -1192,6 +1218,33 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
+/// Recognize a tagged image payload from a tool result and upgrade it to a
+/// real [`ContentBlock::Image`]. `lofi.read` returns
+/// `{type:"image", media_type, data_b64}` when it reads an image file (the
+/// sandbox boundary is JSON, so bytes cannot cross directly). On a match the
+/// base64 is decoded into `bytes` and the `data_b64` field is replaced with a
+/// compact `bytes` count, so the durable transcript keeps a small marker while
+/// the decoded image is carried separately on a user-role message for vision.
+/// Returns `None` (and leaves `value` untouched) for any non-image payload.
+fn upgrade_tagged_image(value: &mut serde_json::Value) -> Option<ContentBlock> {
+    use base64::Engine as _;
+    let obj = value.as_object()?;
+    if obj.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    let media_type = obj.get("media_type")?.as_str()?.to_string();
+    let data_b64 = obj.get("data_b64")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .ok()?;
+    let byte_len = bytes.len();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("data_b64");
+        obj.insert("bytes".to_string(), serde_json::json!(byte_len));
+    }
+    Some(ContentBlock::Image { bytes, media_type })
+}
+
 /// Request image payload budget (base64 bytes). Providers cap the request
 /// *body*, not just the token count: Anthropic rejects a body over 32 MiB
 /// with HTTP 413 `request_too_large` even when the token estimate is well
@@ -1333,6 +1386,44 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upgrade_tagged_image_decodes_and_strips_base64() {
+        use base64::Engine as _;
+        let raw = vec![1u8, 2, 3, 4, 5];
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let mut value = serde_json::json!({
+            "ok": true,
+            "type": "image",
+            "media_type": "image/png",
+            "data_b64": data_b64,
+        });
+        let block = upgrade_tagged_image(&mut value).expect("image upgraded");
+        match block {
+            ContentBlock::Image { bytes, media_type } => {
+                assert_eq!(bytes, raw);
+                assert_eq!(media_type, "image/png");
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+        // The heavyweight base64 is gone; a compact byte count remains.
+        assert!(value.get("data_b64").is_none());
+        assert_eq!(value["bytes"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn upgrade_tagged_image_ignores_non_image_payloads() {
+        let mut text = serde_json::json!({"ok": true, "content": "hi"});
+        assert!(upgrade_tagged_image(&mut text).is_none());
+        assert_eq!(text["content"], serde_json::json!("hi"));
+        // Wrong type tag.
+        let mut other = serde_json::json!({"type": "text", "data_b64": "AAAA"});
+        assert!(upgrade_tagged_image(&mut other).is_none());
+        // Bad base64 must not produce a block.
+        let mut bad =
+            serde_json::json!({"type": "image", "media_type": "image/png", "data_b64": "!!!"});
+        assert!(upgrade_tagged_image(&mut bad).is_none());
     }
 
     #[test]

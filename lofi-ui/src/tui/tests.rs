@@ -3014,32 +3014,23 @@ const TINY_PNG: &[u8] = &[
 ];
 
 #[test]
-fn image_command_refuses_when_model_lacks_support() {
+fn attach_image_refuses_when_model_lacks_support() {
     let mut a = app(); // model_supports_image = false
-    assert!(a.slash_command("/image /tmp/x.png"));
+    a.attach_image_path("/tmp/x.png");
     assert!(a.pending_attachments.is_empty());
     let note = a.notify.as_ref().expect("notify set");
     assert!(note.msg.contains("does not support images"));
 }
 
 #[test]
-fn image_command_requires_a_path() {
-    let mut a = app();
-    a.model_supports_image = true;
-    assert!(a.slash_command("/image"));
-    assert!(a.pending_attachments.is_empty());
-    assert!(a.notify.as_ref().unwrap().msg.contains("usage: /image"));
-}
-
-#[test]
-fn image_command_attaches_and_stages() {
+fn attach_image_attaches_and_stages() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("lofi-test-img-{}.png", std::process::id()));
     std::fs::write(&path, TINY_PNG).unwrap();
 
     let mut a = app();
     a.model_supports_image = true;
-    assert!(a.slash_command(&format!("/image {}", path.display())));
+    a.attach_image_path(&path.display().to_string());
     assert_eq!(a.pending_attachments.len(), 1);
     match &a.pending_attachments[0] {
         lofi_types::ContentBlock::Image { media_type, bytes } => {
@@ -3052,17 +3043,64 @@ fn image_command_attaches_and_stages() {
 }
 
 #[test]
-fn image_command_rejects_non_image_bytes() {
+fn attach_image_rejects_non_image_bytes() {
     let dir = std::env::temp_dir();
-    let path = dir.join(format!("lofi-test-notimg-{}.txt", std::process::id()));
+    let path = dir.join(format!("lofi-test-notimg-{}.png", std::process::id()));
     std::fs::write(&path, b"not an image").unwrap();
 
     let mut a = app();
     a.model_supports_image = true;
-    assert!(a.slash_command(&format!("/image {}", path.display())));
+    a.attach_image_path(&path.display().to_string());
     assert!(a.pending_attachments.is_empty());
     assert!(a.notify.as_ref().unwrap().msg.contains("attach"));
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_image_path_attaches() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("lofi-test-paste-{}.png", std::process::id()));
+    std::fs::write(&path, TINY_PNG).unwrap();
+
+    let mut a = app();
+    a.model_supports_image = true;
+    handle_event(
+        &Event::Paste(path.display().to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    // The image staged and no literal path text landed in the input buffer.
+    assert_eq!(a.pending_attachments.len(), 1);
+    assert!(a.input.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pasted_non_image_or_prose_inserts_text() {
+    let mut a = app();
+    a.model_supports_image = true;
+    // A path that does not resolve pastes as literal text.
+    handle_event(
+        &Event::Paste("/no/such/file.png".to_string()),
+        &mut a,
+        None,
+        &mut None,
+    );
+    assert!(a.pending_attachments.is_empty());
+    assert_eq!(a.input, "/no/such/file.png");
+
+    // Multi-line paste is never an image path. Fresh app for a clean buffer.
+    let mut b = app();
+    b.model_supports_image = true;
+    handle_event(
+        &Event::Paste("line one\nline two".to_string()),
+        &mut b,
+        None,
+        &mut None,
+    );
+    assert!(b.pending_attachments.is_empty());
+    assert_eq!(b.input, "line one\nline two");
 }
 
 #[test]
