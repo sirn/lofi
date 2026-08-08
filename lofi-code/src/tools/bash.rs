@@ -363,10 +363,12 @@ mod tests {
             yolo: false,
             allow_by_default: false,
         };
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
         let tools = BuiltinTools::with_skills_dir(
             dir.path().to_path_buf(),
             None,
-            super::default_tmp_dir(),
+            tmp,
             crate::BashEnv::default(),
             policy,
             Some(confirm),
@@ -469,10 +471,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let auto: crate::AutoModeFn =
             Arc::new(|_| Box::pin(async { crate::AutoModeOutcome::Allow { reason: "t".into() } }));
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
         let tools = BuiltinTools::with_skills_dir(
             dir.path().to_path_buf(),
             None,
-            super::default_tmp_dir(),
+            tmp,
             crate::BashEnv::default(),
             crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
             None,
