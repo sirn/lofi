@@ -5,16 +5,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-pub(super) fn default_tmp_dir() -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("lofi-session-{nanos:016x}"));
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
 /// Atomically replace a regular file and durably commit both its contents and
 /// directory entry. The temporary file lives beside the destination so rename
 /// cannot cross filesystems.

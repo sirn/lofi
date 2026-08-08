@@ -24,7 +24,7 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    atomic_write, default_tmp_dir, find_walk, parse_grep_args, reject_non_regular,
+    atomic_write, find_walk, parse_grep_args, reject_non_regular,
     reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkCeilings,
     WalkLimit,
 };
@@ -63,18 +63,6 @@ pub struct BuiltinTools {
 }
 
 impl BuiltinTools {
-    #[must_use]
-    pub fn new(root: PathBuf) -> Self {
-        Self::with_tool_cb(
-            root,
-            None,
-            default_tmp_dir(),
-            BashEnv::default(),
-            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
-            None,
-        )
-    }
-
     #[must_use]
     pub fn with_tool_cb(
         root: PathBuf,
@@ -231,10 +219,12 @@ mod tests {
             yolo: true,
             allow_by_default: true,
         };
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
         let tools = BuiltinTools::with_tool_cb(
             dir.path().to_path_buf(),
             None,
-            default_tmp_dir(),
+            tmp,
             BashEnv::default(),
             policy,
             None,
