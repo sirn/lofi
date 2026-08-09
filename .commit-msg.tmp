@@ -1,0 +1,16 @@
+code: camelCase the lofi.job_* wire surface end-to-end
+
+Snake_case keys had leaked into both directions of the job API: input
+args (timeout_ms on job_wait, interval_ms on job_notify) and output
+payloads (exit_code, duration_ms, log_path, total_bytes, notify_*
+fields). The rest of the sandboxed surface is camelCase (timeoutMs on
+bash, timeoutMs on job_spawn), so the jobs family now matches.
+
+Inputs renamed: timeout_ms -> timeoutMs, interval_ms -> intervalMs.
+Outputs renamed: exitCode, durationMs, timeoutMs, logPath, totalBytes,
+notifyIntervalMs, notifyChanged.
+
+Spawn now accepts the two knobs it used to drop on the floor: notify
+silences the job entirely, and notifyIntervalMs turns on periodic
+progress ticks without needing a follow-up job_notify call. Passing
+the interval implies notify: true.
