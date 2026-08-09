@@ -218,13 +218,14 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::expect_used)]
     use super::*;
-    use lofi_types::{ContentBlock, Role};
+    use lofi_types::{ContentBlock, PromptKind, Role};
     use tempfile::tempdir;
 
     fn user_msg(t: &str) -> Message {
         Message {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -232,6 +233,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -273,6 +275,7 @@ mod tests {
                     name: "exec".into(),
                     input: serde_json::Value::String("1".into()),
                 }],
+                    kind: PromptKind::default(),
             },
             Message {
                 role: Role::User,
@@ -282,6 +285,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                    kind: PromptKind::default(),
             },
         ];
         let range = rec

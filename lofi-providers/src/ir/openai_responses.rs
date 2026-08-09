@@ -387,6 +387,7 @@ fn usage_from_openai_responses(v: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lofi_types::PromptKind;
     use serde_json::json;
 
     fn model() -> Model {
@@ -430,18 +431,21 @@ mod tests {
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "stable instructions".to_string(),
             }],
+            kind: PromptKind::default(),
         };
         let first_user = Message {
             role: lofi_types::Role::User,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "initial prompt".to_string(),
             }],
+            kind: PromptKind::default(),
         };
         let appended = Message {
             role: lofi_types::Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "new response".to_string(),
             }],
+            kind: PromptKind::default(),
         };
         let first =
             build_openai_responses_request(&model(), &[system.clone(), first_user.clone()], &[]);
@@ -456,6 +460,7 @@ mod tests {
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: PromptKind::default(),
         };
         let first = build_openai_responses_request(
             &model(),
@@ -668,6 +673,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 }],
             }],
+            kind: PromptKind::default(),
         }];
         let input = to_openai_responses_input(&msgs);
         // The function_call_output keeps a plain-string output; the image is
@@ -698,6 +704,7 @@ mod tests {
                 is_error: false,
                 images: Vec::new(),
             }],
+            kind: PromptKind::default(),
         }];
         let input = to_openai_responses_input(&msgs);
         assert_eq!(input[0]["output"], json!("plain"));
@@ -716,6 +723,7 @@ mod tests {
                     media_type: "image/jpeg".to_string(),
                 },
             ],
+            kind: PromptKind::default(),
         }];
         let req = build_openai_responses_request(&model(), &msgs, &[]);
         let content = &req["input"][0]["content"];
