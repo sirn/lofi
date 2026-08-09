@@ -809,6 +809,24 @@ fn push_notice(registry: &JobRegistry, text: String) {
 /// live-but-silent job produces no pings; either way the tick that fires
 /// (or is skipped for no change) resets the interval. Returns the notice
 /// text, or `None` when not due / disabled / unchanged.
+/// Truncate a command line to 60 characters, appending U+2026 when more
+/// follows. Multi-byte chars are kept whole; truncation is at a char
+/// boundary so the ellipsis never lands mid-codepoint.
+fn truncate_cmd(cmd: &str) -> String {
+    let mut out = String::new();
+    let mut chars = cmd.chars();
+    for _ in 0..60 {
+        match chars.next() {
+            Some(c) => out.push(c),
+            None => break,
+        }
+    }
+    if chars.next().is_some() {
+        out.push('\u{2026}');
+    }
+    out
+}
+
 fn progress_tick(
     handle: &JobHandle,
     last_tick: &mut Instant,
@@ -844,17 +862,7 @@ fn progress_tick(
     }
     *last_bytes = bytes;
     let secs = started.elapsed().as_secs();
-    let mut short = String::new();
-    let mut chars = cmd.chars();
-    for _ in 0..60 {
-        match chars.next() {
-            Some(c) => short.push(c),
-            None => break,
-        }
-    }
-    if chars.next().is_some() {
-        short.push('\u{2026}');
-    }
+    let short = truncate_cmd(&cmd);
     Some(format!(
         "job {id} running {secs}s, {bytes} bytes logged: {short}"
     ))
@@ -862,17 +870,7 @@ fn progress_tick(
 
 fn format_notice(job: &Job) -> String {
     use std::fmt::Write as _;
-    let mut cmd = String::new();
-    let mut chars = job.cmd.chars();
-    for _ in 0..60 {
-        match chars.next() {
-            Some(c) => cmd.push(c),
-            None => break,
-        }
-    }
-    if chars.next().is_some() {
-        cmd.push('\u{2026}');
-    }
+    let cmd = truncate_cmd(&job.cmd);
     let mut s = format!("job {} {}: {}", job.id, job.state.as_str(), cmd);
     if let Some(code) = job.exit_code {
         let _ = write!(s, " (exit {code})");
