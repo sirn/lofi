@@ -179,7 +179,18 @@ pub(super) fn handle_event(
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
         KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => {
-            if let Some(queued) = app.prompt_queue.pop() {
+            // Pop the most recent queued prompt for editing. Skip Notices:
+            // system-injected text has no business round-tripping through
+            // the editor where the user could resubmit it as if typed.
+            let mut user_idx = None;
+            for (i, q) in app.prompt_queue.iter().enumerate().rev() {
+                if q.kind == lofi_types::PromptKind::User {
+                    user_idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = user_idx {
+                let queued = app.prompt_queue.remove(i);
                 app.input = queued.text;
                 app.input_cursor = app.input.len();
                 app.history_idx = None;
