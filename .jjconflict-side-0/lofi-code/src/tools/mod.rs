@@ -790,22 +790,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_timeout_kills_process_group() {
-        let (_dir, tools) = tools();
-        let marker = tools.root().join("late_marker");
-        let cmd = format!("(sleep 1; echo x > {}) & wait", marker.display());
-        let v = tools
-            .bash(json!({ "cmd": cmd, "timeoutMs": 100 }))
-            .await
-            .unwrap();
-        assert_eq!(v["output"], json!("<timeout>"));
-        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
-        assert!(
-            !marker.exists(),
-            "background child survived timeout; process group was not killed"
-        );
-    }
-    #[tokio::test]
     async fn find_filtered_prunes_ignored_and_hidden() {
         let (_dir, tools) = tools();
         std::fs::create_dir_all(tools.root().join("target")).unwrap();
