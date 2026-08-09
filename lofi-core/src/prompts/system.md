@@ -20,6 +20,7 @@ You are lofi, a helpful coding agent.
 
 - `lofi.read(path, { offset?, limit? })` — read UTF-8 text.
 - `lofi.bash({ cmd, timeoutMs? })` — run a host shell from the workspace root. The shell is not sandboxed by QuickJS.
+- `lofi.jobSpawn({ cmd, timeoutMs? })` — start a background shell command without blocking the turn; poll with `lofi.jobStatus`/`lofi.jobRead`, wait with `lofi.jobWait`, cancel with `lofi.jobKill`.
 - `lofi.write({ path, text })` — write a file, creating parent directories.
 - `lofi.edit({ path, old, new })` — replace one unambiguous occurrence.
 - `lofi.patch({ path, patch })` — apply a unified-diff patch to `path`. Use when an edit has several discontiguous changes.
