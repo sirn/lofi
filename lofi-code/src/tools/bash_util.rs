@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 /// Polls `cancel` until it is set. Raced against a long-running tool's work so
-/// a tool awaiting I/O (which produces no JS bytecode ticks for the QuickJS
+/// a tool awaiting I/O (which produces no JS bytecode ticks for the `QuickJS`
 /// interrupt handler) can still observe user cancellation. Mirrors
 /// `agent.rs::wait_for_cancel`.
 pub async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
