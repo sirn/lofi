@@ -196,7 +196,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("confirm", &self.confirm.is_some())
             .field("auto_mode", &self.auto_mode.is_some())
             .field("skills_dir", &self.skills_dir)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -294,6 +294,52 @@ pub fn compile_ts(src: &str) -> Result<String> {
     Ok(code)
 }
 
+// CPU-budget interrupt handler. QuickJS calls the handler every ~256
+// bytecode instructions. During continuous execution the gap between calls is
+// microseconds; when the guest `await`s a tool the interpreter suspends and
+// the gap is the tool's duration (milliseconds to hours). We accumulate only
+// the sub-threshold gaps as CPU time and reset on larger ones, so long-running
+// awaited tools don't count toward the budget. This is the only mechanism
+// that can break a synchronous tight loop blocking inside native `ctx.eval`
+// — tokio's task abort cannot preempt it because the loop never reaches an
+// `.await` point.
+async fn install_cpu_guard(
+    rt: &AsyncRuntime,
+    budget: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Arc<AtomicU8> {
+    let intr = Arc::new(AtomicU8::new(INTR_RUNNING));
+    let intr_clone = intr.clone();
+    let mut last_tick = Instant::now();
+    let mut cpu_accumulated = Duration::ZERO;
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        if intr_clone.load(Ordering::Relaxed) != INTR_RUNNING {
+            return true;
+        }
+        if let Some(c) = &cancel {
+            if c.load(Ordering::Relaxed) {
+                intr_clone.store(INTR_CANCELLED, Ordering::Relaxed);
+                return true;
+            }
+        }
+        let now = Instant::now();
+        let delta = now.saturating_duration_since(last_tick);
+        last_tick = now;
+        if delta < SUSPEND_THRESHOLD {
+            cpu_accumulated += delta;
+        } else {
+            cpu_accumulated = Duration::ZERO;
+        }
+        if cpu_accumulated >= budget {
+            intr_clone.store(INTR_TIMEOUT, Ordering::Relaxed);
+            return true;
+        }
+        false
+    })))
+    .await;
+    intr
+}
+
 /// - **Memory & stack** — `JS_SetMemoryLimit` and `JS_SetMaxStackSize` cap
 ///   the guest heap and call depth so a runaway allocation or deep recursion
 ///   aborts with a JS exception instead of exhausting the host.
@@ -327,48 +373,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     rt.set_memory_limit(GUEST_MEMORY_LIMIT).await;
     rt.set_max_stack_size(GUEST_MAX_STACK).await;
 
-    // CPU-budget interrupt handler. QuickJS calls the handler every ~256
-    // bytecode instructions. During continuous execution the gap between
-    // calls is microseconds; when the guest `await`s a tool the interpreter
-    // suspends and the gap is the tool's duration (milliseconds to hours).
-    // We accumulate only the sub-threshold gaps as CPU time and reset on
-    // larger ones, so long-running awaited tools don't count toward the
-    // budget. This is the only mechanism that can break a synchronous tight
-    // loop blocking inside native `ctx.eval` — tokio's task abort cannot
-    // preempt it because the loop never reaches an `.await` point.
-    let intr = Arc::new(AtomicU8::new(INTR_RUNNING));
-    let cpu_budget = opts.timeout;
-    let cancel = opts.cancel.clone();
-    {
-        let intr = intr.clone();
-        let mut last_tick = Instant::now();
-        let mut cpu_accumulated = Duration::ZERO;
-        rt.set_interrupt_handler(Some(Box::new(move || {
-            if intr.load(Ordering::Relaxed) != INTR_RUNNING {
-                return true;
-            }
-            if let Some(c) = &cancel {
-                if c.load(Ordering::Relaxed) {
-                    intr.store(INTR_CANCELLED, Ordering::Relaxed);
-                    return true;
-                }
-            }
-            let now = Instant::now();
-            let delta = now.saturating_duration_since(last_tick);
-            last_tick = now;
-            if delta < SUSPEND_THRESHOLD {
-                cpu_accumulated += delta;
-            } else {
-                cpu_accumulated = Duration::ZERO;
-            }
-            if cpu_accumulated >= cpu_budget {
-                intr.store(INTR_TIMEOUT, Ordering::Relaxed);
-                return true;
-            }
-            false
-        })))
-        .await;
-    }
+    let intr = install_cpu_guard(&rt, opts.timeout, opts.cancel.clone()).await;
 
     let tools = Arc::new(
         BuiltinTools::with_skills_dir(
