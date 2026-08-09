@@ -1,0 +1,27 @@
+{code,core,types,ui}: detach long-running commands via lofi.job*
+
+A blocking lofi.bash call holds the agent loop until the child
+finishes, which wrecks interactive builds, long test watchers, and
+anything else with a streaming tail. Introduce a background job
+surface that mirrors the existing sandbox affordances:
+
+- Bindings on lofi: jobSpawn, jobStatus, jobRead, jobWait, jobKill,
+  jobNotify. Each takes camelCase args and returns camelCase fields
+  (timeoutMs, exitCode, durationMs, logPath, totalBytes, notify,
+  notifyIntervalMs, notifyChanged).
+- All spawn args actually wire through: timeoutMs kills the child,
+  notify=false silences it, notifyIntervalMs enables periodic ticks
+  without a follow-up jobNotify call. Passing the interval implies
+  notify=true.
+- The transcript stays small: job output streams to a per-job log
+  file under the session tmp dir, and only a bounded tail is shown
+  to the model on completion.
+- A new /job UI command surfaces live jobs and their exit status;
+  periodic ticks land in the UI's notification slot, not in the
+  model-turn transcript.
+- Docs (lofi-code/src/docs/api.md) and the system prompt move to
+  the new camelCase surface.
+
+The Rust side keeps snake_case identifiers internally; only the
+JS-visible wire names move to camelCase for consistency with the
+surrounding sandbox (lofi.bash already takes timeoutMs, etc.).
