@@ -1,0 +1,16 @@
+code: deny shell backgrounding idioms in bash/jobSpawn policy
+
+The Bash tool's contract is "block until done, capture output". A
+backgrounded child breaks that: it detaches from the call's pipes and
+the model never sees its result. lofi.jobSpawn is the right surface
+for that work (inspectable via jobStatus/jobRead, notifies on done).
+
+Hard deny checked after tokenize and before extract_commands:
+
+  - bare "&" anywhere in the stream ("&&" stays: sequencing, not detach)
+  - nohup, setsid, disown as the first word of any segment
+  - recurses into subshells and command substitution
+
+Daemonising CLIs (docker run -d, systemctl start) pass through: they
+re-parent work to a daemon, so the Bash PGID is empty at exit and the
+contract holds.
