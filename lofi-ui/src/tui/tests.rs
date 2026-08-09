@@ -5168,6 +5168,20 @@ fn interrupt_run_does_not_restore_notices_to_input() {
 }
 
 #[test]
+fn queue_badge_marks_notice_with_hollow_bullet() {
+    let mut a = app();
+    a.prompt_queue.push(QueuedPrompt {
+        text: "job 1786 completed: sleep 1".to_string(),
+        kind: lofi_types::PromptKind::Notice,
+    });
+    let badge = a.queue_badge().expect("badge");
+    assert!(
+        badge.starts_with("Queue: ▷ "),
+        "queued Notice should render with the hollow bullet, got: {badge}"
+    );
+}
+
+#[test]
 fn queue_badge_truncates_long_prompt() {
     let mut a = app();
     let long = "x".repeat(100);
@@ -5209,6 +5223,32 @@ fn alt_up_restores_queued_prompt_lifo() {
     handle_event(&ev, &mut a, None, &mut run);
     assert_eq!(a.input, "first prompt");
     assert!(a.prompt_queue.is_empty());
+}
+
+#[test]
+fn alt_up_skips_notices_when_restoring_queue() {
+    // Notices are not user input — Alt+Up should never land one in the
+    // editor, even if it's newer than the latest User prompt.
+    let mut a = app();
+    let mut run = None;
+    a.prompt_queue.push(QueuedPrompt {
+        text: "user text".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    a.prompt_queue.push(QueuedPrompt {
+        text: "job 1786 completed".to_string(),
+        kind: lofi_types::PromptKind::Notice,
+    });
+    let ev = Event::Key(crossterm::event::KeyEvent::new_with_kind(
+        KeyCode::Up,
+        KeyModifiers::ALT,
+        KeyEventKind::Press,
+    ));
+    handle_event(&ev, &mut a, None, &mut run);
+    assert_eq!(a.input, "user text");
+    // The Notice remains queued — only the User entry was popped.
+    assert_eq!(a.prompt_queue.len(), 1);
+    assert_eq!(a.prompt_queue[0].kind, lofi_types::PromptKind::Notice);
 }
 
 #[test]

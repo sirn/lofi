@@ -109,18 +109,26 @@ impl App {
             return None;
         }
         let n = self.prompt_queue.len();
-        let preview = &self.prompt_queue[0].text;
+        let head = &self.prompt_queue[0];
+        // Match the transcript marker so a queued Notice reads the same
+        // everywhere: a hollow bullet signals "system-injected" the way the
+        // user's solid mark signals "you typed this".
+        let marker = match head.kind {
+            lofi_types::PromptKind::User => "",
+            lofi_types::PromptKind::Notice => "▷ ",
+        };
+        let preview = head.text.as_str();
         let truncated = if preview.chars().count() > 40 {
             let mut s: String = preview.chars().take(39).collect();
             s.push('…');
             s
         } else {
-            preview.clone()
+            preview.to_string()
         };
         Some(if n == 1 {
-            format!("Queue: {truncated}")
+            format!("Queue: {marker}{truncated}")
         } else {
-            format!("Queue: {truncated} (+{})", n - 1)
+            format!("Queue: {marker}{truncated} (+{})", n - 1)
         })
     }
 
