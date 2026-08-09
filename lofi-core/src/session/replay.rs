@@ -537,3 +537,93 @@ pub fn turn_byte_ranges_from_events(
     }
     ranges
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::session::recorder::SessionRecorder;
+
+    fn user_msg(t: &str) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: t.into() }],
+            }),
+        }
+    }
+
+    fn turn_prompt(kind: lofi_types::PromptKind) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnPrompt { kind },
+        }
+    }
+
+    #[test]
+    fn replay_restores_turn_kind_from_turn_prompt_marker() {
+        let events = vec![
+            user_msg("typed"),
+            turn_prompt(lofi_types::PromptKind::Notice),
+            user_msg("job 1 completed"),
+            user_msg("typed again"),
+        ];
+        let mut kinds: Vec<lofi_types::PromptKind> = Vec::new();
+        replay_selected_session_events(&events, |ev| {
+            if let AgentEvent::TurnStart { kind, .. } = ev {
+                kinds.push(kind);
+            }
+        });
+        assert_eq!(
+            kinds,
+            vec![
+                lofi_types::PromptKind::User,
+                lofi_types::PromptKind::Notice,
+                lofi_types::PromptKind::User,
+            ],
+            "marker applies once, then kind resets to User"
+        );
+    }
+
+    #[test]
+    fn turn_prompt_for_default_user_kind_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+        )
+        .unwrap();
+        let cursor = store::SessionCursor::new(path, None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+        rec.record_turn_prompt(lofi_types::PromptKind::User)
+            .unwrap();
+        let events = cursor.load_tree_events().unwrap();
+        assert_eq!(events.len(), 0, "no marker written for the default kind");
+    }
+
+    #[test]
+    fn turn_prompt_marker_roundtrips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+        )
+        .unwrap();
+        let cursor = store::SessionCursor::new(path, None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+        rec.record_turn_prompt(lofi_types::PromptKind::Notice)
+            .unwrap();
+        let events = cursor.load_tree_events().unwrap();
+        assert!(matches!(
+            events[0].kind,
+            SessionEventKind::TurnPrompt {
+                kind: lofi_types::PromptKind::Notice,
+            }
+        ));
+    }
+}
