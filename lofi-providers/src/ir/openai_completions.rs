@@ -17,6 +17,7 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
