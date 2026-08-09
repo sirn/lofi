@@ -17,6 +17,7 @@ pub mod read;
 
 mod bash_util;
 mod fs;
+pub mod jobs;
 pub mod skills;
 pub mod truncate;
 pub mod write;
@@ -27,6 +28,7 @@ use fs::{
     atomic_write, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf,
     resolve_for_read, resolve_under, walk_files_capped, WalkCeilings, WalkLimit,
 };
+pub use jobs::{JobInfo, JobRegistry};
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
 };
@@ -57,6 +59,10 @@ pub struct BuiltinTools {
     skills_dir: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
+    /// Background jobs spawned by this session. Shared with the owning
+    /// agent so jobs survive across the per-exec tool bundles; dropping the
+    /// last clone kills any survivors.
+    jobs: JobRegistry,
     /// Visible-output caps for tool results (file reads and bash output).
     truncate: truncate::TruncatedCap,
 }
@@ -115,17 +121,27 @@ impl BuiltinTools {
             skills_dir,
             read_roots,
             cancel: None,
+            jobs: JobRegistry::new(),
             truncate: truncate::TruncatedCap::default(),
         }
     }
 
     /// Attaches the run's cooperative cancellation flag. Long-running tools
     /// (`bash`) race their work against it so user cancellation takes effect
-    /// even while the guest is suspended awaiting the tool — the QuickJS
+    /// even while the guest is suspended awaiting the tool — the `QuickJS`
     /// interrupt handler cannot fire there, so this is the only path.
     #[must_use]
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Shares the owning session's job registry. Without this each exec
+    /// would get a fresh registry and `jobStatus` on the next call could
+    /// not see a job spawned by the previous one.
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: JobRegistry) -> Self {
+        self.jobs = jobs;
         self
     }
 
