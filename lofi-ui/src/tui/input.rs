@@ -123,7 +123,16 @@ pub(super) fn handle_event(
                 return;
             }
             app.history_nav.push(prompt.clone());
-            app.prompt_queue.push(prompt);
+            app.prompt_queue.push(QueuedPrompt {
+                text: prompt,
+                kind: lofi_types::PromptKind::User,
+            });
+            // Signal the live run to yield after its current round. Setting the
+            // flag here (not on the next event) closes the race against a
+            // blocking tool call during which no events flow.
+            if let Some(r) = current_run {
+                r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
         KeyCode::Enter if current_run.is_none() && !app.input.is_empty() => {
@@ -146,6 +155,7 @@ pub(super) fn handle_event(
             let Some(agent) = agent else {
                 app.push_turn(Turn {
                     prompt: prompt.clone(),
+                    kind: lofi_types::PromptKind::User,
                     blocks: Vec::new(),
                 });
                 if let Some(hint) = &app.no_models_hint {
@@ -155,7 +165,13 @@ pub(super) fn handle_event(
                 }
                 return;
             };
-            spawn_agent_run(app, current_run, agent, Some(prompt));
+            spawn_agent_run(
+                app,
+                current_run,
+                agent,
+                Some(prompt),
+                lofi_types::PromptKind::User,
+            );
         }
         KeyCode::Backspace if k.modifiers.contains(KeyModifiers::ALT) => app.kill_word_back(),
         KeyCode::Backspace => app.backspace(),
@@ -163,8 +179,8 @@ pub(super) fn handle_event(
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
         KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => {
-            if let Some(prompt) = app.prompt_queue.pop() {
-                app.input = prompt;
+            if let Some(queued) = app.prompt_queue.pop() {
+                app.input = queued.text;
                 app.input_cursor = app.input.len();
                 app.history_idx = None;
                 app.refresh_slash_complete();
@@ -327,6 +343,7 @@ fn spawn_agent_run(
     current_run: &mut Option<RunHandle>,
     agent: &lofi_core::Agent,
     prompt: Option<String>,
+    prompt_kind: lofi_types::PromptKind,
 ) {
     // Session creation/writes are core-owned: ask the sink for the cursor,
     // creating the session file on first use, then mirror it for reads.
@@ -367,6 +384,7 @@ fn spawn_agent_run(
             .run_continuation_with_attachments(
                 &mut messages,
                 prompt,
+                prompt_kind,
                 attachments,
                 tx,
                 cursor.as_ref(),
@@ -442,6 +460,7 @@ pub(super) fn spawn_prompt(
     agent: Option<&lofi_core::Agent>,
     current_run: &mut Option<RunHandle>,
     prompt: String,
+    kind: lofi_types::PromptKind,
 ) {
     if let Some((command, exclude_from_context)) = parse_user_bash(&prompt) {
         spawn_user_bash(app, current_run, command, exclude_from_context);
@@ -450,6 +469,7 @@ pub(super) fn spawn_prompt(
     let Some(agent) = agent else {
         app.push_turn(Turn {
             prompt,
+            kind,
             blocks: app
                 .no_models_hint
                 .clone()
@@ -457,7 +477,7 @@ pub(super) fn spawn_prompt(
         });
         return;
     };
-    spawn_agent_run(app, current_run, agent, Some(prompt));
+    spawn_agent_run(app, current_run, agent, Some(prompt), kind);
 }
 
 pub(super) fn spawn_continue(
@@ -466,7 +486,7 @@ pub(super) fn spawn_continue(
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(agent) = agent {
-        spawn_agent_run(app, current_run, agent, None);
+        spawn_agent_run(app, current_run, agent, None, lofi_types::PromptKind::User);
     }
 }
 
@@ -474,7 +494,11 @@ fn restore_queued_prompts(app: &mut App) {
     if app.prompt_queue.is_empty() {
         return;
     }
-    let queued = std::mem::take(&mut app.prompt_queue).join("\n\n");
+    let queued = std::mem::take(&mut app.prompt_queue)
+        .into_iter()
+        .map(|q| q.text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let draft = std::mem::take(&mut app.input);
     app.input = [queued, draft]
         .into_iter()
@@ -512,9 +536,9 @@ fn interrupt_run(
                 lofi_core::cancelled_user_bash(command, app.run_elapsed().as_millis() as u64);
             finish_user_bash(app, result, exclude_from_context);
             app.run_finished();
-            if let Some(prompt) = app.prompt_queue.first().cloned() {
+            if let Some(queued) = app.prompt_queue.first().cloned() {
                 app.prompt_queue.remove(0);
-                spawn_prompt(app, agent, current_run, prompt);
+                spawn_prompt(app, agent, current_run, queued.text, queued.kind);
             }
         }
         app.ctrl_c_at = None;

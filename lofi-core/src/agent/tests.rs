@@ -133,6 +133,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     }
 }
@@ -364,6 +365,7 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let run = agent.run_continuation(
         &mut messages,
         "go".into(),
+        lofi_types::PromptKind::User,
         tx,
         Some(&cursor),
         false,
@@ -417,6 +419,7 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
         let run = agent.run_continuation(
             &mut messages,
             "go".into(),
+            lofi_types::PromptKind::User,
             tx,
             Some(&cursor),
             false,
@@ -529,12 +532,22 @@ async fn run_continuation_force_stops_at_hard_cap() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .run_continuation(
+            &mut messages,
+            String::new(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -585,6 +598,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
@@ -602,7 +616,16 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         ],
     }];
     agent
-        .run_continuation(&mut messages, String::new(), tx, None, false, None, None)
+        .run_continuation(
+            &mut messages,
+            String::new(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -679,7 +702,16 @@ async fn run_retries_transient_provider_errors() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
+        .run_continuation(
+            &mut messages,
+            "go".to_string(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
         .await;
     assert!(result.is_ok(), "should recover: {result:?}");
     let mut got_start = false;
@@ -750,7 +782,16 @@ async fn successful_provider_round_resets_retry_attempt_count() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
+        .run_continuation(
+            &mut messages,
+            "go".to_string(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -788,7 +829,16 @@ async fn run_does_not_retry_non_transient_errors() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(&mut messages, "go".to_string(), tx, None, false, None, None)
+        .run_continuation(
+            &mut messages,
+            "go".to_string(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
         .await;
     assert!(result.is_err(), "non-retryable errors should propagate");
 }
@@ -1353,7 +1403,16 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     agent
-        .run_continuation(&mut messages, String::new(), tx, None, true, None, None)
+        .run_continuation(
+            &mut messages,
+            String::new(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            true,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
