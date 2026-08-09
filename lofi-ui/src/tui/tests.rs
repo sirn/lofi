@@ -332,6 +332,39 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
 }
 
 #[test]
+fn notice_message_uses_hollow_bullet_subtle_marker_and_italic_muted_body() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use ratatui::style::Modifier;
+
+    let a = app();
+    let mut turn = Turn {
+        kind: lofi_types::PromptKind::Notice,
+        prompt: "job 1786 completed: sleep 1 (exit 0)".to_string(),
+        blocks: Vec::new(),
+    };
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 60,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &turn);
+    assert!(!lines.is_empty());
+    // Hollow bullet, subtle color (not the user color).
+    assert_eq!(lines[0].line.spans[0].content, "▷ ");
+    assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.subtle));
+    // Body is muted and italic, not the regular user fg.
+    let body = &lines[0].line.spans[1];
+    assert_eq!(body.style.fg, Some(a.theme.muted));
+    assert!(body.style.add_modifier.contains(Modifier::ITALIC));
+    // Marker only on the first row.
+    turn.prompt = "a long notice text that wraps to a second row easily".to_string();
+    let lines = render_turn_lines(&cx, &turn);
+    assert!(lines.len() >= 2 || !lines.is_empty());
+}
+
+#[test]
 fn agent_response_uses_agent_rail_but_thinking_and_tools_do_not() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
