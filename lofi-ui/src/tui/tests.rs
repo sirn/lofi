@@ -24,6 +24,7 @@ fn app() -> App {
 
 fn push_turn(app: &mut App) {
     app.push_turn(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "p".to_string(),
         blocks: Vec::new(),
     });
@@ -126,6 +127,7 @@ fn failed_exec_settles_pending_native_tools() {
 fn cancelled_turn_settles_open_tool_rows() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::ToolStart {
@@ -205,6 +207,7 @@ fn rich_header_suffix_for_read_and_bash() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Tool(ToolCall {
             id: "e1".to_string(),
@@ -286,6 +289,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
 
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "A long user prompt\nwith another line".to_string(),
         blocks: Vec::new(),
     });
@@ -298,9 +302,13 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
     let lines = render_turn_lines(&cx, &a.turns[0]);
 
     assert_eq!(lines.len(), 2, "only the two message body rows");
+    // The marker anchors the first row only; continuation rows leave the
+    // gutter blank so the prompt reads as a single block.
+    assert_eq!(lines[0].line.spans[0].content, "▌ ");
+    assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.user));
+    assert_eq!(lines[1].line.spans[0].content, "  ");
+    assert!(lines[1].line.spans[0].style.fg.is_none());
     for line in &lines {
-        assert_eq!(line.line.spans[0].content, "▌ ");
-        assert_eq!(line.line.spans[0].style.fg, Some(a.theme.user));
         assert!(
             line.line.spans.iter().all(|span| span.style.bg.is_none()),
             "user message has no tile background: {:?}",
@@ -320,7 +328,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
         .map(|span| span.content.as_ref())
         .collect();
     assert!(first.starts_with("▌ A long user prompt"));
-    assert!(second.starts_with("▌ with another line"));
+    assert!(second.starts_with("  with another line"));
 }
 
 #[test]
@@ -391,6 +399,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
 
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: Vec::new(),
     });
@@ -435,6 +444,7 @@ fn user_bash_renders_as_shell_tree_with_exit_status() {
 
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserBash {
             command: "ps".to_string(),
@@ -488,6 +498,7 @@ fn user_bash_nonzero_exit_is_visible_and_error_colored() {
 
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserBash {
             command: "false".to_string(),
@@ -1661,6 +1672,8 @@ fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
         "non-verbose exec status header should stay: {nv}"
     );
     a.verbose = true;
+    a.verbose = true;
+    a.verbose = true;
     let v = text(&a);
     assert!(
         v.contains("all done marker"),
@@ -1854,6 +1867,7 @@ fn msg(m: Message) -> SessionEventKind {
 fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "first".into(),
     });
     a.apply_event(AgentEvent::Text("answer".into()));
@@ -1880,6 +1894,7 @@ fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
 
     a.turn_byte_ranges[1] = Some((20, 30));
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "second".into(),
     });
     assert!(a.turns[1].blocks.is_empty());
@@ -2118,6 +2133,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
     let mut a = app();
     a.session.cursor = Some(cursor);
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::Thinking("still visible thought".into()));
@@ -2194,6 +2210,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
 fn turn_committed_extends_existing_range_across_silent_continuation() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::TurnCommitted {
@@ -2212,6 +2229,7 @@ fn turn_committed_extends_existing_range_across_silent_continuation() {
 fn run_finished_keeps_latest_persisted_turn_visible_until_next_prompt() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::Text("visible response".into()));
@@ -2233,6 +2251,7 @@ fn run_finished_keeps_latest_persisted_turn_visible_until_next_prompt() {
 fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "previous prompt".into(),
     });
     a.apply_event(AgentEvent::Text("previous response".into()));
@@ -2248,6 +2267,7 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
         .any(|block| matches!(block, Block::Text(text) if text == "previous response")));
 
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "new prompt".into(),
     });
     assert_eq!(a.turns.len(), 2);
@@ -2299,6 +2319,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
     let mut a = app();
     a.session.cursor = Some(cursor);
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::Text("visible response".into()));
@@ -2318,6 +2339,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
 fn run_finished_keeps_blocks_for_hard_cap_continuation() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
     a.apply_event(AgentEvent::Text("partial response".into()));
@@ -2354,7 +2376,10 @@ fn turn_end_updates_usage() {
 #[test]
 fn round_usage_updates_totals_per_round() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "p".into(),
+        kind: lofi_types::PromptKind::User,
+    });
     a.apply_event(AgentEvent::RoundUsage {
         cost: 0.01,
         usage: Usage {
@@ -2405,7 +2430,10 @@ fn round_usage_updates_totals_per_round() {
 #[test]
 fn turn_end_folds_bundled_totals_on_resume_path() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart { prompt: "p".into() });
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "p".into(),
+        kind: lofi_types::PromptKind::User,
+    });
     a.apply_event(AgentEvent::TurnEnd {
         model: "m".into(),
         elapsed_ms: 0,
@@ -4143,6 +4171,7 @@ fn verbose_expands_compaction_summary() {
     let summary = "## Session Goal\nBuild a coding agent.\n## Decisions\n- Use Rust.";
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "p".to_string(),
         blocks: vec![Block::Compaction {
             summarized: 7,
@@ -4193,6 +4222,7 @@ fn turn_failed_wraps_error_below_header() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::TurnFailed {
             label: "openai/gpt-4o · medium".to_string(),
@@ -4253,6 +4283,7 @@ fn turn_failed_dedups_after_fatal_error_block() {
     let mut a = app();
     let msg = "stream interrupted by upstream gateway";
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![
             Block::Error(msg.to_string()),
@@ -5069,10 +5100,16 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
 fn queue_badge_shows_preview_and_count() {
     let mut a = app();
     assert!(a.queue_badge().is_none());
-    a.prompt_queue.push("fix the bug".to_string());
+    a.prompt_queue.push(QueuedPrompt {
+        text: "fix the bug".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
     let badge = a.queue_badge().expect("badge for one item");
     assert!(badge.contains("Queue: fix the bug"), "badge: {badge}");
-    a.prompt_queue.push("also add tests".to_string());
+    a.prompt_queue.push(QueuedPrompt {
+        text: "also add tests".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
     let badge = a.queue_badge().expect("badge for two items");
     assert!(badge.contains("Queue: fix the bug (+1)"), "badge: {badge}");
 }
@@ -5081,7 +5118,10 @@ fn queue_badge_shows_preview_and_count() {
 fn queue_badge_truncates_long_prompt() {
     let mut a = app();
     let long = "x".repeat(100);
-    a.prompt_queue.push(long);
+    a.prompt_queue.push(QueuedPrompt {
+        text: long,
+        kind: lofi_types::PromptKind::User,
+    });
     let badge = a.queue_badge().expect("badge");
     assert!(
         badge.ends_with("…"),
@@ -5097,8 +5137,14 @@ fn queue_badge_truncates_long_prompt() {
 fn alt_up_restores_queued_prompt_lifo() {
     let mut a = app();
     let mut run = None;
-    a.prompt_queue.push("first prompt".to_string());
-    a.prompt_queue.push("second prompt".to_string());
+    a.prompt_queue.push(QueuedPrompt {
+        text: "first prompt".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    a.prompt_queue.push(QueuedPrompt {
+        text: "second prompt".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
     let ev = Event::Key(crossterm::event::KeyEvent::new_with_kind(
         KeyCode::Up,
         KeyModifiers::ALT,
@@ -5470,7 +5516,16 @@ fn tab_enters_navigate_and_esc_clears() {
 #[tokio::test(flavor = "current_thread")]
 async fn escape_interrupts_run_and_restores_queue_like_pi() {
     let mut a = app();
-    a.prompt_queue = vec!["steer first".to_string(), "follow up".to_string()];
+    a.prompt_queue = vec![
+        QueuedPrompt {
+            text: "steer first".to_string(),
+            kind: lofi_types::PromptKind::User,
+        },
+        QueuedPrompt {
+            text: "follow up".to_string(),
+            kind: lofi_types::PromptKind::User,
+        },
+    ];
     a.set_input("draft".to_string());
     let cancel = Arc::new(AtomicBool::new(false));
     let (_tx, rx) = tokio::sync::mpsc::channel(1);
@@ -6022,6 +6077,7 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
 fn frozen_cache_invalidates_on_width_change() {
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(30),
         blocks: Vec::new(),
     });
@@ -6050,6 +6106,7 @@ fn resize_defers_height_remeasure_off_the_frame() {
     let mut a = app();
     for _ in 0..40 {
         a.turns.push(Turn {
+            kind: lofi_types::PromptKind::User,
             prompt: "word ".repeat(40),
             blocks: Vec::new(),
         });
@@ -6103,6 +6160,7 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     // A long prompt that wraps to many lines when narrow and far fewer when
     // wide, so the re-wrap materially shrinks `total`/`base` on resize.
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(3000),
         blocks: Vec::new(),
     });
@@ -6143,6 +6201,7 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
     });
@@ -6199,6 +6258,7 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
     });
@@ -6243,6 +6303,7 @@ fn resize_keeps_select_anchor_on_same_content_char() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
     });
@@ -6305,6 +6366,7 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".to_string();
     for _ in 0..6 {
         a.turns.push(Turn {
+            kind: lofi_types::PromptKind::User,
             prompt: prompt.clone(),
             blocks: Vec::new(),
         });
@@ -6347,6 +6409,7 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     use ratatui::Terminal;
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(4000),
         blocks: Vec::new(),
     });
@@ -6384,6 +6447,7 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     use ratatui::Terminal;
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "p".to_string(),
     });
     a.apply_event(AgentEvent::Text(
@@ -6504,6 +6568,7 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Text(
             "before\n```rust\nlet x = 1;\n```\nafter".to_string(),
@@ -6911,6 +6976,7 @@ fn working_status_is_replaced_in_place_by_done_status() {
 
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "show the status transition".to_string(),
     });
     a.apply_event(AgentEvent::Text(
@@ -7015,6 +7081,7 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
 
     let mut a = app();
     a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
         prompt: "run it".to_string(),
         blocks: vec![Block::Tool(ToolCall {
             id: "exec-1".to_string(),
@@ -7099,6 +7166,7 @@ fn streaming_long_text_never_drops_visible_lines() {
     a.run = Some(0);
     a.run_start = Some(Instant::now());
     a.apply_event(AgentEvent::TurnStart {
+        kind: lofi_types::PromptKind::User,
         prompt: "stream a long reply".to_string(),
     });
     // A thinking phase first, finalized before text streams: mirrors a real
@@ -7202,6 +7270,7 @@ fn turn_height_matches_emitted_line_count() {
                     elapsed: Some(Duration::from_millis(120)),
                 }));
                 let turn = Turn {
+                    kind: lofi_types::PromptKind::User,
                     prompt: "a long conversation turn".to_string(),
                     blocks,
                 };
@@ -7253,6 +7322,7 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
             active_turn: true,
         };
         let turn = Turn {
+            kind: lofi_types::PromptKind::User,
             prompt: String::new(),
             blocks: vec![Block::Text(text.clone())],
         };
@@ -7455,6 +7525,43 @@ fn notify_lines_grows_with_a_long_message_and_caps_at_max() {
     assert!(lines_60 >= 2, "expected wrapping, got {lines_60}");
     // Narrow enough to need more than the cap → stops at NOTIFY_MAX_LINES.
     assert_eq!(a.notify_lines(24), NOTIFY_MAX_LINES as u16);
+}
+
+#[test]
+fn jobs_modal_opens_only_with_registry() {
+    let mut a = app();
+    a.open_jobs_modal();
+    assert!(a.jobs_modal.is_none());
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    assert!(a.jobs_modal.is_some());
+    assert!(a.modal_open());
+}
+
+#[test]
+fn jobs_modal_esc_closes() {
+    let mut a = app();
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    let esc = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    a.handle_modal_key(&esc);
+    assert!(a.jobs_modal.is_none());
+}
+
+#[test]
+fn jobs_modal_empty_list_no_underflow() {
+    let mut a = app();
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    let down = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    a.handle_modal_key(&down);
+    assert_eq!(a.jobs_modal.as_ref().map(|m| m.selected), Some(0));
 }
 
 #[test]
