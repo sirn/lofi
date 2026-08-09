@@ -490,12 +490,17 @@ pub(super) fn spawn_continue(
     }
 }
 
-fn restore_queued_prompts(app: &mut App) {
+pub(super) fn restore_queued_prompts(app: &mut App) {
     if app.prompt_queue.is_empty() {
         return;
     }
+    // User-typed follow-ups belong back in the editor on interrupt. System-
+    // injected Notices do not — letting them round-trip into `app.input`
+    // would plant the job-tick text in the user's prompt where they'd be
+    // re-submitted as if typed.
     let queued = std::mem::take(&mut app.prompt_queue)
         .into_iter()
+        .filter(|q| q.kind == lofi_types::PromptKind::User)
         .map(|q| q.text)
         .collect::<Vec<_>>()
         .join("\n\n");
