@@ -118,6 +118,10 @@ impl App {
             frozen_width: 0,
             height_remeasure_from: None,
             render_profile: Box::default(),
+            // Cloned session job registry. Set by the caller from the running
+            // agent; `None` until the agent attaches.
+            jobs: None,
+            jobs_modal: None,
         }
     }
 
@@ -145,10 +149,11 @@ impl App {
 
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(super) fn apply_event(&mut self, ev: AgentEvent) {
-        if let AgentEvent::TurnStart { prompt } = ev {
+        if let AgentEvent::TurnStart { prompt, kind } = ev {
             self.freeze_previous_file_backed_turn();
             self.push_turn(Turn {
                 prompt,
+                kind,
                 blocks: Vec::new(),
             });
             self.turn_cost = 0.0;
@@ -454,6 +459,7 @@ impl App {
             .unwrap_or_default();
         let empty = Turn {
             prompt,
+            kind: lofi_types::PromptKind::User,
             blocks: Vec::new(),
         };
         let Some(cursor) = self.session.cursor.as_ref() else {
@@ -759,6 +765,7 @@ impl App {
         if self.turns.is_empty() {
             self.push_turn(Turn {
                 prompt: String::new(),
+                kind: lofi_types::PromptKind::User,
                 blocks: Vec::new(),
             });
         }
@@ -805,6 +812,7 @@ impl App {
             Ok(Some(outcome)) => {
                 self.push_turn(Turn {
                     prompt: line.trim().to_string(),
+                    kind: lofi_types::PromptKind::User,
                     blocks: vec![Block::Text(outcome.text)],
                 });
                 self.notify(NotifyKind::Info, outcome.status);

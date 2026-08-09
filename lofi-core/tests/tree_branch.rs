@@ -6,7 +6,7 @@
 use lofi_core::session::store::SessionStore;
 use lofi_core::session::tree::build_tree_rows;
 use lofi_core::Result;
-use lofi_types::{ContentBlock, Message, Role, SessionEvent, SessionEventKind, Usage};
+use lofi_types::{ContentBlock, Message, PromptKind, Role, SessionEvent, SessionEventKind, Usage};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -19,6 +19,7 @@ fn user_ev(text: &str) -> SessionEvent {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+                kind: PromptKind::default(),
         }),
     }
 }
@@ -32,6 +33,7 @@ fn assistant_ev(text: &str) -> SessionEvent {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+                kind: PromptKind::default(),
         }),
     }
 }

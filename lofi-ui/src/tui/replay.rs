@@ -55,9 +55,10 @@ fn settle_open_tools(turn: &mut Turn, result: &str, elapsed_ms: u64) {
 /// that maps an `AgentEvent` to `Block`s.
 #[allow(clippy::too_many_lines)]
 pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
-    if let AgentEvent::TurnStart { prompt } = ev {
+    if let AgentEvent::TurnStart { prompt, kind } = ev {
         turns.push(Turn {
             prompt,
+            kind,
             blocks: Vec::new(),
         });
         return;
@@ -75,6 +76,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
     {
         turns.push(Turn {
             prompt: String::new(),
+            kind: lofi_types::PromptKind::User,
             blocks: vec![Block::UserBash {
                 command,
                 output,
