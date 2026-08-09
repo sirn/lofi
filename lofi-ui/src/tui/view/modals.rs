@@ -827,6 +827,157 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(actions), rows[5]);
 }
 
+/// Compact `mm:ss` for a job's running/elapsed wall time.
+fn fmt_job_duration(ms: u64) -> String {
+    let s = ms / 1000;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// `/job` modal. Two levels: the job list, and a drill-in log view. The list
+/// is rebuilt from a live snapshot each frame so statuses stay current; the
+/// log view pages a bounded tail window from disk.
+pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::widgets::ListState;
+    if app.jobs_modal.is_none() {
+        return;
+    }
+    // Refresh the drill-in log from disk each frame (no-op when not viewing
+    // or when the log did not grow).
+    app.refresh_job_log();
+    let t = app.theme;
+    let Some(modal) = app.jobs_modal.as_ref() else {
+        return;
+    };
+
+    // Drill-in log view.
+    if let Some(view) = &modal.viewing {
+        let title = format!(" job {} log ", view.id);
+        let help = " ↑/↓ scroll  g top  G follow  esc back ";
+        let w = area.width.saturating_sub(4).clamp(40, 100);
+        let h = area.height.saturating_sub(4).clamp(8, 28);
+        let popup = centered_modal(area, w, h);
+        f.render_widget(Clear, popup);
+        let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+        let body_h = rows.content.height as usize;
+        let total = view.lines.len();
+        // scroll is an offset from the bottom (0 = follow the live tail).
+        let end = total.saturating_sub(view.scroll);
+        let start = end.saturating_sub(body_h);
+        let visible: Vec<Line> = view
+            .lines
+            .iter()
+            .skip(start)
+            .take(body_h)
+            .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
+            .collect();
+        f.render_widget(Paragraph::new(visible), rows.content);
+        if total > body_h {
+            let scroll_area = modal_scroll_area(rows.content);
+            prim::render_scrollbar(
+                f,
+                scroll_area.gutter,
+                start,
+                body_h,
+                total,
+                t.subtle,
+                t.muted,
+            );
+        }
+        return;
+    }
+
+    // Job list.
+    let jobs = app.jobs_snapshot();
+    let Some(modal) = app.jobs_modal.as_ref() else {
+        return;
+    };
+    let title = " background jobs ";
+    let help = if modal.confirm_kill.is_some() {
+        " kill this job? y confirm  any other key cancels "
+    } else {
+        " ↑/↓ navigate  enter log  x stop  esc close "
+    };
+    let row_for = |j: &lofi_core::JobInfo| {
+        let mut cmd = String::new();
+        let mut chars = j.cmd.chars();
+        for _ in 0..40 {
+            match chars.next() {
+                Some(c) => cmd.push(c),
+                None => break,
+            }
+        }
+        if chars.next().is_some() {
+            cmd.push('\u{2026}');
+        }
+        format!(
+            "{:<9} {:>7}  {}",
+            j.state,
+            fmt_job_duration(j.duration_ms),
+            cmd
+        )
+    };
+    let content_w = jobs
+        .iter()
+        .map(|j| prim::width(&row_for(j)))
+        .max()
+        .unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = jobs.len().clamp(1, 18);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(8);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+
+    if jobs.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no background jobs this session",
+                Style::new().fg(t.muted),
+            ))),
+            rows.content,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = jobs
+        .iter()
+        .map(|j| {
+            let style = if j.running {
+                Style::new().fg(t.fg)
+            } else {
+                Style::new().fg(t.muted)
+            };
+            ListItem::new(Span::styled(row_for(j), style))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(focus_style(t));
+    let selected = modal.selected.min(jobs.len() - 1);
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(list, rows.content, &mut state);
+    if jobs.len() > rows.content.height as usize {
+        let scroll_area = modal_scroll_area(rows.content);
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            state.offset(),
+            rows.content.height as usize,
+            jobs.len(),
+            t.subtle,
+            t.muted,
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

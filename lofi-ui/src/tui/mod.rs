@@ -131,6 +131,10 @@ const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
 const NOTIFY_MAX_LINES: usize = 3;
+/// Byte budget for the `/job` log drill-in. The view keeps at most this
+/// many bytes of decoded log resident (a bounded tail window), so watching
+/// a runaway job's log never grows UI memory.
+const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
@@ -141,6 +145,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
+    ("/job", "list background jobs, view logs, stop a job"),
     ("/new", "start a fresh session"),
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
@@ -240,9 +245,22 @@ enum Block {
     },
 }
 
+/// A prompt waiting to be run: typed input queued while a run is live, or
+/// an app-injected notice waking the agent. The kind rides along so the
+/// resulting turn renders with the right marker.
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedPrompt {
+    pub text: String,
+    pub kind: lofi_types::PromptKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Turn {
     prompt: String,
+    /// Where the prompt came from. The kind is not persisted to the session
+    /// log, so restored turns always report `User`.
+    #[serde(default)]
+    kind: lofi_types::PromptKind,
     blocks: Vec<Block>,
 }
 
@@ -518,6 +536,34 @@ struct ThinkingPickerState {
     selected: usize,
 }
 
+/// State for the `/job` modal. The list is rebuilt from a fresh
+/// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
+/// the drill-in log view are kept here. The log view pages bounded windows
+/// from disk, so an unbounded job log never inflates memory.
+struct JobsModalState {
+    selected: usize,
+    /// Set while drilling into one job's log; `Esc` returns to the list.
+    viewing: Option<JobLogView>,
+    /// Armed when the user picks kill: the next `y` confirms, anything else
+    /// cancels. Holds the target job id so the confirm survives a re-render.
+    confirm_kill: Option<u64>,
+}
+
+/// Drill-in log view for one job. Holds only the tail window currently on
+/// screen plus enough to page more; it never holds the whole log.
+struct JobLogView {
+    id: u64,
+    /// Decoded lines currently held, oldest first. Bounded by
+    /// [`JOB_LOG_WINDOW_BYTES`].
+    lines: std::collections::VecDeque<String>,
+    /// Byte offset of the next unread chunk; the file cursor for appends.
+    cursor: u64,
+    /// Total log bytes at last refresh; compared to detect growth.
+    total: u64,
+    /// Scroll offset from the bottom (0 = follow the live tail).
+    scroll: usize,
+}
+
 impl Modal for ThinkingPickerState {
     fn len(&self) -> usize {
         self.levels.len()
@@ -729,7 +775,7 @@ pub(crate) struct App {
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
-    prompt_queue: Vec<String>,
+    prompt_queue: Vec<QueuedPrompt>,
     cost: f64,
     turn_cost: f64,
     turn_has_round_usage: bool,
@@ -762,6 +808,11 @@ pub(crate) struct App {
     picker_generation: Arc<AtomicU64>,
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
+    /// The session's background-job registry, cloned from the agent at
+    /// startup. `None` when no agent is configured. Backs the `/job` modal
+    /// and the persistent running-jobs badge.
+    jobs: Option<lofi_core::JobRegistry>,
+    jobs_modal: Option<JobsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,
@@ -1095,6 +1146,7 @@ async fn run_loop(
             0,
             Turn {
                 prompt: String::new(),
+                kind: lofi_types::PromptKind::User,
                 blocks: vec![Block::Error(hint)],
             },
         );
@@ -1108,8 +1160,17 @@ async fn run_loop(
     let (confirm_tx, mut confirm_rx) =
         tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
     if let Some(a) = agent.take() {
-        agent = Some(a.with_confirm_tx(confirm_tx));
+        let a = a.with_confirm_tx(confirm_tx);
+        // Clone the session's job registry for the `/job` modal and the
+        // running-jobs badge. Cheap: shares the agent's map.
+        app.jobs = Some(a.jobs());
+        agent = Some(a);
     }
+
+    // Live notice feed. The job driver pushes onto this the moment a job
+    // transitions; the select arm below reacts without waiting for a tick.
+    // Buffered pre-UI notices flush into this receiver on subscribe.
+    let mut job_notice_rx = app.jobs.as_ref().map(|j| j.subscribe_notices());
 
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
@@ -1175,9 +1236,15 @@ async fn run_loop(
                             app.run_finished();
                             app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
                             if was_user_bash {
-                                if let Some(prompt) = app.prompt_queue.first().cloned() {
+                                if let Some(queued) = app.prompt_queue.first().cloned() {
                                     app.prompt_queue.remove(0);
-                                    spawn_prompt(&mut app, agent.as_ref(), &mut current_run, prompt);
+                                    spawn_prompt(
+                                        &mut app,
+                                        agent.as_ref(),
+                                        &mut current_run,
+                                        queued.text,
+                                        queued.kind,
+                                    );
                                 }
                             } else if app.context_pressure {
                                 // Core owns hard-cap eligibility and
@@ -1199,13 +1266,14 @@ async fn run_loop(
                             } else {
                                 app.maybe_auto_compact();
                                 if app.run.is_none() {
-                                    if let Some(prompt) = app.prompt_queue.first().cloned() {
+                                    if let Some(queued) = app.prompt_queue.first().cloned() {
                                         app.prompt_queue.remove(0);
                                         spawn_prompt(
                                             &mut app,
                                             agent.as_ref(),
                                             &mut current_run,
-                                            prompt,
+                                            queued.text,
+                                            queued.kind,
                                         );
                                     }
                                 }
@@ -1312,6 +1380,32 @@ async fn run_loop(
                 // Drain pending resize height re-measure a little each tick
                 // so a width change on a long transcript never stalls a frame.
                 if app.remeasure_heights_step(16) {
+                    dirty = true;
+                }
+            }
+            notice = async {
+                match job_notice_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(text) = notice {
+                    let queued = QueuedPrompt {
+                        text,
+                        kind: lofi_types::PromptKind::Notice,
+                    };
+                    if let Some(r) = &current_run {
+                        app.prompt_queue.push(queued);
+                        r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else if agent.is_some() {
+                        spawn_prompt(
+                            &mut app,
+                            agent.as_ref(),
+                            &mut current_run,
+                            queued.text,
+                            queued.kind,
+                        );
+                    }
                     dirty = true;
                 }
             }

@@ -35,6 +35,7 @@ impl Agent {
             Some(&tx),
             AgentEvent::TurnStart {
                 prompt: user_prompt.clone(),
+                kind: lofi_types::PromptKind::User,
             },
         )
         .await
@@ -78,6 +79,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        prompt_kind: lofi_types::PromptKind,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
         continuation: bool,
@@ -87,6 +89,7 @@ impl Agent {
         self.run_continuation_with_attachments(
             messages,
             user_prompt,
+            prompt_kind,
             Vec::new(),
             tx,
             session,
@@ -109,6 +112,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        prompt_kind: lofi_types::PromptKind,
         attachments: Vec<ContentBlock>,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
@@ -160,6 +164,7 @@ impl Agent {
                 Some(&tx),
                 AgentEvent::TurnStart {
                     prompt: prompt_for_event,
+                    kind: prompt_kind,
                 },
             )
             .await
@@ -170,6 +175,17 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        if let Some(rec) = recorder.as_mut() {
+            // Persist the prompt kind ahead of the user message so replay can
+            // rebuild the turn with the same PromptKind the live path used.
+            // Notice turns are the only non-user producers today. A record-on-
+            // every-turn variant would burn one extra line per typed turn for
+            // no behavioral delta, so only non-default kinds are emitted.
+            if prompt_kind != lofi_types::PromptKind::User {
+                rec.record_turn_prompt(prompt_kind)
+                    .map_err(std::io::Error::other)?;
+            }
+        }
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
@@ -482,8 +498,17 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, session, true, cancel, preempt)
-            .await
+        self.run_continuation(
+            messages,
+            String::new(),
+            lofi_types::PromptKind::User,
+            tx,
+            session,
+            true,
+            cancel,
+            preempt,
+        )
+        .await
     }
 
     /// # Errors
@@ -1029,6 +1054,7 @@ impl Agent {
                 auto_mode: self.auto_mode.clone(),
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
+                jobs: self.jobs.clone(),
             };
             let outcome = exec(
                 &code,

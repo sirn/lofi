@@ -103,8 +103,16 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
         }
     }
     let mut thinking_idx = 0usize;
+    // Pending kind for the next user-message turn. Populated by a
+    // SessionEventKind::TurnPrompt marker (recorder emits one only for
+    // non-User kinds, so typed input has no marker and the default applies).
+    let mut next_turn_kind = lofi_types::PromptKind::User;
     for &ev in visible {
         match &ev.kind {
+            SessionEventKind::TurnPrompt { kind } => {
+                next_turn_kind = *kind;
+                continue;
+            }
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
                     if msg
@@ -146,7 +154,13 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                             _ => None,
                         })
                         .unwrap_or_default();
-                    emit(AgentEvent::TurnStart { prompt });
+                    emit(AgentEvent::TurnStart {
+                        prompt,
+                        kind: next_turn_kind,
+                    });
+                    // Reset for the next turn; User remains the default when
+                    // no marker precedes the next user message.
+                    next_turn_kind = lofi_types::PromptKind::User;
                 }
                 Role::Assistant => {
                     for b in &msg.blocks {
