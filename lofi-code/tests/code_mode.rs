@@ -468,15 +468,21 @@ async fn job_kill_is_idempotent_and_kills_process_group() {
     let marker = dir.path().join("survivor");
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
-    let cmd =
-        serde_json::to_string(&format!("(sleep 5; touch {}) & wait", marker.display())).unwrap();
+    // Foreground chain: the outer sh forks "sleep" as a child and waits
+    // for it before touching the marker. Killing the process group must
+    // take down both -- if it only signalled the leader, "sleep" would
+    // finish and the marker would appear ~5s after the kill. (An earlier
+    // version of this test used a backgrounded subshell to detach a
+    // grandchild, which is now denied by shell policy before the spawn
+    // ever reaches the registry.)
+    let cmd = serde_json::to_string(&format!("sleep 5; touch {}", marker.display())).unwrap();
     let src = format!("const s = await lofi.jobSpawn({{ cmd: {cmd} }}); const k1 = await lofi.jobKill({{ id: s.id }}); const k2 = await lofi.jobKill({{ id: s.id }}); return {{ a: k1.state, b: k2.state }};");
     let res = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value["a"], json!("cancelled"));
     assert_eq!(res.value["b"], json!("cancelled"));
     // Give a straggler a chance to fire; the marker must never appear.
     tokio::time::sleep(std::time::Duration::from_millis(5_500)).await;
-    assert!(!marker.exists(), "background child survived kill");
+    assert!(!marker.exists(), "process-group child survived kill");
 }
 
 #[tokio::test]
