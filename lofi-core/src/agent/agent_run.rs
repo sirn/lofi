@@ -30,11 +30,13 @@ impl Agent {
             blocks: vec![ContentBlock::Text {
                 text: user_prompt.clone(),
             }],
+            kind: lofi_types::PromptKind::User,
         }];
         if !emit(
             Some(&tx),
             AgentEvent::TurnStart {
                 prompt: user_prompt.clone(),
+                kind: lofi_types::PromptKind::User,
             },
         )
         .await
@@ -78,6 +80,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        prompt_kind: lofi_types::PromptKind,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
         continuation: bool,
@@ -87,6 +90,7 @@ impl Agent {
         self.run_continuation_with_attachments(
             messages,
             user_prompt,
+            prompt_kind,
             Vec::new(),
             tx,
             session,
@@ -109,6 +113,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         user_prompt: String,
+        prompt_kind: lofi_types::PromptKind,
         attachments: Vec<ContentBlock>,
         tx: Sender<AgentEvent>,
         session: Option<&crate::session::store::SessionCursor>,
@@ -155,11 +160,13 @@ impl Agent {
             messages.push(Message {
                 role: Role::User,
                 blocks,
+                kind: prompt_kind,
             });
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {
                     prompt: prompt_for_event,
+                    kind: prompt_kind,
                 },
             )
             .await
@@ -482,8 +489,17 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
-        self.run_continuation(messages, String::new(), tx, session, true, cancel, preempt)
-            .await
+        self.run_continuation(
+            messages,
+            String::new(),
+            lofi_types::PromptKind::User,
+            tx,
+            session,
+            true,
+            cancel,
+            preempt,
+        )
+        .await
     }
 
     /// # Errors
@@ -839,6 +855,7 @@ impl Agent {
         messages.push(Message {
             role: Role::Tool,
             blocks: results,
+            kind: lofi_types::PromptKind::User,
         });
         Ok(false)
     }
@@ -1029,6 +1046,7 @@ impl Agent {
                 auto_mode: self.auto_mode.clone(),
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
+                jobs: self.jobs.clone(),
             };
             let outcome = exec(
                 &code,
@@ -1169,6 +1187,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     messages.push(Message {
         role: Role::Tool,
         blocks: synthesized,
+        kind: lofi_types::PromptKind::User,
     });
 }
 
@@ -1196,6 +1215,7 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .iter()
         .map(|m| Message {
             role: m.role,
+            kind: m.kind,
             blocks: m
                 .blocks
                 .iter()
@@ -1296,6 +1316,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use base64::Engine as _;
+    use lofi_types::PromptKind;
     use serde_json::json;
 
     fn assistant_with_tool_use(id: &str) -> Message {
@@ -1306,6 +1327,7 @@ mod tests {
                 name: "exec".to_string(),
                 input: json!({"code": "x"}),
             }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -1343,6 +1365,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: PromptKind::default(),
             },
         ];
         close_orphaned_tool_uses(&mut messages);
@@ -1360,6 +1383,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "partial text".to_string(),
             }],
+            kind: PromptKind::default(),
         }];
         close_orphaned_tool_uses(&mut messages);
         assert_eq!(messages.len(), 1);
@@ -1382,6 +1406,7 @@ mod tests {
                         input: json!({"code": "b"}),
                     },
                 ],
+                kind: PromptKind::default(),
             },
             Message {
                 role: Role::Tool,
@@ -1391,6 +1416,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: PromptKind::default(),
             },
         ];
         close_orphaned_tool_uses(&mut messages);
@@ -1457,6 +1483,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 },
             ],
+            kind: PromptKind::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 2);
         let stripped = strip_image_blocks(&messages);
@@ -1492,6 +1519,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 }],
             }],
+            kind: PromptKind::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 1);
         let stripped = strip_image_blocks(&messages);
@@ -1519,6 +1547,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "hi".to_string(),
             }],
+            kind: PromptKind::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 0);
         let stripped = strip_image_blocks(&messages);
@@ -1541,6 +1570,7 @@ mod tests {
                 image(4), // 8 base64 bytes (4 -> ceil(4/3)=2 -> 8)
                 image(1), // 4 base64 bytes
             ],
+            kind: PromptKind::default(),
         }];
         assert_eq!(image_payload_bytes(&messages), 16);
         // Text and empty histories contribute nothing.
@@ -1557,12 +1587,14 @@ mod tests {
         let over = vec![Message {
             role: Role::User,
             blocks: vec![image(7 * 1024 * 1024)],
+            kind: PromptKind::default(),
         }];
         assert!(image_payload_bytes(&over) > MAX_REQUEST_IMAGE_BYTES);
         // 1 MiB raw stays well under.
         let under = vec![Message {
             role: Role::User,
             blocks: vec![image(1024 * 1024)],
+            kind: PromptKind::default(),
         }];
         assert!(image_payload_bytes(&under) <= MAX_REQUEST_IMAGE_BYTES);
     }
