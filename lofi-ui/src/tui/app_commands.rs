@@ -182,6 +182,10 @@ impl App {
                 self.open_thinking_picker();
                 true
             }
+            "/job" | "/jobs" => {
+                self.open_jobs_modal();
+                true
+            }
             _ if cmd.starts_with('/') => {
                 self.notify(
                     NotifyKind::Error,
@@ -314,6 +318,7 @@ impl App {
         lines.push(info_kv(t, "/session", "show session info"));
         lines.push(info_kv(t, "/model", "switch the active model"));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
+        lines.push(info_kv(t, "/job", "list background jobs, view logs, stop"));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(Line::from(""));
@@ -543,6 +548,7 @@ impl App {
                 if let Err(e) = loaded {
                     self.push_turn(Turn {
                         prompt: "/resume".to_string(),
+                        kind: lofi_types::PromptKind::User,
                         blocks: vec![Block::Error(format!("load session: {e}"))],
                     });
                     return;
@@ -569,6 +575,7 @@ impl App {
             }
             Err(e) => self.push_turn(Turn {
                 prompt: "/resume".to_string(),
+                kind: lofi_types::PromptKind::User,
                 blocks: vec![Block::Error(format!("load session: {e}"))],
             }),
         }
@@ -615,6 +622,143 @@ impl App {
         }
     }
 
+    /// `/job`: open the background-jobs modal. Lists every session job with
+    /// live status; `Enter` drills into a job's log, `x` arms a kill confirm.
+    /// No-op (with a notice) when no agent is configured.
+    pub(super) fn open_jobs_modal(&mut self) {
+        if self.jobs.is_none() {
+            self.notify(NotifyKind::Info, "no background jobs (no active session)");
+            return;
+        }
+        self.jobs_modal = Some(JobsModalState {
+            selected: 0,
+            viewing: None,
+            confirm_kill: None,
+        });
+    }
+
+    /// Fresh job snapshot for the modal, newest first. Empty when no agent.
+    pub(super) fn jobs_snapshot(&self) -> Vec<lofi_core::JobInfo> {
+        self.jobs
+            .as_ref()
+            .map_or_else(Vec::new, lofi_core::JobRegistry::snapshot)
+    }
+
+    /// Pull new log bytes into the open drill-in view, if the log grew.
+    /// Bounded: the held window is capped at `JOB_LOG_WINDOW_BYTES`.
+    pub(super) fn refresh_job_log(&mut self) {
+        let (Some(jobs), Some(modal)) = (&self.jobs, &mut self.jobs_modal) else {
+            return;
+        };
+        let Some(view) = &mut modal.viewing else {
+            return;
+        };
+        let Some((bytes, next, total)) = jobs.read_log(view.id, view.cursor, 64 * 1024) else {
+            return;
+        };
+        if next == view.cursor {
+            return; // no growth
+        }
+        view.cursor = next;
+        view.total = total;
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines() {
+            view.lines.push_back(line.to_string());
+        }
+        // Trim the held window to the byte budget, dropping oldest lines.
+        let mut held: usize = view.lines.iter().map(|l| l.len() + 1).sum();
+        while held > JOB_LOG_WINDOW_BYTES {
+            if let Some(front) = view.lines.pop_front() {
+                held -= front.len() + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Keys for the `/job` modal. Two levels: the job list, and the drill-in
+    /// log view. `x` on a running job arms a kill confirm (`y` confirms,
+    /// anything else cancels). Always returns true while the modal is open.
+    fn handle_jobs_key(&mut self, k: &KeyEvent) -> bool {
+        // Take the modal out so the body can call `&self`/`&mut self` helpers
+        // (snapshot, refresh) without overlapping the modal borrow; put it
+        // back (or not, on close) before returning.
+        let Some(mut modal) = self.jobs_modal.take() else {
+            return true;
+        };
+
+        // A pending kill confirm consumes the next key regardless of level.
+        if let Some(id) = modal.confirm_kill.take() {
+            if matches!(k.code, KeyCode::Char('y' | 'Y')) {
+                if let Some(jobs) = &self.jobs {
+                    jobs.kill(id);
+                }
+            }
+            self.jobs_modal = Some(modal);
+            return true;
+        }
+
+        // Drill-in log view.
+        if let Some(view) = &mut modal.viewing {
+            let max_scroll = view.lines.len().saturating_sub(1);
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => modal.viewing = None,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    view.scroll = (view.scroll + 1).min(max_scroll);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    view.scroll = view.scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => view.scroll = max_scroll,
+                KeyCode::Char('G') => view.scroll = 0, // follow the live tail
+                _ => {}
+            }
+            self.jobs_modal = Some(modal);
+            return true;
+        }
+
+        // Job list.
+        let snapshot = self.jobs_snapshot();
+        let len = snapshot.len();
+        let selected_id = snapshot.get(modal.selected).map(|j| j.id);
+        let selected_running = snapshot.get(modal.selected).is_some_and(|j| j.running);
+        let mut open_log = false;
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Closed: do not restore the modal.
+                return true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                modal.selected = modal.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if len > 0 {
+                    modal.selected = (modal.selected + 1).min(len - 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(id) = selected_id {
+                    modal.viewing = Some(JobLogView {
+                        id,
+                        lines: std::collections::VecDeque::new(),
+                        cursor: 0,
+                        total: 0,
+                        scroll: 0,
+                    });
+                    open_log = true;
+                }
+            }
+            KeyCode::Char('x') if selected_running => {
+                modal.confirm_kill = selected_id;
+            }
+            _ => {}
+        }
+        self.jobs_modal = Some(modal);
+        if open_log {
+            self.refresh_job_log();
+        }
+        true
+    }
     /// `/thinking`: open the thinking-level picker for the current model.
     /// Offers `off` plus the model's declared `thinking_levels` (deduped),
     /// pre-selected at the current level. Shows a notice instead of opening
@@ -975,6 +1119,7 @@ impl App {
             || self.tree_picker.is_some()
             || self.model_picker.is_some()
             || self.thinking_picker.is_some()
+            || self.jobs_modal.is_some()
             || !self.pending_confirms.is_empty()
     }
 
@@ -1142,6 +1287,9 @@ impl App {
     /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
     /// key (so the caller skips normal Input-mode processing).
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
+        if self.jobs_modal.is_some() {
+            return self.handle_jobs_key(k);
+        }
         let Some(slot) = self.active_modal_slot() else {
             return false;
         };

@@ -142,6 +142,18 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
     }
 }
 
+/// Where a turn's prompt came from. Typed input is the default; anything
+/// else is an app-injected notice (background-job completions now, more
+/// automation later). Consumers use it to style externally-triggered turns
+/// distinctly from user input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    #[default]
+    User,
+    Notice,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -398,6 +410,14 @@ pub enum SessionEventKind {
     Cursor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_id: Option<String>,
+    },
+    /// Origin of the user prompt that opened a turn. Emitted by the recorder
+    /// before the user message persists anything other than the default
+    /// `User` kind; replay consumes it to rebuild the turn's `PromptKind` instead
+    /// of assuming typed input. Omitted from older logs entirely so they
+    /// remain loadable.
+    TurnPrompt {
+        kind: PromptKind,
     },
     Compaction {
         summary: String,
