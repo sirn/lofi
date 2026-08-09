@@ -1,0 +1,8 @@
+chore: silence pedantic clippy warnings
+
+QuickJS and "did not find any tool_result blocks" needed backticks;
+ExecCtx's manual Debug excluded closures but did not say so; the long
+bash, exec, to_openai_chat_messages, and test functions exceeded
+clippy::too_many_lines without an allow like the rest of the codebase;
+a test invoked format! inside collect, and several rebuilt App values
+in tests did not need mut.
