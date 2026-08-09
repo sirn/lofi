@@ -17,113 +17,120 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
+fn push_system(m: &Message, out: &mut Vec<Value>) {
+    let text = collect_text(&m.blocks);
+    if !text.is_empty() {
+        out.push(json!({"role": "system", "content": text}));
+    }
+}
+
+fn push_user(m: &Message, out: &mut Vec<Value>) {
+    let text = collect_text(&m.blocks);
+    let has_image = m
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
+    if has_image {
+        // Multipart content array: text parts plus one image_url
+        // part per attached image, as a data: URL.
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({"type": "text", "text": text}));
+        }
+        for b in &m.blocks {
+            if let ContentBlock::Image { bytes, media_type } = b {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{}", super::b64(bytes)),
+                    },
+                }));
+            }
+        }
+        out.push(json!({"role": "user", "content": parts}));
+    } else if !text.is_empty() {
+        out.push(json!({"role": "user", "content": text}));
+    }
+}
+
+fn push_assistant(m: &Message, out: &mut Vec<Value>) {
+    let text = collect_text(&m.blocks);
+    let tool_calls: Vec<Value> = m
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, input } => {
+                let args = serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+                Some(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args},
+                }))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut msg = json!({"role": "assistant"});
+    msg["content"] = if text.is_empty() {
+        Value::Null
+    } else {
+        json!(text)
+    };
+    if !tool_calls.is_empty() {
+        msg["tool_calls"] = json!(tool_calls);
+    }
+    out.push(msg);
+}
+
+fn push_tool(m: &Message, out: &mut Vec<Value>) {
+    for b in &m.blocks {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            images,
+            ..
+        } = b
+        {
+            // Chat-completions `tool` messages carry only string
+            // content — an image cannot ride the tool result. Emit it on a
+            // following user message instead, the universally supported
+            // position for an image, so the model sees it in the same round
+            // as the result.
+            out.push(json!({
+                "role": "tool",
+                "tool_call_id": tool_use_id,
+                "content": content,
+            }));
+            if !images.is_empty() {
+                let parts: Vec<Value> = images
+                    .iter()
+                    .map(|img| {
+                        json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+                            },
+                        })
+                    })
+                    .collect();
+                out.push(json!({
+                    "role": "user",
+                    "content": parts,
+                }));
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
-            Role::System => {
-                let text = collect_text(&m.blocks);
-                if !text.is_empty() {
-                    out.push(json!({"role": "system", "content": text}));
-                }
-            }
-            Role::User => {
-                let text = collect_text(&m.blocks);
-                let has_image = m
-                    .blocks
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Image { .. }));
-                if has_image {
-                    // Multipart content array: text parts plus one image_url
-                    // part per attached image, as a data: URL.
-                    let mut parts: Vec<Value> = Vec::new();
-                    if !text.is_empty() {
-                        parts.push(json!({"type": "text", "text": text}));
-                    }
-                    for b in &m.blocks {
-                        if let ContentBlock::Image { bytes, media_type } = b {
-                            parts.push(json!({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": format!("data:{media_type};base64,{}", super::b64(bytes)),
-                                },
-                            }));
-                        }
-                    }
-                    out.push(json!({"role": "user", "content": parts}));
-                } else if !text.is_empty() {
-                    out.push(json!({"role": "user", "content": text}));
-                }
-            }
-            Role::Assistant => {
-                let text = collect_text(&m.blocks);
-                let tool_calls: Vec<Value> = m
-                    .blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolUse { id, name, input } => {
-                            let args =
-                                serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
-                            Some(json!({
-                                "id": id,
-                                "type": "function",
-                                "function": {"name": name, "arguments": args},
-                            }))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let mut msg = json!({"role": "assistant"});
-                msg["content"] = if text.is_empty() {
-                    Value::Null
-                } else {
-                    json!(text)
-                };
-                if !tool_calls.is_empty() {
-                    msg["tool_calls"] = json!(tool_calls);
-                }
-                out.push(msg);
-            }
-            Role::Tool => {
-                for b in &m.blocks {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        images,
-                        ..
-                    } = b
-                    {
-                        // Chat-completions `tool` messages carry only string
-                        // content — an image cannot ride the tool result.
-                        // Emit it on a following user message instead, the
-                        // universally supported position for an image, so the
-                        // model sees it in the same round as the result.
-                        out.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tool_use_id,
-                            "content": content,
-                        }));
-                        if !images.is_empty() {
-                            let parts: Vec<Value> = images
-                                .iter()
-                                .map(|img| {
-                                    json!({
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
-                                        },
-                                    })
-                                })
-                                .collect();
-                            out.push(json!({
-                                "role": "user",
-                                "content": parts,
-                            }));
-                        }
-                    }
-                }
-            }
+            Role::System => push_system(m, &mut out),
+            Role::User => push_user(m, &mut out),
+            Role::Assistant => push_assistant(m, &mut out),
+            Role::Tool => push_tool(m, &mut out),
         }
     }
     out
