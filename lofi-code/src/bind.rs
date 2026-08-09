@@ -12,6 +12,7 @@ pub(super) fn bind_tools<'js>(
     skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
+    bind_job_tools(ctx, lofi, tools)?;
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
@@ -272,6 +273,60 @@ fn bind_file_tools<'js>(
         )?,
     )?;
 
+    Ok(())
+}
+
+/// Background job tools share the bash policy/confirmation path (via
+/// `job_spawn`'s `check_policy`) and emit the same Start/End tool events as
+/// the file tools, so the UI tiles and transcript records stay uniform.
+fn bind_job_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+) -> rquickjs::Result<()> {
+    type JobMethod = for<'a> fn(
+        &'a BuiltinTools,
+        serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = lofi_error::Result<Json>> + Send + 'a>,
+    >;
+    const JOB_TOOLS: &[(&str, JobMethod)] = &[
+        ("job_spawn", |t, a| Box::pin(t.job_spawn(a))),
+        ("job_status", |t, a| Box::pin(t.job_status(a))),
+        ("job_read", |t, a| Box::pin(t.job_read(a))),
+        ("job_wait", |t, a| Box::pin(t.job_wait(a))),
+        ("job_kill", |t, a| Box::pin(t.job_kill(a))),
+        ("job_notify", |t, a| Box::pin(t.job_notify(a))),
+    ];
+    for &(name, method) in JOB_TOOLS {
+        let t = tools.clone();
+        lofi.set(
+            name,
+            Function::new(
+                ctx.clone(),
+                Async(move |args: Value| {
+                    let t = t.clone();
+                    let args = js_to_json(&args);
+                    async move {
+                        let id = t.next_tool_id();
+                        t.emit(ToolEvent::Start {
+                            id,
+                            name: name.into(),
+                            args: native_args_label("bash", &args),
+                        });
+                        let res = method(&t, args).await;
+                        let (result, is_error) = tool_preview(&res);
+                        t.emit(ToolEvent::End {
+                            id,
+                            result,
+                            is_error,
+                        });
+                        tool_result(res)
+                    }
+                }),
+            )?,
+        )?;
+    }
     Ok(())
 }
 
