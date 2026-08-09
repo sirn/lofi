@@ -12,6 +12,7 @@ pub enum AgentEvent {
     /// from-disk replay path share one builder.
     TurnStart {
         prompt: String,
+        kind: lofi_types::PromptKind,
     },
     TurnContinue,
     UserBash {
