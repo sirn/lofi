@@ -177,6 +177,10 @@ pub struct Agent {
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
     skills_dir: Option<PathBuf>,
+    /// Session-scoped background jobs. Shared with every exec so a job
+    /// spawned in one round is visible to the next; dropping the agent
+    /// (and with it the last registry clone) kills any survivors.
+    jobs: lofi_code::tools::JobRegistry,
 }
 
 impl Agent {
@@ -217,6 +221,7 @@ impl Agent {
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
             skills_dir: None,
+            jobs: lofi_code::tools::JobRegistry::new(),
         }
     }
 
@@ -246,6 +251,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
+            jobs: self.jobs.clone(),
         }
     }
 
@@ -267,6 +273,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir: self.skills_dir.clone(),
+            jobs: self.jobs.clone(),
             truncate: self.truncate,
         }
     }
@@ -289,6 +296,7 @@ impl Agent {
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
             skills_dir,
+            jobs: self.jobs.clone(),
             truncate: self.truncate,
         }
     }
