@@ -1,0 +1,24 @@
+{code,core,types,ui}: split long functions instead of allowing too_many_lines
+
+The codebase had accumulated several functions that exceeded the
+clippy::too_many_lines default and were each silenced with a local
+`#[allow]`. That makes the lint toothless and hides where real
+refactoring is needed.
+
+This commit extracts helpers without changing behavior:
+ - lofi-code::run_code_mode splits its preamble, host-async driver,
+   cleanup, and loop-slice trimmer into named helpers; the entry fn
+   drops from ~195 lines to a short orchestration
+ - BuiltinTools::bind_tools splits schema construction
+   (jobs_tool_schema, bind_tools_inner) from the registration loop
+ - BashTool::exec splits command validation, sandbox policy wiring,
+   and the spawn driver into helpers
+ - openai_completions::map_openai_history extracts
+   sanitize_message_content, push_orphaned_tool_output_tail,
+   sink_dangling_tool_carryover, and the assistant/tool/user/system
+   mappers
+ - lofi-ui::tests::initial_app splits PTY echo stub and CWD-lock
+   warm-up from the app constructor
+
+agent_run's format_dangling_appendix picks up the small final carry
+formatting helper so its callers stay short.
