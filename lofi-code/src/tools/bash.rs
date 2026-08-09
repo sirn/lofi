@@ -19,7 +19,7 @@ impl BuiltinTools {
     /// Auto-mode emits an evaluating confirmation request immediately and
     /// races its decision against a manual response. Presentation and timing
     /// policy belong to consumers of that event.
-    async fn check_policy(&self, cmd: &str) -> Option<Value> {
+    pub(super) async fn check_policy(&self, cmd: &str) -> Option<Value> {
         let decision = self.shell_policy.evaluate(cmd);
         let suffix = decision
             .matched_command
