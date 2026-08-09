@@ -131,6 +131,27 @@ impl App {
         }
     }
 
+    /// Rows the notification area occupies at the given terminal width.
+    /// Only the transient notify badge can overflow one line — quit, yank,
+    /// retry, and queue badges are short by construction and always take a
+    /// single row. A long notify wraps to at most [`NOTIFY_MAX_LINES`] rows.
+    pub(crate) fn notify_lines(&self, w: usize) -> u16 {
+        let Some((msg, _)) = self.notify_badge() else {
+            return 1;
+        };
+        let (label, _) = self.mode_badge();
+        let mode_w = unicode_width::UnicodeWidthStr::width(label) + 2;
+        let verbose_w = if self.verbose { 10 } else { 0 };
+        let avail = w
+            .saturating_sub(4)
+            .saturating_sub(mode_w)
+            .saturating_sub(verbose_w);
+        if avail == 0 {
+            return 1;
+        }
+        greedy_wrap_lines(msg, avail).min(NOTIFY_MAX_LINES) as u16
+    }
+
     /// Footer cost, shown on the right edge of the usage line. Includes the
     /// current turn's running cost (`turn_cost`) so a multi-round turn shows
     /// a live total before `TurnEnd` folds it into `cost`.
@@ -148,4 +169,33 @@ impl App {
         }
         Line::from(vec![Span::styled(label, Style::new().fg(self.theme.muted))])
     }
+}
+
+/// Width-aware greedy word-wrap row count: how many rows of at most `max_w`
+/// display cells `s` spans when wrapped at spaces (hard-breaking a word
+/// wider than the row). Mirror of `prim::wrap`'s accounting so the layout
+/// height matches the renderer without depending on the private module.
+pub(super) fn greedy_wrap_lines(s: &str, max_w: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut rows = 1;
+    let mut cell = 0;
+    for word in s.split(['\n', ' ']).filter(|w| !w.is_empty()) {
+        let ww: usize = word.chars().filter_map(UnicodeWidthChar::width).sum();
+        // Hard-break a word wider than one row.
+        let word_rows = if ww > max_w { ww.div_ceil(max_w) } else { 1 };
+        if word_rows > 1 {
+            rows += word_rows - 1;
+            cell = ww % max_w;
+            continue;
+        }
+        let needed = if cell == 0 { ww } else { ww + 1 };
+        if cell + needed > max_w {
+            rows += 1;
+            cell = ww;
+        } else {
+            cell += needed;
+        }
+    }
+    // Preserve explicit blank lines as rows.
+    rows + s.chars().filter(|c| *c == '\n').count()
 }
