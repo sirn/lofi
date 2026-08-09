@@ -297,7 +297,16 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
 
     let prompt = opts.prompt.clone();
     let mut messages = Vec::new();
-    let agent_run = agent.run_continuation(&mut messages, prompt, tx, None, false, None, None);
+    let agent_run = agent.run_continuation(
+        &mut messages,
+        prompt,
+        lofi_types::PromptKind::User,
+        tx,
+        None,
+        false,
+        None,
+        None,
+    );
 
     // The agent future is not `Send` (the QuickJS `AsyncContext` is not
     // `Sync`), so it cannot be `tokio::spawn`'d. Drive it concurrently with

@@ -21,7 +21,7 @@ pub(crate) mod component;
 mod modals;
 mod prim;
 use modals::{
-    render_confirm_modal, render_info_modal, render_model_picker, render_picker,
+    render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
     render_slash_complete, render_thinking_picker, render_tree_picker,
 };
 
@@ -130,6 +130,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.thinking_picker.is_some() {
         render_thinking_picker(f, area, app);
+    }
+    if app.jobs_modal.is_some() {
+        render_jobs_modal(f, area, app);
     }
     if app.info.is_some() {
         render_info_modal(f, area, app);
@@ -642,6 +645,16 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     let chip_row = area.bottom().saturating_sub(1);
 
     let mut right: Vec<Span<'static>> = Vec::new();
+    // Persistent running-jobs count sits left of the mode chip; transient
+    // badges own the left edge, so this stays out of their way.
+    if let Some(badge) = app.jobs_badge() {
+        // Non-subtle background: the badge is active state, not ambient
+        // chrome, so it should read at a glance.
+        right.push(Span::styled(
+            format!(" {badge} "),
+            Style::new().fg(t.fg).bg(t.info).add_modifier(bold),
+        ));
+    }
     if app.verbose {
         right.push(Span::styled(
             " VERBOSE ",
