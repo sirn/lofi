@@ -1,0 +1,24 @@
+code: background job tooling with completion notices
+
+Long-running shell commands used to hold the agent loop hostage:
+lofi.bash returned only after the command finished, so a five-minute
+build blocked five minutes of chat. Add a jobs subsystem that spawns
+commands into detached processes, exposes lofi.job_spawn/status/read/
+wait/kill bindings, logs stdout+stderr to per-job files under the
+session tmp dir, and lets the agent tick, wait on, or reap any of
+them through a /job modal.
+
+Completion surfaces through a new transient prompt kind. The job
+runner emits a Notice TurnStart with the exit summary; the agent
+loop records the turn under PromptKind::Notice so it is stamped
+separately from real user prompts, replays with the same kind after
+a restart, and renders in the UI with a hollow-bullet subtle marker
+plus muted italic body to read as system output rather than chat.
+Kind state rides along on TurnStart for the live session and via a
+TurnPrompt recorder event for resume, so a mid-session compaction or
+reload does not lose the distinction.
+
+Companion UI work: a /job list+drill-in modal showing runtime, exit
+status, and a paged log view; tighter modal frames with primary-color
+edges and one-cell padding so stacked pickers do not dock to the
+edges of the screen.
