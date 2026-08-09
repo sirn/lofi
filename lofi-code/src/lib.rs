@@ -180,6 +180,9 @@ pub struct ExecCtx {
     pub skills_dir: Option<PathBuf>,
     /// Visible-output cap applied to file reads and bash output.
     pub truncate: crate::tools::truncate::TruncatedCap,
+    /// Session-scoped background job registry shared with the owning
+    /// agent.
+    pub jobs: crate::tools::JobRegistry,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -382,7 +385,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
             ctx.skills_dir.clone(),
         )
         .with_cancel(opts.cancel.clone())
-        .with_truncate(ctx.truncate),
+        .with_truncate(ctx.truncate)
+        .with_jobs(ctx.jobs.clone()),
     );
     let strings = ctx.strings.clone();
     let recall = ctx.recall.clone();
@@ -611,6 +615,7 @@ mod tests {
             auto_mode: None,
             skills_dir: None,
             truncate: crate::tools::truncate::TruncatedCap::default(),
+            jobs: crate::tools::JobRegistry::new(),
         }
     }
 
@@ -833,6 +838,7 @@ mod tests {
             auto_mode: None,
             skills_dir: None,
             truncate: crate::tools::truncate::TruncatedCap::default(),
+            jobs: crate::tools::JobRegistry::new(),
         };
         let res = exec(
             "return lofi_strings.greeting;",

@@ -554,7 +554,7 @@ fn turn_heap_bytes(turn: &Turn) -> usize {
 
 fn block_heap_bytes(block: &Block) -> usize {
     match block {
-        Block::Text(text) | Block::Error(text) => text.capacity(),
+        Block::Text(text) | Block::Error(text) | Block::JobNotice(text) => text.capacity(),
         Block::Thinking(thinking) => thinking.text.capacity(),
         Block::Tool(tool) => {
             tool.id.capacity()

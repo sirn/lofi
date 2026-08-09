@@ -118,6 +118,10 @@ impl App {
             frozen_width: 0,
             height_remeasure_from: None,
             render_profile: Box::default(),
+            // Cloned session job registry. Set by the caller from the running
+            // agent; `None` until the agent attaches.
+            jobs: None,
+            jobs_modal: None,
         }
     }
 
@@ -165,6 +169,18 @@ impl App {
         match ev {
             AgentEvent::Notice(msg) => {
                 self.notify(NotifyKind::Warn, msg);
+                return;
+            }
+            AgentEvent::JobNotice(text) => {
+                // Live-only transcript marker for background-job notices
+                // (ticks and terminal transitions). Pushed as its own turn so
+                // it never merges into an assistant turn; never persisted to
+                // the session log (the agent owns writes; the notification is
+                // live-only state).
+                self.push_turn(Turn {
+                    prompt: String::new(),
+                    blocks: vec![Block::JobNotice(text)],
+                });
                 return;
             }
             AgentEvent::RetryStart {
@@ -422,6 +438,24 @@ impl App {
         self.turns.push(turn);
         self.turn_byte_ranges.push(None);
         self.turn_event_offsets.push(None);
+    }
+
+    /// Total number of transcript turns (live + file-backed shells).
+    #[allow(dead_code)]
+    pub(super) fn turns_len(&self) -> usize {
+        self.turns.len()
+    }
+
+    /// Drop the newest `turns.len() - keep` turns. Used to retire one-shot
+    /// transcript markers that got promoted into a wake-up turn's prompt, so
+    /// they are not rendered twice. Only valid while the rows being removed
+    /// are in-memory (not file-backed shells).
+    #[allow(dead_code)]
+    pub(super) fn truncate_turns(&mut self, keep: usize) {
+        self.collapsed_turns.get_mut().clear();
+        self.turns.truncate(keep);
+        self.turn_byte_ranges.truncate(keep);
+        self.turn_event_offsets.truncate(keep);
     }
 
     pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {

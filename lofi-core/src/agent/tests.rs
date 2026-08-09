@@ -133,6 +133,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     }
 }
@@ -529,6 +530,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
@@ -585,6 +587,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
         skills_dir: None,
+        jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);

@@ -127,6 +127,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 cancelled: *cancelled,
                 exclude_from_context: *exclude_from_context,
             }),
+            Block::JobNotice(msg) => stack.push(JobNoticeLine { msg }),
             Block::Error(msg) => stack.push(ErrorLine { msg }),
             Block::TurnEnd { label, elapsed } => {
                 stack.push(TurnEnd {
@@ -3066,6 +3067,38 @@ impl Component for ErrorLine<'_> {
                 vec![Span::raw("  "), Span::raw("  ")]
             };
             out.push(prim::rline(deco, vec![Span::styled(seg.clone(), err)]));
+        }
+        out
+    }
+}
+
+/// A background-job notice, clearly marked as automatic. Rendered as a
+/// distinct marker — `◆ job` with the notice text — so it cannot be mistaken
+/// for a user prompt or assistant output. Periodic ticks and terminal
+/// transitions share this style; the text itself carries the state.
+struct JobNoticeLine<'a> {
+    msg: &'a str,
+}
+
+impl Component for JobNoticeLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let icon = Style::new().fg(t.info);
+        let body = Style::new().fg(t.info);
+        let label = Style::new().fg(t.info);
+        let content_w = cx.width.saturating_sub(9); // "  " + "◆ " + "job "
+        let mut out = Vec::new();
+        for (i, seg) in prim::wrap(self.msg, content_w).iter().enumerate() {
+            let deco = if i == 0 {
+                vec![
+                    Span::raw("  "),
+                    Span::styled("◆ ", icon),
+                    Span::styled("job ", label),
+                ]
+            } else {
+                vec![Span::raw("  "), Span::raw("  "), Span::raw("    ")]
+            };
+            out.push(prim::rline(deco, vec![Span::styled(seg.clone(), body)]));
         }
         out
     }
