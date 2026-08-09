@@ -128,7 +128,7 @@ impl BuiltinTools {
 
     /// Attaches the run's cooperative cancellation flag. Long-running tools
     /// (`bash`) race their work against it so user cancellation takes effect
-    /// even while the guest is suspended awaiting the tool — the QuickJS
+    /// even while the guest is suspended awaiting the tool — the `QuickJS`
     /// interrupt handler cannot fire there, so this is the only path.
     #[must_use]
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
@@ -137,7 +137,7 @@ impl BuiltinTools {
     }
 
     /// Shares the owning session's job registry. Without this each exec
-    /// would get a fresh registry and `job_status` on the next call could
+    /// would get a fresh registry and `jobStatus` on the next call could
     /// not see a job spawned by the previous one.
     #[must_use]
     pub fn with_jobs(mut self, jobs: JobRegistry) -> Self {
