@@ -38,17 +38,10 @@ impl ResolvedPolicy {
             }
         };
 
-        // Backgrounding primitives never pass policy. The Bash tool's
-        // contract is "block until done, return the captured output"; a
-        // backgrounded child breaks that by detaching from the call's
-        // stdout/stderr and outliving the model turn. The right surface
-        // for those workflows is lofi.jobSpawn, which keeps the job
-        // inspectable via lofi.jobStatus/jobRead and notifies on
-        // completion.
-        //
-        // This check is hard-coded (not a per-rule deny) so a permissive
-        // config cannot re-enable a foot-gun the Bash tool fundamentally
-        // cannot serve.
+        // Hard-coded — not a per-rule deny — so a permissive config cannot
+        // re-enable a shape the Bash tool fundamentally cannot serve
+        // (a detached child outlives the call; the model never sees its
+        // output).
         if let Some(reason) = detect_backgrounding(&tokens) {
             return Decision {
                 action: PolicyAction::Deny,
@@ -210,15 +203,8 @@ impl ResolvedPolicy {
 /// Detect a shell idiom that detaches work from the Bash call. Returns a
 /// human-readable deny reason on match, None when the input is clean.
 ///
-/// Recognised shapes:
-///  - Bare "&" operator anywhere in the stream (backgrounds the prior
-///    segment). "&&" is a separate Operator and not flagged.
-///  - "nohup", "setsid", or "disown" as the first word of any segment.
-///    Each is a job-control primitive whose only purpose is to detach the
-///    child from the caller's lifecycle.
-///
-/// The check is recursive into command substitutions and subshells —
-/// otherwise "sh -c 'sleep 1 &'" would sneak past the top-level scan.
+/// Recurses into subshells and command substitution so "sh -c 'sleep 1 &'"
+/// cannot sneak past the top-level scan.
 fn detect_backgrounding(tokens: &[Token]) -> Option<String> {
     const DETACH_WORDS: &[&str] = &["nohup", "setsid", "disown"];
 
