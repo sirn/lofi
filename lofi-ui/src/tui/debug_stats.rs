@@ -213,7 +213,7 @@ impl App {
             + self
                 .prompt_queue
                 .iter()
-                .map(String::capacity)
+                .map(|q| q.text.capacity())
                 .sum::<usize>();
         let index_bytes = self.turn_byte_ranges.capacity() * size_of::<Option<(u64, u64)>>()
             + self.turn_event_offsets.capacity() * size_of::<Option<Vec<u64>>>()

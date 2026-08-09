@@ -3,7 +3,7 @@
 use futures::StreamExt;
 use lofi_providers::assemble_message;
 use lofi_providers::open;
-use lofi_types::{
+use lofi_types::{PromptKind, 
     Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, ProviderConfig,
     Role, StreamingEvent, Usage,
 };
@@ -14,6 +14,7 @@ fn user_msg() -> Message {
         blocks: vec![ContentBlock::Text {
             text: "hi".to_string(),
         }],
+        kind: PromptKind::default(),
     }
 }
 

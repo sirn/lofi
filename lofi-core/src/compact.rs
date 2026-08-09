@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lofi_types::{
+use lofi_types::{PromptKind, 
     CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, Role, SessionEvent,
     SessionEventKind,
 };
@@ -211,6 +211,7 @@ pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
             blocks: vec![ContentBlock::Text {
                 text: compaction.summary.clone(),
             }],
+            kind: PromptKind::default(),
         });
     }
     out.extend(compaction.kept_messages.iter().cloned());
@@ -1459,12 +1460,14 @@ mod tests {
         Message {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
     fn assistant(t: &str) -> Message {
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
     fn exec_call(id: &str, code: &str) -> Message {
@@ -1475,6 +1478,7 @@ mod tests {
                 name: "exec".into(),
                 input: serde_json::json!({ "code": code }),
             }],
+            kind: PromptKind::default(),
         }
     }
     fn exec_result(id: &str, value: &str) -> Message {
@@ -1486,6 +1490,7 @@ mod tests {
                 is_error: false,
                 images: Vec::new(),
             }],
+            kind: PromptKind::default(),
         }
     }
     fn native(parent: &str, name: &str, args: &str) -> NativeToolRecord {
@@ -1610,6 +1615,7 @@ mod tests {
         // the contract.
         let with_image = Message {
             role: Role::User,
+            kind: PromptKind::default(),
             blocks: vec![
                 ContentBlock::Text {
                     text: "look at this".into(),

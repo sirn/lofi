@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lofi_error::{Error, Result};
-use lofi_types::{Message, RunModel, SessionEvent, SessionEventKind};
+use lofi_types::{PromptKind, Message, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
@@ -519,6 +519,7 @@ impl SessionCursor {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
                 }],
+                kind: PromptKind::default(),
             }),
         }];
         self.append_events(&mut events)
@@ -1513,6 +1514,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -1522,6 +1524,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -1550,6 +1553,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "  raw prompt  \n".to_string(),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -1562,6 +1566,7 @@ mod tests {
                         name: "exec".to_string(),
                         input: serde_json::json!({"code": "x"}),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -1575,6 +1580,7 @@ mod tests {
                         is_error: false,
                         images: Vec::new(),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -2247,6 +2253,38 @@ mod tests {
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn user_message_kind_field_roundtrips_through_disk() {
+        // Typed (default) messages omit `kind` from the wire; notice turns
+        // carry `kind: "notice"`. Both must deserialize back to the right
+        // `PromptKind` so replay can rebuild each turn faithfully.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let jsonl = concat!(
+            "{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":{\"provider\":\"p\",\"id\":\"m\",\"thinking\":\"medium\"}}\n",
+            "{\"id\":\"\",\"type\":\"cursor\"}\n",
+            "{\"id\":\"a\",\"parent_id\":null,\"type\":\"message\",\"role\":\"user\",\"blocks\":[{\"type\":\"text\",\"text\":\"typed\"}]}\n",
+            "{\"id\":\"b\",\"parent_id\":\"a\",\"type\":\"message\",\"role\":\"user\",\"kind\":\"notice\",\"blocks\":[{\"type\":\"text\",\"text\":\"job done\"}]}\n",
+        );
+        std::fs::write(&path, jsonl).unwrap();
+        let cursor = SessionCursor::new(path, None);
+        let events = cursor.load_tree_events().unwrap();
+        let kinds: Vec<_> = events
+            .iter()
+            .filter_map(|ev| match &ev.kind {
+                SessionEventKind::Message(m) if matches!(m.role, Role::User) => Some(m.kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                lofi_types::PromptKind::User,
+                lofi_types::PromptKind::Notice
+            ]
         );
     }
 }

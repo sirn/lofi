@@ -93,12 +93,13 @@ fn synthesize_lineage(messages: &[Message]) -> Vec<SessionEvent> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use lofi_types::{ContentBlock, Role};
+    use lofi_types::{ContentBlock, PromptKind, Role};
 
     fn user(text: &str) -> Message {
         Message {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
+            kind: PromptKind::default(),
         }
     }
 
