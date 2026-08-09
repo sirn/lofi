@@ -277,7 +277,7 @@ fn bind_file_tools<'js>(
 }
 
 /// Background job tools share the bash policy/confirmation path (via
-/// `job_spawn`'s `check_policy`) and emit the same Start/End tool events as
+/// `jobSpawn`'s `check_policy`) and emit the same Start/End tool events as
 /// the file tools, so the UI tiles and transcript records stay uniform.
 fn bind_job_tools<'js>(
     ctx: &Ctx<'js>,
@@ -291,12 +291,12 @@ fn bind_job_tools<'js>(
         Box<dyn std::future::Future<Output = lofi_error::Result<Json>> + Send + 'a>,
     >;
     const JOB_TOOLS: &[(&str, JobMethod)] = &[
-        ("job_spawn", |t, a| Box::pin(t.job_spawn(a))),
-        ("job_status", |t, a| Box::pin(t.job_status(a))),
-        ("job_read", |t, a| Box::pin(t.job_read(a))),
-        ("job_wait", |t, a| Box::pin(t.job_wait(a))),
-        ("job_kill", |t, a| Box::pin(t.job_kill(a))),
-        ("job_notify", |t, a| Box::pin(t.job_notify(a))),
+        ("jobSpawn", |t, a| Box::pin(t.job_spawn(a))),
+        ("jobStatus", |t, a| Box::pin(t.job_status(a))),
+        ("jobRead", |t, a| Box::pin(t.job_read(a))),
+        ("jobWait", |t, a| Box::pin(t.job_wait(a))),
+        ("jobKill", |t, a| Box::pin(t.job_kill(a))),
+        ("jobNotify", |t, a| Box::pin(t.job_notify(a))),
     ];
     for &(name, method) in JOB_TOOLS {
         let t = tools.clone();
