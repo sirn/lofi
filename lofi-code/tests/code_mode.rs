@@ -411,7 +411,7 @@ async fn job_spawn_returns_immediately_and_completes() {
     let id = spawn.value["id"].as_str().unwrap().to_string();
 
     let src = format!(
-        "const s = await lofi.job_wait({{ id: '{id}' }}); return {{ state: s.state, code: s.exit_code }};"
+        "const s = await lofi.job_wait({{ id: '{id}' }}); return {{ state: s.state, code: s.exitCode }};"
     );
     let done = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(done.value["state"], json!("completed"));
@@ -424,7 +424,7 @@ async fn job_spawn_without_timeout_has_no_deadline() {
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
     let spawn = exec(
-        "const r = await lofi.job_spawn({ cmd: 'echo x' }); return r.timeout_ms;",
+        "const r = await lofi.job_spawn({ cmd: 'echo x' }); return r.timeoutMs;",
         &cx,
         &ExecOptions::default(),
     )
@@ -457,7 +457,7 @@ async fn job_wait_with_timeout_returns_running() {
     let dir = tempfile::tempdir().unwrap();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
-    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 30' }); const w = await lofi.job_wait({ id: s.id, timeout_ms: 50 }); await lofi.job_kill({ id: s.id }); return w.state;";
+    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 30' }); const w = await lofi.job_wait({ id: s.id, timeoutMs: 50 }); await lofi.job_kill({ id: s.id }); return w.state;";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value, json!("running"));
 }
@@ -500,7 +500,7 @@ async fn job_periodic_tick_goes_to_ui_not_model() {
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = jobs.clone();
     // Spawn a job that emits one line then sleeps; enable a 5s-floor tick.
-    let src = "const s = await lofi.job_spawn({ cmd: 'echo hello; sleep 20' }); await lofi.job_notify({ id: s.id, interval_ms: 5000 }); return s.id;";
+    let src = "const s = await lofi.job_spawn({ cmd: 'echo hello; sleep 20' }); await lofi.job_notify({ id: s.id, intervalMs: 5000 }); return s.id;";
     exec(src, &cx, &ExecOptions::default()).await.unwrap();
     // Wait past one tick interval so the progress ticker fires.
     tokio::time::sleep(std::time::Duration::from_millis(6_500)).await;
@@ -516,7 +516,7 @@ async fn job_terminal_queues_a_notice() {
     let jobs = lofi_code::tools::JobRegistry::new();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = jobs.clone();
-    let src = "const s = await lofi.job_spawn({ cmd: 'exit 0' }); await lofi.job_notify({ id: s.id, interval_ms: 5000 }); await lofi.job_wait({ id: s.id }); return s.id;";
+    let src = "const s = await lofi.job_spawn({ cmd: 'exit 0' }); await lofi.job_notify({ id: s.id, intervalMs: 5000 }); await lofi.job_wait({ id: s.id }); return s.id;";
     exec(src, &cx, &ExecOptions::default()).await.unwrap();
     let notices = jobs.drain_notices();
     assert_eq!(notices.len(), 1, "terminal notices: {notices:?}");
@@ -529,8 +529,32 @@ async fn job_notify_bare_enables_periodic_at_default() {
     let src = "const s = await lofi.job_spawn({ cmd: 'sleep 5' }); const n = await lofi.job_notify({ id: s.id }); await lofi.job_kill({ id: s.id }); return n;";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value["notify"], json!(true));
-    assert_eq!(res.value["interval_ms"], json!(30_000));
+    assert_eq!(res.value["intervalMs"], json!(30_000));
     assert_eq!(res.value["changed"], json!(true));
+}
+
+#[tokio::test]
+async fn job_spawn_notify_interval_wires_through_to_status() {
+    // Spawn-time knobs land on `Job.notify` so the task driver picks them
+    // up. Without the wire, `notifyIntervalMs` is silently dropped and the
+    // job runs terminal-only.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 30', notifyIntervalMs: 6000 }); const st = await lofi.job_status({ id: s.id }); await lofi.job_kill({ id: s.id }); return { notify: st.notify, iv: st.notifyIntervalMs };";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["notify"], json!(true));
+    assert_eq!(res.value["iv"], json!(6_000));
+}
+
+#[tokio::test]
+async fn job_spawn_notify_false_silences_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 30', notify: false }); const st = await lofi.job_status({ id: s.id }); await lofi.job_kill({ id: s.id }); return st.notify;";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value, json!(false));
 }
 
 #[tokio::test]
@@ -538,7 +562,7 @@ async fn job_notify_clamps_interval_floor() {
     let dir = tempfile::tempdir().unwrap();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
-    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 5' }); const n = await lofi.job_notify({ id: s.id, interval_ms: 100 }); await lofi.job_kill({ id: s.id }); return n.interval_ms;";
+    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 5' }); const n = await lofi.job_notify({ id: s.id, intervalMs: 100 }); await lofi.job_kill({ id: s.id }); return n.intervalMs;";
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value, json!(5_000));
 }
