@@ -2605,6 +2605,39 @@ fn split_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Collapse JSON tool args into a short header label for known tools so
+/// the `Tool <name> <args>` line scans like a sentence instead of dumping
+/// the request envelope. Returns `None` for tools we have no tailored
+/// view for; the caller falls back to the verbatim args.
+///
+/// Only shapes the surface actually emits are recognised (every job op
+/// takes an `id`; `jobSpawn` takes a command). Anything else returns
+/// `None`.
+fn summarize_tool_args(name: &str, args: &str) -> Option<String> {
+    if args.is_empty() {
+        return Some(String::new());
+    }
+    let id = json_string_field(args, "id");
+    match name {
+        "jobSpawn" => json_string_field(args, "cmd").map(|cmd| truncate_args_display(cmd, 60)),
+        "jobStatus" | "jobRead" | "jobWait" | "jobKill" | "jobNotify" => {
+            id.map(|s| format!("job {s}"))
+        }
+        _ => None,
+    }
+}
+
+/// Cap an args-rendered text cell at `width` chars (multi-byte safe),
+/// replacing the overflow with U+2026.
+fn truncate_args_display(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut s: String = text.chars().take(width.saturating_sub(1)).collect();
+    s.push('\u{2026}');
+    s
+}
+
 fn json_string_field<'a>(raw: &'a str, field: &str) -> Option<&'a str> {
     let needle = format!("\"{field}\"");
     let key = raw.find(&needle)?;
@@ -2806,9 +2839,11 @@ impl ExecBlockBranch<'_> {
             Span::styled("Tool ", Style::new().fg(t.muted)),
             Span::styled(self.nt.name.clone(), Style::new().fg(t.info)),
         ];
-        if !self.nt.args.is_empty() {
+        let args_label = summarize_tool_args(&self.nt.name, &self.nt.args)
+            .unwrap_or_else(|| self.nt.args.clone());
+        if !args_label.is_empty() {
             content.push(Span::styled(
-                format!(" {}", self.nt.args),
+                format!(" {args_label}"),
                 Style::new().fg(t.subtle),
             ));
         }
@@ -3355,7 +3390,7 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::{
         analyze, markdown_body_height, native_body, native_preview_range, render_markdown_body,
-        trim_reasoning_summary, Align, MdBlock,
+        summarize_tool_args, trim_reasoning_summary, Align, MdBlock,
     };
     use crate::tui::theme::Theme;
     use crate::tui::NativeTool;
@@ -3565,6 +3600,27 @@ mod tests {
         };
         assert_eq!(native_body(&tool).lines, vec!["command not found"]);
         assert_eq!(tool.result.as_deref(), Some(raw.as_str()));
+    }
+
+    #[test]
+    fn summarize_tool_args_shortens_job_envelopes() {
+        assert_eq!(
+            summarize_tool_args("jobStatus", "{\"id\":\"1786294694788353138\"}").as_deref(),
+            Some("job 1786294694788353138")
+        );
+        assert_eq!(
+            summarize_tool_args("jobSpawn", "{\"cmd\":\"sleep 1\"}").as_deref(),
+            Some("sleep 1")
+        );
+        assert_eq!(
+            summarize_tool_args("jobSpawn", "{\"cmd\":\"a very long command line that exceeds the 60-character display budget\"}").as_deref(),
+            Some("a very long command line that exceeds the 60-character disp…")
+        );
+        assert_eq!(
+            summarize_tool_args("read", "{\"path\":\"/tmp/x\"}"),
+            None,
+            "read is not a job tool — keep verbatim"
+        );
     }
 
     #[test]
