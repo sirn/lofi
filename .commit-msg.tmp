@@ -1,0 +1,8 @@
+{code,core,ui}: detach long-running commands via lofi.job_* and /job
+
+lofi.bash blocked the agent loop until the wrapped command exited, so
+any build, test sweep, or watched server held the chat hostage. Spawn
+commands into a session-scoped registry instead, surface their status
+through a /job modal, and signal completion through a new transient
+Notice prompt so the user sees the result without it being conflated
+with their own typing; the distinction survives session reload.
