@@ -366,7 +366,11 @@ async fn exec_honours_configured_truncate_cap() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("big.txt"),
-        (1..=10).map(|i| format!("line {i}\n")).collect::<String>(),
+        (1..=10).fold(String::new(), |mut s, i| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "line {i}");
+            s
+        }),
     )
     .unwrap();
     let mut c = ctx(dir.path());

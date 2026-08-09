@@ -128,6 +128,7 @@ impl BuiltinTools {
 
     /// # Errors
     /// Returns [`Error::Io`] only if the process cannot be spawned.
+    #[allow(clippy::too_many_lines)]
     pub async fn bash(&self, args: Value) -> Result<Value> {
         let cmd = args
             .get("cmd")

@@ -6707,6 +6707,7 @@ fn permission_dialog_caps_height_and_scrolls_command_preview() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn resumed_compaction_restores_summarized_message_count() {
     // Exact regression: a hard compact kept no tail, its silent continuation
     // produced only two messages, and the session was then resumed with -c.
@@ -7262,7 +7263,7 @@ fn turn_height_matches_emitted_line_count() {
     for active in [false, true] {
         for w in [28usize, 50, 90, 120] {
             for has_thinking in [false, true] {
-                let mut a = app();
+                let a = app();
                 let mut blocks = Vec::new();
                 if has_thinking {
                     blocks.push(Block::Thinking(ThinkingBlock {
@@ -7339,7 +7340,7 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
     use crate::tui::view::component::Cx;
 
     let w = 40usize;
-    let mut a = app();
+    let a = app();
     let theme = a.theme;
     let mut text = String::new();
     let mut prev_rows: Vec<String> = Vec::new();
