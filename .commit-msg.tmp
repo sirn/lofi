@@ -1,0 +1,24 @@
+code: camelCase the lofi.job* wire surface end-to-end
+
+Snake_case leaked across the whole job API: function names
+(lofi.job_spawn, lofi.job_notify, ...), input args (timeout_ms on
+jobWait, interval_ms on jobNotify), and output payloads (exit_code,
+log_path, total_bytes, notify_*) — while the surrounding sandboxed
+surface is uniformly camelCase (lofi.bash takes timeoutMs, etc.).
+
+After this change every JS-visible name is camelCase:
+ - bindings: jobSpawn, jobStatus, jobRead, jobWait, jobKill, jobNotify
+ - inputs:   timeoutMs, intervalMs (jobNotify), notifyIntervalMs,
+             notify (jobSpawn)
+ - outputs:  exitCode, durationMs, timeoutMs, logPath, totalBytes,
+             notify, notifyIntervalMs, notifyChanged
+The Rust-side names stay snake_case; only the wire surface moves.
+
+Binding-names and args also flow into the published docs and the
+system prompt the model reads, so lofi-code/src/docs/api.md and
+lofi-core/src/prompts/system.md move to the new spellings.
+
+Spawn now accepts the two knobs it used to silently drop: notify:
+false silences the job entirely, and notifyIntervalMs turns on
+periodic ticks without needing a follow-up jobNotify call. Passing
+the interval implies notify: true.
