@@ -126,7 +126,7 @@ notice names it — page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are
 present but their values are replaced with `[redacted]` in the output.
 
-## lofi.job_spawn({ cmd, timeoutMs? })
+## lofi.jobSpawn({ cmd, timeoutMs?, notify?, notifyIntervalMs? })
 
 Start a background shell command without blocking the current turn. The
 command runs `sh -c` from the workspace root in its own process group with
@@ -140,73 +140,79 @@ the same shell policy, stripped environment, and output redaction as
   that do not fit a synchronous tool call, so a job runs until it exits, is
   killed, or the session ends. Pass `timeoutMs` to cap it; on timeout the
   whole process group is killed and the job ends as `"timed_out"`.
+- `notify` (boolean, optional, default `true`) — master switch for both the
+  terminal notice and any periodic ticks. `false` silences the job entirely.
+- `notifyIntervalMs` (number, optional) — turn on periodic progress pings
+  while the job runs. Clamped to a 5000 ms floor. Passing it implies
+  `notify: true`; a separate `jobNotify` call is not needed.
 
-**Returns:** `{ ok, id, state, command, directory, pid, timeout_ms,
-log_path }`. `state` starts as `"running"`. `log_path` names the merged
+**Returns:** `{ ok, id, state, command, directory, pid, timeoutMs,
+logPath }`. `state` starts as `"running"`. `logPath` names the merged
 stdout/stderr log under `lofi.tmp_dir`; it is a read root, so `lofi.read` on
 it also works. The log grows unbounded for the life of the job and is
-removed with the session; page through it with `job_read` rather than
+removed with the session; page through it with `jobRead` rather than
 reading it whole.
 
-## lofi.job_status({ id })
+## lofi.jobStatus({ id })
 
 Current state, timestamps, exit status, and limits for a job.
 
-**Returns:** `{ ok, id, state, command, directory, pid, exit_code, signal,
-duration_ms, timeout_ms, log_path, notify }`. `state` is `"running"`,
-`"completed"`, `"failed"`, `"cancelled"`, or `"timed_out"`. Unknown ids
-return `{ ok: false, error }`.
+**Returns:** `{ ok, id, state, command, directory, pid, exitCode, signal,
+durationMs, timeoutMs, logPath, notify, notifyIntervalMs, notifyChanged }`.
+`state` is `"running"`, `"completed"`, `"failed"`, `"cancelled"`, or
+`"timed_out"`. Unknown ids return `{ ok: false, error }`.
 
-## lofi.job_read({ id, cursor?, limit? })
+## lofi.jobRead({ id, cursor?, limit? })
 
 Incremental read of a job's merged stdout/stderr log.
 
 **Parameters:**
-- `id` (string, required) — job id from `job_spawn`.
+- `id` (string, required) — job id from `jobSpawn`.
 - `cursor` (number, optional) — byte offset to resume from (default 0).
 - `limit` (number, optional) — max bytes to return (default and max 65536).
 
-**Returns:** `{ ok, id, state, cursor, total_bytes, output, done }`.
+**Returns:** `{ ok, id, state, cursor, totalBytes, output, done }`.
 `cursor` is the next offset to pass. `output` is redacted. `done` is true
 once the job is terminal.
 
-## lofi.job_wait({ id, timeout_ms? })
+## lofi.jobWait({ id, timeoutMs? })
 
 Bounded wait for a job to reach a terminal state. Waiting never cancels the
-job; it returns the still-running status when `timeout_ms` elapses.
+job; it returns the still-running status when `timeoutMs` elapses.
 
-**Returns:** the same shape as `job_status`.
+**Returns:** the same shape as `jobStatus`.
 
-## lofi.job_kill({ id, reason? })
+## lofi.jobKill({ id, reason? })
 
 Cancel a job: SIGKILL its entire process group (children and grandchildren)
 and mark it `"cancelled"`. Idempotent — killing an already-terminal job is
 a no-op that returns its current status.
 
-**Returns:** the same shape as `job_status`, plus `reason`.
+**Returns:** the same shape as `jobStatus`, plus `reason`.
 
-## lofi.job_notify({ id, enabled?, interval_ms?, changed? })
+## lofi.jobNotify({ id, enabled?, intervalMs?, changed? })
 
-Configure notifications for a job. Notices are one-line messages the agent
-injects at the next round boundary (and the UI surfaces live).
+Configure notifications for a job that did not opt in at spawn. Notices are
+one-line messages the agent injects at the next round boundary (and the UI
+surfaces live).
 
 **Parameters:**
-- `id` (string, required) — job id from `job_spawn`.
+- `id` (string, required) — job id from `jobSpawn`.
 - `enabled` (boolean, optional) — master switch. Defaults to `true` when
-  omitted: calling `job_notify` at all means "notify me". `enabled: false`
+  omitted: calling `jobNotify` at all means "notify me". `enabled: false`
   silences the job (including the terminal notice), useful after collecting
-  a result with `job_wait`.
-- `interval_ms` (number, optional) — turn on periodic progress pings while
+  a result with `jobWait`.
+- `intervalMs` (number, optional) — turn on periodic progress pings while
   the job runs. Clamped to a 5000 ms floor. When omitted and the job has no
   interval yet, enabling sets it to the 30000 ms default.
-- `changed` (boolean, optional, default `true`) — when true, a periodic tick
-  only emits if the log grew since the last tick, so a live-but-silent job
-  stays quiet. `false` emits every tick while running.
+- `changed` (boolean, optional, default `true`) — when true, a periodic
+  tick only emits if the log grew since the last tick, so a live-but-silent
+  job stays quiet. `false` emits every tick while running.
 
 The terminal transition always queues one notice when `enabled`, regardless
 of how `changed` treated the intermediate ticks.
 
-**Returns:** `{ ok, id, notify, interval_ms, changed }`.
+**Returns:** `{ ok, id, notify, intervalMs, changed }`.
 
 ## lofi.tmp_dir
 
