@@ -78,11 +78,10 @@ impl SessionRecorder {
         }
     }
 
-    /// Persist the origin of the user prompt that opens this turn. Emitted
-    /// only when the kind is anything other than the default `User`, so older
-    /// transcripts (and typed-input turns) leave no marker and remain
-    /// byte-identical to what the recorder wrote before this marker existed.
-    /// Replay consumes it to restore the turn's `PromptKind`.
+    /// Persist a `TurnPrompt` marker before the next user message so replay
+    /// rebuilds the turn with the same `PromptKind` the live path used.
+    /// Skipped for the default `User` kind: typed-input turns produce no
+    /// marker, and older transcripts without any marker still parse.
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn record_turn_prompt(&mut self, kind: lofi_types::PromptKind) -> Result<()> {
