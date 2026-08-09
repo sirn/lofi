@@ -24,9 +24,8 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    atomic_write, find_walk, parse_grep_args, reject_non_regular,
-    reject_symlink_leaf, resolve_for_read, resolve_under, walk_files_capped, WalkCeilings,
-    WalkLimit,
+    atomic_write, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf,
+    resolve_for_read, resolve_under, walk_files_capped, WalkCeilings, WalkLimit,
 };
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,

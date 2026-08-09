@@ -128,6 +128,9 @@ const RESIZE_DEBOUNCE_MS: u64 = 50;
 const AUTO_MODE_UI_GRACE: Duration = Duration::from_secs(3);
 const YANK_NOTIFY: Duration = Duration::from_secs(2);
 const NOTIFY_TTL: Duration = Duration::from_secs(5);
+/// Cap on the notification area height: a long transient message wraps
+/// across up to this many rows instead of truncating to one.
+const NOTIFY_MAX_LINES: usize = 3;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;

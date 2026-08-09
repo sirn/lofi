@@ -14,7 +14,7 @@ use ratatui::Frame;
 
 use crate::tui::theme::active_indicator;
 use crate::tui::SLASH_COMMANDS;
-use crate::tui::{App, Mode, NotifyKind, SPINNER};
+use crate::tui::{App, Mode, NotifyKind, NOTIFY_MAX_LINES, SPINNER};
 
 pub(crate) mod blocks;
 pub(crate) mod component;
@@ -25,10 +25,11 @@ use modals::{
     render_slash_complete, render_thinking_picker, render_tree_picker,
 };
 
-#[allow(unused_imports)]
+#[allow(unused_imports)] // used by tests and render harnesses
 pub(crate) use prim::RawLine;
 pub(crate) use prim::RenderLine;
 pub(crate) use prim::VisLine;
+pub(crate) use prim::{width, wrap};
 
 pub(crate) use prim::HStack;
 
@@ -88,7 +89,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let input_h = u16::try_from(input_lines).unwrap_or(u16::MAX);
     app.sync_input_scroll(area.width.saturating_sub(3) as usize, input_lines);
 
-    let footer_h = input_h.saturating_add(4);
+    let footer_h = input_h
+        .saturating_add(3)
+        .saturating_add(app.notify_lines(area.width as usize));
     let running = u16::from(app.run_active());
     let mut vs = VStack::new();
     vs.fixed(1); // header
@@ -580,13 +583,14 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
 fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     let t = app.theme;
     let w = area.width;
-    render_mode_line(f, Rect::new(area.x, area.y, w, 1), app);
+    let nh = app.notify_lines(w as usize);
+    render_mode_line(f, Rect::new(area.x, area.y, w, nh), app);
 
     let panel = Rect::new(
         area.x,
-        area.y.saturating_add(1),
+        area.y.saturating_add(nh),
         w,
-        area.height.saturating_sub(1),
+        area.height.saturating_sub(nh),
     );
     f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
@@ -621,18 +625,21 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_info(f, chunks[3], app);
 }
 
-/// Mode-badge line. The right edge carries the ` VERBOSE ` tag (while tool
-/// detail is expanded) and the mode chip (` INPUT ` / ` NAV `) — a filled
-/// pill in the mode color. The left edge holds one notification badge
-/// (quit > yank > transient slash-command status/error); the middle is
-/// blank. A long notification is truncated with `…` so the right side
-/// always fits.
+/// Mode-badge strip. The bottom row carries the ` VERBOSE ` tag (while tool
+/// detail is expanded) and the mode chip (` INPUT ` / ` NAV `) on the right,
+/// and one notification badge on the left (quit > yank > retry > queue >
+/// transient status/error). A long notification wraps across up to
+/// [`NOTIFY_MAX_LINES`] rows above the chips instead of truncating to one,
+/// so the right-side chrome always stays put.
 fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let (label, color) = app.mode_badge();
     let w = area.width as usize;
     let chip = format!(" {label} ");
     let bold = Modifier::BOLD;
+
+    // Chips anchor the bottom row of the strip.
+    let chip_row = area.bottom().saturating_sub(1);
 
     let mut right: Vec<Span<'static>> = Vec::new();
     if app.verbose {
@@ -646,6 +653,18 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         Style::new().fg(t.fg).bg(color).add_modifier(bold),
     ));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
+
+    // Background rule for the full strip, in the mode color.
+    let rule: String = std::iter::repeat_n('╱', w).collect();
+    for row in area.y..=chip_row {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                rule.clone(),
+                Style::new().fg(color).bg(t.panel_bg),
+            ))),
+            Rect::new(area.x, row, area.width, 1),
+        );
+    }
 
     let mut left: Vec<Span<'static>> = Vec::new();
     if let Some(badge) = app.quit_badge() {
@@ -668,54 +687,74 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             format!(" {queue} "),
             Style::new().fg(t.fg).bg(t.muted).add_modifier(bold),
         ));
+    }
+    if !left.is_empty() {
+        let left_w: usize = left.iter().map(|s| prim::width(s.content.as_ref())).sum();
+        let lrect = Rect::new(
+            area.x.saturating_add(2),
+            chip_row,
+            u16::try_from(left_w).unwrap_or(0),
+            1,
+        );
+        f.render_widget(Paragraph::new(Line::from(left)), lrect);
     } else if let Some((msg, kind)) = app.notify_badge() {
+        // Wrapped notification block: first NOTIFY_MAX_LINES - 1 lines get the
+        // full width, the last shares its row with the chips.
+        let last_avail = w.saturating_sub(4).saturating_sub(right_w);
+        let full_avail = w.saturating_sub(4);
+        let mut lines = prim::wrap(msg, full_avail);
+        let overflow = lines.len() > NOTIFY_MAX_LINES;
+        lines.truncate(NOTIFY_MAX_LINES);
+        // Re-wrap the final line against the narrower bottom-row width.
+        if let Some(last) = lines.last_mut() {
+            let mut pieces = prim::wrap(last, last_avail);
+            let display_overflow = overflow || pieces.len() > 1;
+            let mut shown = pieces.drain(..).next().unwrap_or_default();
+            if display_overflow {
+                shown = prim::truncate(&shown, last_avail.saturating_sub(1));
+                shown.push('…');
+            }
+            *last = shown;
+        }
         let bg = match kind {
             NotifyKind::Info => t.muted,
             NotifyKind::Warn => t.warn,
             NotifyKind::Error => t.error,
         };
-        let avail = w
-            .saturating_sub(2)
-            .saturating_sub(right_w)
-            .saturating_sub(2);
-        if avail >= 1 {
-            let body = if prim::width(msg) > avail {
-                let mut s = prim::truncate(msg, avail.saturating_sub(1));
-                s.push('…');
-                s
+        let n = lines.len() as u16;
+        let top = chip_row.saturating_add(1).saturating_sub(n);
+        for (i, line) in lines.iter().enumerate() {
+            let y = top.saturating_add(i as u16);
+            // Keep each row inside the allocated strip.
+            if y < area.y || y > chip_row {
+                continue;
+            }
+            let body = if i as u16 + 1 == n {
+                format!(" {line} ")
             } else {
-                msg.to_string()
+                format!(" {line}")
             };
-            left.push(Span::styled(
-                format!(" {body} "),
-                Style::new().fg(t.fg).bg(bg).add_modifier(bold),
-            ));
+            let lw = prim::width(&body);
+            let lrect = Rect::new(
+                area.x.saturating_add(2),
+                y,
+                u16::try_from(lw.min(w.saturating_sub(2))).unwrap_or(0),
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    body,
+                    Style::new().fg(t.fg).bg(bg).add_modifier(bold),
+                ))),
+                lrect,
+            );
         }
     }
 
-    let rule: String = std::iter::repeat_n('╱', w).collect();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            rule,
-            Style::new().fg(color).bg(t.panel_bg),
-        ))),
-        area,
-    );
-    let left_w: usize = left.iter().map(|s| prim::width(s.content.as_ref())).sum();
-    if left_w > 0 {
-        let lrect = Rect::new(
-            area.x.saturating_add(2),
-            area.y,
-            u16::try_from(left_w).unwrap_or(0),
-            1,
-        );
-        f.render_widget(Paragraph::new(Line::from(left)), lrect);
-    }
-    let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
     let rrect = Rect::new(
         area.x
             .saturating_add(u16::try_from(w.saturating_sub(right_w)).unwrap_or(0)),
-        area.y,
+        chip_row,
         u16::try_from(right_w).unwrap_or(0),
         1,
     );
