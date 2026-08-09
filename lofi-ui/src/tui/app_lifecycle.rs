@@ -118,6 +118,10 @@ impl App {
             frozen_width: 0,
             height_remeasure_from: None,
             render_profile: Box::default(),
+            // Cloned session job registry. Set by the caller from the running
+            // agent; `None` until the agent attaches.
+            jobs: None,
+            jobs_modal: None,
         }
     }
 

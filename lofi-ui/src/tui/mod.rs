@@ -131,6 +131,10 @@ const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
 const NOTIFY_MAX_LINES: usize = 3;
+/// Byte budget for the `/job` log drill-in. The view keeps at most this
+/// many bytes of decoded log resident (a bounded tail window), so watching
+/// a runaway job's log never grows UI memory.
+const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
@@ -141,6 +145,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
+    ("/job", "list background jobs, view logs, stop a job"),
     ("/new", "start a fresh session"),
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
@@ -518,6 +523,34 @@ struct ThinkingPickerState {
     selected: usize,
 }
 
+/// State for the `/job` modal. The list is rebuilt from a fresh
+/// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
+/// the drill-in log view are kept here. The log view pages bounded windows
+/// from disk, so an unbounded job log never inflates memory.
+struct JobsModalState {
+    selected: usize,
+    /// Set while drilling into one job's log; `Esc` returns to the list.
+    viewing: Option<JobLogView>,
+    /// Armed when the user picks kill: the next `y` confirms, anything else
+    /// cancels. Holds the target job id so the confirm survives a re-render.
+    confirm_kill: Option<u64>,
+}
+
+/// Drill-in log view for one job. Holds only the tail window currently on
+/// screen plus enough to page more; it never holds the whole log.
+struct JobLogView {
+    id: u64,
+    /// Decoded lines currently held, oldest first. Bounded by
+    /// [`JOB_LOG_WINDOW_BYTES`].
+    lines: std::collections::VecDeque<String>,
+    /// Byte offset of the next unread chunk; the file cursor for appends.
+    cursor: u64,
+    /// Total log bytes at last refresh; compared to detect growth.
+    total: u64,
+    /// Scroll offset from the bottom (0 = follow the live tail).
+    scroll: usize,
+}
+
 impl Modal for ThinkingPickerState {
     fn len(&self) -> usize {
         self.levels.len()
@@ -762,6 +795,11 @@ pub(crate) struct App {
     picker_generation: Arc<AtomicU64>,
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
+    /// The session's background-job registry, cloned from the agent at
+    /// startup. `None` when no agent is configured. Backs the `/job` modal
+    /// and the persistent running-jobs badge.
+    jobs: Option<lofi_core::JobRegistry>,
+    jobs_modal: Option<JobsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,
@@ -1108,7 +1146,11 @@ async fn run_loop(
     let (confirm_tx, mut confirm_rx) =
         tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
     if let Some(a) = agent.take() {
-        agent = Some(a.with_confirm_tx(confirm_tx));
+        let a = a.with_confirm_tx(confirm_tx);
+        // Clone the session's job registry for the `/job` modal and the
+        // running-jobs badge. Cheap: shares the agent's map.
+        app.jobs = Some(a.jobs());
+        agent = Some(a);
     }
 
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1313,6 +1355,26 @@ async fn run_loop(
                 // so a width change on a long transcript never stalls a frame.
                 if app.remeasure_heights_step(16) {
                     dirty = true;
+                }
+                // Drain background-job notices into prompts: while a run is
+                // live they queue behind it (delivered at run-end by the
+                // run-finished branch); idle, they spawn one batched turn now.
+                // Either way the notice renders as an ordinary user-prompt turn.
+                if let Some(jobs) = app.jobs.clone() {
+                    let notices = jobs.drain_notices();
+                    if !notices.is_empty() {
+                        if current_run.is_some() {
+                            app.prompt_queue.extend(notices);
+                        } else if agent.is_some() {
+                            spawn_prompt(
+                                &mut app,
+                                agent.as_ref(),
+                                &mut current_run,
+                                notices.join("\n"),
+                            );
+                        }
+                        dirty = true;
+                    }
                 }
             }
             picker_load = picker_load_rx.recv() => {

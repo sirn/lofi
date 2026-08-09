@@ -90,6 +90,20 @@ impl App {
             .map(|retry| format!("Retry: {} of {}", retry.attempt, retry.max_attempts))
     }
 
+    /// Persistent count of running background jobs, e.g. "1 job" / "2 jobs".
+    /// Always visible while any job runs, unlike the transient badges.
+    pub(crate) fn jobs_badge(&self) -> Option<String> {
+        let jobs = self.jobs.as_ref()?;
+        let n = jobs.running_count();
+        if n == 0 {
+            None
+        } else if n == 1 {
+            Some("1 job".to_string())
+        } else {
+            Some(format!("{n} jobs"))
+        }
+    }
+
     pub(crate) fn queue_badge(&self) -> Option<String> {
         if self.prompt_queue.is_empty() {
             return None;

@@ -7467,3 +7467,49 @@ fn notify_lines_counts_verbose_chip_width() {
     verbose.notify(NotifyKind::Error, msg);
     assert!(verbose.notify_lines(60) >= quiet.notify_lines(60));
 }
+
+#[test]
+fn jobs_badge_counts_running_only() {
+    let mut a = app();
+    assert_eq!(a.jobs_badge(), None);
+    let jobs = lofi_core::JobRegistry::new();
+    a.jobs = Some(jobs.clone());
+    assert_eq!(a.jobs_badge(), None);
+}
+
+#[test]
+fn jobs_modal_opens_only_with_registry() {
+    let mut a = app();
+    a.open_jobs_modal();
+    assert!(a.jobs_modal.is_none());
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    assert!(a.jobs_modal.is_some());
+    assert!(a.modal_open());
+}
+
+#[test]
+fn jobs_modal_esc_closes() {
+    let mut a = app();
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    let esc = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    a.handle_modal_key(&esc);
+    assert!(a.jobs_modal.is_none());
+}
+
+#[test]
+fn jobs_modal_empty_list_no_underflow() {
+    let mut a = app();
+    a.jobs = Some(lofi_core::JobRegistry::new());
+    a.open_jobs_modal();
+    let down = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    a.handle_modal_key(&down);
+    assert_eq!(a.jobs_modal.as_ref().map(|m| m.selected), Some(0));
+}

@@ -1029,6 +1029,7 @@ impl Agent {
                 auto_mode: self.auto_mode.clone(),
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
+                jobs: self.jobs.clone(),
             };
             let outcome = exec(
                 &code,

@@ -12,6 +12,7 @@ pub(super) fn bind_tools<'js>(
     skills_dir: Option<PathBuf>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
+    bind_job_tools(ctx, lofi, tools)?;
     bind_recall_tool(ctx, lofi, recall)?;
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
@@ -260,6 +261,186 @@ fn bind_file_tools<'js>(
                         args: label,
                     });
                     let res = t.bash(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    Ok(())
+}
+
+/// Background job tools share the bash policy/confirmation path (via
+/// `job_spawn`'s `check_policy`) and emit the same Start/End tool events as
+/// the file tools, so the UI tiles and transcript records stay uniform.
+fn bind_job_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+) -> rquickjs::Result<()> {
+    let t = tools.clone();
+    lofi.set(
+        "job_spawn",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                let label = native_args_label("bash", &args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_spawn".into(),
+                        args: label,
+                    });
+                    let res = t.job_spawn(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "job_status",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_status".into(),
+                        args: args.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                    });
+                    let res = t.job_status(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "job_read",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_read".into(),
+                        args: args.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                    });
+                    let res = t.job_read(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "job_wait",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_wait".into(),
+                        args: args.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                    });
+                    let res = t.job_wait(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "job_kill",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_kill".into(),
+                        args: args.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                    });
+                    let res = t.job_kill(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "job_notify",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Value| {
+                let t = t.clone();
+                let args = js_to_json(&args);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "job_notify".into(),
+                        args: args.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                    });
+                    let res = t.job_notify(args).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,
