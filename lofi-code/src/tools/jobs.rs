@@ -5,7 +5,7 @@
 //! redacted environment as `lofi.bash`, in its own process group so a kill
 //! tears down the whole tree. Stdout and stderr share one per-job log file
 //! under the session tmp dir (a read root, so `lofi.read(log_path)` also
-//! works); `job_read` pages that file over a byte cursor. A terminal
+//! works); `jobRead` pages that file over a byte cursor. A terminal
 //! transition queues a completion notice that the host agent injects at
 //! the next round boundary and surfaces live as a `Notice`. Jobs are
 //! scoped to the owning session: the agent creates one registry and shares
@@ -26,14 +26,14 @@ use lofi_error::{Error, Result};
 use super::bash_util::PgrpKillGuard;
 use super::BuiltinTools;
 
-/// Byte budget for a single `job_read` page. Generous compared to the
+/// Byte budget for a single `jobRead` page. Generous compared to the
 /// user-visible bash tail because the agent explicitly pages; still bounded
 /// so a chatty job cannot flood one tool result.
 const MAX_JOB_READ_BYTES: usize = 64 * 1024;
 /// How often the driver task re-checks the child, the kill flag, and the
 /// timeout.
 const JOB_POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// Default progress-notice interval when `job_notify` enables periodic
+/// Default progress-notice interval when `jobNotify` enables periodic
 /// pings without passing `intervalMs`.
 const DEFAULT_NOTIFY_INTERVAL_MS: u64 = 30_000;
 /// Floor for the progress-notice interval. Anything lower is clamped here
@@ -148,9 +148,9 @@ pub struct JobInfo {
 
 struct JobHandle {
     data: Mutex<Job>,
-    /// Fired when the job reaches a terminal state; `job_wait` listens.
+    /// Fired when the job reaches a terminal state; `jobWait` listens.
     done: Notify,
-    /// Set by `job_kill`; the driver task polls it between `try_wait`s.
+    /// Set by `jobKill`; the driver task polls it between `try_wait`s.
     cancel: std::sync::atomic::AtomicBool,
 }
 
@@ -295,7 +295,7 @@ impl JobRegistry {
     }
 
     /// Kill a job's whole process group and mark it cancelled. Synchronous
-    /// core shared by the `job_kill` tool and the UI modal; `true` when the
+    /// core shared by the `jobKill` tool and the UI modal; `true` when the
     /// job existed and was running (so a kill actually happened).
     pub fn kill(&self, id: u64) -> bool {
         let Some(handle) = self.get(id) else {
@@ -438,13 +438,13 @@ impl BuiltinTools {
         let cmd = args
             .get("cmd")
             .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("job_spawn: missing 'cmd'".into()))?
+            .ok_or_else(|| Error::Tool("jobSpawn: missing 'cmd'".into()))?
             .to_owned();
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
 
         // Notifications at spawn. Default: terminal only. `notify: false`
         // silences everything; `notifyIntervalMs` (clamped to the floor)
-        // turns on periodic pings without needing a second `job_notify`
+        // turns on periodic pings without needing a second `jobNotify`
         // call. Passing the interval alone is enough — opting into periodic
         // ticks implies `notify: true`.
         let mut notify = NotifyOpts::terminal_only();
@@ -681,7 +681,7 @@ impl BuiltinTools {
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Calling `job_notify` at all means "notify me", so a missing
+        // Calling `jobNotify` at all means "notify me", so a missing
         // `enabled` key is treated as `true`.
         let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         job.notify.enabled = enabled;
@@ -709,7 +709,7 @@ impl BuiltinTools {
 
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
-/// terminal transition updates the job record, wakes `job_wait` listeners,
+/// terminal transition updates the job record, wakes `jobWait` listeners,
 /// and queues the completion notice for the host agent.
 // The driver takes only the JobRegistry it needs to publish notices. Taking
 // the whole BuiltinTools would leak its tool callback (an UnboundedSender per
@@ -734,7 +734,7 @@ async fn run_job(
 
     loop {
         if handle.cancel.load(Ordering::Relaxed) {
-            // `job_kill` already set the state; just reap.
+            // `jobKill` already set the state; just reap.
             let _ = child.wait().await;
             guard.disarm();
             break;
@@ -773,7 +773,7 @@ async fn run_job(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((state, exit_code, signal)) = outcome {
-            // A `job_kill` that won the race already set Cancelled; do not
+            // A `jobKill` that won the race already set Cancelled; do not
             // overwrite a terminal state.
             if !job.state.is_terminal() {
                 job.state = state;

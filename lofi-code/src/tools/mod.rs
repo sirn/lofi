@@ -137,7 +137,7 @@ impl BuiltinTools {
     }
 
     /// Shares the owning session's job registry. Without this each exec
-    /// would get a fresh registry and `job_status` on the next call could
+    /// would get a fresh registry and `jobStatus` on the next call could
     /// not see a job spawned by the previous one.
     #[must_use]
     pub fn with_jobs(mut self, jobs: JobRegistry) -> Self {
