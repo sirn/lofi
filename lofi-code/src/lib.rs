@@ -199,7 +199,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("confirm", &self.confirm.is_some())
             .field("auto_mode", &self.auto_mode.is_some())
             .field("skills_dir", &self.skills_dir)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -317,6 +317,7 @@ pub fn compile_ts(src: &str) -> Result<String> {
 /// Returns [`Error::Sandbox`] for compile failures, CPU-budget exhaustion,
 /// cancellation, guest exceptions, or tool errors that propagate as thrown
 /// exceptions.
+#[allow(clippy::too_many_lines)]
 pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecResult> {
     let js = compile_ts(src)?;
 
