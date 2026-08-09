@@ -25,6 +25,7 @@ fn ctx(root: &Path) -> ExecCtx {
         auto_mode: None,
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
+        jobs: lofi_code::tools::JobRegistry::new(),
     }
 }
 
@@ -231,6 +232,7 @@ async fn strings_exposed_as_lofi_strings() {
         auto_mode: None,
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
+        jobs: lofi_code::tools::JobRegistry::new(),
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -318,6 +320,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         auto_mode: None,
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
+        jobs: lofi_code::tools::JobRegistry::new(),
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
                await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \
@@ -382,4 +385,141 @@ async fn exec_honours_configured_truncate_cap() {
     let content = res.value["content"].as_str().unwrap();
     assert!(content.contains("line 1"));
     assert!(!content.contains("line 10"));
+}
+
+#[tokio::test]
+async fn job_spawn_returns_immediately_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Shared registry across two execs: the second call must see the job the
+    // first one spawned, or the whole feature is a no-op.
+    let jobs = lofi_code::tools::JobRegistry::new();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = jobs.clone();
+    let spawn = exec(
+        "const r = await lofi.job_spawn({ cmd: 'echo bg-ok' }); return r;",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(spawn.value["ok"], json!(true));
+    assert_eq!(spawn.value["state"], json!("running"));
+    let id = spawn.value["id"].as_str().unwrap().to_string();
+
+    let src = format!(
+        "const s = await lofi.job_wait({{ id: '{id}' }}); return {{ state: s.state, code: s.exit_code }};"
+    );
+    let done = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(done.value["state"], json!("completed"));
+    assert_eq!(done.value["code"], json!(0));
+}
+
+#[tokio::test]
+async fn job_spawn_without_timeout_has_no_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let spawn = exec(
+        "const r = await lofi.job_spawn({ cmd: 'echo x' }); return r.timeout_ms;",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    // No default deadline: the caller must opt in to a timeout.
+    assert!(spawn.value.is_null());
+}
+
+#[tokio::test]
+async fn job_read_pages_output_over_a_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = r#"
+        const s = await lofi.job_spawn({ cmd: 'printf \"l1\\nl2\\nl3\\n\"' });
+        await lofi.job_wait({ id: s.id });
+        const p1 = await lofi.job_read({ id: s.id, limit: 3 });
+        const p2 = await lofi.job_read({ id: s.id, cursor: p1.cursor });
+        return { a: p1.output, b: p2.output, done: p2.done };
+    "#;
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["a"], json!("l1\n"));
+    assert_eq!(res.value["b"], json!("l2\nl3\n"));
+    assert_eq!(res.value["done"], json!(true));
+}
+
+#[tokio::test]
+async fn job_wait_with_timeout_returns_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = "const s = await lofi.job_spawn({ cmd: 'sleep 30' }); const w = await lofi.job_wait({ id: s.id, timeout_ms: 50 }); await lofi.job_kill({ id: s.id }); return w.state;";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value, json!("running"));
+}
+
+#[tokio::test]
+async fn job_kill_is_idempotent_and_kills_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("survivor");
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let cmd =
+        serde_json::to_string(&format!("(sleep 5; touch {}) & wait", marker.display())).unwrap();
+    let src = format!("const s = await lofi.job_spawn({{ cmd: {cmd} }}); const k1 = await lofi.job_kill({{ id: s.id }}); const k2 = await lofi.job_kill({{ id: s.id }}); return {{ a: k1.state, b: k2.state }};");
+    let res = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["a"], json!("cancelled"));
+    assert_eq!(res.value["b"], json!("cancelled"));
+    // Give a straggler a chance to fire; the marker must never appear.
+    tokio::time::sleep(std::time::Duration::from_millis(5_500)).await;
+    assert!(!marker.exists(), "background child survived kill");
+}
+
+#[tokio::test]
+async fn job_completion_queues_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = lofi_code::tools::JobRegistry::new();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = jobs.clone();
+    let src = "const s = await lofi.job_spawn({ cmd: 'exit 3' }); await lofi.job_wait({ id: s.id }); return s.id;";
+    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let notices = jobs.drain_notices();
+    assert_eq!(notices.len(), 1, "notices: {notices:?}");
+    assert!(notices[0].contains("failed"), "notice: {}", notices[0]);
+    assert!(notices[0].contains("exit 3"), "notice: {}", notices[0]);
+}
+
+#[tokio::test]
+async fn job_notify_disabled_suppresses_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = lofi_code::tools::JobRegistry::new();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = jobs.clone();
+    let src = "const s = await lofi.job_spawn({ cmd: 'true' }); await lofi.job_notify({ id: s.id, enabled: false }); await lofi.job_wait({ id: s.id }); return s.id;";
+    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert!(jobs.drain_notices().is_empty());
+}
+
+#[tokio::test]
+async fn job_unknown_id_returns_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = "return await lofi.job_status({ id: '999' });";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["ok"], json!(false));
+    assert!(res.value["error"].as_str().unwrap().contains("no such job"));
+}
+
+#[tokio::test]
+async fn job_spawn_honours_shell_policy_deny() {
+    // The default (untrusted) ctx denies shell commands without a policy
+    // match; a background job must not bypass that.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = "return await lofi.job_spawn({ cmd: 'echo hi' });";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["ok"], json!(false));
+    assert!(res.value["status"].as_str().is_some(), "res: {}", res.value);
 }

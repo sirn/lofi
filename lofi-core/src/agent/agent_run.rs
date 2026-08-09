@@ -253,6 +253,25 @@ impl Agent {
                     break;
                 }
                 Ok(false) => {
+                    // Drain background-job completions so the model sees them
+                    // at the next round boundary. A job that finished while the
+                    // agent was idle is surfaced here on the next turn, and its
+                    // recorded user message doubles as the audit record. The
+                    // Notice event is live-only (matching `ContextPressure`):
+                    // replay rebuilds from the injected message instead.
+                    let job_notices = self.jobs.drain_notices();
+                    if !job_notices.is_empty() {
+                        let text = job_notices.join("\n");
+                        messages.push(Message {
+                            role: Role::User,
+                            blocks: vec![ContentBlock::Text {
+                                text: format!("[background job update]\n{text}"),
+                            }],
+                        });
+                        if !tx.is_closed() {
+                            let _ = tx.send(AgentEvent::Notice(text.clone())).await;
+                        }
+                    }
                     // The assistant tool call and its results form a complete,
                     // provider-valid round. Persist that suffix now instead of
                     // retaining the entire long turn only in memory.
@@ -1029,6 +1048,7 @@ impl Agent {
                 auto_mode: self.auto_mode.clone(),
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
+                jobs: self.jobs.clone(),
             };
             let outcome = exec(
                 &code,
