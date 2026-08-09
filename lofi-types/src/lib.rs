@@ -142,6 +142,18 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
     }
 }
 
+/// Where a turn's prompt came from. Typed input is the default; anything
+/// else is an app-injected notice (background-job completions now, more
+/// automation later). Consumers use it to style externally-triggered turns
+/// distinctly from user input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    #[default]
+    User,
+    Notice,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -237,6 +249,18 @@ mod base64_bytes {
 pub struct Message {
     pub role: Role,
     pub blocks: Vec<ContentBlock>,
+    /// Origin of a user-role prompt. Distinguishes typed input from
+    /// app-injected notices so replay does not need a separate marker
+    /// event. Defaults to `User` so older transcripts remain loadable.
+    #[serde(default, skip_serializing_if = "is_default_prompt_kind")]
+    pub kind: PromptKind,
+}
+
+// `skip_serializing_if` requires a `&T` signature; `PromptKind` is `Copy` but
+// serde's contract fixes the parameter form.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_prompt_kind(kind: &PromptKind) -> bool {
+    *kind == PromptKind::User
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +439,11 @@ pub enum SessionEventKind {
         represented: usize,
         kept: usize,
     },
+    /// An event variant this build does not know about — typically a marker
+    /// written by a newer (or older, pre-release) binary. The transcript
+    /// stays loadable; consumers ignore these.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One append-only line in a session transcript log.
@@ -1402,7 +1431,29 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "hello".to_string(),
             }],
+            kind: PromptKind::User,
         });
+        // Default-User kind must skip in the wire form; explicit-Notice must round-trip.
+        let user_json = serde_json::to_value(&Message {
+            role: Role::User,
+            blocks: vec![],
+            kind: PromptKind::User,
+        })
+        .unwrap();
+        assert!(user_json.get("kind").is_none());
+        let notice_json = serde_json::to_value(&Message {
+            role: Role::User,
+            blocks: vec![],
+            kind: PromptKind::Notice,
+        })
+        .unwrap();
+        assert_eq!(notice_json["kind"], "notice");
+        let parsed: Message = serde_json::from_str(r#"{"role":"user","blocks":[]}"#).unwrap();
+        assert_eq!(
+            parsed.kind,
+            PromptKind::User,
+            "absent kind defaults to User"
+        );
     }
 
     #[test]

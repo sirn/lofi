@@ -90,23 +90,45 @@ impl App {
             .map(|retry| format!("Retry: {} of {}", retry.attempt, retry.max_attempts))
     }
 
+    /// Persistent count of running background jobs, e.g. "1 job" / "2 jobs".
+    /// Always visible while any job runs, unlike the transient badges.
+    pub(crate) fn jobs_badge(&self) -> Option<String> {
+        let jobs = self.jobs.as_ref()?;
+        let n = jobs.running_count();
+        if n == 0 {
+            None
+        } else if n == 1 {
+            Some("1 job".to_string())
+        } else {
+            Some(format!("{n} jobs"))
+        }
+    }
+
     pub(crate) fn queue_badge(&self) -> Option<String> {
         if self.prompt_queue.is_empty() {
             return None;
         }
         let n = self.prompt_queue.len();
-        let preview = &self.prompt_queue[0];
+        let head = &self.prompt_queue[0];
+        // Match the transcript marker so a queued Notice reads the same
+        // everywhere: a hollow bullet signals "system-injected" the way the
+        // user's solid mark signals "you typed this".
+        let marker = match head.kind {
+            lofi_types::PromptKind::User => "",
+            lofi_types::PromptKind::Notice => "▷ ",
+        };
+        let preview = head.text.as_str();
         let truncated = if preview.chars().count() > 40 {
             let mut s: String = preview.chars().take(39).collect();
             s.push('…');
             s
         } else {
-            preview.clone()
+            preview.to_string()
         };
         Some(if n == 1 {
-            format!("Queue: {truncated}")
+            format!("Queue: {marker}{truncated}")
         } else {
-            format!("Queue: {truncated} (+{})", n - 1)
+            format!("Queue: {marker}{truncated} (+{})", n - 1)
         })
     }
 
