@@ -131,6 +131,27 @@ impl App {
         }
     }
 
+    /// Rows the notification area occupies at the given terminal width.
+    /// Only the transient notify badge can overflow one line — quit, yank,
+    /// retry, and queue badges are short by construction and always take a
+    /// single row. A long notify wraps to at most [`NOTIFY_MAX_LINES`] rows.
+    pub(crate) fn notify_lines(&self, w: usize) -> u16 {
+        let Some((msg, _)) = self.notify_badge() else {
+            return 1;
+        };
+        let (label, _) = self.mode_badge();
+        let mode_w = super::view::width(label) + 2;
+        let verbose_w = if self.verbose { 10 } else { 0 };
+        let avail = w
+            .saturating_sub(4)
+            .saturating_sub(mode_w)
+            .saturating_sub(verbose_w);
+        if avail == 0 {
+            return 1;
+        }
+        super::view::wrap(msg, avail).len().min(NOTIFY_MAX_LINES) as u16
+    }
+
     /// Footer cost, shown on the right edge of the usage line. Includes the
     /// current turn's running cost (`turn_cost`) so a multi-round turn shows
     /// a live total before `TurnEnd` folds it into `cost`.
