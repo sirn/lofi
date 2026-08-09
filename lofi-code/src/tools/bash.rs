@@ -10,6 +10,16 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+/// Outcome the race produces: either both pipes drained and `wait` returned,
+/// or the join itself failed (pipe error or spawn-side I/O).
+type RaceInner = std::result::Result<
+    ((Vec<u8>, bool), (Vec<u8>, bool), std::process::ExitStatus),
+    std::io::Error,
+>;
+/// Outer race result: `Err` when the timeout or cancel fired first, `Ok`
+/// wrapping the inner join outcome otherwise.
+type RaceOutcome = std::result::Result<RaceInner, tokio::time::error::Elapsed>;
+
 impl BuiltinTools {
     /// Output is tail-truncated to 4 KB / 20 lines (whichever is hit
     /// first), keeping the end where errors and final results land. When
@@ -126,6 +136,79 @@ impl BuiltinTools {
         approved
     }
 
+    /// Build the host-level `sh -c` invocation: stdout/stderr piped, own
+    /// process group so the whole tree can be killed on timeout/cancel, env
+    /// resolved from the `bash` config (minimal baseline by default; specific
+    /// vars opted back in via `pass_env`/`env_file`).
+    fn command_for(&self, cmd: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&self.root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        self.bash_env.apply(&mut command);
+        command
+    }
+
+    /// Map the race outcome into the JSON shape returned to the guest. The
+    /// three arms correspond to (a) child exited and both pipes drained, (b)
+    /// the join failed (pipe error or spawn-time I/O), and (c) the
+    /// outer timeout/cancel fired before either finished.
+    fn bash_result_json(
+        &self,
+        cmd: &str,
+        timeout_ms: u64,
+        started: Instant,
+        mut guard: PgrpKillGuard,
+        result: RaceOutcome,
+    ) -> Result<Value> {
+        match result {
+            Ok(Ok((out, err, status))) => {
+                guard.disarm();
+                let (out_bytes, out_truncated) = out;
+                let (err_bytes, err_truncated) = err;
+                let mut merged = out_bytes;
+                merged.extend_from_slice(&err_bytes);
+                let pipe_capped = out_truncated || err_truncated;
+                let mut full = String::from_utf8_lossy(&merged).into_owned();
+                self.bash_env.redact(&mut full);
+                let output = self.format_bash_output(&full, pipe_capped);
+                #[allow(clippy::cast_possible_truncation)]
+                let duration_ms = started.elapsed().as_millis() as u64;
+                Ok(json!({
+                    "ok": status.success(),
+                    "output": output,
+                    "code": status.code(),
+                    "command": cmd,
+                    "directory": self.root.display().to_string(),
+                    "signal": status.signal(),
+                    "duration_ms": duration_ms,
+                    "status": if status.signal().is_some() { "signaled" } else { "exited" },
+                }))
+            }
+            Ok(Err(e)) => {
+                drop(guard);
+                Err(Error::Io(e))
+            }
+            Err(_) => {
+                drop(guard);
+                Ok(json!({
+                    "ok": false,
+                    "output": "<timeout>",
+                    "code": Value::Null,
+                    "command": cmd,
+                    "directory": self.root.display().to_string(),
+                    "signal": Value::Null,
+                    "duration_ms": timeout_ms,
+                    "status": "timeout",
+                }))
+            }
+        }
+    }
+
     /// # Errors
     /// Returns [`Error::Io`] only if the process cannot be spawned.
     pub async fn bash(&self, args: Value) -> Result<Value> {
@@ -155,19 +238,11 @@ impl BuiltinTools {
         // children and grandchildren included — rather than just the `sh`
         // leader. The `PgrpKillGuard` makes that robust against early return
         // or future cancellation.
-        let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(&self.root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        self.bash_env.apply(&mut command);
+        let mut command = self.command_for(&cmd);
 
         let started = Instant::now();
         let mut child = command.spawn()?;
-        let mut guard = PgrpKillGuard::new(child.id());
+        let guard = PgrpKillGuard::new(child.id());
         let mut stdout = child
             .stdout
             .take()
@@ -181,23 +256,20 @@ impl BuiltinTools {
         // closes its pipes early but keeps running (`exec >/dev/null 2>&1;
         // sleep 1000`) can't outlive `timeoutMs`. `MAX_BASH_OUTPUT_BYTES` is
         // the pipe-level memory safety cap; user-visible truncation is below.
-        let run = Box::pin(async {
+        let timed = Box::pin(tokio::time::timeout(dur, async move {
             let (out, err, status) = tokio::try_join!(
                 read_capped(&mut stdout, MAX_BASH_OUTPUT_BYTES),
                 read_capped(&mut stderr, MAX_BASH_OUTPUT_BYTES),
                 child.wait(),
             )?;
             Ok::<_, std::io::Error>((out, err, status))
-        });
-        let timed = Box::pin(tokio::time::timeout(dur, run));
+        }));
 
         // Race the run against user cancellation: while the guest awaits the
         // process, no QuickJS bytecode ticks, so the sandbox interrupt handler
         // can't observe `cancel`. Map cancel onto the same elapsed-timeout
         // outcome — that tears down identically (kill the process group, which
         // EOFs the pipes) and reports a non-ok result.
-        // Yield once so a fast command resolves inside the race before we
-        // consult the flag, mirroring the unbiased timeout path when unset.
         let result = match &self.cancel {
             Some(flag) => {
                 let cancel_wait = crate::tools::wait_for_cancel(flag);
@@ -210,7 +282,7 @@ impl BuiltinTools {
                         // error shape rather than name its type.
                         match tokio::time::timeout(
                             Duration::ZERO,
-                            std::future::pending::<std::result::Result<((),(),std::process::ExitStatus), std::io::Error>>(),
+                            std::future::pending::<RaceInner>(),
                         )
                         .await
                         {
@@ -223,50 +295,7 @@ impl BuiltinTools {
             None => timed.await,
         };
 
-        match result {
-            Ok(Ok((out, err, status))) => {
-                guard.disarm();
-                let (out_bytes, out_truncated) = out;
-                let (err_bytes, err_truncated) = err;
-                let mut merged = out_bytes;
-                merged.extend_from_slice(&err_bytes);
-                let pipe_capped = out_truncated || err_truncated;
-                let mut full = String::from_utf8_lossy(&merged).into_owned();
-                self.bash_env.redact(&mut full);
-                let output = self.format_bash_output(&full, pipe_capped);
-                #[allow(clippy::cast_possible_truncation)]
-                let duration_ms = started.elapsed().as_millis() as u64;
-                Ok(json!({
-                    "ok": status.success(),
-                    "output": output,
-                    "code": status.code(),
-                    "command": cmd,
-                    "directory": self.root.display().to_string(),
-                    "signal": status.signal(),
-                    "duration_ms": duration_ms,
-                    "status": if status.signal().is_some() { "signaled" } else { "exited" },
-                }))
-            }
-            Ok(Err(e)) => {
-                drop(guard);
-                let _ = child.wait().await;
-                Err(Error::Io(e))
-            }
-            Err(_) => {
-                drop(guard);
-                let _ = child.wait().await;
-                Ok(json!({
-                    "ok": false,
-                    "output": "<timeout>",
-                    "code": Value::Null,
-                    "command": cmd,
-                    "directory": self.root.display().to_string(),
-                    "signal": Value::Null,
-                    "duration_ms": timeout_ms,
-                    "status": "timeout",
-                }))
-            }
-        }
+        self.bash_result_json(&cmd, timeout_ms, started, guard, result)
     }
 
     /// Tail-truncate `full` to 4 KB / 20 lines and, when truncation occurs,
