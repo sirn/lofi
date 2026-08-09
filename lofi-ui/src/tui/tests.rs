@@ -6706,20 +6706,9 @@ fn permission_dialog_caps_height_and_scrolls_command_preview() {
     assert_eq!(a.pending_confirms.len(), 1);
 }
 
-#[test]
-fn resumed_compaction_restores_summarized_message_count() {
-    // Exact regression: a hard compact kept no tail, its silent continuation
-    // produced only two messages, and the session was then resumed with -c.
-    // The marker's summarized count must survive resume so /compact does not
-    // treat the restored summary as a single message.
-    let dir = tempfile::tempdir().unwrap();
-    let session_store = store::SessionStore::new(dir.path().join("sessions"));
-    let path = session_store
-        .create_cursor(std::path::Path::new("/tmp/resumed-compact"), &"p/m".into())
-        .unwrap()
-        .path()
-        .to_path_buf();
-
+// Write five "old" messages, then a zero-tail compaction marker folding them
+// into "previous summary". Returns the leaf id of the pre-compaction range.
+fn seed_compacted_turn(path: &std::path::Path) {
     let mut old: Vec<SessionEvent> = (0..5)
         .map(|i| SessionEvent {
             id: String::new(),
@@ -6727,9 +6716,9 @@ fn resumed_compaction_restores_summarized_message_count() {
             kind: msg(assistant(&format!("old {i}"))),
         })
         .collect();
-    test_append_events(&path, &mut old, None).unwrap();
+    test_append_events(path, &mut old, None).unwrap();
     test_append_compaction(
-        &path,
+        path,
         &[],
         None,
         "previous summary",
@@ -6741,7 +6730,11 @@ fn resumed_compaction_restores_summarized_message_count() {
         },
     )
     .unwrap();
+}
 
+// Append the silent continuation that triggered the regression: two large
+// assistant messages followed by a TurnEnd reporting 113k input tokens.
+fn seed_post_compact_continuation(path: &std::path::Path) {
     let large = "continued work ".repeat(2_000);
     let mut continuation = vec![
         SessionEvent {
@@ -6768,7 +6761,24 @@ fn resumed_compaction_restores_summarized_message_count() {
             },
         },
     ];
-    test_append_events(&path, &mut continuation, None).unwrap();
+    test_append_events(path, &mut continuation, None).unwrap();
+}
+
+#[test]
+fn resumed_compaction_restores_summarized_message_count() {
+    // Exact regression: a hard compact kept no tail, its silent continuation
+    // produced only two messages, and the session was then resumed with -c.
+    // The marker's summarized count must survive resume so /compact does not
+    // treat the restored summary as a single message.
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = store::SessionStore::new(dir.path().join("sessions"));
+    let path = session_store
+        .create_cursor(std::path::Path::new("/tmp/resumed-compact"), &"p/m".into())
+        .unwrap()
+        .path()
+        .to_path_buf();
+    seed_compacted_turn(&path);
+    seed_post_compact_continuation(&path);
 
     let resumed = store::SessionCursor::open(path.clone()).unwrap();
     let index = resumed.snapshot().unwrap().index;
@@ -7262,7 +7272,7 @@ fn turn_height_matches_emitted_line_count() {
     for active in [false, true] {
         for w in [28usize, 50, 90, 120] {
             for has_thinking in [false, true] {
-                let mut a = app();
+                let a = app();
                 let mut blocks = Vec::new();
                 if has_thinking {
                     blocks.push(Block::Thinking(ThinkingBlock {
@@ -7339,7 +7349,7 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
     use crate::tui::view::component::Cx;
 
     let w = 40usize;
-    let mut a = app();
+    let a = app();
     let theme = a.theme;
     let mut text = String::new();
     let mut prev_rows: Vec<String> = Vec::new();
