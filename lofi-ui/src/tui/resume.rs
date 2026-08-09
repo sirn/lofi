@@ -54,6 +54,9 @@ pub(super) fn replay_indexed_session(
         } else {
             app.apply_file_backed_replay_event(AgentEvent::TurnStart {
                 prompt: prompts.get(turn).cloned().unwrap_or_default(),
+                // The kind is not persisted; replays render every prompt as a
+                // user turn.
+                kind: lofi_types::PromptKind::User,
             });
             for &i in selected {
                 if !matches!(

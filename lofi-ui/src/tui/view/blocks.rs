@@ -95,6 +95,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
     if !turn.prompt.is_empty() {
         stack.push(UserMessage {
             prompt: &turn.prompt,
+            kind: turn.kind,
         });
     }
     for block in &turn.blocks {
@@ -175,6 +176,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
 
 struct UserMessage<'a> {
     prompt: &'a str,
+    kind: lofi_types::PromptKind,
 }
 
 impl Component for UserMessage<'_> {
@@ -182,14 +184,35 @@ impl Component for UserMessage<'_> {
         let t = cx.theme;
         let w = cx.width;
         let content_w = w.saturating_sub(2);
-        let mark = Style::new().fg(user_indicator(t));
+        // Notice turns (job wake-ups, future automation) are de-emphasized so
+        // an app-injected prompt never competes visually with typed input:
+        // hollow bullet instead of a solid bar, outline-gray instead of the
+        // user color, italic muted body instead of regular fg. The marker
+        // appears on the first row only; continuation rows leave the gutter
+        // blank so the body reads as a single block.
+        let (mark_glyph, mark_color, body_style) = match self.kind {
+            lofi_types::PromptKind::User => ("▌ ", user_indicator(t), Style::new().fg(t.fg)),
+            lofi_types::PromptKind::Notice => (
+                "▷ ",
+                t.subtle,
+                Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
+            ),
+        };
+        let mark = Style::new().fg(mark_color);
+        let blank = " ".repeat(mark_glyph.chars().count());
         render_markdown_body(
             self.prompt.trim(),
             t,
             w,
             content_w,
-            Style::new().fg(t.fg),
-            move |_| vec![Span::styled("▌ ", mark)],
+            body_style,
+            move |row| {
+                if row == 0 {
+                    vec![Span::styled(mark_glyph, mark)]
+                } else {
+                    vec![Span::raw(blank.clone())]
+                }
+            },
         )
     }
 }
