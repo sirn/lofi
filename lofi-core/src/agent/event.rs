@@ -111,6 +111,12 @@ pub enum AgentEvent {
     /// Live-only: never persisted as a `SessionEvent`, matching
     /// `ContextPressure`.
     Notice(String),
+    /// A background-job notice (periodic tick or terminal transition). The
+    /// TUI renders this as a clearly-automatic transcript marker on its own
+    /// turn and activates a follow-up turn when idle. Never persisted as a
+    /// `SessionEvent` — the registered wake-up prompt carries the audit into
+    /// the durable history instead.
+    JobNotice(String),
     /// A provider error that ended the run after retry classification.
     /// Transient errors that will be retried use RetryStart/RetryEnd instead,
     /// so they never appear as fatal transcript rows.

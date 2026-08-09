@@ -267,6 +267,8 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::UserBash { .. }
         | AgentEvent::TurnContinue
         | AgentEvent::Notice(_)
+        // Live-only: pushed as a standalone turn via `apply_event` instead.
+        | AgentEvent::JobNotice(_)
         | AgentEvent::ContextPressure { .. } => {}
     }
 }
