@@ -1,0 +1,14 @@
+{code,core,ui}: split long functions instead of allowing too_many_lines
+
+Pedantic clippy flagged four functions over the 100-line limit. Each
+had clear seams at the role/phase boundaries, so extract helpers
+(bash's host-command constructor and race-outcome mapping, exec's CPU
+guard installer, to_openai_chat_messages per-role emitters, the
+compaction-restore test's seed helpers) rather than ship allow
+attributes the codebase otherwise avoids.
+
+While the lint door was open, fix the remaining pedantic items:
+doc backticks on QuickJS and a quoted error message,
+ExecCtx::Debug::finish_non_exhaustive since closures are intentionally
+omitted, writeln! over format!+push_str, and two let mut that did not
+need mut.
