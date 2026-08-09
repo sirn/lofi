@@ -1,7 +1,7 @@
 use lofi_types::{CommandEntry, HeredocPolicy, MatchMode, PolicyAction, RedirectPolicy};
 
 use super::extract::{extract_commands, CommandSource, ExtractedCommand, WrapperRuleMap};
-use super::token::tokenize;
+use super::token::{tokenize, Token};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
@@ -37,6 +37,17 @@ impl ResolvedPolicy {
                 };
             }
         };
+
+        // Hard-coded (not a per-rule deny): no config knob turns this off,
+        // because a detached child outlives the Bash call and the model
+        // never sees its output.
+        if let Some(reason) = detect_backgrounding(&tokens) {
+            return Decision {
+                action: PolicyAction::Deny,
+                reason,
+                matched_command: Some(command.to_string()),
+            };
+        }
 
         let cmds = extract_commands(&tokens, CommandSource::Direct, &self.wrappers);
         if cmds.is_empty() {
@@ -186,6 +197,42 @@ impl ResolvedPolicy {
             matched_command: None,
         }
     }
+}
+
+/// Detect a shell idiom that detaches work from the Bash call. Returns a
+/// human-readable deny reason on match, None when the input is clean.
+///
+/// Recurses into subshells and command substitution so "sh -c 'sleep 1 &'"
+/// cannot sneak past the top-level scan.
+fn detect_backgrounding(tokens: &[Token]) -> Option<String> {
+    const DETACH_WORDS: &[&str] = &["nohup", "setsid", "disown"];
+
+    let mut start_of_segment = true;
+    for tok in tokens {
+        match tok {
+            Token::Operator(op) if op == "&" => {
+                return Some("bare & is not allowed; use lofi.jobSpawn for background jobs".into());
+            }
+            Token::Operator(_) => {
+                start_of_segment = true;
+            }
+            Token::Word(w) => {
+                if start_of_segment && DETACH_WORDS.contains(&w.as_str()) {
+                    return Some(format!(
+                        "{w} is not allowed; use lofi.jobSpawn for background jobs"
+                    ));
+                }
+                start_of_segment = false;
+            }
+            Token::Group { tokens, .. } => {
+                if let Some(reason) = detect_backgrounding(tokens) {
+                    return Some(reason);
+                }
+            }
+            Token::Redirect { .. } => {}
+        }
+    }
+    None
 }
 
 fn action_rank(a: PolicyAction) -> u8 {
@@ -341,6 +388,50 @@ mod tests {
         let p = policy_for(ShellPolicyMode::WorkspaceWrite);
         let d = p.evaluate("git commit -m test");
         assert_eq!(d.action, PolicyAction::Ask);
+    }
+
+    #[test]
+    fn deny_bare_ampersand_backgrounds() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        let d = p.evaluate("sleep 30 &");
+        assert_eq!(d.action, PolicyAction::Deny);
+        assert!(d.reason.contains("jobSpawn"), "reason: {}", d.reason);
+    }
+
+    #[test]
+    fn deny_ampersand_after_otherwise_allowed_command() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        // Even when every segment is allowed, the bare "&" is a hard deny.
+        let d = p.evaluate("cargo build & cargo test");
+        assert_eq!(d.action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn deny_nohup_setsid_disown() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        for cmd in ["nohup sleep 5", "setsid cargo watch", "disown %1"] {
+            let d = p.evaluate(cmd);
+            assert_eq!(d.action, PolicyAction::Deny, "cmd: {cmd}");
+        }
+    }
+
+    #[test]
+    fn deny_backgrounding_inside_subshell_and_substitution() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        for cmd in ["(sleep 5 &)", "echo $(sleep 5 &)", "echo `sleep 5 &`"] {
+            let d = p.evaluate(cmd);
+            assert_eq!(d.action, PolicyAction::Deny, "cmd: {cmd}");
+        }
+    }
+
+    #[test]
+    fn allow_double_ampersand_and_pipeline() {
+        let p = policy_for(ShellPolicyMode::WorkspaceWrite);
+        // "&&" and "|" are sequencing, not backgrounding.
+        let d = p.evaluate("cargo build && cargo test");
+        assert_eq!(d.action, PolicyAction::Allow);
+        let d = p.evaluate("cargo build | tail -3");
+        assert_eq!(d.action, PolicyAction::Allow);
     }
 
     #[test]
