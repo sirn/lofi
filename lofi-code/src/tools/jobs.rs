@@ -5,7 +5,7 @@
 //! redacted environment as `lofi.bash`, in its own process group so a kill
 //! tears down the whole tree. Stdout and stderr share one per-job log file
 //! under the session tmp dir (a read root, so `lofi.read(log_path)` also
-//! works); `job_read` pages that file over a byte cursor. A terminal
+//! works); `jobRead` pages that file over a byte cursor. A terminal
 //! transition queues a completion notice that the host agent injects at
 //! the next round boundary and surfaces live as a `Notice`. Jobs are
 //! scoped to the owning session: the agent creates one registry and shares
@@ -26,15 +26,15 @@ use lofi_error::{Error, Result};
 use super::bash_util::PgrpKillGuard;
 use super::BuiltinTools;
 
-/// Byte budget for a single `job_read` page. Generous compared to the
+/// Byte budget for a single `jobRead` page. Generous compared to the
 /// user-visible bash tail because the agent explicitly pages; still bounded
 /// so a chatty job cannot flood one tool result.
 const MAX_JOB_READ_BYTES: usize = 64 * 1024;
 /// How often the driver task re-checks the child, the kill flag, and the
 /// timeout.
 const JOB_POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// Default progress-notice interval when `job_notify` enables periodic
-/// pings without passing `interval_ms`.
+/// Default progress-notice interval when `jobNotify` enables periodic
+/// pings without passing `intervalMs`.
 const DEFAULT_NOTIFY_INTERVAL_MS: u64 = 30_000;
 /// Floor for the progress-notice interval. Anything lower is clamped here
 /// so a chatty interval cannot flood the transcript.
@@ -119,14 +119,14 @@ impl Job {
             "command": self.cmd,
             "directory": root.display().to_string(),
             "pid": self.pid,
-            "exit_code": self.exit_code,
+            "exitCode": self.exit_code,
             "signal": self.signal,
-            "duration_ms": duration_ms,
-            "timeout_ms": self.timeout_ms,
-            "log_path": self.log_path,
+            "durationMs": duration_ms,
+            "timeoutMs": self.timeout_ms,
+            "logPath": self.log_path,
             "notify": self.notify.enabled,
-            "notify_interval_ms": self.notify.interval_ms,
-            "notify_changed": self.notify.changed,
+            "notifyIntervalMs": self.notify.interval_ms,
+            "notifyChanged": self.notify.changed,
         })
     }
 }
@@ -148,9 +148,9 @@ pub struct JobInfo {
 
 struct JobHandle {
     data: Mutex<Job>,
-    /// Fired when the job reaches a terminal state; `job_wait` listens.
+    /// Fired when the job reaches a terminal state; `jobWait` listens.
     done: Notify,
-    /// Set by `job_kill`; the driver task polls it between `try_wait`s.
+    /// Set by `jobKill`; the driver task polls it between `try_wait`s.
     cancel: std::sync::atomic::AtomicBool,
 }
 
@@ -295,7 +295,7 @@ impl JobRegistry {
     }
 
     /// Kill a job's whole process group and mark it cancelled. Synchronous
-    /// core shared by the `job_kill` tool and the UI modal; `true` when the
+    /// core shared by the `jobKill` tool and the UI modal; `true` when the
     /// job existed and was running (so a kill actually happened).
     pub fn kill(&self, id: u64) -> bool {
         let Some(handle) = self.get(id) else {
@@ -438,9 +438,23 @@ impl BuiltinTools {
         let cmd = args
             .get("cmd")
             .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("job_spawn: missing 'cmd'".into()))?
+            .ok_or_else(|| Error::Tool("jobSpawn: missing 'cmd'".into()))?
             .to_owned();
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+
+        // Notifications at spawn. Default: terminal only. `notify: false`
+        // silences everything; `notifyIntervalMs` (clamped to the floor)
+        // turns on periodic pings without needing a second `jobNotify`
+        // call. Passing the interval alone is enough — opting into periodic
+        // ticks implies `notify: true`.
+        let mut notify = NotifyOpts::terminal_only();
+        if let Some(on) = args.get("notify").and_then(Value::as_bool) {
+            notify.enabled = on;
+        }
+        if let Some(ms) = args.get("notifyIntervalMs").and_then(Value::as_u64) {
+            notify.interval_ms = Some(ms.max(MIN_NOTIFY_INTERVAL_MS));
+            notify.enabled = true;
+        }
 
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
@@ -487,7 +501,7 @@ impl BuiltinTools {
                 signal: None,
                 log_path: log_path.clone(),
                 timeout_ms,
-                notify: NotifyOpts::terminal_only(),
+                notify,
             }),
             done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
@@ -508,8 +522,8 @@ impl BuiltinTools {
             "command": cmd,
             "directory": self.root.display().to_string(),
             "pid": pid,
-            "timeout_ms": timeout_ms,
-            "log_path": log_path,
+            "timeoutMs": timeout_ms,
+            "logPath": log_path,
         }))
     }
 
@@ -576,14 +590,14 @@ impl BuiltinTools {
             "id": id.to_string(),
             "state": state.as_str(),
             "cursor": end as u64,
-            "total_bytes": total,
+            "totalBytes": total,
             "output": chunk,
             "done": state.is_terminal(),
         }))
     }
 
     /// Bounded wait for the job to reach a terminal state. Returns the
-    /// final status, or the still-running status when `timeout_ms` elapses.
+    /// final status, or the still-running status when `timeoutMs` elapses.
     /// Waiting never cancels the job.
     ///
     /// # Errors
@@ -593,7 +607,7 @@ impl BuiltinTools {
         let Some(handle) = self.jobs.get(id) else {
             return Ok(no_such_job(id));
         };
-        let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64);
+        let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
 
         // Fast path: already terminal.
         {
@@ -650,11 +664,11 @@ impl BuiltinTools {
     }
 
     /// Configure notifications for this job. The terminal transition always
-    /// queues one notice (unless `enabled: false`); `interval_ms` turns on
+    /// queues one notice (unless `enabled: false`); `intervalMs` turns on
     /// periodic progress pings while the job runs. With `changed` (the
     /// default) a tick only emits when the log grew since the last tick, so
     /// an idle-but-alive job stays quiet; `changed: false` emits every tick.
-    /// `interval_ms` is clamped to a 5s floor and defaults to 30s.
+    /// `intervalMs` is clamped to a 5s floor and defaults to 30s.
     /// # Errors
     /// Returns [`Error::Tool`] when `id` is missing or invalid.
     #[allow(clippy::unused_async)]
@@ -667,7 +681,7 @@ impl BuiltinTools {
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Calling `job_notify` at all means "notify me", so a missing
+        // Calling `jobNotify` at all means "notify me", so a missing
         // `enabled` key is treated as `true`.
         let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         job.notify.enabled = enabled;
@@ -677,7 +691,7 @@ impl BuiltinTools {
         if enabled && job.notify.interval_ms.is_none() {
             job.notify.interval_ms = Some(DEFAULT_NOTIFY_INTERVAL_MS);
         }
-        if let Some(ms) = args.get("interval_ms").and_then(Value::as_u64) {
+        if let Some(ms) = args.get("intervalMs").and_then(Value::as_u64) {
             job.notify.interval_ms = Some(ms.max(MIN_NOTIFY_INTERVAL_MS));
         }
         if let Some(changed) = args.get("changed").and_then(Value::as_bool) {
@@ -687,7 +701,7 @@ impl BuiltinTools {
             "ok": true,
             "id": id.to_string(),
             "notify": job.notify.enabled,
-            "interval_ms": job.notify.interval_ms,
+            "intervalMs": job.notify.interval_ms,
             "changed": job.notify.changed,
         }))
     }
@@ -695,7 +709,7 @@ impl BuiltinTools {
 
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
-/// terminal transition updates the job record, wakes `job_wait` listeners,
+/// terminal transition updates the job record, wakes `jobWait` listeners,
 /// and queues the completion notice for the host agent.
 // The driver takes only the JobRegistry it needs to publish notices. Taking
 // the whole BuiltinTools would leak its tool callback (an UnboundedSender per
@@ -720,7 +734,7 @@ async fn run_job(
 
     loop {
         if handle.cancel.load(Ordering::Relaxed) {
-            // `job_kill` already set the state; just reap.
+            // `jobKill` already set the state; just reap.
             let _ = child.wait().await;
             guard.disarm();
             break;
@@ -759,7 +773,7 @@ async fn run_job(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((state, exit_code, signal)) = outcome {
-            // A `job_kill` that won the race already set Cancelled; do not
+            // A `jobKill` that won the race already set Cancelled; do not
             // overwrite a terminal state.
             if !job.state.is_terminal() {
                 job.state = state;
