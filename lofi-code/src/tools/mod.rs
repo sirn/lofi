@@ -128,7 +128,7 @@ impl BuiltinTools {
 
     /// Attaches the run's cooperative cancellation flag. Long-running tools
     /// (`bash`) race their work against it so user cancellation takes effect
-    /// even while the guest is suspended awaiting the tool — the QuickJS
+    /// even while the guest is suspended awaiting the tool — the `QuickJS`
     /// interrupt handler cannot fire there, so this is the only path.
     #[must_use]
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {

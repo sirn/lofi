@@ -1143,7 +1143,7 @@ impl Agent {
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block
 /// must be answered by a `ToolResult` before the message list is handed back
 /// to the caller. Providers like the Anthropic Messages API reject an orphaned
-/// `tool_use` (400 "did not find any tool_result blocks"), and the transcript
+/// `tool_use` (400 `"did not find any tool_result blocks"`), and the transcript
 /// keeps cancelled partials for replay — so pairing is structural, not a
 /// per-outcome fallback. Idempotent: appends an error `ToolResult` only for
 /// `ToolUse` blocks in the last assistant message that have no matching result
@@ -1216,6 +1216,7 @@ fn count_image_blocks(messages: &[Message]) -> usize {
 /// text. The model still sees that an attachment was present. Used only on the
 /// send path; the durable transcript is untouched.
 fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+    use std::fmt::Write as _;
     messages
         .iter()
         .map(|m| Message {
@@ -1238,7 +1239,7 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
                             if !content.is_empty() {
                                 content.push('\n');
                             }
-                            content.push_str(&format!("[image omitted: model does not support images; media_type={}]", img.media_type));
+                            let _ = write!(content, "[image omitted: model does not support images; media_type={}]", img.media_type);
                         }
                         ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
