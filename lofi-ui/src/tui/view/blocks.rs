@@ -2450,6 +2450,85 @@ fn native_body(nt: &NativeTool) -> NativeBody {
                 notice: b("truncated").then_some("(truncated)".into()),
             }
         }
+        "jobRead" => {
+            let output = s("output");
+            let cursor = v
+                .get("cursor")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let total = v
+                .get("totalBytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let done = b("done");
+            let notice = if done {
+                Some(format!("(end of log; {total} bytes total)"))
+            } else if total > 0 {
+                Some(format!("(read {cursor} of {total} bytes)"))
+            } else {
+                None
+            };
+            NativeBody {
+                lines: split_lines(output),
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice,
+            }
+        }
+        "jobSpawn" | "jobStatus" | "jobWait" | "jobKill" | "jobNotify" => {
+            let mut lines: Vec<String> = Vec::new();
+            let state = s("state");
+            if !state.is_empty() {
+                lines.push(format!("state: {state}"));
+            }
+            let mut stats: Vec<String> = Vec::new();
+            if let Some(code) = v.get("exitCode").and_then(serde_json::Value::as_i64) {
+                stats.push(format!("exit {code}"));
+            }
+            if let Some(sig) = v.get("signal").and_then(serde_json::Value::as_i64) {
+                stats.push(format!("signal {sig}"));
+            }
+            if let Some(ms) = v.get("durationMs").and_then(serde_json::Value::as_u64) {
+                stats.push(format!(
+                    "duration {}",
+                    prim::fmt_duration(std::time::Duration::from_millis(ms))
+                ));
+            }
+            if !stats.is_empty() {
+                lines.push(stats.join("  "));
+            }
+            let mut notify_bits: Vec<String> = Vec::new();
+            if v.get("notify").is_some() {
+                notify_bits.push(format!("notify: {}", b("notify")));
+            }
+            if let Some(iv) = v
+                .get("notifyIntervalMs")
+                .and_then(serde_json::Value::as_u64)
+            {
+                notify_bits.push(format!(
+                    "interval {}",
+                    prim::fmt_duration(std::time::Duration::from_millis(iv))
+                ));
+            }
+            if v.get("notifyChanged").is_some() {
+                notify_bits.push(format!("changed {}", b("notifyChanged")));
+            }
+            if !notify_bits.is_empty() {
+                lines.push(notify_bits.join("  "));
+            }
+            let log_path = s("logPath");
+            if !log_path.is_empty() {
+                lines.push(format!("log: {log_path}"));
+            }
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
         _ => NativeBody {
             lines: split_lines(raw),
             numbered: false,
@@ -3272,6 +3351,8 @@ use active_indicator as _;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
     use super::{
         analyze, markdown_body_height, native_body, native_preview_range, render_markdown_body,
         trim_reasoning_summary, Align, MdBlock,
@@ -3484,6 +3565,109 @@ mod tests {
         };
         assert_eq!(native_body(&tool).lines, vec!["command not found"]);
         assert_eq!(tool.result.as_deref(), Some(raw.as_str()));
+    }
+
+    #[test]
+    fn job_status_body_renders_compact_summary() {
+        let raw = serde_json::json!({
+            "id": "1786294694788353138",
+            "state": "completed",
+            "exitCode": 0,
+            "signal": null,
+            "durationMs": 30089,
+            "logPath": "/tmp/lofi-job.log",
+            "notify": true,
+            "notifyChanged": true,
+            "notifyIntervalMs": 5000,
+            "ok": true,
+            "command": "for i in 1 2; do echo $i; done",
+            "directory": "/tmp",
+            "timeoutMs": 30000
+        })
+        .to_string();
+        let tool = NativeTool {
+            id: 1,
+            name: "jobStatus".to_string(),
+            args: String::new(),
+            result: Some(raw),
+            preview: None,
+            is_error: false,
+            done: true,
+        };
+        let body = native_body(&tool);
+        assert_eq!(body.lines[0], "state: completed");
+        assert!(
+            body.lines[1].contains("exit 0"),
+            "exit code line: {:?}",
+            body.lines[1]
+        );
+        assert!(
+            body.lines[1].contains("duration"),
+            "duration line: {:?}",
+            body.lines[1]
+        );
+        let notify_line = body
+            .lines
+            .iter()
+            .find(|l| l.starts_with("notify:"))
+            .expect("notify line present");
+        assert!(notify_line.contains("notify: true"), "{notify_line}");
+        assert!(notify_line.contains("interval"), "{notify_line}");
+        assert!(
+            body.lines.last().is_some_and(|l| l.starts_with("log: ")),
+            "log path last: {:?}",
+            body.lines
+        );
+    }
+
+    #[test]
+    fn job_read_body_renders_output_with_tail_notice() {
+        let raw = serde_json::json!({
+            "id": "1",
+            "state": "completed",
+            "output": "beat-1\nbeat-2\n",
+            "cursor": 14,
+            "totalBytes": 71,
+            "done": false,
+            "ok": true
+        })
+        .to_string();
+        let tool = NativeTool {
+            id: 1,
+            name: "jobRead".to_string(),
+            args: String::new(),
+            result: Some(raw),
+            preview: None,
+            is_error: false,
+            done: true,
+        };
+        let body = native_body(&tool);
+        assert_eq!(body.lines, vec!["beat-1", "beat-2"]);
+        assert_eq!(body.notice.as_deref(), Some("(read 14 of 71 bytes)"));
+    }
+
+    #[test]
+    fn job_read_body_marks_done_at_end() {
+        let raw = serde_json::json!({
+            "id": "1",
+            "output": "done\n",
+            "cursor": 71,
+            "totalBytes": 71,
+            "done": true,
+            "ok": true
+        })
+        .to_string();
+        let tool = NativeTool {
+            id: 1,
+            name: "jobRead".to_string(),
+            args: String::new(),
+            result: Some(raw),
+            preview: None,
+            is_error: false,
+            done: true,
+        };
+        let body = native_body(&tool);
+        assert_eq!(body.notice.as_deref(), Some("(end of log; 71 bytes total)"));
     }
 
     #[test]
