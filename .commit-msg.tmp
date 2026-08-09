@@ -1,0 +1,16 @@
+code,core,ui: split long functions instead of allowing too_many_lines
+
+Pedantic clippy flagged bash(), exec(), to_openai_chat_messages, and
+resumed_compaction_restores_summarized_message_count over the 100-line
+limit. Each had clear seams, so extract helpers rather than opt out
+with #[allow]: bash() gains command_for and bash_result_json, exec()
+gains install_cpu_guard, to_openai_chat_messages breaks into per-role
+pushers, and the test gains seed_compacted_turn and
+seed_post_compact_continuation.
+
+The remaining pedantic lints are mechanical: missing backticks on
+QuickJS and on a quoted error string, ExecCtx::Debug ending in
+finish() (intentional — closures are omitted; switched to
+finish_non_exhaustive), a format!-inside-collect in a test now going
+through fold + writeln!, and two test apps rebuilt as let instead of
+let mut.
