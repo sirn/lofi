@@ -78,6 +78,29 @@ impl SessionRecorder {
         }
     }
 
+    /// Persist a `TurnPrompt` marker before the next user message so replay
+    /// rebuilds the turn with the same `PromptKind` the live path used.
+    /// Skipped for the default `User` kind: typed-input turns produce no
+    /// marker, and older transcripts without any marker still parse.
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn record_turn_prompt(&mut self, kind: lofi_types::PromptKind) -> Result<()> {
+        if kind == lofi_types::PromptKind::User {
+            return Ok(());
+        }
+        let mut events = vec![SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnPrompt { kind },
+        }];
+        let (start, end) = self.cursor.append_events(&mut events)?;
+        if end > start {
+            self.byte_start.get_or_insert(start);
+            self.byte_end = Some(end);
+        }
+        Ok(())
+    }
+
     /// Append everything completed since the previous checkpoint, without a
     /// terminal marker. Called after each provider/tool round so a long turn
     /// is durable before the whole agent loop settles.
