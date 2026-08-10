@@ -453,12 +453,14 @@ mod tests {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "sys".to_string(),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "hi".to_string(),
                 }],
+                kind: Default::default(),
             },
         ];
         let req = build_anthropic_request(&model(), &msgs, &[]);
@@ -498,24 +500,28 @@ mod tests {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "stable instructions".to_string(),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "first turn".to_string(),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::Assistant,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "first answer".to_string(),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "latest turn".to_string(),
                 }],
+                kind: Default::default(),
             },
         ];
         let tools = [ToolSchema {
@@ -550,6 +556,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 }],
             }],
+            kind: Default::default(),
         }];
         let req = build_anthropic_request(&model(), &msgs, &[]);
         let content = &req["messages"][0]["content"][0]["content"];
@@ -580,6 +587,7 @@ mod tests {
                 is_error: false,
                 images: Vec::new(),
             }],
+            kind: Default::default(),
         }];
         let req = build_anthropic_request(&model(), &msgs, &[]);
         let content = &req["messages"][0]["content"][0]["content"];
@@ -596,6 +604,7 @@ mod tests {
                     name: "exec".to_string(),
                     input: json!({"code": "return 1"}),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::Tool,
@@ -605,6 +614,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: Default::default(),
             },
         ];
 
@@ -626,6 +636,7 @@ mod tests {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "do not mark an older user message".to_string(),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::Assistant,
@@ -633,6 +644,7 @@ mod tests {
                     text: "reasoning".to_string(),
                     signature: Some("signature".to_string()),
                 }],
+                kind: Default::default(),
             },
         ];
 
@@ -659,6 +671,7 @@ mod tests {
                     name: "exec".to_string(),
                     input: json!({"code": "sleep 999"}),
                 }],
+                kind: Default::default(),
             },
             Message {
                 role: Role::Tool,
@@ -669,6 +682,7 @@ mod tests {
                     is_error: true,
                     images: Vec::new(),
                 }],
+                kind: Default::default(),
             },
         ];
         let req = build_anthropic_request(&model(), &msgs, &[]);
@@ -799,6 +813,7 @@ mod tests {
                     media_type: "image/jpeg".to_string(),
                 },
             ],
+            kind: Default::default(),
         }];
         let req = build_anthropic_request(&model(), &msgs, &[]);
         let content = &req["messages"][0]["content"];
