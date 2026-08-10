@@ -66,6 +66,97 @@ async fn exec_returns_a_value() {
 }
 
 #[tokio::test]
+async fn exec_returning_empty_object_stays_empty_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec("return {};", &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!({}));
+}
+
+#[tokio::test]
+async fn exec_returning_class_instance_yields_opaque_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "class Foo { method() { return 1 } } return new Foo();";
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.value,
+        json!({ "__lofi_opaque_kind__": "object", "__lofi_opaque_name__": "Foo" })
+    );
+}
+
+#[tokio::test]
+async fn exec_returning_function_yields_opaque_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "function myFn() { return 1 } return myFn;";
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    // Function declarations satisfy Function.prototype.constructor, so the
+    // sentinel always includes the constructor flag.
+    assert_eq!(
+        res.value,
+        json!({
+            "__lofi_opaque_kind__": "function",
+            "__lofi_opaque_name__": "myFn",
+            "__lofi_opaque_constructor__": true,
+        })
+    );
+}
+
+#[tokio::test]
+async fn exec_returning_constructor_yields_opaque_sentinel_with_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "class Bar { m() {} } return Bar;";
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.value,
+        json!({
+            "__lofi_opaque_kind__": "function",
+            "__lofi_opaque_name__": "Bar",
+            "__lofi_opaque_constructor__": true
+        })
+    );
+}
+
+#[tokio::test]
+async fn exec_returning_non_enumerable_property_is_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let src =
+        "const o = {}; Object.defineProperty(o, 'x', { value: 42, enumerable: false }); return o;";
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!({ "x": 42 }));
+}
+
+#[tokio::test]
+async fn exec_returning_symbol_yields_symbol_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec(
+        "return Symbol('mydesc');",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!("Symbol(mydesc)"));
+}
+
+#[tokio::test]
+async fn exec_returning_bigint_yields_tagged_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec("return 123n;", &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!("123n"));
+}
+
+#[tokio::test]
 async fn exec_top_level_await_works() {
     let dir = tempfile::tempdir().unwrap();
     let res = exec(
