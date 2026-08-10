@@ -30,6 +30,7 @@ impl Agent {
             blocks: vec![ContentBlock::Text {
                 text: user_prompt.clone(),
             }],
+            kind: lofi_types::PromptKind::User,
         }];
         if !emit(
             Some(&tx),
@@ -159,6 +160,7 @@ impl Agent {
             messages.push(Message {
                 role: Role::User,
                 blocks,
+                kind: prompt_kind,
             });
             if !emit(
                 Some(&tx),
@@ -175,16 +177,6 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        if let Some(rec) = recorder.as_mut() {
-            // Persist the prompt kind ahead of the user message so replay can
-            // rebuild the turn with the same PromptKind the live path used.
-            // Notice turns are the only non-user producers today. A record-on-
-            // every-turn variant would burn one extra line per typed turn for
-            // no behavioral delta, so only non-default kinds are emitted.
-            if prompt_kind != lofi_types::PromptKind::User {
-                rec.record_turn_prompt(prompt_kind)?;
-            }
-        }
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
@@ -863,6 +855,7 @@ impl Agent {
         messages.push(Message {
             role: Role::Tool,
             blocks: results,
+            kind: lofi_types::PromptKind::User,
         });
         Ok(false)
     }
@@ -1194,6 +1187,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     messages.push(Message {
         role: Role::Tool,
         blocks: synthesized,
+        kind: lofi_types::PromptKind::User,
     });
 }
 
@@ -1221,6 +1215,7 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .iter()
         .map(|m| Message {
             role: m.role,
+            kind: m.kind,
             blocks: m
                 .blocks
                 .iter()

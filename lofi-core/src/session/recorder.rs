@@ -249,6 +249,7 @@ mod tests {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
         }
+            kind: Default::default(),
     }
 
     fn assistant_text(t: &str) -> Message {
@@ -256,6 +257,7 @@ mod tests {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
         }
+            kind: Default::default(),
     }
 
     fn header() -> &'static [u8] {
@@ -296,6 +298,7 @@ mod tests {
                     name: "exec".into(),
                     input: serde_json::Value::String("1".into()),
                 }],
+                    kind: Default::default(),
             },
             Message {
                 role: Role::User,
@@ -305,6 +308,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                    kind: Default::default(),
             },
         ];
         let range = rec

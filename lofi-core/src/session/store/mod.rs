@@ -519,6 +519,7 @@ impl SessionCursor {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
                 }],
+                kind: Default::default(),
             }),
         }];
         self.append_events(&mut events)
