@@ -442,7 +442,7 @@ fn resolve_scope(
 mod tests {
     use std::io::Write;
 
-    use lofi_types::{ContentBlock, Message, Role, SessionEvent};
+    use lofi_types::{ContentBlock, Message, PromptKind, Role, SessionEvent};
 
     use super::*;
 
@@ -475,6 +475,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
+                    kind: PromptKind::default(),
             }),
         }
     }

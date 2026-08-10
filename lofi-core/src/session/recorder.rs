@@ -78,29 +78,6 @@ impl SessionRecorder {
         }
     }
 
-    /// Persist a `TurnPrompt` marker before the next user message so replay
-    /// rebuilds the turn with the same `PromptKind` the live path used.
-    /// Skipped for the default `User` kind: typed-input turns produce no
-    /// marker, and older transcripts without any marker still parse.
-    /// # Errors
-    /// Propagates transcript serialization and I/O failures.
-    pub fn record_turn_prompt(&mut self, kind: lofi_types::PromptKind) -> Result<()> {
-        if kind == lofi_types::PromptKind::User {
-            return Ok(());
-        }
-        let mut events = vec![SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::TurnPrompt { kind },
-        }];
-        let (start, end) = self.cursor.append_events(&mut events)?;
-        if end > start {
-            self.byte_start.get_or_insert(start);
-            self.byte_end = Some(end);
-        }
-        Ok(())
-    }
-
     /// Append everything completed since the previous checkpoint, without a
     /// terminal marker. Called after each provider/tool round so a long turn
     /// is durable before the whole agent loop settles.
@@ -241,13 +218,14 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::expect_used)]
     use super::*;
-    use lofi_types::{ContentBlock, Role};
+    use lofi_types::{ContentBlock, PromptKind, Role};
     use tempfile::tempdir;
 
     fn user_msg(t: &str) -> Message {
         Message {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -255,6 +233,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -296,6 +275,7 @@ mod tests {
                     name: "exec".into(),
                     input: serde_json::Value::String("1".into()),
                 }],
+                    kind: PromptKind::default(),
             },
             Message {
                 role: Role::User,
@@ -305,6 +285,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                    kind: PromptKind::default(),
             },
         ];
         let range = rec

@@ -126,6 +126,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
             }
             Message {
                 role: msg.role,
+                kind: msg.kind,
                 blocks,
             }
         })
@@ -166,7 +167,7 @@ pub fn recover_event_content(events: &[SessionEvent], id: &str) -> Option<String
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use lofi_types::{ContentBlock, Message, Role};
+    use lofi_types::{ContentBlock, Message, PromptKind, Role};
 
     #[allow(dead_code)]
     fn user(t: &str) -> Message {
@@ -175,6 +176,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: t.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
     fn assistant(t: &str) -> Message {
@@ -183,6 +185,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: t.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
     fn think(t: &str) -> ContentBlock {
@@ -262,6 +265,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("a", "out-1")],
+                    kind: PromptKind::default(),
                 },
             ),
             (
@@ -269,6 +273,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("b", "out-2")],
+                    kind: PromptKind::default(),
                 },
             ),
             (
@@ -276,6 +281,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("c", "out-3")],
+                    kind: PromptKind::default(),
                 },
             ),
         ];
@@ -299,6 +305,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![think("old reasoning"), exec_call("a", "code-1")],
+                    kind: PromptKind::default(),
                 },
             ),
             (
@@ -306,6 +313,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![think("recent reasoning"), exec_call("b", "code-2")],
+                    kind: PromptKind::default(),
                 },
             ),
         ];
@@ -325,6 +333,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![exec_call("a", "old-secret-code")],
+                    kind: PromptKind::default(),
                 },
             ),
             (
@@ -332,6 +341,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![exec_call("b", "recent-code")],
+                    kind: PromptKind::default(),
                 },
             ),
         ];

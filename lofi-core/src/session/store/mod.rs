@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lofi_error::{Error, Result};
-use lofi_types::{Message, RunModel, SessionEvent, SessionEventKind};
+use lofi_types::{PromptKind, Message, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
@@ -519,6 +519,7 @@ impl SessionCursor {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
                 }],
+                kind: PromptKind::default(),
             }),
         }];
         self.append_events(&mut events)
@@ -1513,6 +1514,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -1522,6 +1524,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: PromptKind::default(),
         }
     }
 
@@ -1550,6 +1553,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "  raw prompt  \n".to_string(),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -1562,6 +1566,7 @@ mod tests {
                         name: "exec".to_string(),
                         input: serde_json::json!({"code": "x"}),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -1575,6 +1580,7 @@ mod tests {
                         is_error: false,
                         images: Vec::new(),
                     }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
