@@ -302,12 +302,12 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
     let lines = render_turn_lines(&cx, &a.turns[0]);
 
     assert_eq!(lines.len(), 2, "only the two message body rows");
-    // The marker anchors the first row only; continuation rows leave the
-    // gutter blank so the prompt reads as a single block.
+    // The rail spans every row so the message stays visually grouped; blank
+    // continuation gutters were making multi-line prompts look disjoint.
     assert_eq!(lines[0].line.spans[0].content, "▌ ");
     assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.user));
-    assert_eq!(lines[1].line.spans[0].content, "  ");
-    assert!(lines[1].line.spans[0].style.fg.is_none());
+    assert_eq!(lines[1].line.spans[0].content, "▌ ");
+    assert_eq!(lines[1].line.spans[0].style.fg, Some(a.theme.user));
     for line in &lines {
         assert!(
             line.line.spans.iter().all(|span| span.style.bg.is_none()),
@@ -328,7 +328,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
         .map(|span| span.content.as_ref())
         .collect();
     assert!(first.starts_with("▌ A long user prompt"));
-    assert!(second.starts_with("  with another line"));
+    assert!(second.starts_with("▌ with another line"));
 }
 
 #[test]
