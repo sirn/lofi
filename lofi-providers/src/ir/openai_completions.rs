@@ -549,6 +549,7 @@ mod tests {
                     media_type: "image/jpeg".to_string(),
                 },
             ],
+            kind: Default::default(),
         }];
         let req = build_openai_chat_request(&model(), &msgs, &[]);
         let content = &req["messages"][0]["content"];
@@ -578,6 +579,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 }],
             }],
+            kind: Default::default(),
         }];
         let req = build_openai_chat_request(&model(), &msgs, &[]);
         assert_eq!(
@@ -603,6 +605,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "hello".to_string(),
             }],
+            kind: Default::default(),
         }];
         let req = build_openai_chat_request(&model(), &msgs, &[]);
         assert_eq!(req["messages"][0]["content"], "hello");
