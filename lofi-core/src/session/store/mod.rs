@@ -497,6 +497,7 @@ impl SessionCursor {
             (_, None) => *index = None,
             (None, Some(_)) => {}
         }
+        Ok((start, end))        }
         Ok((start, end))
     }
 
@@ -519,6 +520,7 @@ impl SessionCursor {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
                 }],
+                kind: Default::default(),
             }),
         }];
         self.append_events(&mut events)
@@ -994,7 +996,7 @@ pub struct CompactionCounts {
 /// followed by the marker. A failed write is rolled back to the original file
 /// length so the transcript cannot expose a partial checkpoint as its leaf.
 /// # Errors
-/// Propagates transcript read, serialization, and write failures.
+/// Propagates transcript read, serialization, and write failures./// Propagates transcript read, serialization, and write failures.
 #[cfg(test)]
 pub(crate) fn append_compaction(
     path: &Path,
@@ -1493,7 +1495,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used)]    #![allow(clippy::expect_used)]
 
     use super::*;
     use lofi_types::{ContentBlock, Role, SessionEventKind, ThinkingLevel, Usage};
@@ -1513,6 +1515,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: Default::default(),
         }
     }
 
@@ -1522,6 +1525,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: Default::default(),
         }
     }
 
@@ -1550,6 +1554,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "  raw prompt  \n".to_string(),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
@@ -1562,6 +1567,7 @@ mod tests {
                         name: "exec".to_string(),
                         input: serde_json::json!({"code": "x"}),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
@@ -1575,6 +1581,7 @@ mod tests {
                         is_error: false,
                         images: Vec::new(),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
@@ -1992,7 +1999,7 @@ mod tests {
         let (_, events, _, _) = load(&path).unwrap();
         assert!(events[1].parent_id.is_none());
         assert_eq!(events[2].parent_id.as_deref(), Some(events[1].id.as_str()));
-    }
+    }    }
 
     #[test]
     fn append_then_load_messages() {
