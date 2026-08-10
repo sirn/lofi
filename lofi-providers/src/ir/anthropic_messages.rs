@@ -240,10 +240,8 @@ fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
-/// Pass the configured effort level through verbatim, omitting `off`.
-/// Anthropic rejects unknown levels with a 400 so the user sees a clear
-/// error rather than silent remapping — e.g. `xhigh` is unsupported on
-/// Claude Sonnet 4.6.
+/// Pass the configured effort level through verbatim, omitting `off`, so
+/// unsupported levels surface the API's 400 instead of a silent remap.
 fn anthropic_effort(level: &ThinkingLevel) -> Option<&str> {
     (level != &ThinkingLevel::Off).then(|| level.as_str())
 }
@@ -485,9 +483,7 @@ mod tests {
             let req = build_anthropic_request(&model, &[], &[]);
             assert_eq!(req["thinking"], json!({"type": "adaptive"}));
             assert_eq!(req["output_config"], json!({"effort": effort}));
-            assert!(req["thinking"].get("effort").is_none());
             assert_eq!(req["max_tokens"], 1024);
-            assert!(req["thinking"].get("budget_tokens").is_none());
         }
         assert!(build_anthropic_request(&model(), &[], &[])
             .get("thinking")
