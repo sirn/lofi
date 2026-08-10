@@ -897,6 +897,7 @@ fn clip(s: &str, max: usize) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use lofi_types::PromptKind;
 
     fn ev(id: &str, kind: SessionEventKind) -> SessionEvent {
         SessionEvent {
@@ -913,6 +914,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
+                    kind: PromptKind::default(),
             }),
         )
     }
@@ -924,6 +926,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
+                    kind: PromptKind::default(),
             }),
         )
     }
