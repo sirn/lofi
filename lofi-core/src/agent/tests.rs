@@ -144,6 +144,7 @@ fn user_msg(text: &str) -> Message {
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
         }],
+        kind: Default::default(),
     }
 }
 
@@ -614,6 +615,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
                 media_type: "image/jpeg".to_string(),
             },
         ],
+        kind: Default::default(),
     }];
     agent
         .run_continuation(
@@ -1399,6 +1401,7 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
                 media_type: "image/jpeg".to_string(),
             },
         ],
+        kind: Default::default(),
     }];
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
