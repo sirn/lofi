@@ -249,6 +249,18 @@ mod base64_bytes {
 pub struct Message {
     pub role: Role,
     pub blocks: Vec<ContentBlock>,
+    /// Origin of a user-role prompt. Distinguishes typed input from
+    /// app-injected notices so replay does not need a separate marker
+    /// event. Defaults to `User` so older transcripts remain loadable.
+    #[serde(default, skip_serializing_if = "is_default_prompt_kind")]
+    pub kind: PromptKind,
+}
+
+// `skip_serializing_if` requires a `&T` signature; `PromptKind` is `Copy` but
+// serde's contract fixes the parameter form.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_prompt_kind(kind: &PromptKind) -> bool {
+    *kind == PromptKind::User
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -410,14 +422,6 @@ pub enum SessionEventKind {
     Cursor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_id: Option<String>,
-    },
-    /// Origin of the user prompt that opened a turn. Emitted by the recorder
-    /// before the user message persists anything other than the default
-    /// `User` kind; replay consumes it to rebuild the turn's `PromptKind` instead
-    /// of assuming typed input. Omitted from older logs entirely so they
-    /// remain loadable.
-    TurnPrompt {
-        kind: PromptKind,
     },
     Compaction {
         summary: String,
@@ -1422,7 +1426,29 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "hello".to_string(),
             }],
+            kind: PromptKind::User,
         });
+        // Default-User kind must skip in the wire form; explicit-Notice must round-trip.
+        let user_json = serde_json::to_value(&Message {
+            role: Role::User,
+            blocks: vec![],
+            kind: PromptKind::User,
+        })
+        .unwrap();
+        assert!(user_json.get("kind").is_none());
+        let notice_json = serde_json::to_value(&Message {
+            role: Role::User,
+            blocks: vec![],
+            kind: PromptKind::Notice,
+        })
+        .unwrap();
+        assert_eq!(notice_json["kind"], "notice");
+        let parsed: Message = serde_json::from_str(r#"{"role":"user","blocks":[]}"#).unwrap();
+        assert_eq!(
+            parsed.kind,
+            PromptKind::User,
+            "absent kind defaults to User"
+        );
     }
 
     #[test]

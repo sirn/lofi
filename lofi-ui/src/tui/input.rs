@@ -296,6 +296,7 @@ pub(super) fn finish_user_bash(
             blocks: vec![ContentBlock::Text {
                 text: result.context_text(),
             }],
+            kind: PromptKind::default(),
         }) {
             app.notify(NotifyKind::Error, format!("update agent history: {error}"));
         }

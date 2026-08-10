@@ -9,7 +9,7 @@
 use std::collections::HashMap as Map;
 use std::collections::HashSet;
 
-use lofi_types::{
+use lofi_types::{PromptKind, 
     ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, Usage,
 };
 
@@ -103,17 +103,11 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
         }
     }
     let mut thinking_idx = 0usize;
-    // Pending kind for the next user-message turn. Populated by a
-    // SessionEventKind::TurnPrompt marker (recorder emits one only for
-    // non-User kinds, so typed input has no marker and the default applies).
-    let mut next_turn_kind = lofi_types::PromptKind::User;
     for &ev in visible {
         match &ev.kind {
-            SessionEventKind::TurnPrompt { kind } => {
-                next_turn_kind = *kind;
-            }
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
+                    let next_turn_kind = msg.kind;
                     if msg
                         .blocks
                         .iter()
@@ -157,9 +151,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                         prompt,
                         kind: next_turn_kind,
                     });
-                    // Reset for the next turn; User remains the default when
-                    // no marker precedes the next user message.
-                    next_turn_kind = lofi_types::PromptKind::User;
                 }
                 Role::Assistant => {
                     for b in &msg.blocks {
@@ -354,6 +345,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
                 blocks: vec![ContentBlock::Text {
                     text: result.context_text(),
                 }],
+                kind: PromptKind::default(),
             })
         }
         _ => None,
@@ -390,6 +382,7 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
                         blocks: vec![ContentBlock::Text {
                             text: summary.clone(),
                         }],
+                        kind: PromptKind::default(),
                     });
                 }
                 if first_kept_entry_id.is_empty() {
@@ -542,7 +535,6 @@ pub fn turn_byte_ranges_from_events(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use crate::session::recorder::SessionRecorder;
 
     fn user_msg(t: &str) -> SessionEvent {
         SessionEvent {
@@ -551,24 +543,28 @@ mod tests {
             kind: SessionEventKind::Message(Message {
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: t.into() }],
+                kind: PromptKind::default(),
             }),
         }
     }
 
-    fn turn_prompt(kind: lofi_types::PromptKind) -> SessionEvent {
+    fn user_msg_with_kind(t: &str, kind: lofi_types::PromptKind) -> SessionEvent {
         SessionEvent {
             id: String::new(),
             parent_id: None,
-            kind: SessionEventKind::TurnPrompt { kind },
+            kind: SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: t.into() }],
+                kind,
+            }),
         }
     }
 
     #[test]
-    fn replay_restores_turn_kind_from_turn_prompt_marker() {
+    fn replay_restores_turn_kind_from_message_kind_field() {
         let events = vec![
             user_msg("typed"),
-            turn_prompt(lofi_types::PromptKind::Notice),
-            user_msg("job 1 completed"),
+            user_msg_with_kind("job 1 completed", lofi_types::PromptKind::Notice),
             user_msg("typed again"),
         ];
         let mut kinds: Vec<lofi_types::PromptKind> = Vec::new();
@@ -584,46 +580,7 @@ mod tests {
                 lofi_types::PromptKind::Notice,
                 lofi_types::PromptKind::User,
             ],
-            "marker applies once, then kind resets to User"
+            "kind travels with each user message and resets to User"
         );
-    }
-
-    #[test]
-    fn turn_prompt_for_default_user_kind_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(
-            &path,
-            b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
-        )
-        .unwrap();
-        let cursor = store::SessionCursor::new(path, None);
-        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
-        rec.record_turn_prompt(lofi_types::PromptKind::User)
-            .unwrap();
-        let events = cursor.load_tree_events().unwrap();
-        assert_eq!(events.len(), 0, "no marker written for the default kind");
-    }
-
-    #[test]
-    fn turn_prompt_marker_roundtrips_through_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(
-            &path,
-            b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
-        )
-        .unwrap();
-        let cursor = store::SessionCursor::new(path, None);
-        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
-        rec.record_turn_prompt(lofi_types::PromptKind::Notice)
-            .unwrap();
-        let events = cursor.load_tree_events().unwrap();
-        assert!(matches!(
-            events[0].kind,
-            SessionEventKind::TurnPrompt {
-                kind: lofi_types::PromptKind::Notice,
-            }
-        ));
     }
 }
