@@ -155,14 +155,13 @@ pub(super) fn js_to_json_bounded(
             return object_to_json(obj, depth, nodes, bytes, overflow);
         }
     }
-    if let Some(big) = v.clone().into_big_int() {
+    if let Some(big) = v.as_big_int() {
         // BigInt has no JSON number form; emit a tagged string so the value
-        // doesn't silently vanish.
-        let s: rquickjs::Result<std::string::String> = (|| {
-            let i = big.clone().to_i64()?;
-            Ok(format!("{i}n"))
-        })();
-        return s.map_or_else(|_| json!("BigInt(<unconverted>)"), |t| json!(t));
+        // doesn't silently vanish. `to_i64` consumes, so clone the reference.
+        return big.clone().to_i64().map_or_else(
+            |_| json!("BigInt(<unconverted>)"),
+            |i| json!(format!("{i}n")),
+        );
     }
     Json::Null
 }
@@ -175,11 +174,9 @@ fn object_to_json(
     overflow: &mut bool,
 ) -> Json {
     let mut map = serde_json::Map::new();
-    // `own_props` without `enum_only()` so non-enumerable own props
-    // (e.g. fields hidden via `Object.defineProperty`) also cross the
-    // bridge. The default `prop` iterator matches JSON.stringify;
-    // dropping the rest kept things like class fields invisible
-    // to the model and produced the `{}` bug we are fixing.
+    // Use `own_props` without `enum_only()` so non-enumerable own props also
+    // cross the bridge — the default `prop` iterator matches JSON.stringify
+    // and silently drops fields hidden via `Object.defineProperty`.
     let string_only = rquickjs::object::Filter::new().string();
     for (k, val) in obj
         .own_props::<std::string::String, Value>(string_only)
@@ -200,17 +197,21 @@ fn object_to_json(
     }
 
     if map.is_empty() {
-        // Class instance or other empty-enumerable-object: emit a tagged
-        // placeholder so the model can tell the value crossed the bridge
-        // but is opaque.
+        // A class instance or other object with a non-default prototype has
+        // state we cannot serialize. Surface as a tagged placeholder so the
+        // model can tell the value crossed the bridge but is opaque.
         let proto_ctor_name = obj.get_prototype().and_then(|p| {
             p.get::<_, Function>("constructor").ok().and_then(|c| {
                 c.as_object()
                     .and_then(|o| o.get::<_, std::string::String>("name").ok())
             })
         });
-        let proto_ctor_name = proto_ctor_name.filter(|n| !n.is_empty() && n != "Object");
-        return sentinel_for("object", proto_ctor_name.as_deref(), false);
+        // Only emit the sentinel when there is a real class name; a literal
+        // `{}` with the default Object prototype should stay `{}`.
+        if let Some(name) = proto_ctor_name.filter(|n| !n.is_empty() && n != "Object") {
+            return sentinel_for("object", Some(name.as_str()), false);
+        }
+        return Json::Object(map);
     }
     Json::Object(map)
 }

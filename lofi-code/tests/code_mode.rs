@@ -66,6 +66,15 @@ async fn exec_returns_a_value() {
 }
 
 #[tokio::test]
+async fn exec_returning_empty_object_stays_empty_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec("return {};", &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!({}));
+}
+
+#[tokio::test]
 async fn exec_returning_class_instance_yields_opaque_sentinel() {
     let dir = tempfile::tempdir().unwrap();
     let src = "class Foo { method() { return 1 } } return new Foo();";
