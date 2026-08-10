@@ -52,6 +52,9 @@ pub(super) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Valu
 
 /// `undefined` maps to `Null` so a guest `return;` (or no return) yields
 /// `Value::Null` rather than vanishing. Functions and symbols stringify.
+/// Opaque values (class instances, functions, exotic objects) map to a
+/// sentinel object instead of `{}` so the model can see the value crossed
+/// the bridge.
 /// Convert a `QuickJS` value to `JSON`, bounded by [`JS_TO_JSON_MAX_DEPTH`] and
 /// [`JS_TO_JSON_MAX_NODES`] so a self-referential or pathologically nested
 /// object can't recurse unboundedly and abort the harness. On overflow the
@@ -106,6 +109,17 @@ pub(super) fn js_to_json_bounded(
             return json!(text);
         }
     }
+    if let Some(sym) = v.as_symbol() {
+        // Symbols have no JSON form; surface their description so the model
+        // at least sees that something crossed the bridge.
+        let desc = sym
+            .description()
+            .ok()
+            .and_then(Value::into_string)
+            .and_then(|s| s.to_string().ok())
+            .unwrap_or_default();
+        return json!(format!("Symbol({desc})"));
+    }
     if v.is_array() {
         if let Some(arr) = v.as_array() {
             if *nodes + arr.len() > JS_TO_JSON_MAX_NODES {
@@ -123,25 +137,93 @@ pub(super) fn js_to_json_bounded(
             return Json::Array(out);
         }
     }
+    if v.is_function() {
+        // Functions are opaque to JSON; emit a tagged placeholder so the
+        // model sees the value crossed the bridge, not dropped silently.
+        if let Some(f) = v.as_function() {
+            let name = f
+                .as_object()
+                .and_then(|o| o.get::<_, std::string::String>("name").ok())
+                .unwrap_or_default();
+            let ctor = f.is_constructor();
+            return sentinel_for("function", Some(&name), ctor);
+        }
+        return Json::Null;
+    }
     if v.is_object() {
         if let Some(obj) = v.as_object() {
-            let mut map = serde_json::Map::new();
-            for (k, val) in obj.props::<std::string::String, Value>().flatten() {
-                if *overflow {
-                    break;
-                }
-                *bytes = bytes.saturating_add(k.len());
-                if *bytes > JS_TO_JSON_MAX_BYTES {
-                    *overflow = true;
-                    break;
-                }
-                map.insert(
-                    k,
-                    js_to_json_bounded(&val, depth + 1, nodes, bytes, overflow),
-                );
-            }
-            return Json::Object(map);
+            return object_to_json(obj, depth, nodes, bytes, overflow);
         }
     }
+    if let Some(big) = v.as_big_int() {
+        // BigInt has no JSON number form; emit a tagged string so the value
+        // doesn't silently vanish. `to_i64` consumes, so clone the reference.
+        return big.clone().to_i64().map_or_else(
+            |_| json!("BigInt(<unconverted>)"),
+            |i| json!(format!("{i}n")),
+        );
+    }
     Json::Null
+}
+
+fn object_to_json(
+    obj: &rquickjs::Object<'_>,
+    depth: usize,
+    nodes: &mut usize,
+    bytes: &mut usize,
+    overflow: &mut bool,
+) -> Json {
+    let mut map = serde_json::Map::new();
+    // Use `own_props` without `enum_only()` so non-enumerable own props also
+    // cross the bridge — the default `prop` iterator matches JSON.stringify
+    // and silently drops fields hidden via `Object.defineProperty`.
+    let string_only = rquickjs::object::Filter::new().string();
+    for (k, val) in obj
+        .own_props::<std::string::String, Value>(string_only)
+        .flatten()
+    {
+        if *overflow {
+            break;
+        }
+        *bytes = bytes.saturating_add(k.len());
+        if *bytes > JS_TO_JSON_MAX_BYTES {
+            *overflow = true;
+            break;
+        }
+        map.insert(
+            k,
+            js_to_json_bounded(&val, depth + 1, nodes, bytes, overflow),
+        );
+    }
+
+    if map.is_empty() {
+        // A class instance or other object with a non-default prototype has
+        // state we cannot serialize. Surface as a tagged placeholder so the
+        // model can tell the value crossed the bridge but is opaque.
+        let proto_ctor_name = obj.get_prototype().and_then(|p| {
+            p.get::<_, Function>("constructor").ok().and_then(|c| {
+                c.as_object()
+                    .and_then(|o| o.get::<_, std::string::String>("name").ok())
+            })
+        });
+        // Only emit the sentinel when there is a real class name; a literal
+        // `{}` with the default Object prototype should stay `{}`.
+        if let Some(name) = proto_ctor_name.filter(|n| !n.is_empty() && n != "Object") {
+            return sentinel_for("object", Some(name.as_str()), false);
+        }
+        return Json::Object(map);
+    }
+    Json::Object(map)
+}
+
+fn sentinel_for(kind: &str, name: Option<&str>, is_constructor: bool) -> Json {
+    let mut map = serde_json::Map::new();
+    map.insert("__lofi_opaque_kind__".to_string(), json!(kind));
+    if let Some(n) = name {
+        map.insert("__lofi_opaque_name__".to_string(), json!(n));
+    }
+    if is_constructor {
+        map.insert("__lofi_opaque_constructor__".to_string(), json!(true));
+    }
+    Json::Object(map)
 }
