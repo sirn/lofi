@@ -30,6 +30,7 @@ impl Agent {
             blocks: vec![ContentBlock::Text {
                 text: user_prompt.clone(),
             }],
+            kind: lofi_types::PromptKind::User,
         }];
         if !emit(
             Some(&tx),
@@ -159,6 +160,7 @@ impl Agent {
             messages.push(Message {
                 role: Role::User,
                 blocks,
+                kind: prompt_kind,
             });
             if !emit(
                 Some(&tx),
@@ -175,16 +177,6 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        if let Some(rec) = recorder.as_mut() {
-            // Persist the prompt kind ahead of the user message so replay can
-            // rebuild the turn with the same PromptKind the live path used.
-            // Notice turns are the only non-user producers today. A record-on-
-            // every-turn variant would burn one extra line per typed turn for
-            // no behavioral delta, so only non-default kinds are emitted.
-            if prompt_kind != lofi_types::PromptKind::User {
-                rec.record_turn_prompt(prompt_kind)?;
-            }
-        }
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
@@ -505,6 +497,7 @@ impl Agent {
             session,
             true,
             cancel,
+            preempt,            cancel,
             preempt,
         )
         .await
@@ -863,6 +856,7 @@ impl Agent {
         messages.push(Message {
             role: Role::Tool,
             blocks: results,
+            kind: lofi_types::PromptKind::User,
         });
         Ok(false)
     }
@@ -1002,7 +996,7 @@ impl Agent {
                                 parent: event_parent.clone(),
                                 call_id: id,
                                 name,
-                                args,
+                                args,                                args,
                                 result: result.clone(),
                                 is_error,
                             });
@@ -1194,6 +1188,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     messages.push(Message {
         role: Role::Tool,
         blocks: synthesized,
+        kind: lofi_types::PromptKind::User,
     });
 }
 
@@ -1221,6 +1216,7 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .iter()
         .map(|m| Message {
             role: m.role,
+            kind: m.kind,
             blocks: m
                 .blocks
                 .iter()
@@ -1331,6 +1327,7 @@ mod tests {
                 name: "exec".to_string(),
                 input: json!({"code": "x"}),
             }],
+            kind: Default::default(),
         }
     }
 
@@ -1368,6 +1365,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: Default::default(),
             },
         ];
         close_orphaned_tool_uses(&mut messages);
@@ -1385,6 +1383,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "partial text".to_string(),
             }],
+            kind: Default::default(),
         }];
         close_orphaned_tool_uses(&mut messages);
         assert_eq!(messages.len(), 1);
@@ -1407,6 +1406,7 @@ mod tests {
                         input: json!({"code": "b"}),
                     },
                 ],
+                kind: Default::default(),
             },
             Message {
                 role: Role::Tool,
@@ -1416,6 +1416,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: Default::default(),
             },
         ];
         close_orphaned_tool_uses(&mut messages);
@@ -1482,6 +1483,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 },
             ],
+            kind: Default::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 2);
         let stripped = strip_image_blocks(&messages);
@@ -1499,7 +1501,7 @@ mod tests {
         assert_eq!(
             stripped[0].blocks[0],
             ContentBlock::Text {
-                text: "look".to_string()
+                text: "look".to_string()                text: "look".to_string()
             }
         );
     }
@@ -1517,6 +1519,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                 }],
             }],
+            kind: Default::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 1);
         let stripped = strip_image_blocks(&messages);
@@ -1544,6 +1547,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: "hi".to_string(),
             }],
+            kind: Default::default(),
         }];
         assert_eq!(count_image_blocks(&messages), 0);
         let stripped = strip_image_blocks(&messages);
@@ -1566,6 +1570,7 @@ mod tests {
                 image(4), // 8 base64 bytes (4 -> ceil(4/3)=2 -> 8)
                 image(1), // 4 base64 bytes
             ],
+            kind: Default::default(),
         }];
         assert_eq!(image_payload_bytes(&messages), 16);
         // Text and empty histories contribute nothing.
@@ -1582,12 +1587,14 @@ mod tests {
         let over = vec![Message {
             role: Role::User,
             blocks: vec![image(7 * 1024 * 1024)],
+            kind: Default::default(),
         }];
         assert!(image_payload_bytes(&over) > MAX_REQUEST_IMAGE_BYTES);
         // 1 MiB raw stays well under.
         let under = vec![Message {
             role: Role::User,
             blocks: vec![image(1024 * 1024)],
+            kind: Default::default(),
         }];
         assert!(image_payload_bytes(&under) <= MAX_REQUEST_IMAGE_BYTES);
     }

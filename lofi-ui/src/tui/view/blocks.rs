@@ -216,13 +216,20 @@ impl Component for NoticeMessage<'_> {
         // blank so the body reads as a single block.
         let mark = Style::new().fg(t.subtle);
         let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
-        render_markdown_body(self.prompt.trim(), t, w, content_w, body_style, move |row| {
-            if row == 0 {
-                vec![Span::styled("▷ ", mark)]
-            } else {
-                vec![Span::raw("  ")]
-            }
-        })
+        render_markdown_body(
+            self.prompt.trim(),
+            t,
+            w,
+            content_w,
+            body_style,
+            move |row| {
+                if row == 0 {
+                    vec![Span::styled("▷ ", mark)]
+                } else {
+                    vec![Span::raw("  ")]
+                }
+            },
+        )
     }
 }
 
