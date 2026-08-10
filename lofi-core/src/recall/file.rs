@@ -475,6 +475,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
+                    kind: Default::default(),
             }),
         }
     }

@@ -553,6 +553,7 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
                             images: Vec::new(),
                         })
                         .collect(),
+                    kind: lofi_types::PromptKind::User,
                 }),
             }
         } else if meta.kind_type == "compaction" {
