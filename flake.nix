@@ -65,6 +65,9 @@
 
             # Dev runner / watcher.
             cargo-watch
+
+            # Binary size analysis.
+            cargo-bloat
           ];
         };
       }
