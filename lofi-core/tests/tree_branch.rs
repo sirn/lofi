@@ -19,6 +19,7 @@ fn user_ev(text: &str) -> SessionEvent {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+                kind: Default::default(),
         }),
     }
 }
@@ -32,6 +33,7 @@ fn assistant_ev(text: &str) -> SessionEvent {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+                kind: Default::default(),
         }),
     }
 }

@@ -14,6 +14,7 @@ fn user_msg() -> Message {
         blocks: vec![ContentBlock::Text {
             text: "hi".to_string(),
         }],
+        kind: Default::default(),
     }
 }
 

@@ -1497,7 +1497,7 @@ fn numbered_empty_body_line_keeps_its_number() {
     a.apply_event(AgentEvent::ToolEnd {
         id: "e1".to_string(),
         result: "{\"value\":null}".to_string(),
-        is_error: false,
+        is_error: false,        is_error: false,
         elapsed_ms: 0,
     });
     let turn = &a.turns[0];
@@ -1865,6 +1865,7 @@ fn user(text: &str) -> Message {
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
         }],
+        kind: Default::default(),
     }
 }
 
@@ -1874,6 +1875,7 @@ fn assistant(text: &str) -> Message {
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
         }],
+        kind: Default::default(),
     }
 }
 
@@ -2145,6 +2147,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
                     name: "exec".into(),
                     input: serde_json::json!({ "code": "return 1" }),
                 }],
+                kind: Default::default(),
             }),
         },
         SessionEvent {
@@ -2158,6 +2161,7 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
                     is_error: false,
                     images: Vec::new(),
                 }],
+                kind: Default::default(),
             }),
         },
     ];
@@ -2324,6 +2328,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
                 blocks: vec![ContentBlock::Text {
                     text: "system".into(),
                 }],
+                kind: Default::default(),
             }),
         },
         SessionEvent {
@@ -2996,8 +3001,7 @@ fn tree_picker_is_centered() {
                 source_offset: 0,
                 source_kind: store::IndexKind::UserPrompt,
                 hydrated: true,
-            },
-        ],
+            },        ],
         selected: 0,
         generation: 0,
         loading: false,
@@ -3270,12 +3274,14 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3288,12 +3294,14 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3510,12 +3518,14 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3537,12 +3547,14 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3767,12 +3779,14 @@ fn modal_tab_cycles_with_wraparound() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3785,12 +3799,14 @@ fn modal_tab_cycles_with_wraparound() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3854,18 +3870,21 @@ fn tree_revert_to_root_then_reopens() {
     let kinds = [
         SessionEventKind::Message(Message {
             role: Role::System,
+                kind: Default::default(),
             blocks: vec![ContentBlock::Text { text: "sys".into() }],
         }),
         SessionEventKind::Message(Message {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3878,12 +3897,14 @@ fn tree_revert_to_root_then_reopens() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -3947,6 +3968,7 @@ fn tree_shows_tool_result_nodes() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "list files".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -3955,6 +3977,7 @@ fn tree_shows_tool_result_nodes() {
                 id: "tu1".into(),
                 name: "bash".into(),
                 input: serde_json::json!({"cmd": "ls"}),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -3964,12 +3987,14 @@ fn tree_shows_tool_result_nodes() {
                 content: "file_a.txt file_b.txt".into(),
                 is_error: false,
                 images: Vec::new(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -4046,6 +4071,7 @@ fn tree_exec_label_shows_native_tools() {
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "do stuff".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -4054,6 +4080,7 @@ fn tree_exec_label_shows_native_tools() {
                 id: "exec_0".into(),
                 name: "exec".into(),
                 input: serde_json::json!({"code": "..."}),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::Message(Message {
@@ -4063,6 +4090,7 @@ fn tree_exec_label_shows_native_tools() {
                 content: "exec result".into(),
                 is_error: false,
                 images: Vec::new(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::NativeTool(NativeToolRecord {
@@ -4093,6 +4121,7 @@ fn tree_exec_label_shows_native_tools() {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".into(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::TurnEnd {
@@ -4485,6 +4514,7 @@ fn footer_shows_ctx_after_usage() {
 fn thinking_timing_is_restored_from_transcript() {
     let assistant_with_thinking = Message {
         role: Role::Assistant,
+            kind: Default::default(),
         blocks: vec![
             ContentBlock::Thinking {
                 text: "hm".to_string(),
@@ -4496,8 +4526,7 @@ fn thinking_timing_is_restored_from_transcript() {
         ],
     };
     let events = sev_chain([
-        msg(user("hi")),
-        msg(assistant_with_thinking),
+        msg(user("hi")),        msg(assistant_with_thinking),
         SessionEventKind::ThinkingTiming { elapsed_ms: 1234 },
     ]);
     let turns = turns_from_session_events(&events);
@@ -4630,6 +4659,7 @@ fn turns_from_events_links_tool_results() {
             blocks: vec![
                 ContentBlock::Text {
                     text: "ok".to_string(),
+                kind: Default::default(),
                 },
                 ContentBlock::ToolUse {
                     id: "t1".to_string(),
@@ -4645,12 +4675,14 @@ fn turns_from_events_links_tool_results() {
                 content: "file.txt".to_string(),
                 is_error: false,
                 images: Vec::new(),
+                kind: Default::default(),
             }],
         },
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
+                kind: Default::default(),
             }],
         },
     ];
@@ -4677,6 +4709,7 @@ fn turns_from_events_restores_timings() {
                 id: "t1".to_string(),
                 name: "exec".to_string(),
                 input: serde_json::json!({"code": "return 1"}),
+                kind: Default::default(),
             }],
         }),
         msg(Message {
@@ -4686,12 +4719,14 @@ fn turns_from_events_restores_timings() {
                 content: "1".to_string(),
                 is_error: false,
                 images: Vec::new(),
+                kind: Default::default(),
             }],
         }),
         msg(Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
+                kind: Default::default(),
             }],
         }),
         SessionEventKind::ToolTiming {
@@ -4913,6 +4948,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             id: id.to_string(),
             name: "exec".to_string(),
             input: serde_json::json!({"code": format!("[code cleared — re-expand with lofi.result(\"{eid}\")]" )}),
+            kind: Default::default(),
         }],
     };
     let exec_result_stub = |id: &str, eid: &str| Message {
@@ -4922,6 +4958,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
             is_error: false,
             images: Vec::new(),
+            kind: Default::default(),
         }],
     };
     let exec_call_full = |id: &str| Message {
@@ -4930,6 +4967,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             id: id.to_string(),
             name: "exec".to_string(),
             input: serde_json::json!({"code": "return 1"}),
+            kind: Default::default(),
         }],
     };
     let exec_result_full = |id: &str, out: &str| Message {
@@ -4939,6 +4977,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
             content: out.to_string(),
             is_error: false,
             images: Vec::new(),
+            kind: Default::default(),
         }],
     };
 
@@ -5996,8 +6035,7 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
 
 #[test]
 fn apply_model_switch_with_no_context_window_uses_default() {
-    let mut a = app();
-    a.ctx_limit = 100_000;
+    let mut a = app();    a.ctx_limit = 100_000;
     let model = lofi_types::Model {
         id: "local".into(),
         name: "Local".into(),
@@ -6198,6 +6236,7 @@ fn frozen_cache_invalidates_on_width_change() {
 fn resize_defers_height_remeasure_off_the_frame() {
     let mut a = app();
     for _ in 0..40 {
+            kind: Default::default(),
         a.turns.push(Turn {
             kind: lofi_types::PromptKind::User,
             prompt: "word ".repeat(40),
@@ -7462,42 +7501,7 @@ fn assert_streaming_words_never_move_rows(words: &[&str], case: &str) {
                 assert!(
                     row_text.contains(bare),
                     "[{case}] settled word {bare:?} vanished after word {i} ({word:?})\nprev:\n{}\ncur:\n{}",
-                    prev_rows.join("\n"),
-                    rows.join("\n")
-                );
-            }
-        }
-        prev_rows = rows;
-    }
-}
-
-#[test]
-fn streaming_inline_code_does_not_rewrap_settled_rows() {
-    // A code span `alpha beta gamma` opens partway through and closes several
-    // words later, straddling a wrap boundary at width 40.
-    assert_streaming_words_never_move_rows(
-        &[
-            "the", "quick", "brown", "fox", "jumps", "over", "`alpha", "beta", "gamma`", "and",
-            "keeps", "running", "toward", "the", "lazy", "dog", "without", "stopping", "for",
-            "anything", "at", "all", "today",
-        ],
-        "code",
-    );
-}
-
-#[test]
-fn streaming_inline_bold_does_not_rewrap_settled_rows() {
-    assert_streaming_words_never_move_rows(
-        &[
-            "the", "quick", "brown", "fox", "jumps", "over", "**alpha", "beta", "gamma**", "and",
-            "keeps", "running", "toward", "the", "lazy", "dog", "without", "stopping", "for",
-            "anything", "at", "all", "today",
-        ],
-        "bold",
-    );
-}
-
-#[test]
+                    prev_rows.join("\n"),#[test]
 fn streaming_inline_link_does_not_rewrap_settled_rows() {
     // A link opens mid-line and its destination completes several words later.
     assert_streaming_words_never_move_rows(
@@ -7583,6 +7587,7 @@ fn compact_keeps_file_backed_turn_content_visible() {
         store::SessionCursor::open(path).unwrap(),
     );
     let c0 = a.session.cursor.as_ref().unwrap().clone();
+        kind: Default::default(),
     let snap = c0.snapshot().unwrap();
     a.restore_indexed_session(&c0, &snap.index, snap.file_size)
         .unwrap();
@@ -7594,6 +7599,7 @@ fn compact_keeps_file_backed_turn_content_visible() {
     // the compaction marker appended rather than replacing it.
     let rendered = a.materialize_turn(0);
     assert!(
+        kind: Default::default(),
         rendered
             .blocks
             .iter()

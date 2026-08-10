@@ -115,6 +115,7 @@ async fn evaluate_command(
     let messages = vec![Message {
         role: Role::User,
         blocks: vec![ContentBlock::Text { text: prompt }],
+        kind: lofi_types::PromptKind::User,
     }];
 
     let stream = match provider.stream(&model, &messages, &[]).await {
