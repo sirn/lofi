@@ -95,6 +95,7 @@ impl MessageAssembler {
         Message {
             role: Role::Assistant,
             blocks,
+            kind: lofi_types::PromptKind::User,
         }
     }
 }

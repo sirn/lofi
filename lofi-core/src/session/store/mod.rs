@@ -519,6 +519,7 @@ impl SessionCursor {
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
                 }],
+                kind: Default::default(),
             }),
         }];
         self.append_events(&mut events)
@@ -1513,6 +1514,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: Default::default(),
         }
     }
 
@@ -1522,6 +1524,7 @@ mod tests {
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            kind: Default::default(),
         }
     }
 
@@ -1550,6 +1553,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "  raw prompt  \n".to_string(),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
@@ -1562,6 +1566,7 @@ mod tests {
                         name: "exec".to_string(),
                         input: serde_json::json!({"code": "x"}),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
@@ -1575,6 +1580,7 @@ mod tests {
                         is_error: false,
                         images: Vec::new(),
                     }],
+                    kind: Default::default(),
                 }),
             },
             SessionEvent {
