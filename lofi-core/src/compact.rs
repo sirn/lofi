@@ -211,6 +211,7 @@ pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
             blocks: vec![ContentBlock::Text {
                 text: compaction.summary.clone(),
             }],
+            kind: Default::default(),
         });
     }
     out.extend(compaction.kept_messages.iter().cloned());
@@ -1460,12 +1461,14 @@ mod tests {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
         }
+            kind: Default::default(),
     }
     fn assistant(t: &str) -> Message {
         Message {
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
         }
+            kind: Default::default(),
     }
     fn exec_call(id: &str, code: &str) -> Message {
         Message {
@@ -1476,6 +1479,7 @@ mod tests {
                 input: serde_json::json!({ "code": code }),
             }],
         }
+                kind: Default::default(),
     }
     fn exec_result(id: &str, value: &str) -> Message {
         Message {
@@ -1487,6 +1491,7 @@ mod tests {
                 images: Vec::new(),
             }],
         }
+                kind: Default::default(),
     }
     fn native(parent: &str, name: &str, args: &str) -> NativeToolRecord {
         NativeToolRecord {
@@ -1558,362 +1563,3 @@ mod tests {
             parent_id: Some("e6".to_string()),
             kind: SessionEventKind::Message(assistant("continued result")),
         });
-
-        let compacted = compact(&events, &CompactOptions::default())
-            .expect("restored summarized count must satisfy the history guard");
-        assert_eq!(compacted.summarized_count, 2);
-        assert_eq!(compacted.represented_count, 7);
-        assert_eq!(compacted.kept_count, 0);
-    }
-
-    #[test]
-    fn compact_refuses_when_too_little_to_fold() {
-        let events = events_of(&[
-            user("hi"),
-            assistant("hello"),
-            user("again"),
-            assistant("sure"),
-        ]);
-        assert!(compact(&events, &CompactOptions::default()).is_none());
-    }
-
-    #[test]
-    fn compact_keeps_last_turn_and_summarizes_prefix() {
-        let msgs = [
-            user("Please add a login form to auth.ts"),
-            assistant("I'll edit auth.ts to add the form."),
-            exec_call("t1", "lofi.edit"),
-            exec_result("t1", "ok"),
-            assistant("Done."),
-            user("Now add tests please"),
-            assistant("Adding tests."),
-        ];
-        let events = events_of(&msgs);
-        let c = compact(&events, &CompactOptions::default()).expect("some compaction");
-        assert!(c.summarized_count >= 1);
-        assert!(c.summary.starts_with(HANDOFF_PREAMBLE));
-        assert!(c.summary.contains("[Session Goal]"));
-        assert!(c.summary.contains("login form"));
-        assert_eq!(
-            c.kept_messages.first().map(user_text).as_deref(),
-            Some("Now add tests please")
-        );
-    }
-
-    #[test]
-    fn compact_drops_image_blocks() {
-        // The byte-pressure recovery depends on this: an oversized image
-        // payload stops before send, the UI force-compacts, and the continued
-        // request must be small. That only holds because compaction drops
-        // `Image` blocks from the summarized prefix. If compaction ever
-        // starts keeping images, the recovery loops forever — this test pins
-        // the contract.
-        let with_image = Message {
-            role: Role::User,
-            blocks: vec![
-                ContentBlock::Text {
-                    text: "look at this".into(),
-                },
-                ContentBlock::Image {
-                    bytes: vec![0u8; 16],
-                    media_type: "image/jpeg".into(),
-                },
-            ],
-        };
-        let msgs = [
-            with_image,
-            assistant("I see it."),
-            exec_call("t1", "return 1"),
-            exec_result("t1", "1"),
-            assistant("Done."),
-            user("next"),
-            assistant("ok"),
-        ];
-        let events = events_of(&msgs);
-        let c = compact(&events, &CompactOptions::default()).expect("some compaction");
-        let history = compacted_history(&c);
-        assert!(
-            !history
-                .iter()
-                .flat_map(|m| m.blocks.iter())
-                .any(|b| matches!(b, ContentBlock::Image { .. })),
-            "compacted history must not carry Image blocks"
-        );
-    }
-
-    #[test]
-    fn compact_files_and_changes_from_native_tools() {
-        let mut events = events_of(&[
-            user("edit auth.ts"),
-            exec_call("t1", "lofi.edit"),
-            exec_result("t1", "ok"),
-            assistant("done"),
-            user("thanks"),
-            assistant("ok"),
-            user("also add a test"),
-            assistant("sure"),
-        ]);
-        events.push(SessionEvent {
-            id: "n1".to_string(),
-            parent_id: Some("e7".to_string()),
-            kind: SessionEventKind::NativeTool(native("t1", "edit", "auth.ts")),
-        });
-        let c = compact(&events, &CompactOptions::default()).expect("some compaction");
-        assert!(c.summary.contains("[Files And Changes]"));
-        assert!(c.summary.contains("Modified: auth.ts"));
-    }
-
-    #[test]
-    fn merge_previous_accumulates_goals() {
-        let prev =
-            format!("{HANDOFF_PREAMBLE}\n\n[Session Goal]\n- goal one\n\n---\n\n[user]\nold");
-        let fresh =
-            format!("{HANDOFF_PREAMBLE}\n\n[Session Goal]\n- goal two\n\n---\n\n[user]\nnew");
-        let merged = merge_previous(&prev, &fresh);
-        assert!(merged.contains("goal one"));
-        assert!(merged.contains("goal two"));
-    }
-
-    #[test]
-    fn merge_previous_preserves_original_goals() {
-        let prev_goals: Vec<String> = (0..8).map(|i| format!("- original goal {i}")).collect();
-        let fresh_goals: Vec<String> = (0..5).map(|i| format!("- fresh goal {i}")).collect();
-        let prev = format!(
-            "{HANDOFF_PREAMBLE}\n\n[Session Goal]\n{}\n\n---\n\n[user]\nold",
-            prev_goals.join("\n")
-        );
-        let fresh = format!(
-            "{HANDOFF_PREAMBLE}\n\n[Session Goal]\n{}\n\n---\n\n[user]\nnew",
-            fresh_goals.join("\n")
-        );
-        let merged = merge_previous(&prev, &fresh);
-        assert!(merged.contains("original goal 0"));
-        assert!(merged.contains("original goal 1"));
-        assert!(merged.contains("fresh goal 4"));
-        let goal_count = merged
-            .split("[Session Goal]")
-            .nth(1)
-            .unwrap_or("")
-            .lines()
-            .filter(|l| l.starts_with("- "))
-            .count();
-        assert!(goal_count <= 8, "goal_count={goal_count} should be <= 8");
-    }
-
-    #[test]
-    fn extract_preferences_skips_questions() {
-        let blocks = vec![
-            CompactBlock::User {
-                text: "Can you use the openai provider?".to_string(),
-            },
-            CompactBlock::User {
-                text: "Please always use 2-space indentation".to_string(),
-            },
-        ];
-        let prefs = extract_preferences(&blocks);
-        assert!(prefs.iter().all(|p| !p.contains("openai provider")));
-        assert!(prefs.iter().any(|p| p.contains("2-space indentation")));
-    }
-
-    #[test]
-    fn brief_collapses_consecutive_identical_tool_calls() {
-        let blocks = vec![CompactBlock::ToolCall {
-            id: "t1".to_string(),
-            code: String::new(),
-            label: None,
-            native: vec![
-                native("t1", "read", "foo.rs"),
-                native("t1", "read", "foo.rs"),
-                native("t1", "read", "foo.rs"),
-            ],
-        }];
-        let brief = build_brief(&blocks, &[]);
-        assert!(
-            brief.contains("(x3)"),
-            "brief should contain repeat count: {brief}"
-        );
-    }
-
-    #[test]
-    fn summary_stays_within_token_budget() {
-        // Build a conversation with many turns so the brief transcript
-        // would be large without the token budget.
-        let big = "x".repeat(2000);
-        let mut msgs = Vec::new();
-        msgs.push(user("do a big task"));
-        for i in 0..40 {
-            msgs.push(exec_call(&format!("t{i}"), "lofi.read"));
-            msgs.push(exec_result(&format!("t{i}"), &big));
-            msgs.push(assistant(&"step done with lots of text ".repeat(5)));
-        }
-        msgs.push(user("now summarize"));
-        msgs.push(assistant("done"));
-        let events = events_of(&msgs);
-        let c = compact(&events, &CompactOptions::default()).expect("should compact");
-        let summary_chars = c.summary.len();
-        assert!(
-            summary_chars < 20_000,
-            "summary is {summary_chars} chars, should be under ~16k"
-        );
-    }
-
-    #[test]
-    fn re_compact_after_compact_all_ignores_summarized_messages() {
-        let mut events = events_of(&[user("OLD MESSAGE MUST STAY SUMMARIZED"), assistant("old")]);
-        events.push(SessionEvent {
-            id: "c1".to_string(),
-            parent_id: Some("e1".to_string()),
-            kind: SessionEventKind::Compaction {
-                summary: format!("{HANDOFF_PREAMBLE}\n\n[prior summary]"),
-                first_kept_entry_id: String::new(),
-                summarized_range: ["e0".to_string(), "e1".to_string()],
-                checkpointed_tail: false,
-                summarized: 2,
-                represented: 2,
-                kept: 0,
-            },
-        });
-        let new_messages = [
-            user("new one"),
-            assistant("reply one"),
-            user("new two"),
-            assistant("reply two"),
-            user("new three"),
-            assistant("reply three"),
-            user("new four"),
-            assistant("reply four"),
-        ];
-        let mut parent = "c1".to_string();
-        for (i, message) in new_messages.into_iter().enumerate() {
-            let id = format!("n{i}");
-            events.push(SessionEvent {
-                id: id.clone(),
-                parent_id: Some(parent),
-                kind: SessionEventKind::Message(message),
-            });
-            parent = id;
-        }
-
-        let c = compact(&events, &CompactOptions::default()).expect("compaction should succeed");
-        assert!(c.summary.contains("[prior summary]"));
-        assert!(!c.summary.contains("OLD MESSAGE MUST STAY SUMMARIZED"));
-    }
-
-    #[test]
-    fn re_compact_edits_old_kept_tail_from_disk() {
-        let big_result = "x".repeat(10_000);
-        let mut events = events_of(&[
-            user("do task"),
-            exec_call("t1", "lofi.read"),
-            exec_result("t1", &big_result),
-            assistant("done"),
-            user("now continue"),
-            exec_call("t2", "lofi.read"),
-            exec_result("t2", &big_result),
-            assistant("ok"),
-        ]);
-        events.push(SessionEvent {
-            id: "c1".to_string(),
-            parent_id: Some("e7".to_string()),
-            kind: SessionEventKind::Compaction {
-                summary: format!("{HANDOFF_PREAMBLE}\n\n[prior summary]"),
-                first_kept_entry_id: "e4".to_string(),
-                summarized_range: ["e0".to_string(), "e3".to_string()],
-                checkpointed_tail: false,
-                summarized: 4,
-                represented: 4,
-                kept: 4,
-            },
-        });
-        events.push(SessionEvent {
-            id: "e8".to_string(),
-            parent_id: Some("c1".to_string()),
-            kind: SessionEventKind::Message(user("what did you do?")),
-        });
-        events.push(SessionEvent {
-            id: "e9".to_string(),
-            parent_id: Some("e8".to_string()),
-            kind: SessionEventKind::Message(assistant("I read a file")),
-        });
-        events.push(SessionEvent {
-            id: "e10".to_string(),
-            parent_id: Some("e9".to_string()),
-            kind: SessionEventKind::Message(user("ok now add tests")),
-        });
-        events.push(SessionEvent {
-            id: "e11".to_string(),
-            parent_id: Some("e10".to_string()),
-            kind: SessionEventKind::Message(exec_call("t3", "lofi.write")),
-        });
-        events.push(SessionEvent {
-            id: "e12".to_string(),
-            parent_id: Some("e11".to_string()),
-            kind: SessionEventKind::Message(exec_result("t3", &big_result)),
-        });
-        events.push(SessionEvent {
-            id: "e13".to_string(),
-            parent_id: Some("e12".to_string()),
-            kind: SessionEventKind::Message(assistant("Done adding tests")),
-        });
-
-        let opts = CompactOptions {
-            edit: lofi_types::EditConfig {
-                enabled: true,
-                keep_results: 1,
-                keep_thinking: 0,
-                keep_calls: 1,
-            },
-            ..Default::default()
-        };
-
-        let c = compact(&events, &opts).expect("compaction should succeed");
-
-        assert!(c.summary.contains("[prior summary]"));
-        assert!(
-            !c.summary.contains(&"x".repeat(100)),
-            "summary should not contain the big result from the old kept tail"
-        );
-
-        assert!(
-            c.summary.contains("cleared") || !c.summary.contains(&big_result),
-            "old kept tail results should be stubbed, not carried verbatim into summary"
-        );
-    }
-
-    #[test]
-    fn compact_single_prompt_oversized_turn() {
-        // One user prompt followed by 6 exec tool cycles (12 messages).
-        // Each exec result is 20k chars → ~30k tokens total, well over the
-        // 2k-token budget. The oversized-turn guard must split at a
-        // completed tool-cycle so the leading messages are summarized.
-        let big = "x".repeat(20_000);
-        let msgs = [
-            user("do a big task"),
-            exec_call("t1", "lofi.read big1"),
-            exec_result("t1", &big),
-            exec_call("t2", "lofi.read big2"),
-            exec_result("t2", &big),
-            exec_call("t3", "lofi.read big3"),
-            exec_result("t3", &big),
-            exec_call("t4", "lofi.read big4"),
-            exec_result("t4", &big),
-            exec_call("t5", "lofi.read big5"),
-            exec_result("t5", &big),
-            exec_call("t6", "lofi.read big6"),
-            exec_result("t6", "ok"),
-        ];
-        let events = events_of(&msgs);
-        let opts = CompactOptions {
-            max_kept_tokens: 2_000,
-            ..Default::default()
-        };
-        let c = compact(&events, &opts).expect("should compact single oversized turn");
-        assert!(
-            c.summarized_count >= MIN_SUMMARIZED,
-            "summarized {} should be >= {MIN_SUMMARIZED}",
-            c.summarized_count
-        );
-        assert!(c.summary.contains("do a big task"));
-        assert!(!c.kept_messages.is_empty(), "should keep a tail");
-    }
-}

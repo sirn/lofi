@@ -354,6 +354,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
                 blocks: vec![ContentBlock::Text {
                     text: result.context_text(),
                 }],
+                kind: Default::default(),
             })
         }
         _ => None,
@@ -390,6 +391,7 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
                         blocks: vec![ContentBlock::Text {
                             text: summary.clone(),
                         }],
+                        kind: Default::default(),
                     });
                 }
                 if first_kept_entry_id.is_empty() {
@@ -551,6 +553,7 @@ mod tests {
             kind: SessionEventKind::Message(Message {
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: t.into() }],
+                kind: Default::default(),
             }),
         }
     }

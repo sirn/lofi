@@ -100,6 +100,7 @@ mod tests {
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
         }
+            kind: Default::default(),
     }
 
     #[test]

@@ -126,6 +126,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
             }
             Message {
                 role: msg.role,
+                kind: msg.kind,
                 blocks,
             }
         })
@@ -176,6 +177,7 @@ mod tests {
                 text: t.to_string(),
             }],
         }
+                kind: Default::default(),
     }
     fn assistant(t: &str) -> Message {
         Message {
@@ -184,6 +186,7 @@ mod tests {
                 text: t.to_string(),
             }],
         }
+                kind: Default::default(),
     }
     fn think(t: &str) -> ContentBlock {
         ContentBlock::Thinking {
@@ -262,6 +265,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("a", "out-1")],
+                    kind: Default::default(),
                 },
             ),
             (
@@ -269,6 +273,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("b", "out-2")],
+                    kind: Default::default(),
                 },
             ),
             (
@@ -276,6 +281,7 @@ mod tests {
                 Message {
                     role: Role::Tool,
                     blocks: vec![exec_result("c", "out-3")],
+                    kind: Default::default(),
                 },
             ),
         ];
@@ -299,6 +305,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![think("old reasoning"), exec_call("a", "code-1")],
+                    kind: Default::default(),
                 },
             ),
             (
@@ -306,6 +313,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![think("recent reasoning"), exec_call("b", "code-2")],
+                    kind: Default::default(),
                 },
             ),
         ];
@@ -325,6 +333,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![exec_call("a", "old-secret-code")],
+                    kind: Default::default(),
                 },
             ),
             (
@@ -332,6 +341,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![exec_call("b", "recent-code")],
+                    kind: Default::default(),
                 },
             ),
         ];
