@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use lofi_types::{
+use lofi_types::{PromptKind, 
     CompactionConfig, ContentBlock, Message, Role, SessionEvent, SessionEventKind, Usage,
 };
 
@@ -79,6 +79,7 @@ impl AgentLifecycle {
             blocks: vec![ContentBlock::Text {
                 text: system_prompt.to_string(),
             }],
+            kind: PromptKind::default(),
         });
         Ok(true)
     }
@@ -221,6 +222,7 @@ impl AgentLifecycle {
                     blocks: vec![ContentBlock::Text {
                         text: system_prompt.to_string(),
                     }],
+                    kind: PromptKind::default(),
                 },
             );
         }
@@ -369,6 +371,7 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
                 summary = Some(Message {
                     role: Role::User,
                     blocks: vec![ContentBlock::Text { text }],
+                    kind: PromptKind::default(),
                 });
             }
             SessionEventKind::TurnFailed { .. } => skipping_failed_turn = true,
@@ -408,6 +411,7 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
                     blocks: vec![ContentBlock::Text {
                         text: result.context_text(),
                     }],
+                    kind: PromptKind::default(),
                 });
             }
             _ => {}
@@ -542,6 +546,7 @@ mod tests {
             .push_message(Message {
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: "hi".into() }],
+                kind: PromptKind::default(),
             })
             .unwrap();
         assert!(
@@ -563,6 +568,7 @@ mod tests {
                 kind: SessionEventKind::Message(Message {
                     role: Role::User,
                     blocks: vec![ContentBlock::Text { text: "go".into() }],
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -573,6 +579,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "partial".into(),
                     }],
+                        kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -615,6 +622,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
+                    kind: PromptKind::default(),
             }),
         };
         let mut events = vec![make_msg(Role::User, "u0"), make_msg(Role::Assistant, "a0")];
@@ -675,6 +683,7 @@ mod tests {
             .push_message(Message {
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text { text }],
+                kind: PromptKind::default(),
             })
             .unwrap();
 
