@@ -175,7 +175,11 @@ fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSch
         "max_tokens": model.max_tokens.unwrap_or(4096),
     });
     if let Some(effort) = anthropic_effort(&model.thinking) {
-        req["thinking"] = json!({ "type": "adaptive", "effort": effort });
+        // `effort` lives in `output_config`, not on `thinking` — Anthropic
+        // rejects the nested shape with
+        // "thinking.adaptive.effort: Extra inputs are not permitted."
+        req["thinking"] = json!({ "type": "adaptive" });
+        req["output_config"] = json!({ "effort": effort });
     }
     if let Some(sys) = system {
         req["system"] = json!([{
@@ -236,12 +240,12 @@ fn add_conversation_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
+/// Pass the configured effort level through verbatim, omitting `off`.
+/// Anthropic rejects unknown levels with a 400 so the user sees a clear
+/// error rather than silent remapping — e.g. `xhigh` is unsupported on
+/// Claude Sonnet 4.6.
 fn anthropic_effort(level: &ThinkingLevel) -> Option<&str> {
-    match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::XHigh => Some("max"),
-        other => Some(other.as_str()),
-    }
+    (level != &ThinkingLevel::Off).then(|| level.as_str())
 }
 
 /// Tool-use blocks are correlated by the block `index`; the real tool `id`
@@ -473,16 +477,15 @@ mod tests {
             (ThinkingLevel::Low, "low"),
             (ThinkingLevel::Medium, "medium"),
             (ThinkingLevel::High, "high"),
-            (ThinkingLevel::XHigh, "max"),
+            (ThinkingLevel::XHigh, "xhigh"),
             (ThinkingLevel::Custom("custom".to_string()), "custom"),
         ] {
             let mut model = model();
             model.thinking = level;
             let req = build_anthropic_request(&model, &[], &[]);
-            assert_eq!(
-                req["thinking"],
-                json!({"type": "adaptive", "effort": effort})
-            );
+            assert_eq!(req["thinking"], json!({"type": "adaptive"}));
+            assert_eq!(req["output_config"], json!({"effort": effort}));
+            assert!(req["thinking"].get("effort").is_none());
             assert_eq!(req["max_tokens"], 1024);
             assert!(req["thinking"].get("budget_tokens").is_none());
         }
