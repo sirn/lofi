@@ -63,6 +63,7 @@ pub struct BuiltinTools {
     /// agent so jobs survive across the per-exec tool bundles; dropping the
     /// last clone kills any survivors.
     jobs: JobRegistry,
+    on_job_started: Option<crate::JobStartedFn>,
     /// Visible-output caps for tool results (file reads and bash output).
     truncate: truncate::TruncatedCap,
 }
@@ -122,6 +123,7 @@ impl BuiltinTools {
             read_roots,
             cancel: None,
             jobs: JobRegistry::new(),
+            on_job_started: None,
             truncate: truncate::TruncatedCap::default(),
         }
     }
@@ -142,6 +144,12 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_jobs(mut self, jobs: JobRegistry) -> Self {
         self.jobs = jobs;
+        self
+    }
+
+    #[must_use]
+    pub fn with_on_job_started(mut self, hook: Option<crate::JobStartedFn>) -> Self {
+        self.on_job_started = hook;
         self
     }
 
