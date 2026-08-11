@@ -23,6 +23,7 @@ enum ModalSlot {
     Tree,
     Model,
     Thinking,
+    Theme,
 }
 
 fn run_resume_load(
@@ -182,6 +183,10 @@ impl App {
                 self.open_thinking_picker();
                 true
             }
+            "/theme" => {
+                self.open_theme_picker();
+                true
+            }
             "/job" | "/jobs" => {
                 self.open_jobs_modal();
                 true
@@ -317,6 +322,7 @@ impl App {
         lines.push(info_kv(t, "/tree", "roll back to a past turn"));
         lines.push(info_kv(t, "/session", "show session info"));
         lines.push(info_kv(t, "/model", "switch the active model"));
+        lines.push(info_kv(t, "/theme", "switch color scheme for this session"));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
         lines.push(info_kv(t, "/job", "list background jobs, view logs, stop"));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
@@ -792,6 +798,33 @@ impl App {
         out
     }
 
+    /// `/theme`: open the color-scheme picker (Auto / Light / Dark).
+    /// Pre-selects the currently active mode.
+    pub(super) fn open_theme_picker(&mut self) {
+        let modes = ThemePickerState::MODES;
+        let selected = modes
+            .iter()
+            .position(|m| m == &self.theme_mode)
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePickerState { modes, selected });
+    }
+
+    pub(super) fn theme_picker_confirm(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            if let Some(&mode) = picker.modes.get(picker.selected) {
+                self.theme_mode = mode;
+                // `Auto` re-runs the OSC 11 probe so a system light<->dark
+                // flip is picked up; `Light`/`Dark` are already cached
+                // and the call short-circuits without terminal I/O.
+                self.theme = Theme::resolve(mode);
+                // `FrozenCache` stores styled render lines; drop them so the
+                // next frame re-renders with the new palette. CollapsedTurnCache
+                // retains unstyled turns and stays valid across theme changes.
+                self.frozen_render.clear();
+            }
+        }
+    }
+
     pub(super) fn thinking_picker_confirm(&mut self) {
         if let Some(picker) = self.thinking_picker.take() {
             if let Some(level) = picker.levels.get(picker.selected) {
@@ -1119,6 +1152,7 @@ impl App {
             || self.tree_picker.is_some()
             || self.model_picker.is_some()
             || self.thinking_picker.is_some()
+            || self.theme_picker.is_some()
             || self.jobs_modal.is_some()
             || !self.pending_confirms.is_empty()
     }
@@ -1276,6 +1310,8 @@ impl App {
             Some(ModalSlot::Model)
         } else if self.thinking_picker.is_some() {
             Some(ModalSlot::Thinking)
+        } else if self.theme_picker.is_some() {
+            Some(ModalSlot::Theme)
         } else {
             None
         }
@@ -1313,6 +1349,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Theme => self.theme_picker_confirm(),
             },
             // With a single entry, Tab/Shift+Tab confirm outright instead of
             // cycling (a no-op) — same as pressing Enter.
@@ -1329,6 +1366,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Theme => self.theme_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
                 ModalSlot::Picker => {
@@ -1343,6 +1381,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,
+                ModalSlot::Theme => self.theme_picker = None,
             },
             _ => {}
         }
@@ -1350,6 +1389,7 @@ impl App {
             || (matches!(slot, ModalSlot::Tree) && self.tree_picker.is_none())
             || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
             || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
+            || (matches!(slot, ModalSlot::Theme) && self.theme_picker.is_none())
         {
             return true;
         }
@@ -1394,8 +1434,10 @@ impl App {
             self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else if self.model_picker.is_some() {
             self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
-        } else {
+        } else if self.thinking_picker.is_some() {
             self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
+        } else {
+            self.theme_picker.as_mut().map(|t| t as &mut dyn Modal)
         }
     }
 
