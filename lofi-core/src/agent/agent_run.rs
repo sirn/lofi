@@ -109,6 +109,7 @@ impl Agent {
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution failures that cannot be surfaced as a `ToolResult`.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[inline(never)]
     pub async fn run_continuation_with_attachments(
         &self,
         messages: &mut Vec<Message>,
@@ -861,6 +862,7 @@ impl Agent {
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[inline(never)]
     async fn execute_tools(
         &self,
         tool_uses: &[(&str, &str, &serde_json::Value)],

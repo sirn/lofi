@@ -66,6 +66,7 @@ impl ModelRegistry {
     /// Returns [`Error::Http`] on a transport failure that is not covered by
     /// the cache fallback, or [`Error::Io`] / [`Error::State`] on cache
     /// write failure.
+    #[inline(never)]
     pub async fn load_async(config: &Config) -> Result<Self> {
         let mut augmented = config.clone();
         let cache_path = state::discovery_cache_path()?;
