@@ -1207,6 +1207,25 @@ async fn run_loop(
         agent = Some(a);
     }
 
+    if let Some(sink_cursor) = &app.session.cursor {
+        let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
+        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(sink_cursor, &index)
+            .unwrap_or_default();
+        if !outstanding.is_empty() {
+            let ids = outstanding
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.prompt_queue.push(QueuedPrompt {
+                text: format!(
+                    "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
+                ),
+                kind: lofi_types::PromptKind::Notice,
+            });
+        }
+    }
+
     // Live notice feed. The job driver pushes onto this the moment a job
     // transitions; the select arm below reacts without waiting for a tick.
     // Buffered pre-UI notices flush into this receiver on subscribe.
