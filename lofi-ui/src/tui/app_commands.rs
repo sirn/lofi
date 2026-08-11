@@ -798,8 +798,8 @@ impl App {
         out
     }
 
-    /// `/theme`: open the color-scheme picker (Auto / Light / Dark).
-    /// Pre-selects the currently active mode.
+    /// `/theme`: open the color-scheme picker (Auto / Light / Dark),
+    /// pre-selected on the currently active mode.
     pub(super) fn open_theme_picker(&mut self) {
         let modes = ThemePickerState::MODES;
         let selected = modes
@@ -813,13 +813,12 @@ impl App {
         if let Some(picker) = self.theme_picker.take() {
             if let Some(&mode) = picker.modes.get(picker.selected) {
                 self.theme_mode = mode;
-                // `Auto` re-runs the OSC 11 probe so a system light<->dark
-                // flip is picked up; `Light`/`Dark` are already cached
-                // and the call short-circuits without terminal I/O.
+                // 'Auto' re-runs the OSC 11 probe so a system light<->dark
+                // flip is picked up; 'Light'/'Dark' short-circuit without
+                // terminal I/O.
                 self.theme = Theme::resolve(mode);
-                // `FrozenCache` stores styled render lines; drop them so the
-                // next frame re-renders with the new palette. CollapsedTurnCache
-                // retains unstyled turns and stays valid across theme changes.
+                // Frozen render lines carry the old palette; CollapsedTurnCache
+                // stores unstyled turns and can stay.
                 self.frozen_render.clear();
             }
         }

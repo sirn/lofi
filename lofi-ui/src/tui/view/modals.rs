@@ -548,7 +548,11 @@ pub(super) fn render_theme_picker(f: &mut Frame, area: Rect, app: &App) {
             let is_active = *m == app.theme_mode;
             ListItem::new(Span::styled(
                 row_for(*m),
-                if is_active { active_style } else { inactive_style },
+                if is_active {
+                    active_style
+                } else {
+                    inactive_style
+                },
             ))
         })
         .collect();
