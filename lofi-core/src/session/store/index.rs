@@ -114,6 +114,9 @@ pub enum IndexKind {
     TurnCancelled,
     Compaction,
     Cursor,
+    /// `JobStarted` / `JobFinished` markers; lets reconciliation skip the
+    /// full event slice.
+    JobLifecycle,
     Other,
 }
 
@@ -247,6 +250,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "compaction" => IndexKind::Compaction,
         "native_tool" => IndexKind::NativeTool,
         "cursor" => IndexKind::Cursor,
+        "job_started" | "job_finished" => IndexKind::JobLifecycle,
         _ => IndexKind::Other,
     }
 }
@@ -271,6 +275,9 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
         SessionEventKind::Compaction { .. } => IndexKind::Compaction,
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
+        SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {
+            IndexKind::JobLifecycle
+        }
         _ => IndexKind::Other,
     }
 }
