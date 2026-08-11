@@ -780,34 +780,41 @@ impl Default for PricingFieldMappings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderConfig {
-    #[serde(default)]
     pub api_type: Option<Api>,
-    #[serde(default)]
     pub api_types: IndexMap<String, ApiTypeMapping>,
-    #[serde(default)]
     pub base_url: Option<String>,
-    #[serde(default)]
     pub pricing_convention: PricingConvention,
-    #[serde(default)]
     pub pricing_field_mappings: PricingFieldMappings,
-    #[serde(default)]
     pub env_name: Option<String>,
-    #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
-    #[serde(default)]
     pub models: IndexMap<String, ModelConfig>,
-    #[serde(default)]
     pub auto_models: Option<AutoModelsConfig>,
-    #[serde(default)]
     pub no_auth: bool,
-    #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
-    #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            api_type: None,
+            api_types: IndexMap::new(),
+            base_url: None,
+            pricing_convention: PricingConvention::default(),
+            pricing_field_mappings: PricingFieldMappings::default(),
+            env_name: None,
+            api_key: None,
+            headers: None,
+            models: IndexMap::new(),
+            auto_models: None,
+            no_auth: false,
+            thinking_level: None,
+            thinking_levels: Vec::new(),
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -846,6 +853,63 @@ impl ProviderConfig {
             .get(key)
             .and_then(|m| m.pricing_field_mappings.as_ref())
             .unwrap_or(&self.pricing_field_mappings)
+    }
+}
+
+// Manual Deserialize: route through deserialize_map with a concrete-typed
+// visitor instead of deserialize_any. The derived impl causes
+// toml_edit::TableDeserializer::deserialize_any::<ProviderVisitor> to be
+// instantiated per call site, duplicating ~16 KiB each time. The manual
+// visitor pulls each field with next_value::<T>() against the concrete
+// field type, so deserialization reuses already-instantiated per-T code
+// paths instead of generating a per-struct dispatch table.
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = ProviderConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a ProviderConfig map")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut out = ProviderConfig::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "api_type" => out.api_type = map.next_value()?,
+                        "api_types" => out.api_types = map.next_value()?,
+                        "base_url" => out.base_url = map.next_value()?,
+                        "pricing_convention" => {
+                            out.pricing_convention = map.next_value()?;
+                        }
+                        "pricing_field_mappings" => {
+                            out.pricing_field_mappings = map.next_value()?;
+                        }
+                        "env_name" => out.env_name = map.next_value()?,
+                        "api_key" => out.api_key = map.next_value()?,
+                        "headers" => out.headers = map.next_value()?,
+                        "models" => out.models = map.next_value()?,
+                        "auto_models" => out.auto_models = map.next_value()?,
+                        "no_auth" => out.no_auth = map.next_value()?,
+                        "thinking_level" => out.thinking_level = map.next_value()?,
+                        "thinking_levels" => out.thinking_levels = map.next_value()?,
+                        _ => {
+                            // Tolerate unknown keys: drop the value without
+                            // binding a concrete type so we never grow code
+                            // for forward-compat variants.
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+        deserializer.deserialize_map(V)
     }
 }
 
