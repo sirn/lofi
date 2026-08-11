@@ -127,6 +127,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         ctx_limit,
         compaction,
         image_config,
+        ui_theme,
         supports_image,
         switcher,
     ) = match resolve_startup_agent(&opts, restored.as_deref()).await? {
@@ -135,6 +136,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
             let root = opts.root.clone();
             let compaction = config.compaction.clone();
             let image_config = config.image;
+            let ui_theme = config.ui.theme;
             let supports_image = model.supports_image;
             let switcher = tui::ModelSwitcher::new(registry, config, root);
             (
@@ -145,6 +147,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                 model.context_window.unwrap_or(0),
                 compaction,
                 image_config,
+                ui_theme,
                 supports_image,
                 Some(switcher),
             )
@@ -157,6 +160,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
             0,
             lofi_types::CompactionConfig::default(),
             lofi_types::ImageConfig::default(),
+            lofi_types::ThemeMode::default(),
             false,
             None,
         ),
@@ -172,6 +176,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         agent,
         label,
         thinking,
+        ui_theme,
         session,
         hint,
         ctx_limit,
