@@ -1714,6 +1714,7 @@ dependencies = [
  "lofi-error",
  "lofi-types",
  "lz4_flex",
+ "nix",
  "pulldown-cmark",
  "ratatui",
  "serde",
