@@ -1207,7 +1207,7 @@ async fn run_loop(
         agent = Some(a);
     }
 
-    if let (Some(sink_cursor), Some(_)) = (&app.session.cursor, &app.jobs) {
+    if let Some(sink_cursor) = &app.session.cursor {
         let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
         let outstanding = lofi_core::session::replay::outstanding_job_ids_at(
             sink_cursor,
