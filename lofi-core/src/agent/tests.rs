@@ -4,7 +4,7 @@
 use super::*;
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
-use lofi_types::{PromptKind, Api, SessionEventKind, Usage};
+use lofi_types::{Api, PromptKind, SessionEventKind, Usage};
 use tempfile::tempdir;
 
 struct MockProvider {

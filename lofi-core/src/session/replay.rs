@@ -9,8 +9,9 @@
 use std::collections::HashMap as Map;
 use std::collections::HashSet;
 
-use lofi_types::{PromptKind, 
-    ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, Usage,
+use lofi_types::{
+    ContentBlock, Message, NativeToolRecord, PromptKind, Role, SessionEvent, SessionEventKind,
+    Usage,
 };
 
 use super::store::{self, EventIndex, IndexKind, SessionCursor};
