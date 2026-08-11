@@ -1145,6 +1145,35 @@ fn default_retry_max_delay_ms() -> u64 {
     60_000
 }
 
+/// Color scheme selection. `Auto` queries the terminal via OSC 11 at
+/// startup and whenever the user picks "Auto" interactively; `Light` /
+/// `Dark` force the corresponding palette without probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub theme: ThemeMode,
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
@@ -1259,6 +1288,8 @@ pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub bash: BashConfig,
@@ -1281,6 +1312,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             agent: AgentConfig::default(),
+            ui: UiConfig::default(),
             compaction: CompactionConfig::default(),
             bash: BashConfig::default(),
             truncate: TruncateConfig::default(),
