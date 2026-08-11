@@ -7712,6 +7712,35 @@ fn jobs_modal_empty_list_no_underflow() {
 }
 
 #[test]
+fn theme_picker_opens_preselected_on_current_mode() {
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.theme_mode = ThemeMode::Dark; // test-only construction defaults to Auto
+    a.open_theme_picker();
+    let picker = a.theme_picker.as_ref().unwrap();
+    assert_eq!(picker.modes.len(), 3);
+    assert_eq!(picker.modes[picker.selected], ThemeMode::Dark);
+    assert!(a.modal_open());
+}
+
+#[test]
+fn theme_picker_confirm_updates_mode_and_clears_frozen_cache() {
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.theme_mode = ThemeMode::Dark;
+    // Seed the frozen cache so we can prove confirm clears it.
+    a.frozen_render.insert(0, Vec::new());
+    assert!(a.frozen_render.contains(0));
+    a.open_theme_picker();
+    // Move from Dark (idx 2) to Light (idx 1).
+    a.theme_picker.as_mut().unwrap().selected = 1;
+    a.theme_picker_confirm();
+    assert!(a.theme_picker.is_none());
+    assert_eq!(a.theme_mode, ThemeMode::Light);
+    assert!(!a.frozen_render.contains(0));
+}
+
+#[test]
 fn notify_lines_counts_verbose_chip_width() {
     let msg = "an error long enough to matter when the verbose chip eats ten cells off the available width of the line".to_string();
     let mut quiet = app();
