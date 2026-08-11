@@ -1,0 +1,17 @@
+core,code,types,ui: track job lifecycle on the lineage
+
+Background jobs used to be invisible to resume and /tree: the registry
+could keep ids that the lineage claimed were live after a rollback (or
+vice versa), and the agent had no durable way to learn the difference.
+Spawns already wrote tool results into the transcript, but the lifecycle
+boundaries were not recorded, so reconciling on resume meant heuristics
+(string-sniffing the transcript) rather than a single source of truth.
+
+Durable JobStarted / JobFinished markers now ride the lineage alongside
+the tool results the model already sees. They stay invisible to model
+context and the transcript renderer (lineage bookkeeping only), but
+resume and /tree can now decide which registry ids are still live from
+one authoritative walk of the lineage. /tree kills jobs whose
+spawn event rolled off the lineage; resume feeds a Notice through the
+prompt queue so the model learns that stale ids are dead before it can
+target one.
