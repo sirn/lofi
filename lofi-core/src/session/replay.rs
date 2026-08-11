@@ -321,11 +321,12 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
 /// by message reconstruction (`messages_from_events`, `compact`) so the
 /// bash-to-context transform and exclusion rule live in one place.
 #[must_use]
+#[allow(clippy::match_same_arms)]
 pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
     match kind {
-        // Job lifecycle markers are lineage bookkeeping only: the model
-        // learns about background work from tool calls and notices, not from
-        // raw lifecycle events. Returning None keeps them out of context.
+        // Lineage bookkeeping only; the model learns about background work
+        // from tool results and notices. Kept explicit against the wildcard
+        // so the lifecycle rule is visible without scanning the `_` arm.
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
         SessionEventKind::UserBash {
@@ -502,18 +503,13 @@ pub fn compaction_status_from_index(
     )
 }
 
-/// Job ids with a `JobStarted` marker and no matching `JobFinished` marker
-/// on the currently selected visible lineage. These are the jobs that were
-/// still running when the session last ended (resume) or that the lineage
-/// claims are still live (/tree into a branch that contains their spawn but
-/// not their finish). Hosts use this to decide which jobs survive a lineage
-/// switch and which stale ids need an agent-facing notice.
+/// Job ids with a `JobStarted` marker but no matching `JobFinished` marker
+/// on the visible lineage.
 #[must_use]
 pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
-    let visible = visible_event_indices(events);
     let mut started: Vec<u64> = Vec::new();
     let mut finished: HashSet<u64> = HashSet::new();
-    for i in visible {
+    for i in visible_event_indices(events) {
         match &events[i].kind {
             SessionEventKind::JobStarted { job_id } => started.push(*job_id),
             SessionEventKind::JobFinished { job_id } => {
@@ -522,17 +518,14 @@ pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
             _ => {}
         }
     }
+    started.retain(|id| !finished.contains(id));
     started
-        .into_iter()
-        .filter(|id| !finished.contains(id))
-        .collect()
 }
 
 /// Like [`outstanding_job_ids`] but reads lifecycle markers directly from a
-/// cursor over an indexed lineage. The `index` parameter must be
-/// lineage-scoped (i.e., produced by `SessionCursor::snapshot`, which runs
-/// `indexed_lineage`); only `IndexKind::JobLifecycle` entries are touched,
-/// so cost scales with the number of job markers, not total events.
+/// cursor over an indexed lineage; `index` must be lineage-scoped (see
+/// `SessionCursor::snapshot`). Only `IndexKind::JobLifecycle` entries are
+/// touched.
 /// # Errors
 /// Propagates cursor I/O failures.
 pub fn outstanding_job_ids_at(
@@ -551,10 +544,8 @@ pub fn outstanding_job_ids_at(
             _ => {}
         }
     }
-    Ok(started
-        .into_iter()
-        .filter(|id| !finished.contains(id))
-        .collect())
+    started.retain(|id| !finished.contains(id));
+    Ok(started)
 }
 
 /// Byte ranges per turn, derived from the visible event path. Test helper
@@ -687,10 +678,6 @@ mod tests {
 
     #[test]
     fn replay_suppresses_job_lifecycle_markers() {
-        // Lifecycle markers must not appear as transcript events; the model
-        // learns about jobs through tool results and notices only. Use the
-        // selected-events variant — it bypasses lineage resolution, so the
-        // lifecycle markers are seen raw.
         let events = vec![
             user_msg("a"),
             job_started(1),

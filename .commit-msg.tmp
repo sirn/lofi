@@ -1,0 +1,22 @@
+code,code,core,types,ui: iterate on job lifecycle markers (clarity, hygiene)
+
+- JobStartedFn no longer takes a `&str` command parameter that no caller
+  ever used; spawn hooks now fire with only the new id.
+- Inline comments trimmed from narrative/passage-style prose down to
+  why-not rationale; several outright violating comments deleted.
+- `JobRegistry::live_ids` returns HashSet<u64> directly, removing the
+  intermediate Vec + recollect at call sites that always wanted set
+  membership semantics.
+- `kill_not_in` adopts `keep` as a local HashSet binding instead of the
+  keep_set intermediate.
+- `outstanding_job_ids` / `outstanding_job_ids_at` use Vec::retain
+  instead of a fresh collect.
+- UI reconciliation blocks: dropped narrative comment headers, replaced
+  HashSet re-collection with direct use of live_ids() (now a HashSet),
+  used format-captured names ({ids}) instead of format! args.
+- clippy::match_same_arms allowed on agent_message_for_event with the
+  rationale comment preserved; explicit None arm documents the design
+  choice against the wildcard.
+
+Behavior preserved; no API contract changes. Workspace tests + clippy
+green.
