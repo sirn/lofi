@@ -50,6 +50,7 @@ impl App {
             total_in: 0,
             total_out: 0,
             prompt_queue: Vec::new(),
+            startup_notices: Vec::new(),
             run: None,
             run_start: None,
             retry: None,

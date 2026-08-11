@@ -169,6 +169,7 @@ struct Inner {
     /// test drives the registry headless. `subscribe_notices` flushes this
     /// buffer through the newly added subscriber.
     pending: Mutex<Vec<String>>,
+    on_finished: Mutex<Option<crate::JobFinishedFn>>,
 }
 
 /// Per-session registry of background jobs. Cheap to clone; every clone
@@ -199,6 +200,7 @@ impl JobRegistry {
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(Vec::new()),
+                on_finished: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -292,6 +294,52 @@ impl JobRegistry {
                     .is_terminal()
             })
             .count()
+    }
+
+    /// Installs the terminal-transition hook; called exactly once per job
+    /// when the driver records a terminal state. `None` un-installs.
+    pub fn set_on_finished(&self, hook: Option<crate::JobFinishedFn>) {
+        let mut slot = self
+            .inner
+            .on_finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = hook;
+    }
+
+    /// Ids of jobs currently registered, regardless of state.
+    #[must_use]
+    pub fn live_ids(&self) -> std::collections::HashSet<u64> {
+        self.inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Kills and unregisters every job whose id is not in `keep`. Returns
+    /// the ids that were killed.
+    pub fn kill_not_in(&self, keep: &[u64]) -> Vec<u64> {
+        let keep: std::collections::HashSet<u64> = keep.iter().copied().collect();
+        let mut killed = Vec::new();
+        for id in self.live_ids() {
+            if keep.contains(&id) {
+                continue;
+            }
+            if self.kill(id) {
+                killed.push(id);
+            }
+            let _ = self
+                .inner
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+        }
+        killed.sort_unstable();
+        killed
     }
 
     /// Kill a job's whole process group and mark it cancelled. Synchronous
@@ -514,6 +562,9 @@ impl BuiltinTools {
             .insert(id, handle.clone());
 
         tokio::spawn(run_job(self.jobs.clone(), handle, child, timeout_ms));
+        if let Some(hook) = &self.on_job_started {
+            hook(id);
+        }
 
         Ok(json!({
             "ok": true,
@@ -791,6 +842,20 @@ async fn run_job(
         }
     };
     handle.done.notify_waiters();
+    let hook = jobs
+        .inner
+        .on_finished
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        let id = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .id;
+        hook(id);
+    }
     if let Some(text) = notice {
         push_notice(&jobs, text);
     }
