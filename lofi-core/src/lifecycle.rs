@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use lofi_types::{PromptKind, 
-    CompactionConfig, ContentBlock, Message, Role, SessionEvent, SessionEventKind, Usage,
+use lofi_types::{
+    CompactionConfig, ContentBlock, Message, PromptKind, Role, SessionEvent, SessionEventKind,
+    Usage,
 };
 
 use crate::compact::{compact, compacted_history, CompactOptions, Compaction};
@@ -579,7 +580,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text {
                         text: "partial".into(),
                     }],
-                        kind: PromptKind::default(),
+                    kind: PromptKind::default(),
                 }),
             },
             SessionEvent {
@@ -622,7 +623,7 @@ mod tests {
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
                 }],
-                    kind: PromptKind::default(),
+                kind: PromptKind::default(),
             }),
         };
         let mut events = vec![make_msg(Role::User, "u0"), make_msg(Role::Assistant, "a0")];
