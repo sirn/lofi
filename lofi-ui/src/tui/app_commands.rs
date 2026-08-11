@@ -1014,6 +1014,66 @@ impl App {
     /// (for "edit and resend" entries) load the original prompt into the
     /// input box. The visual rollback replaces the old "branch ready" badge —
     /// the user sees the conversation up to the branch point immediately.
+    /// Roll the live-job registry back to match the freshly selected
+    /// lineage. Kills jobs whose spawn event is now off-lineage; flags
+    /// outstanding spawns that no longer have a live process so the model
+    /// learns the ids are stale.
+    fn reconcile_jobs_after_lineage_switch(
+        &mut self,
+        cursor: &store::SessionCursor,
+        index: &[store::EventIndex],
+    ) {
+        let Some(jobs) = self.jobs.clone() else {
+            return;
+        };
+        let spawn_ids: Vec<u64> = index
+            .iter()
+            .filter(|e| e.kind == store::IndexKind::JobLifecycle)
+            .filter_map(|e| match cursor.event_at(e.offset).ok()?.kind {
+                lofi_types::SessionEventKind::JobStarted { job_id } => Some(job_id),
+                _ => None,
+            })
+            .collect();
+        tracing::info!(
+            target: "lofi::reconcile",
+            spawn_ids = ?spawn_ids,
+            live = ?jobs.live_ids(),
+            "reconcile"
+        );
+        let killed = jobs.kill_not_in(&spawn_ids);
+        if !killed.is_empty() {
+            let ids = killed
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.notify(
+                NotifyKind::Info,
+                format!("killed {} off-lineage job(s): {ids}", killed.len()),
+            );
+        }
+        let live = jobs.live_ids();
+        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(cursor, index)
+            .unwrap_or_default();
+        let stale: Vec<u64> = outstanding
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .collect();
+        if !stale.is_empty() {
+            let ids = stale
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.prompt_queue.push(super::QueuedPrompt {
+                text: format!(
+                    "branch switch: jobs [{ids}] from the prior lineage are no longer running; their ids are stale. Use jobSpawn for new background work."
+                ),
+                kind: lofi_types::PromptKind::Notice,
+            });
+        }
+    }
+
     pub(super) fn tree_picker_confirm_inner(&mut self, picker: &TreePickerState) {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
         self.tree_picker_index = None;
@@ -1072,6 +1132,7 @@ impl App {
             );
             return;
         }
+        self.reconcile_jobs_after_lineage_switch(&cursor, &snapshot.index);
         let prefill = if !entry.prefill.is_empty() {
             entry.prefill
         } else if entry.source_kind == store::IndexKind::UserPrompt {
