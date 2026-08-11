@@ -3,9 +3,9 @@
 use futures::StreamExt;
 use lofi_providers::assemble_message;
 use lofi_providers::open;
-use lofi_types::{PromptKind, 
-    Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, ProviderConfig,
-    Role, StreamingEvent, Usage,
+use lofi_types::{
+    Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, PromptKind,
+    ProviderConfig, Role, StreamingEvent, Usage,
 };
 
 fn user_msg() -> Message {

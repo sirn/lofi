@@ -60,6 +60,14 @@ pub struct SessionRecorder {
     tool_timing_ids: HashSet<String>,
     byte_start: Option<u64>,
     byte_end: Option<u64>,
+    /// Job lifecycle events emitted by tool hooks mid-turn. Drained into
+    /// the next `append_pending` so the `JobStarted` `parent_id` chains off
+    /// the current turn's user message — not the cursor's pre-turn leaf —
+    /// keeping the lifecycle on the same lineage as the conversation that
+    /// spawned it. Without this, /tree rollback to before the turn would
+    /// leave the `JobStarted` event on the new lineage, so reconcile would
+    /// see the job as in-lineage and skip both kill and stale-notice.
+    pending_job_lifecycle: std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>>,
 }
 
 impl SessionRecorder {
@@ -75,7 +83,18 @@ impl SessionRecorder {
             tool_timing_ids: HashSet::new(),
             byte_start: None,
             byte_end: None,
+            pending_job_lifecycle: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Handle for the tool-runtime hook that fires when a background job
+    /// starts or finishes. Pushes into the pending queue; the next
+    /// `append_pending` call drains it into the durable transcript.
+    #[must_use]
+    pub fn job_lifecycle_queue(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>> {
+        std::sync::Arc::clone(&self.pending_job_lifecycle)
     }
 
     /// Append everything completed since the previous checkpoint, without a
@@ -182,6 +201,19 @@ impl SessionRecorder {
             parent_id: None,
             kind: SessionEventKind::ThinkingTiming { elapsed_ms },
         }));
+        {
+            let mut pending = self
+                .pending_job_lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for kind in pending.drain(..) {
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind,
+                });
+            }
+        }
         if let Some(kind) = terminal {
             events.push(SessionEvent {
                 id: String::new(),
@@ -275,7 +307,7 @@ mod tests {
                     name: "exec".into(),
                     input: serde_json::Value::String("1".into()),
                 }],
-                    kind: PromptKind::default(),
+                kind: PromptKind::default(),
             },
             Message {
                 role: Role::User,
@@ -285,7 +317,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
-                    kind: PromptKind::default(),
+                kind: PromptKind::default(),
             },
         ];
         let range = rec

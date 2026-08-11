@@ -804,6 +804,9 @@ pub(crate) struct App {
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
+    /// Stale-job notices computed at session startup, folded into the
+    /// history of the first agent run after resume. Consumed on first use.
+    startup_notices: Vec<String>,
     cost: f64,
     turn_cost: f64,
     turn_has_round_usage: bool,
@@ -1169,6 +1172,23 @@ async fn run_loop(
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size)?;
+        // Jobs whose started marker is on this lineage but whose terminal
+        // marker is not (process died, or user /tree'd a fresh branch
+        // elsewhere). Their ids are stale; surface that on the first agent
+        // turn after resume so the model does not try to poll them. Reuses
+        // the already-built lineage index — no second file scan.
+        let outstanding =
+            lofi_core::session::replay::outstanding_job_ids_at(&cursor, &index).unwrap_or_default();
+        if !outstanding.is_empty() {
+            let ids = outstanding
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.startup_notices.push(format!(
+                "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
+            ));
+        }
     }
     // The resume index is startup scratch. All persistent UI backing uses the
     // compact turn ranges/offsets built above and opens a fresh cursor snapshot
@@ -1206,6 +1226,7 @@ async fn run_loop(
         app.jobs = Some(a.jobs());
         agent = Some(a);
     }
+
 
     // Live notice feed. The job driver pushes onto this the moment a job
     // transitions; the select arm below reacts without waiting for a tick.
@@ -1345,6 +1366,24 @@ async fn run_loop(
                                 NotifyKind::Error,
                                 format!("switch model: {e}"),
                             ),
+                        }
+                    }
+                    // Slash commands (notably /tree reconcile) can push
+                    // notices into prompt_queue while at rest. The queue's
+                    // usual consumer is the agent-finished branch of the
+                    // current_run select arm; without a live run, that arm
+                    // never fires and the notice would sit forever. Drain
+                    // at rest here, matching the mpsc notice path.
+                    if current_run.is_none() && !app.prompt_queue.is_empty() && agent.is_some() {
+                        if let Some(queued) = app.prompt_queue.first().cloned() {
+                            app.prompt_queue.remove(0);
+                            spawn_prompt(
+                                &mut app,
+                                agent.as_ref(),
+                                &mut current_run,
+                                queued.text,
+                                queued.kind,
+                            );
                         }
                     }
                     }

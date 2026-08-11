@@ -390,8 +390,25 @@ fn spawn_agent_run(
     } else {
         std::mem::take(&mut app.pending_attachments)
     };
+    // Notices computed at session startup (e.g. stale job ids) ride the
+    // first agent run so the model sees them inline before the user's text.
+    // Continuations skip them: mid-run context is already shaped.
+    let startup_notices = if continuation {
+        Vec::new()
+    } else {
+        std::mem::take(&mut app.startup_notices)
+    };
     let handle = tokio::task::spawn_local(async move {
         let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+        for notice in &startup_notices {
+            messages.push(lofi_types::Message {
+                role: lofi_types::Role::User,
+                blocks: vec![lofi_types::ContentBlock::Text {
+                    text: notice.clone(),
+                }],
+                kind: lofi_types::PromptKind::Notice,
+            });
+        }
         let result = agent
             .run_continuation_with_attachments(
                 &mut messages,
