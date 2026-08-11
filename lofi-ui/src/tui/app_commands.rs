@@ -1072,6 +1072,61 @@ impl App {
             );
             return;
         }
+        // /tree cross-lineage job cleanup. A job is session-bound AND
+        // lineage-bound: its tool_result only exists in the agent's view
+        // when the spawn event lies on the active lineage. The transcript
+        // just rolled back; any live job whose `JobStarted` isn't on the
+        // new lineage must be killed so the registry matches what the
+        // agent can see. Jobs whose spawn IS on the lineage but whose
+        // `JobFinished` marker never landed still have a live registry
+        // entry — those need an agent-visible notice so the model knows
+        // they are dead from the model's perspective once it returns.
+        if let Some(jobs) = self.jobs.clone() {
+            // The keep-set is the set of spawns visible on the new lineage,
+            // not merely the outstanding ones. Terminal-but-spawned-on-this-
+            // lineage jobs keep their registry presence for `jobStatus`.
+            let spawn_ids: Vec<u64> = snapshot
+                .index
+                .iter()
+                .filter(|e| e.kind == store::IndexKind::JobLifecycle)
+                .filter_map(|e| {
+                    cursor.event_at(e.offset).ok().and_then(|ev| match ev.kind {
+                        lofi_types::SessionEventKind::JobStarted { job_id } => Some(job_id),
+                        _ => None,
+                    })
+                })
+                .collect();
+            let killed = jobs.kill_not_in(&spawn_ids);
+            let live: std::collections::HashSet<u64> =
+                jobs.live_ids().into_iter().collect();
+            let outstanding = lofi_core::session::replay::outstanding_job_ids_at(
+                &cursor,
+                &snapshot.index,
+            )
+            .unwrap_or_default();
+            let stale: Vec<u64> = outstanding
+                .iter()
+                .copied()
+                .filter(|id| !live.contains(id))
+                .collect();
+            if !stale.is_empty() {
+                let ids: Vec<String> = stale.iter().map(u64::to_string).collect();
+                self.prompt_queue.push(super::QueuedPrompt {
+                    text: format!(
+                        "branch switch: jobs [{}] from the prior lineage are no longer running; their ids are stale. Use jobSpawn for new background work.",
+                        ids.join(", "),
+                    ),
+                    kind: lofi_types::PromptKind::Notice,
+                });
+            }
+            if !killed.is_empty() {
+                let ids: Vec<String> = killed.iter().map(u64::to_string).collect();
+                self.notify(
+                    NotifyKind::Info,
+                    format!("killed {} off-lineage job(s): {}", killed.len(), ids.join(", ")),
+                );
+            }
+        }
         let prefill = if !entry.prefill.is_empty() {
             entry.prefill
         } else if entry.source_kind == store::IndexKind::UserPrompt {

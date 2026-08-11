@@ -169,6 +169,10 @@ struct Inner {
     /// test drives the registry headless. `subscribe_notices` flushes this
     /// buffer through the newly added subscriber.
     pending: Mutex<Vec<String>>,
+    /// Optional durable-sink hook fired once per terminal transition with
+    /// the job id. Installed by the owning host (the agent when a session
+    /// is active) so `JobFinished` markers land on the active lineage.
+    on_finished: Mutex<Option<crate::JobFinishedFn>>,
 }
 
 /// Per-session registry of background jobs. Cheap to clone; every clone
@@ -199,6 +203,7 @@ impl JobRegistry {
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(Vec::new()),
+                on_finished: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -292,6 +297,59 @@ impl JobRegistry {
                     .is_terminal()
             })
             .count()
+    }
+
+    /// Install the durable-sink hook for terminal transitions. The hook is
+    /// called exactly once per job, at the moment the driver records the
+    /// terminal state. Hosts (the agent with an active session cursor) use
+    /// it to append `JobFinished` lineage markers; callers that don't care
+    /// about durable reconciliation simply never install one.
+    pub fn set_on_finished(&self, hook: Option<crate::JobFinishedFn>) {
+        let mut slot = self
+            .inner
+            .on_finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = hook;
+    }
+
+    /// Ids of jobs currently registered, regardless of state. Used by the
+    /// host to match registry entries against lineage markers during a
+    /// /tree switch or resume-time reconcile.
+    #[must_use]
+    pub fn live_ids(&self) -> Vec<u64> {
+        self.inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Kill every registered job whose id is NOT in `keep`. Returns the ids
+    /// that were killed so the caller can surface them. Used by the host at
+    /// /tree transitions: jobs whose spawn event is not on the new lineage
+    /// lose their audit trail and must not survive the switch.
+    pub fn kill_not_in(&self, keep: &[u64]) -> Vec<u64> {
+        let keep_set: std::collections::HashSet<u64> = keep.iter().copied().collect();
+        let mut killed = Vec::new();
+        for id in self.live_ids() {
+            if keep_set.contains(&id) {
+                continue;
+            }
+            if self.kill(id) {
+                killed.push(id);
+            }
+            let _ = self
+                .inner
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+        }
+        killed.sort_unstable();
+        killed
     }
 
     /// Kill a job's whole process group and mark it cancelled. Synchronous
@@ -514,6 +572,14 @@ impl BuiltinTools {
             .insert(id, handle.clone());
 
         tokio::spawn(run_job(self.jobs.clone(), handle, child, timeout_ms));
+
+        // Durable spawn marker. The registry has accepted the job; firing
+        // the hook after insertion means a resume-time reconciliation that
+        // sees this id on the lineage will also see the registry entry if
+        // the process is still live, instead of reporting false staleness.
+        if let Some(hook) = &self.on_job_started {
+            hook(id, &cmd);
+        }
 
         Ok(json!({
             "ok": true,
@@ -791,6 +857,23 @@ async fn run_job(
         }
     };
     handle.done.notify_waiters();
+    // Durable terminal marker so resume and /tree reconciliation see this
+    // job as finished on the active lineage. Best-effort: hosts without a
+    // hook installed simply skip.
+    let hook = jobs
+        .inner
+        .on_finished
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        let id = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .id;
+        hook(id);
+    }
     if let Some(text) = notice {
         push_notice(&jobs, text);
     }

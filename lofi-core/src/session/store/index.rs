@@ -114,6 +114,10 @@ pub enum IndexKind {
     TurnCancelled,
     Compaction,
     Cursor,
+    /// A `JobStarted` or `JobFinished` lineage marker. Distinguished from
+    /// `Other` so resume/tree reconciliation can scan only lifecycle events
+    /// without deserializing the full event slice.
+    JobLifecycle,
     Other,
 }
 
@@ -271,6 +275,9 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
         SessionEventKind::Compaction { .. } => IndexKind::Compaction,
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
+        SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {
+            IndexKind::JobLifecycle
+        }
         _ => IndexKind::Other,
     }
 }
