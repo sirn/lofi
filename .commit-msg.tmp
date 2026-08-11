@@ -1,0 +1,5 @@
+format: workspace-wide cargo fmt normalization
+
+Pulls formatting drift out of the lifecycle-markers commit so the feature
+diff stays focused. Touches only whitespace/import order in pre-existing
+files; no behavior changes.
