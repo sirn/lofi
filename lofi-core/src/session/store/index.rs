@@ -114,9 +114,8 @@ pub enum IndexKind {
     TurnCancelled,
     Compaction,
     Cursor,
-    /// A `JobStarted` or `JobFinished` lineage marker. Distinguished from
-    /// `Other` so resume/tree reconciliation can scan only lifecycle events
-    /// without deserializing the full event slice.
+    /// `JobStarted` / `JobFinished` markers; lets reconciliation skip the
+    /// full event slice.
     JobLifecycle,
     Other,
 }

@@ -63,10 +63,6 @@ pub struct BuiltinTools {
     /// agent so jobs survive across the per-exec tool bundles; dropping the
     /// last clone kills any survivors.
     jobs: JobRegistry,
-    /// Optional host-installed callback fired once per successful spawn,
-    /// immediately after the process group is created. The host uses it to
-    /// durably record a `JobStarted` lineage marker; when unset, job
-    /// lifecycle events exist only as in-memory state and tool results.
     on_job_started: Option<crate::JobStartedFn>,
     /// Visible-output caps for tool results (file reads and bash output).
     truncate: truncate::TruncatedCap,
@@ -151,11 +147,6 @@ impl BuiltinTools {
         self
     }
 
-    /// Installs the durable-sink hook fired once per successful job spawn
-    /// with `(job_id, cmd)`. The owning agent routes this through to the
-    /// session cursor so `JobStarted` markers land on the active lineage
-    /// and survive resume reconciliation. Without a hook, lifecycle events
-    /// exist only in memory.
     #[must_use]
     pub fn with_on_job_started(mut self, hook: Option<crate::JobStartedFn>) -> Self {
         self.on_job_started = hook;

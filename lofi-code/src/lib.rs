@@ -109,11 +109,8 @@ pub type RecallFn = Arc<
 
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// Durable-marker callbacks the host agent installs so `jobSpawn` /
-/// terminal transitions land on the active session lineage as
-/// `JobStarted` / `JobFinished` events. Called synchronously from the
-/// sandbox or the job driver; must not block.
-pub type JobStartedFn = Arc<dyn Fn(u64, &str) + Send + Sync>;
+// Must not block: called synchronously from the sandbox / job driver.
+pub type JobStartedFn = Arc<dyn Fn(u64) + Send + Sync>;
 pub type JobFinishedFn = Arc<dyn Fn(u64) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,13 +187,11 @@ pub struct ExecCtx {
     /// Session-scoped background job registry shared with the owning
     /// agent.
     pub jobs: crate::tools::JobRegistry,
-    /// Durable-marker hook fired at successful `jobSpawn` so the host can
-    /// append a `JobStarted` lineage event. `None` keeps lifecycle purely
-    /// in-memory (pre-session resume, tests, `--no-session`).
+    /// Fired at successful `jobSpawn`. `None` keeps lifecycle in-memory
+    /// only (pre-session resume, tests, `--no-session`).
     pub on_job_started: Option<crate::JobStartedFn>,
-    /// Durable-marker hook fired once when a job reaches a terminal state
-    /// so the host can append a `JobFinished` lineage event. `None` keeps
-    /// lifecycle in-memory; matching `on_job_started`'s semantic.
+    /// Fired once when a job reaches a terminal state. Same in-memory
+    /// fallback as `on_job_started`.
     pub on_job_finished: Option<crate::JobFinishedFn>,
 }
 
@@ -393,9 +388,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 
     let intr = install_cpu_guard(&rt, opts.timeout, opts.cancel.clone()).await;
 
-    // Mirror the durable-marker hooks: spawns go through the per-exec
-    // BuiltinTools; terminal transitions fire on the shared registry so a
-    // finish outlives the per-exec bundle's drop.
+    // Terminal transitions fire on the shared registry so a finish outlives
+    // the per-exec bundle's drop; spawns go through the per-exec BuiltinTools.
     ctx.jobs.set_on_finished(ctx.on_job_finished.clone());
     let tools = Arc::new(
         BuiltinTools::with_skills_dir(
