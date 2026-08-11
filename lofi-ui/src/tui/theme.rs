@@ -60,6 +60,16 @@ const BASE16: Base16Accents = Base16Accents {
 };
 
 impl Theme {
+    /// Foreground for chips/badges drawn *on* an accent background.
+    /// `panel_bg` instead of `fg` because base-16 accents are picked to
+    /// read against the panel; pairing accent fg with accent bg inverts
+    /// polarity under either theme (dark panel ≈ black on bright accents,
+    /// light panel ≈ white on mid-tone accents) and lands with high contrast
+    /// on both.
+    pub(crate) fn on_accent_text(&self) -> Color {
+        self.panel_bg
+    }
+
     pub(crate) fn dark() -> Self {
         Self {
             primary: BASE16.primary,

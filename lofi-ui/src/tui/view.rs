@@ -655,7 +655,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         // chrome, so it should read at a glance.
         right.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.info).add_modifier(bold),
+            Style::new().fg(t.on_accent_text()).bg(t.info).add_modifier(bold),
         ));
     }
     if app.verbose {
@@ -664,15 +664,12 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
-    // INPUT is the default state, so render it quietly (muted text on panel
-    // background) instead of as an accent bg chip. NAV/SELECT are modal
-    // shifts the user should notice, so they keep the accent background
-    // treatment. Notably, `t.muted` mid-gray clashes with `t.fg` under
-    // either theme polarity, so it cannot safely serve as chip bg with fg text.
+    // INPUT is the default state, so render it quietly; NAV/SELECT keep
+    // the accent chip so a modal shift pops.
     let chip_style = if matches!(app.mode, Mode::Input) {
         Style::new().fg(t.muted).bg(t.panel_bg).add_modifier(bold)
     } else {
-        Style::new().fg(t.fg).bg(color).add_modifier(bold)
+        Style::new().fg(t.on_accent_text()).bg(color).add_modifier(bold)
     };
     right.push(Span::styled(chip, chip_style));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
@@ -693,22 +690,22 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     if let Some(badge) = app.quit_badge() {
         left.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
+            Style::new().fg(t.on_accent_text()).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(badge) = app.yank_badge() {
         left.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+            Style::new().fg(t.on_accent_text()).bg(t.primary).add_modifier(bold),
         ));
     } else if let Some(retry) = app.retry_badge() {
         left.push(Span::styled(
             format!(" {retry} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
+            Style::new().fg(t.on_accent_text()).bg(t.warn).add_modifier(bold),
         ));
     } else if let Some(queue) = app.queue_badge() {
         left.push(Span::styled(
             format!(" {queue} "),
-            Style::new().fg(t.fg).bg(t.muted).add_modifier(bold),
+            Style::new().fg(t.on_accent_text()).bg(t.muted).add_modifier(bold),
         ));
     }
     if !left.is_empty() {
@@ -767,7 +764,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     body,
-                    Style::new().fg(t.fg).bg(bg).add_modifier(bold),
+                    Style::new().fg(t.on_accent_text()).bg(bg).add_modifier(bold),
                 ))),
                 lrect,
             );
