@@ -9,8 +9,9 @@
 use std::collections::HashMap as Map;
 use std::collections::HashSet;
 
-use lofi_types::{PromptKind, 
-    ContentBlock, Message, NativeToolRecord, Role, SessionEvent, SessionEventKind, Usage,
+use lofi_types::{
+    ContentBlock, Message, NativeToolRecord, PromptKind, Role, SessionEvent, SessionEventKind,
+    Usage,
 };
 
 use super::store::{self, EventIndex, IndexKind, SessionCursor};
@@ -252,6 +253,8 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
             | SessionEventKind::ThinkingTiming { .. }
+            | SessionEventKind::JobStarted { .. }
+            | SessionEventKind::JobFinished { .. }
             | SessionEventKind::Cursor { .. }
             | SessionEventKind::Unknown => {}
             SessionEventKind::Compaction {
@@ -319,8 +322,13 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
 /// by message reconstruction (`messages_from_events`, `compact`) so the
 /// bash-to-context transform and exclusion rule live in one place.
 #[must_use]
+#[allow(clippy::match_same_arms)]
 pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
     match kind {
+        // Lineage bookkeeping only; the model learns about background work
+        // from tool results and notices. Kept explicit against the wildcard
+        // so the lifecycle rule is visible without scanning the `_` arm.
+        SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
         SessionEventKind::UserBash {
             command,
@@ -496,6 +504,49 @@ pub fn compaction_status_from_index(
     )
 }
 
+/// Job ids with a `JobStarted` marker but no matching `JobFinished` marker
+/// on the visible lineage.
+#[must_use]
+pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
+    let mut started: Vec<u64> = Vec::new();
+    let mut finished: HashSet<u64> = HashSet::new();
+    for i in visible_event_indices(events) {
+        track_lifecycle(&events[i].kind, &mut started, &mut finished);
+    }
+    started.retain(|id| !finished.contains(id));
+    started
+}
+
+/// Like [`outstanding_job_ids`] but reads lifecycle markers directly from a
+/// cursor over an indexed lineage; `index` must be lineage-scoped (see
+/// `SessionCursor::snapshot`). Only `IndexKind::JobLifecycle` entries are
+/// touched.
+/// # Errors
+/// Propagates cursor I/O failures.
+pub fn outstanding_job_ids_at(
+    cursor: &SessionCursor,
+    index: &[EventIndex],
+) -> lofi_error::Result<Vec<u64>> {
+    let mut started: Vec<u64> = Vec::new();
+    let mut finished: HashSet<u64> = HashSet::new();
+    for entry in index.iter().filter(|e| e.kind == IndexKind::JobLifecycle) {
+        let ev = cursor.event_at(entry.offset)?;
+        track_lifecycle(&ev.kind, &mut started, &mut finished);
+    }
+    started.retain(|id| !finished.contains(id));
+    Ok(started)
+}
+
+fn track_lifecycle(kind: &SessionEventKind, started: &mut Vec<u64>, finished: &mut HashSet<u64>) {
+    match kind {
+        SessionEventKind::JobStarted { job_id } => started.push(*job_id),
+        SessionEventKind::JobFinished { job_id } => {
+            finished.insert(*job_id);
+        }
+        _ => {}
+    }
+}
+
 /// Byte ranges per turn, derived from the visible event path. Test helper
 /// shared with the TUI's resume projection.
 #[must_use]
@@ -559,6 +610,86 @@ mod tests {
                 kind,
             }),
         }
+    }
+
+    fn chain(events: &mut [SessionEvent]) {
+        for (i, ev) in events.iter_mut().enumerate() {
+            ev.id = format!("e{i}");
+            ev.parent_id = (i > 0).then(|| format!("e{}", i - 1));
+        }
+    }
+
+    fn job_started(id: u64) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobStarted { job_id: id },
+        }
+    }
+
+    fn job_finished(id: u64) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobFinished { job_id: id },
+        }
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_empty_on_no_markers() {
+        let mut events = vec![user_msg("hello")];
+        chain(&mut events);
+        assert!(outstanding_job_ids(&events).is_empty());
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_unfinished_starts() {
+        let mut events = vec![
+            user_msg("a"),
+            job_started(1),
+            job_started(2),
+            job_finished(1),
+            user_msg("b"),
+        ];
+        chain(&mut events);
+        assert_eq!(outstanding_job_ids(&events), vec![2]);
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_all_when_none_finished() {
+        let mut events = vec![job_started(7), user_msg("x"), job_started(8)];
+        chain(&mut events);
+        assert_eq!(outstanding_job_ids(&events), vec![7, 8]);
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_empty_when_all_finished() {
+        let mut events = vec![job_started(3), job_finished(3), user_msg("done")];
+        chain(&mut events);
+        assert!(outstanding_job_ids(&events).is_empty());
+    }
+
+    #[test]
+    fn job_lifecycle_markers_do_not_map_to_ir() {
+        assert!(agent_message_for_event(&SessionEventKind::JobStarted { job_id: 1 }).is_none());
+        assert!(agent_message_for_event(&SessionEventKind::JobFinished { job_id: 1 }).is_none());
+    }
+
+    #[test]
+    fn replay_suppresses_job_lifecycle_markers() {
+        let events = vec![
+            user_msg("a"),
+            job_started(1),
+            job_finished(1),
+            user_msg("b"),
+        ];
+        let mut prompts: Vec<String> = Vec::new();
+        replay_selected_session_events(&events, |ev| {
+            if let AgentEvent::TurnStart { prompt, .. } = ev {
+                prompts.push(prompt);
+            }
+        });
+        assert_eq!(prompts, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
