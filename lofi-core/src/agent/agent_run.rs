@@ -181,23 +181,28 @@ impl Agent {
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
         // Lifecycle appends share the session cursor. Failures are
         // swallowed: losing a marker never takes down a job.
-        let lifecycle_hook = |cursor: &crate::session::store::SessionCursor,
-                              kind: fn(u64) -> lofi_types::SessionEventKind| {
-            let cursor = cursor.clone();
-            std::sync::Arc::new(move |job_id: u64| {
-                let mut events = [lofi_types::SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: kind(job_id),
-                }];
-                let _ = cursor.append_events(&mut events);
-            }) as lofi_code::JobStartedFn
-        };
+        let lifecycle_hook =
+            |cursor: &crate::session::store::SessionCursor,
+             kind: fn(u64) -> lofi_types::SessionEventKind| {
+                let cursor = cursor.clone();
+                std::sync::Arc::new(move |job_id: u64| {
+                    let mut events = [lofi_types::SessionEvent {
+                        id: String::new(),
+                        parent_id: None,
+                        kind: kind(job_id),
+                    }];
+                    let _ = cursor.append_events(&mut events);
+                }) as lofi_code::JobStartedFn
+            };
         let on_job_started = session.map(|c| {
-            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobStarted { job_id })
+            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobStarted {
+                job_id,
+            })
         });
         let on_job_finished = session.map(|c| {
-            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobFinished { job_id })
+            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobFinished {
+                job_id,
+            })
         });
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
