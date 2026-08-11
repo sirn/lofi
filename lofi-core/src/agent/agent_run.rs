@@ -14,6 +14,8 @@ struct RoundOpts<'a> {
     /// Suppress the image-omit notice when true, so it fires once per turn
     /// at the continuation loop, not once per tool round in `run_once_inner`.
     suppress_omit_notice: bool,
+    on_job_started: Option<lofi_code::JobStartedFn>,
+    on_job_finished: Option<lofi_code::JobFinishedFn>,
 }
 
 impl Agent {
@@ -177,6 +179,35 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        // JobStarted goes through the recorder's pending queue so its parent
+        // chains off the current turn's events (not the pre-turn leaf). That
+        // keeps the marker on the same lineage as the conversation that
+        // spawned it: a /tree rollback to before the turn drops the marker
+        // from the lineage, and reconcile kills the off-lineage job.
+        // JobFinished fires when the job exits, which can be long after the
+        // spawning turn ends — by then the recorder is dropped. Write it
+        // directly to the cursor, chained off whatever the current leaf is.
+        // Failures are swallowed: losing a marker never takes down a job.
+        let on_job_started = recorder.as_ref().map(|r| {
+            let queue = r.job_lifecycle_queue();
+            std::sync::Arc::new(move |job_id: u64| {
+                let mut q = queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                q.push(lofi_types::SessionEventKind::JobStarted { job_id });
+            }) as lofi_code::JobStartedFn
+        });
+        let on_job_finished = session.map(|c| {
+            let cursor = c.clone();
+            std::sync::Arc::new(move |job_id: u64| {
+                let mut events = [lofi_types::SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: lofi_types::SessionEventKind::JobFinished { job_id },
+                }];
+                let _ = cursor.append_events(&mut events);
+            }) as lofi_code::JobFinishedFn
+        });
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
         // sees compacted-away messages and abandoned branches when requested.
@@ -236,6 +267,8 @@ impl Agent {
                         cancel: cancel.as_ref(),
                         prev_input_tokens: prev_input,
                         suppress_omit_notice: omit_notice_sent,
+                        on_job_started: on_job_started.clone(),
+                        on_job_finished: on_job_finished.clone(),
                     },
                 )
                 .await;
@@ -531,6 +564,8 @@ impl Agent {
             cancel,
             prev_input_tokens,
             suppress_omit_notice,
+            on_job_started,
+            on_job_finished,
         } = opts;
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
@@ -836,6 +871,8 @@ impl Agent {
                 recall.clone(),
                 result.clone(),
                 cancel,
+                on_job_started.clone(),
+                on_job_finished.clone(),
             )
             .await
         {
@@ -869,6 +906,8 @@ impl Agent {
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
         cancel: Option<&Arc<AtomicBool>>,
+        on_job_started: Option<lofi_code::JobStartedFn>,
+        on_job_finished: Option<lofi_code::JobFinishedFn>,
     ) -> Result<Vec<ContentBlock>> {
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
@@ -1047,6 +1086,8 @@ impl Agent {
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
                 jobs: self.jobs.clone(),
+                on_job_started: on_job_started.clone(),
+                on_job_finished: on_job_finished.clone(),
             };
             let outcome = exec(
                 &code,
