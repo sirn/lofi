@@ -135,13 +135,14 @@ fn parse_rgb_tuple(buf: &[u8]) -> Option<Rgb> {
     None
 }
 
-/// Scale a hex component to 16-bit: 1 digit replicates (`f` -> `ffff`),
-/// 2 digits (`ff` -> `ffff`), 3 digits (`fff` -> `ffff`), 4 digits stay.
+/// Scale a hex component to 16-bit per `XParseColor` conventions: 1 and 2
+/// digits replicate (`f` -> `ffff`, `ff` -> `ffff`); 3 digits use the
+/// libx11 formula (`v << 4 | v >> 8`); 4 digits stay as-is.
 fn scale_component(v: u16, digits: usize) -> u16 {
     match digits {
         1 => v * 0x1111,
         2 => v * 0x0101,
-        3 => v * 0x0010 + (v >> 8),
+        3 => (v << 4) | (v >> 8),
         _ => v,
     }
 }
@@ -159,20 +160,41 @@ mod tests {
     #[test]
     fn parses_2digit_hex() {
         let buf = b"\x1b]11;rgb:ff/ff/ff\x07";
-        assert_eq!(parse_osc11(buf), Some(Rgb { r: 255, g: 255, b: 255 }));
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            })
+        );
     }
 
     #[test]
     fn parses_with_st_terminator() {
         // ST = ESC \\
         let buf = b"\x1b]11;rgb:ab/cd/ef\x1b\\";
-        assert_eq!(parse_osc11(buf), Some(Rgb { r: 0xab, g: 0xcd, b: 0xef }));
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            })
+        );
     }
 
     #[test]
     fn skips_garbage_before_marker() {
         let buf = b"junk\x1b]11;rgb:12/34/56\x07";
-        assert_eq!(parse_osc11(buf), Some(Rgb { r: 0x12, g: 0x34, b: 0x56 }));
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            })
+        );
     }
 
     #[test]
@@ -188,7 +210,38 @@ mod tests {
 
     #[test]
     fn luminance_white_is_one() {
-        let l = Rgb { r: 255, g: 255, b: 255 }.luminance();
+        let l = Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        }
+        .luminance();
         assert!((l - 1.0).abs() < 0.01, "luminance: {l}");
+    }
+
+    #[test]
+    fn parses_3digit_hex() {
+        // libx11 scaling: (v << 4) | (v >> 8). 0xabc -> 0xabca.
+        let buf = b"\x1b]11;rgb:a/b/c\x07";
+        // 1-digit path: a -> 0xaa, b -> 0xbb, c -> 0xcc.
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc
+            })
+        );
+
+        // 3-digit path: 0xfff -> (0xfff << 4) | (0xfff >> 8) = 0xff0f | 0xf = 0xffff.
+        let buf = b"\x1b]11;rgb:fff/fff/fff\x07";
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff
+            })
+        );
     }
 }
