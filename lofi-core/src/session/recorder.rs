@@ -275,7 +275,7 @@ mod tests {
                     name: "exec".into(),
                     input: serde_json::Value::String("1".into()),
                 }],
-                    kind: PromptKind::default(),
+                kind: PromptKind::default(),
             },
             Message {
                 role: Role::User,
@@ -285,7 +285,7 @@ mod tests {
                     is_error: false,
                     images: Vec::new(),
                 }],
-                    kind: PromptKind::default(),
+                kind: PromptKind::default(),
             },
         ];
         let range = rec

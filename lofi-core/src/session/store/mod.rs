@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lofi_error::{Error, Result};
-use lofi_types::{PromptKind, Message, RunModel, SessionEvent, SessionEventKind};
+use lofi_types::{Message, PromptKind, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
@@ -2281,10 +2281,7 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec![
-                lofi_types::PromptKind::User,
-                lofi_types::PromptKind::Notice
-            ]
+            vec![lofi_types::PromptKind::User, lofi_types::PromptKind::Notice]
         );
     }
 }
