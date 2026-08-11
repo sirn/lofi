@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use base64::Engine;
 
+pub(crate) mod terminal_bg;
 pub(crate) mod theme;
 use std::time::Instant;
 pub(crate) use theme::Theme;
@@ -153,6 +154,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show session info"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
+    ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
     ("/verbose", "toggle tool detail"),
 ];
@@ -537,6 +539,19 @@ struct ThinkingPickerState {
     selected: usize,
 }
 
+struct ThemePickerState {
+    modes: [lofi_types::ThemeMode; 3],
+    selected: usize,
+}
+
+impl ThemePickerState {
+    const MODES: [lofi_types::ThemeMode; 3] = [
+        lofi_types::ThemeMode::Auto,
+        lofi_types::ThemeMode::Light,
+        lofi_types::ThemeMode::Dark,
+    ];
+}
+
 /// State for the `/job` modal. The list is rebuilt from a fresh
 /// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
 /// the drill-in log view are kept here. The log view pages bounded windows
@@ -568,6 +583,18 @@ struct JobLogView {
 impl Modal for ThinkingPickerState {
     fn len(&self) -> usize {
         self.levels.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
+impl Modal for ThemePickerState {
+    fn len(&self) -> usize {
+        self.modes.len()
     }
     fn selected(&self) -> usize {
         self.selected
@@ -809,6 +836,7 @@ pub(crate) struct App {
     picker_generation: Arc<AtomicU64>,
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
+    theme_picker: Option<ThemePickerState>,
     /// The session's background-job registry, cloned from the agent at
     /// startup. `None` when no agent is configured. Backs the `/job` modal
     /// and the persistent running-jobs badge.
@@ -829,6 +857,7 @@ pub(crate) struct App {
     pending_attachments: Vec<lofi_types::ContentBlock>,
     no_models_hint: Option<String>,
     theme: Theme,
+    theme_mode: lofi_types::ThemeMode,
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
@@ -1019,6 +1048,7 @@ pub(crate) async fn run(
     agent: Option<Agent>,
     model_label: String,
     thinking: ThinkingLevel,
+    ui_theme: lofi_types::ThemeMode,
     session: SessionConfig,
     no_models_hint: Option<String>,
     ctx_limit: u64,
@@ -1043,6 +1073,9 @@ pub(crate) async fn run(
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
+    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
+    // (see terminal_bg module doc for why).
+    let theme = Theme::resolve(ui_theme);
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1075,6 +1108,8 @@ pub(crate) async fn run(
             run_loop(
                 &mut guard,
                 agent,
+                theme,
+                ui_theme,
                 model_label,
                 thinking,
                 session,
@@ -1096,6 +1131,8 @@ pub(crate) async fn run(
 async fn run_loop(
     guard: &mut TerminalGuard,
     mut agent: Option<Agent>,
+    theme: Theme,
+    theme_mode: lofi_types::ThemeMode,
     model_label: String,
     thinking: ThinkingLevel,
     session: SessionConfig,
@@ -1126,6 +1163,8 @@ async fn run_loop(
         image_config,
         model_supports_image,
     );
+    app.theme = theme;
+    app.theme_mode = theme_mode;
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
