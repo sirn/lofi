@@ -179,32 +179,25 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        // Job lifecycle appends share the session cursor. The started hook
-        // fires from inside the sandbox (sync); the finished hook from the
-        // job driver task. Failures are swallowed so a flaky cursor cannot
-        // take down a job: `append_events` re-materializes what it can on
-        // the next successful append.
-        let on_job_started: Option<lofi_code::JobStartedFn> = session.map(|cursor| {
+        // Lifecycle appends share the session cursor. Failures are
+        // swallowed: losing a marker never takes down a job.
+        let lifecycle_hook = |cursor: &crate::session::store::SessionCursor,
+                              kind: fn(u64) -> lofi_types::SessionEventKind| {
             let cursor = cursor.clone();
             std::sync::Arc::new(move |job_id: u64| {
                 let mut events = [lofi_types::SessionEvent {
                     id: String::new(),
                     parent_id: None,
-                    kind: lofi_types::SessionEventKind::JobStarted { job_id },
+                    kind: kind(job_id),
                 }];
                 let _ = cursor.append_events(&mut events);
             }) as lofi_code::JobStartedFn
+        };
+        let on_job_started = session.map(|c| {
+            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobStarted { job_id })
         });
-        let on_job_finished: Option<lofi_code::JobFinishedFn> = session.map(|cursor| {
-            let cursor = cursor.clone();
-            std::sync::Arc::new(move |job_id: u64| {
-                let mut events = [lofi_types::SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: lofi_types::SessionEventKind::JobFinished { job_id },
-                }];
-                let _ = cursor.append_events(&mut events);
-            }) as lofi_code::JobFinishedFn
+        let on_job_finished = session.map(|c| {
+            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobFinished { job_id })
         });
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still

@@ -1,0 +1,13 @@
+code,core,ui: iteration 2 — extract helpers and prune noise
+
+- agent_run: collapse the two near-identical lifecycle-hook closures into a
+  single lifecycle_hook lambda parameterized on the marker kind. Behavior
+  unchanged; the surviving comment now carries only the failure-mode
+  rationale (swallow append errors so a down cursor cannot take down a job).
+- replay: extract track_lifecycle so outstanding_job_ids and
+  outstanding_job_ids_at share the started/finished state machine instead
+  of duplicating it.
+- ui/tui/mod.rs: drop the meaningless `Some(_) = &app.jobs` conjunct in
+  the resume reconcile guard. The reconcile is purely a lineage query;
+  whether the registry exists has no bearing on whether the agent should
+  be told that ids are stale.
