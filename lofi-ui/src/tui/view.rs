@@ -22,7 +22,7 @@ mod modals;
 mod prim;
 use modals::{
     render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_slash_complete, render_thinking_picker, render_tree_picker,
+    render_slash_complete, render_theme_picker, render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -130,6 +130,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.thinking_picker.is_some() {
         render_thinking_picker(f, area, app);
+    }
+    if app.theme_picker.is_some() {
+        render_theme_picker(f, area, app);
     }
     if app.jobs_modal.is_some() {
         render_jobs_modal(f, area, app);
@@ -661,10 +664,17 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
-    right.push(Span::styled(
-        chip,
-        Style::new().fg(t.fg).bg(color).add_modifier(bold),
-    ));
+    // INPUT is the default state, so render it quietly (muted text on panel
+    // background) instead of as an accent bg chip. NAV/SELECT are modal
+    // shifts the user should notice, so they keep the accent background
+    // treatment. Notably, `t.muted` mid-gray clashes with `t.fg` under
+    // either theme polarity, so it cannot safely serve as chip bg with fg text.
+    let chip_style = if matches!(app.mode, Mode::Input) {
+        Style::new().fg(t.muted).bg(t.panel_bg).add_modifier(bold)
+    } else {
+        Style::new().fg(t.fg).bg(color).add_modifier(bold)
+    };
+    right.push(Span::styled(chip, chip_style));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
     // Background rule for the full strip, in the mode color.
