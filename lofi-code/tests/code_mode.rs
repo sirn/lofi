@@ -26,6 +26,8 @@ fn ctx(root: &Path) -> ExecCtx {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        on_job_started: None,
+        on_job_finished: None,
     }
 }
 
@@ -324,6 +326,8 @@ async fn strings_exposed_as_lofi_strings() {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        on_job_started: None,
+        on_job_finished: None,
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -412,6 +416,8 @@ async fn write_and_edit_emit_written_content_as_result() {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        on_job_started: None,
+        on_job_finished: None,
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
                await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \
