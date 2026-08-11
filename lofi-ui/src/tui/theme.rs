@@ -58,6 +58,34 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Light variant — modus-operandi mapped to ANSI 256 indexes. Surface
+    /// tones sit at the light end of the gray run (higher indexes); the
+    /// hierarchy mirrors dark's `panel < cursor < surface < inline <
+    /// selection` ordering inverted toward lighter grays.
+    pub(crate) fn light() -> Self {
+        Self {
+            primary: Color::Indexed(24),  // operandi cyan    #005e8b
+            user: Color::Indexed(24),
+            agent: Color::Indexed(53),    // operandi magenta #721045
+            success: Color::Indexed(22),  // operandi green   #006800
+            warn: Color::Indexed(58),     // operandi yellow  #6f5500
+            error: Color::Indexed(124),   // operandi red     #a60000
+            info: Color::Indexed(25),     // operandi blue    #0031a9
+            fg: Color::Indexed(16),       // pure black from the colour cube
+            muted: Color::Indexed(240),   // operandi fg_dim  #595959
+            subtle: Color::Indexed(246),  // operandi border  #919191
+            surface: Color::Indexed(255), // operandi bg_dim  #f2f2f2 ≈ #eeeeee
+            inline_bg: Color::Indexed(254),
+            panel_bg: Color::Indexed(252), // slight-gray footer
+
+            selection: Color::Indexed(253), // one step below inline_bg
+            cursor_line: Color::Indexed(254),
+            select_cursor: Color::Indexed(152), // operandi bg_hover #b2e4dc
+        }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
