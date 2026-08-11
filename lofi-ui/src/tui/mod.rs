@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use base64::Engine;
 
+pub(crate) mod terminal_bg;
 pub(crate) mod theme;
 use std::time::Instant;
 pub(crate) use theme::Theme;
@@ -1043,6 +1044,17 @@ pub(crate) async fn run(
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
+    // Detect the terminal background AFTER raw mode engages: cooked mode
+    // would (a) echo the OSC 11 reply keys back onto the screen and (b)
+    // line-buffer stdin, so a BEL-terminated response with no \n would
+    // block until we time out. Raw mode disables both, letting the response
+    // stream straight into our reader thread. On any failure (no reply,
+    // parse error, OSC-unaware terminal) the fallback is the dark palette,
+    // matching `Theme::default()`.
+    let theme = terminal_bg::query_background(std::time::Duration::from_millis(150))
+        .map_or_else(Theme::dark, |rgb| {
+            if rgb.luminance() > 0.5 { Theme::light() } else { Theme::dark() }
+        });
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1075,6 +1087,7 @@ pub(crate) async fn run(
             run_loop(
                 &mut guard,
                 agent,
+                theme,
                 model_label,
                 thinking,
                 session,
@@ -1096,6 +1109,7 @@ pub(crate) async fn run(
 async fn run_loop(
     guard: &mut TerminalGuard,
     mut agent: Option<Agent>,
+    theme: Theme,
     model_label: String,
     thinking: ThinkingLevel,
     session: SessionConfig,
@@ -1126,6 +1140,7 @@ async fn run_loop(
         image_config,
         model_supports_image,
     );
+    app.theme = theme;
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
