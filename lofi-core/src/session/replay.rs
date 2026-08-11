@@ -252,6 +252,8 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
             | SessionEventKind::ThinkingTiming { .. }
+            | SessionEventKind::JobStarted { .. }
+            | SessionEventKind::JobFinished { .. }
             | SessionEventKind::Cursor { .. }
             | SessionEventKind::Unknown => {}
             SessionEventKind::Compaction {
@@ -321,6 +323,10 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
 #[must_use]
 pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
     match kind {
+        // Job lifecycle markers are lineage bookkeeping only: the model
+        // learns about background work from tool calls and notices, not from
+        // raw lifecycle events. Returning None keeps them out of context.
+        SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
         SessionEventKind::UserBash {
             command,
@@ -496,6 +502,61 @@ pub fn compaction_status_from_index(
     )
 }
 
+/// Job ids with a `JobStarted` marker and no matching `JobFinished` marker
+/// on the currently selected visible lineage. These are the jobs that were
+/// still running when the session last ended (resume) or that the lineage
+/// claims are still live (/tree into a branch that contains their spawn but
+/// not their finish). Hosts use this to decide which jobs survive a lineage
+/// switch and which stale ids need an agent-facing notice.
+#[must_use]
+pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
+    let visible = visible_event_indices(events);
+    let mut started: Vec<u64> = Vec::new();
+    let mut finished: HashSet<u64> = HashSet::new();
+    for i in visible {
+        match &events[i].kind {
+            SessionEventKind::JobStarted { job_id } => started.push(*job_id),
+            SessionEventKind::JobFinished { job_id } => {
+                finished.insert(*job_id);
+            }
+            _ => {}
+        }
+    }
+    started
+        .into_iter()
+        .filter(|id| !finished.contains(id))
+        .collect()
+}
+
+/// Like [`outstanding_job_ids`] but reads lifecycle markers directly from a
+/// cursor over an indexed lineage. The `index` parameter must be
+/// lineage-scoped (i.e., produced by `SessionCursor::snapshot`, which runs
+/// `indexed_lineage`); only `IndexKind::JobLifecycle` entries are touched,
+/// so cost scales with the number of job markers, not total events.
+/// # Errors
+/// Propagates cursor I/O failures.
+pub fn outstanding_job_ids_at(
+    cursor: &SessionCursor,
+    index: &[EventIndex],
+) -> lofi_error::Result<Vec<u64>> {
+    let mut started: Vec<u64> = Vec::new();
+    let mut finished: HashSet<u64> = HashSet::new();
+    for entry in index.iter().filter(|e| e.kind == IndexKind::JobLifecycle) {
+        let ev = cursor.event_at(entry.offset)?;
+        match ev.kind {
+            SessionEventKind::JobStarted { job_id } => started.push(job_id),
+            SessionEventKind::JobFinished { job_id } => {
+                finished.insert(job_id);
+            }
+            _ => {}
+        }
+    }
+    Ok(started
+        .into_iter()
+        .filter(|id| !finished.contains(id))
+        .collect())
+}
+
 /// Byte ranges per turn, derived from the visible event path. Test helper
 /// shared with the TUI's resume projection.
 #[must_use]
@@ -559,6 +620,90 @@ mod tests {
                 kind,
             }),
         }
+    }
+
+    fn chain(events: &mut [SessionEvent]) {
+        for (i, ev) in events.iter_mut().enumerate() {
+            ev.id = format!("e{i}");
+            ev.parent_id = (i > 0).then(|| format!("e{}", i - 1));
+        }
+    }
+
+    fn job_started(id: u64) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobStarted { job_id: id },
+        }
+    }
+
+    fn job_finished(id: u64) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobFinished { job_id: id },
+        }
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_empty_on_no_markers() {
+        let mut events = vec![user_msg("hello")];
+        chain(&mut events);
+        assert!(outstanding_job_ids(&events).is_empty());
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_unfinished_starts() {
+        let mut events = vec![
+            user_msg("a"),
+            job_started(1),
+            job_started(2),
+            job_finished(1),
+            user_msg("b"),
+        ];
+        chain(&mut events);
+        assert_eq!(outstanding_job_ids(&events), vec![2]);
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_all_when_none_finished() {
+        let mut events = vec![job_started(7), user_msg("x"), job_started(8)];
+        chain(&mut events);
+        assert_eq!(outstanding_job_ids(&events), vec![7, 8]);
+    }
+
+    #[test]
+    fn outstanding_job_ids_returns_empty_when_all_finished() {
+        let mut events = vec![job_started(3), job_finished(3), user_msg("done")];
+        chain(&mut events);
+        assert!(outstanding_job_ids(&events).is_empty());
+    }
+
+    #[test]
+    fn job_lifecycle_markers_do_not_map_to_ir() {
+        assert!(agent_message_for_event(&SessionEventKind::JobStarted { job_id: 1 }).is_none());
+        assert!(agent_message_for_event(&SessionEventKind::JobFinished { job_id: 1 }).is_none());
+    }
+
+    #[test]
+    fn replay_suppresses_job_lifecycle_markers() {
+        // Lifecycle markers must not appear as transcript events; the model
+        // learns about jobs through tool results and notices only. Use the
+        // selected-events variant — it bypasses lineage resolution, so the
+        // lifecycle markers are seen raw.
+        let events = vec![
+            user_msg("a"),
+            job_started(1),
+            job_finished(1),
+            user_msg("b"),
+        ];
+        let mut prompts: Vec<String> = Vec::new();
+        replay_selected_session_events(&events, |ev| {
+            if let AgentEvent::TurnStart { prompt, .. } = ev {
+                prompts.push(prompt);
+            }
+        });
+        assert_eq!(prompts, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

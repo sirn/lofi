@@ -1,0 +1,24 @@
+core,code,ui: durable job lifecycle markers with lineage-bound reconciliation
+
+Add SessionEventKind::JobStarted/JobFinished as lineage bookkeeping on the
+transcript. The variants are invisible to model context (agent_message_for_event
+returns None) and transcript rendering; they exist solely so resume and /tree
+can decide which registry ids are still semantically live on the active
+lineage.
+
+lofi-code ExecCtx gains on_job_started / on_job_finished hooks installed by
+the owning agent. jobSpawn fires the started hook after registry insertion;
+run_job fires finished at every terminal transition. Hooks are best-effort:
+a failed append loses a marker, never a job, and a missing hook leaves the
+registry in-memory only.
+
+Resume reconciliation walks the lineage via the new
+replay::outstanding_job_ids_at helper (touches only JobLifecycle index
+entries, not every event). Outstanding ids surface to the model via the
+existing PromptKind::Notice prompt queue, before any user-typed follow-up,
+so the model knows those ids are stale before it can call jobStatus.
+
+/tree switches go through the same lineage walk minus the spawn-only set:
+jobs whose JobStarted is not on the new lineage are killed (kill_not_in) and
+reported in a UI notification; jobs whose spawn is on the lineage but whose
+JobFinished never landed trigger the stale-id notice.

@@ -439,6 +439,20 @@ pub enum SessionEventKind {
         represented: usize,
         kept: usize,
     },
+    /// A background job (`jobSpawn`) was started. Durable lineage marker so
+    /// resume and /tree reconciliation can detect which jobs were live when
+    /// the session last ended. Invisible to the model and the transcript
+    /// renderer; only reconciliation reads it.
+    JobStarted {
+        job_id: u64,
+    },
+    /// A background job reached a terminal state. Paired with
+    /// [`Self::JobStarted`] by id; a started job with no matching finished
+    /// marker on the visible lineage was still running at the time the
+    /// session last ended (or was rolled back across).
+    JobFinished {
+        job_id: u64,
+    },
     /// An event variant this build does not know about — typically a marker
     /// written by a newer (or older, pre-release) binary. The transcript
     /// stays loadable; consumers ignore these.
