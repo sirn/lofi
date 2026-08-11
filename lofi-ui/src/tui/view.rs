@@ -22,7 +22,7 @@ mod modals;
 mod prim;
 use modals::{
     render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_slash_complete, render_thinking_picker, render_tree_picker,
+    render_slash_complete, render_theme_picker, render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -130,6 +130,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.thinking_picker.is_some() {
         render_thinking_picker(f, area, app);
+    }
+    if app.theme_picker.is_some() {
+        render_theme_picker(f, area, app);
     }
     if app.jobs_modal.is_some() {
         render_jobs_modal(f, area, app);
@@ -652,7 +655,10 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
         // chrome, so it should read at a glance.
         right.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.info).add_modifier(bold),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.info)
+                .add_modifier(bold),
         ));
     }
     if app.verbose {
@@ -661,10 +667,17 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
-    right.push(Span::styled(
-        chip,
-        Style::new().fg(t.fg).bg(color).add_modifier(bold),
-    ));
+    // INPUT is the default state, so render it quietly; NAV/SELECT keep
+    // the accent chip so a modal shift pops.
+    let chip_style = if matches!(app.mode, Mode::Input) {
+        Style::new().fg(t.muted).bg(t.panel_bg).add_modifier(bold)
+    } else {
+        Style::new()
+            .fg(t.on_accent_text())
+            .bg(color)
+            .add_modifier(bold)
+    };
+    right.push(Span::styled(chip, chip_style));
     let right_w: usize = right.iter().map(|s| prim::width(s.content.as_ref())).sum();
 
     // Background rule for the full strip, in the mode color.
@@ -683,22 +696,34 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     if let Some(badge) = app.quit_badge() {
         left.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.warn)
+                .add_modifier(bold),
         ));
     } else if let Some(badge) = app.yank_badge() {
         left.push(Span::styled(
             format!(" {badge} "),
-            Style::new().fg(t.fg).bg(t.primary).add_modifier(bold),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.primary)
+                .add_modifier(bold),
         ));
     } else if let Some(retry) = app.retry_badge() {
         left.push(Span::styled(
             format!(" {retry} "),
-            Style::new().fg(t.fg).bg(t.warn).add_modifier(bold),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.warn)
+                .add_modifier(bold),
         ));
     } else if let Some(queue) = app.queue_badge() {
         left.push(Span::styled(
             format!(" {queue} "),
-            Style::new().fg(t.fg).bg(t.muted).add_modifier(bold),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.muted)
+                .add_modifier(bold),
         ));
     }
     if !left.is_empty() {
@@ -757,7 +782,10 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     body,
-                    Style::new().fg(t.fg).bg(bg).add_modifier(bold),
+                    Style::new()
+                        .fg(t.on_accent_text())
+                        .bg(bg)
+                        .add_modifier(bold),
                 ))),
                 lrect,
             );
