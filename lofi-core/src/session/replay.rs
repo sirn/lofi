@@ -510,13 +510,7 @@ pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
     let mut started: Vec<u64> = Vec::new();
     let mut finished: HashSet<u64> = HashSet::new();
     for i in visible_event_indices(events) {
-        match &events[i].kind {
-            SessionEventKind::JobStarted { job_id } => started.push(*job_id),
-            SessionEventKind::JobFinished { job_id } => {
-                finished.insert(*job_id);
-            }
-            _ => {}
-        }
+        track_lifecycle(&events[i].kind, &mut started, &mut finished);
     }
     started.retain(|id| !finished.contains(id));
     started
@@ -536,16 +530,20 @@ pub fn outstanding_job_ids_at(
     let mut finished: HashSet<u64> = HashSet::new();
     for entry in index.iter().filter(|e| e.kind == IndexKind::JobLifecycle) {
         let ev = cursor.event_at(entry.offset)?;
-        match ev.kind {
-            SessionEventKind::JobStarted { job_id } => started.push(job_id),
-            SessionEventKind::JobFinished { job_id } => {
-                finished.insert(job_id);
-            }
-            _ => {}
-        }
+        track_lifecycle(&ev.kind, &mut started, &mut finished);
     }
     started.retain(|id| !finished.contains(id));
     Ok(started)
+}
+
+fn track_lifecycle(kind: &SessionEventKind, started: &mut Vec<u64>, finished: &mut HashSet<u64>) {
+    match kind {
+        SessionEventKind::JobStarted { job_id } => started.push(*job_id),
+        SessionEventKind::JobFinished { job_id } => {
+            finished.insert(*job_id);
+        }
+        _ => {}
+    }
 }
 
 /// Byte ranges per turn, derived from the visible event path. Test helper
