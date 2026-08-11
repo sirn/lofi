@@ -439,6 +439,17 @@ pub enum SessionEventKind {
         represented: usize,
         kept: usize,
     },
+    /// Lineage marker for `jobSpawn`. Invisible to the model and
+    /// transcript renderer.
+    JobStarted {
+        job_id: u64,
+    },
+    /// Paired with [`Self::JobStarted`] by id; a start with no matching
+    /// finish on the visible lineage was still running when the session
+    /// last ended.
+    JobFinished {
+        job_id: u64,
+    },
     /// An event variant this build does not know about — typically a marker
     /// written by a newer (or older, pre-release) binary. The transcript
     /// stays loadable; consumers ignore these.
