@@ -1207,6 +1207,33 @@ async fn run_loop(
         agent = Some(a);
     }
 
+    // Resume-time job reconciliation. The fresh agent's registry is empty;
+    // any prior process is gone (Drop killed it on graceful quit, orphan on
+    // crash). Walk the lineage for `JobStarted` markers with no matching
+    // `JobFinished` — those are the ones the agent's transcript claims are
+    // still running. If any exist, submit a `PromptKind::Notice` so the
+    // model knows the ids are stale before it can target one with
+    // `jobStatus`. The notice rides the same prompt queue as live job
+    // notices so it stays ordered against anything the user types next.
+    if let (Some(sink_cursor), Some(_jobs)) = (&app.session.cursor, &app.jobs) {
+        let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
+        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(
+            sink_cursor,
+            &index,
+        )
+        .unwrap_or_default();
+        if !outstanding.is_empty() {
+            let ids: Vec<String> = outstanding.iter().map(u64::to_string).collect();
+            app.prompt_queue.push(QueuedPrompt {
+                text: format!(
+                    "session resumed: jobs [{}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work.",
+                    ids.join(", "),
+                ),
+                kind: lofi_types::PromptKind::Notice,
+            });
+        }
+    }
+
     // Live notice feed. The job driver pushes onto this the moment a job
     // transitions; the select arm below reacts without waiting for a tick.
     // Buffered pre-UI notices flush into this receiver on subscribe.
