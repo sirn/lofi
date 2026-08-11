@@ -1,0 +1,15 @@
+ui: add light theme with OSC 11 auto-detection and a /theme picker
+
+Light and dark palettes now share ANSI base-16 accents so indicators
+follow whatever palette the terminal carries; the rest of the palette
+pins explicit 256-index tones per-polarity. Auto (default) probes the
+terminal background via OSC 11 and falls back to dark when there is no
+reply. [ui] theme = ... persists in config; /theme switches for the
+rest of the session only and re-runs the probe when Auto is picked.
+Switching themes clears the frozen-render cache so previously styled
+turns repaint under the new palette.
+
+INPUT chip renders quietly (muted-on-panel) rather than as an accent
+background; the muted mid-gray clashes with fg under either theme
+polarity and only worked pre-light-theme by accident of which tones
+were paired.
