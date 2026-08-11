@@ -22,7 +22,7 @@ mod modals;
 mod prim;
 use modals::{
     render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_slash_complete, render_thinking_picker, render_tree_picker,
+    render_slash_complete, render_theme_picker, render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -130,6 +130,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.thinking_picker.is_some() {
         render_thinking_picker(f, area, app);
+    }
+    if app.theme_picker.is_some() {
+        render_theme_picker(f, area, app);
     }
     if app.jobs_modal.is_some() {
         render_jobs_modal(f, area, app);
