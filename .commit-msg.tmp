@@ -1,0 +1,6 @@
+ui: add light theme, base-16 accents, /theme picker
+
+[ui] theme = auto (default) probes OSC 11 at startup; light/dark skip
+the probe. /theme switches for the session only and re-probes on Auto.
+Accent chips (NAV, SELECT, badges) draw text from panel_bg rather than
+fg so they read under both polarities; INPUT chip renders quietly.
