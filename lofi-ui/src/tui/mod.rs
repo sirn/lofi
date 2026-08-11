@@ -540,8 +540,6 @@ struct ThinkingPickerState {
 }
 
 struct ThemePickerState {
-    /// `Auto` / `Light` / `Dark`, in display order. `Auto` is the
-    /// probe-on-each-pick mode; the other two reuse the cached palette.
     modes: [lofi_types::ThemeMode; 3],
     selected: usize,
 }
@@ -859,10 +857,6 @@ pub(crate) struct App {
     pending_attachments: Vec<lofi_types::ContentBlock>,
     no_models_hint: Option<String>,
     theme: Theme,
-    /// Mode currently driving `theme`. `Auto` re-runs the OSC 11 probe
-    /// each time the user picks "Auto" in `/theme`; `Light`/`Dark`
-    /// reuse the cached palette. Defaults to `Auto` when constructed
-    /// without an explicit choice (e.g. tests).
     theme_mode: lofi_types::ThemeMode,
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
@@ -1079,12 +1073,8 @@ pub(crate) async fn run(
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
-    // Theme resolution happens AFTER raw mode engages: cooked mode would
-    // (a) echo the OSC 11 reply keys back onto the screen and (b)
-    // line-buffer stdin, so a BEL-terminated response with no \n would
-    // block until we time out. Raw mode disables both, letting the response
-    // stream straight into our reader thread. `Light`/`Dark` modes skip
-    // the probe entirely; `Auto` falls back to dark on no reply.
+    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
+    // (see terminal_bg module doc for why).
     let theme = Theme::resolve(ui_theme);
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
