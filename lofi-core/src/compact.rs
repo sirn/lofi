@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lofi_types::{PromptKind, 
-    CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, Role, SessionEvent,
-    SessionEventKind,
+use lofi_types::{
+    CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, PromptKind, Role,
+    SessionEvent, SessionEventKind,
 };
 
 use crate::session::store;
