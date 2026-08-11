@@ -1209,13 +1209,14 @@ async fn run_loop(
 
     if let Some(sink_cursor) = &app.session.cursor {
         let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
-        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(
-            sink_cursor,
-            &index,
-        )
-        .unwrap_or_default();
+        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(sink_cursor, &index)
+            .unwrap_or_default();
         if !outstanding.is_empty() {
-            let ids = outstanding.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+            let ids = outstanding
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             app.prompt_queue.push(QueuedPrompt {
                 text: format!(
                     "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."

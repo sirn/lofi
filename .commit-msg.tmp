@@ -1,0 +1,9 @@
+ui: iteration 3 — extract reconcile_jobs_after_lineage_switch
+
+tree_picker_confirm_inner grew past clippy's 100-line threshold once the
+/tree reconcile was inlined. Hoisting the block into a dedicated helper
+restores the function under the lint budget and isolates the rollback
+critical section: kill off-lineage jobs, then surface outstanding spawns
+that no longer have a live process.
+
+Apply cargo fmt while at it.
