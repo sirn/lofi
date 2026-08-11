@@ -14,8 +14,6 @@ struct RoundOpts<'a> {
     /// Suppress the image-omit notice when true, so it fires once per turn
     /// at the continuation loop, not once per tool round in `run_once_inner`.
     suppress_omit_notice: bool,
-    /// Durable job-lifecycle marker hooks; `None` keeps lifecycle in-memory
-    /// (tests, `--no-session`). One shared pair per turn.
     on_job_started: Option<lofi_code::JobStartedFn>,
     on_job_finished: Option<lofi_code::JobFinishedFn>,
 }
@@ -181,14 +179,14 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        // Job-lifecycle durable markers ride the same session cursor as the
-        // per-turn messages. Spawns append synchronously from inside the
-        // sandbox (QuickJS host fns are sync); finishes fire from the job
-        // driver task. Both are best-effort: a failed append loses a marker,
-        // never a job. A `None` session leaves the registry in-memory only.
+        // Job lifecycle appends share the session cursor. The started hook
+        // fires from inside the sandbox (sync); the finished hook from the
+        // job driver task. Failures are swallowed so a flaky cursor cannot
+        // take down a job: `append_events` re-materializes what it can on
+        // the next successful append.
         let on_job_started: Option<lofi_code::JobStartedFn> = session.map(|cursor| {
             let cursor = cursor.clone();
-            std::sync::Arc::new(move |job_id: u64, _cmd: &str| {
+            std::sync::Arc::new(move |job_id: u64| {
                 let mut events = [lofi_types::SessionEvent {
                     id: String::new(),
                     parent_id: None,
