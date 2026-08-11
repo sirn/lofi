@@ -804,6 +804,9 @@ pub(crate) struct App {
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
+    /// Stale-job notices computed at session startup, folded into the
+    /// history of the first agent run after resume. Consumed on first use.
+    startup_notices: Vec<String>,
     cost: f64,
     turn_cost: f64,
     turn_has_round_usage: bool,
@@ -1207,6 +1210,10 @@ async fn run_loop(
         agent = Some(a);
     }
 
+    // Jobs whose started marker is on this lineage but whose terminal marker
+    // is not (process died, or user /tree'd a fresh branch elsewhere). Their
+    // ids are stale; surface that on the first agent turn after resume so
+    // the model does not try to poll them.
     if let Some(sink_cursor) = &app.session.cursor {
         let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
         let outstanding = lofi_core::session::replay::outstanding_job_ids_at(sink_cursor, &index)
@@ -1217,12 +1224,9 @@ async fn run_loop(
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            app.prompt_queue.push(QueuedPrompt {
-                text: format!(
-                    "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
-                ),
-                kind: lofi_types::PromptKind::Notice,
-            });
+            app.startup_notices.push(format!(
+                "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
+            ));
         }
     }
 
