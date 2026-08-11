@@ -250,6 +250,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "compaction" => IndexKind::Compaction,
         "native_tool" => IndexKind::NativeTool,
         "cursor" => IndexKind::Cursor,
+        "job_started" | "job_finished" => IndexKind::JobLifecycle,
         _ => IndexKind::Other,
     }
 }

@@ -804,6 +804,9 @@ pub(crate) struct App {
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
+    /// Stale-job notices computed at session startup, folded into the
+    /// history of the first agent run after resume. Consumed on first use.
+    startup_notices: Vec<String>,
     cost: f64,
     turn_cost: f64,
     turn_has_round_usage: bool,
@@ -1169,6 +1172,23 @@ async fn run_loop(
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size)?;
+        // Jobs whose started marker is on this lineage but whose terminal
+        // marker is not (process died, or user /tree'd a fresh branch
+        // elsewhere). Their ids are stale; surface that on the first agent
+        // turn after resume so the model does not try to poll them. Reuses
+        // the already-built lineage index — no second file scan.
+        let outstanding =
+            lofi_core::session::replay::outstanding_job_ids_at(&cursor, &index).unwrap_or_default();
+        if !outstanding.is_empty() {
+            let ids = outstanding
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.startup_notices.push(format!(
+                "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
+            ));
+        }
     }
     // The resume index is startup scratch. All persistent UI backing uses the
     // compact turn ranges/offsets built above and opens a fresh cursor snapshot
@@ -1207,24 +1227,6 @@ async fn run_loop(
         agent = Some(a);
     }
 
-    if let Some(sink_cursor) = &app.session.cursor {
-        let index = sink_cursor.snapshot().map(|s| s.index).unwrap_or_default();
-        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(sink_cursor, &index)
-            .unwrap_or_default();
-        if !outstanding.is_empty() {
-            let ids = outstanding
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            app.prompt_queue.push(QueuedPrompt {
-                text: format!(
-                    "session resumed: jobs [{ids}] from the previous run are no longer running; their ids are stale. Use jobSpawn for new background work."
-                ),
-                kind: lofi_types::PromptKind::Notice,
-            });
-        }
-    }
 
     // Live notice feed. The job driver pushes onto this the moment a job
     // transitions; the select arm below reacts without waiting for a tick.
