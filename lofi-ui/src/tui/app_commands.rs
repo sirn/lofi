@@ -1034,6 +1034,8 @@ impl App {
                 _ => None,
             })
             .collect();
+        let live_before = jobs.live_ids();
+        tracing::info!(target: "lofi::reconcile", ?spawn_ids, live=?live_before, "lineage switch");
         let killed = jobs.kill_not_in(&spawn_ids);
         if !killed.is_empty() {
             let ids = killed
