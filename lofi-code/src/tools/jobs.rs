@@ -320,13 +320,26 @@ impl JobRegistry {
     }
 
     /// Kills and unregisters every job whose id is not in `keep`. Returns
-    /// the ids that were killed.
+    /// the ids that were killed. The kill is silent: notifications are
+    /// disabled before termination so the job driver does not push a
+    /// "cancelled" notice. Used by `/tree` rollback reconcile, where the
+    /// user has explicitly asked to drop the lineage that owned the job —
+    /// neither the agent nor the user needs to be told the subsidiary
+    /// process went away; the separate UI toast covers the user side.
     pub fn kill_not_in(&self, keep: &[u64]) -> Vec<u64> {
         let keep: std::collections::HashSet<u64> = keep.iter().copied().collect();
         let mut killed = Vec::new();
         for id in self.live_ids() {
             if keep.contains(&id) {
                 continue;
+            }
+            if let Some(handle) = self.get(id) {
+                handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .notify
+                    .enabled = false;
             }
             if self.kill(id) {
                 killed.push(id);
