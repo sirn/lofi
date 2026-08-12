@@ -1,0 +1,11 @@
+ui: stop a lingering OSC 11 reader thread from eating keystrokes
+
+query_background() spawned a thread doing stdin.read() that, on a terminal
+that never replied to OSC 11, outlived the 150ms probe and competed with
+crossterm's EventStream reader for every keystroke thereafter. Each read
+raced; under a synthetic pty (tu) roughly every second or third key was
+swallowed, making lofi appear to eat input.
+
+Replace the thread+channel reader with an inline nix::poll loop on stdin's
+fd bounded by the same deadline. No thread is spawned, so nothing is left
+reading stdin after we return — the bug class is gone, not just narrowed.

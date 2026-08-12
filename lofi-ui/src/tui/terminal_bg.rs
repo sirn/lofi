@@ -9,9 +9,12 @@
 //! terminal that doesn't speak OSC 11) we return `None` and let the
 //! caller pick a fallback theme.
 
-use std::io::{self, Read, Write};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::io::{self, Write};
+use std::os::unix::io::{AsRawFd, BorrowedFd};
+use std::time::{Duration, Instant};
+
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::unistd::read;
 
 /// A 24-bit RGB triple reported by the terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,38 +44,51 @@ pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
     stdout.write_all(b"\x1b]11;?\x07").ok()?;
     stdout.flush().ok()?;
 
-    // Bounded wait via a reader thread + channel. The thread may outlive us
-    // on terminals that never reply, but process exit reaps it — acceptable
-    // for a ~150 ms query window.
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut stdin = io::stdin().lock();
-        let mut buf = [0u8; 128];
-        let mut n = 0usize;
+    // Poll stdin's fd directly with a hard deadline, then read when ready.
+    // We start this probe before crossterm's EventStream takes over stdin,
+    // so a bounded, single-threaded read is safe and leaves no reader
+    // thread behind to compete for keystrokes after a timeout.
+    let stdin = io::stdin();
+    let stdin_fd = stdin.as_raw_fd();
+    // SAFETY: fd 0 is a live, readable descriptor while we hold `stdin`.
+    // The workspace forbids `unsafe` by default; lift that here because
+    // BorrowedFd::borrow_raw is the only safe-API-free way to hand a raw
+    // stdin descriptor to nix::poll without taking ownership.
+    #[allow(unsafe_code)]
+    let borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
+    let deadline = Instant::now() + timeout;
+    let mut buf = [0u8; 128];
+    let mut n = 0usize;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let Ok(timeout_ms) = PollTimeout::try_from(remaining) else {
+            return None;
+        };
+        let mut fds = [PollFd::new(borrowed, PollFlags::POLLIN)];
+        match poll(&mut fds, timeout_ms) {
+            Ok(n) if n > 0 => {}
+            _ => return None, // timeout, EINTR, or other — bail to fallback theme
+        }
         let mut chunk = [0u8; 64];
-        loop {
-            match stdin.read(&mut chunk) {
-                Ok(0) | Err(_) => break, // EOF or I/O error
-                Ok(m) => {
-                    let end = (n + m).min(buf.len());
-                    buf[n..end].copy_from_slice(&chunk[..end - n]);
-                    n = end;
-                    // Response terminator: BEL (\x07) or ST (ESC \\).
-                    if chunk[..m].contains(&0x07)
-                        || (m >= 2 && chunk[m - 2] == 0x1b && chunk[m - 1] == b'\\')
-                    {
-                        break;
-                    }
-                    if n >= buf.len() {
-                        break;
-                    }
+        match read(stdin_fd, &mut chunk) {
+            Ok(0) | Err(_) => return None,  // EOF or I/O error
+            Ok(m) => {
+                let end = (n + m).min(buf.len());
+                buf[n..end].copy_from_slice(&chunk[..end - n]);
+                n = end;
+                // Response terminator: BEL (\x07) or ST (ESC \\).
+                if chunk[..m].contains(&0x07)
+                    || (m >= 2 && chunk[m - 2] == 0x1b && chunk[m - 1] == b'\\')
+                {
+                    break;
+                }
+                if n >= buf.len() {
+                    return None;
                 }
             }
         }
-        let _ = tx.send(buf[..n].to_vec());
-    });
-    let bytes = rx.recv_timeout(timeout).ok()?;
-    parse_osc11(&bytes)
+    }
+    parse_osc11(&buf[..n])
 }
 
 /// Parse an OSC 11 response. The terminal replies with the literal
