@@ -1368,6 +1368,24 @@ async fn run_loop(
                             ),
                         }
                     }
+                    // Slash commands (notably /tree reconcile) can push
+                    // notices into prompt_queue while at rest. The queue's
+                    // usual consumer is the agent-finished branch of the
+                    // current_run select arm; without a live run, that arm
+                    // never fires and the notice would sit forever. Drain
+                    // at rest here, matching the mpsc notice path.
+                    if current_run.is_none() && !app.prompt_queue.is_empty() && agent.is_some() {
+                        if let Some(queued) = app.prompt_queue.first().cloned() {
+                            app.prompt_queue.remove(0);
+                            spawn_prompt(
+                                &mut app,
+                                agent.as_ref(),
+                                &mut current_run,
+                                queued.text,
+                                queued.kind,
+                            );
+                        }
+                    }
                     }
                     Some(Err(e)) => {
                         last_err = Some(format!("input read failed: {e}"));
