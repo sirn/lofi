@@ -1348,6 +1348,7 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                eprintln!("[EV-ARM] {:?}", maybe_ev);
                 let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
