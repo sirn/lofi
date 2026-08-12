@@ -1034,6 +1034,12 @@ impl App {
                 _ => None,
             })
             .collect();
+        tracing::info!(
+            target: "lofi::reconcile",
+            spawn_ids = ?spawn_ids,
+            live = ?jobs.live_ids(),
+            "reconcile"
+        );
         let killed = jobs.kill_not_in(&spawn_ids);
         if !killed.is_empty() {
             let ids = killed
