@@ -13,6 +13,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
+nix = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 base64 = { workspace = true }
