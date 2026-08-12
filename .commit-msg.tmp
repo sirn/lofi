@@ -1,0 +1,18 @@
+agent: route JobStarted through the recorder pending queue
+
+The tool hook used to append JobStarted to the session cursor at hook-fire
+time, mid-tool-call. The user turn that triggered the spawn had not been
+flushed yet (turns only flush at round checkpoints), so JobStarted chained
+off the pre-turn leaf (typically the system message). Rolling back past
+the spawning turn in /tree kept the JobStarted on the new lineage, and
+reconcile_jobs_after_lineage_switch saw the job as in-lineage: no kill,
+no stale-notice.
+
+Queue JobStarted into SessionRecorder::pending_job_lifecycle and drain it
+in append_pending so the parent_id chains off the current turn's events.
+The rollback then drops the JobStarted, and reconcile cancels the
+off-lineage job.
+
+JobFinished still writes directly: it can fire long after the spawning
+turn ends, when the recorder is already dropped, so routing through the
+queue would lose it.
