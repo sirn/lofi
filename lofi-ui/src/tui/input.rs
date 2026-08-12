@@ -31,6 +31,7 @@ pub(super) fn handle_event(
     app: &mut App,
     agent: Option<&Agent>,
     current_run: &mut Option<RunHandle>,
+    if let Event::Mouse(m) = ev {
 ) {
     if let Event::Mouse(m) = ev {
         if !app.modal_open() {
