@@ -179,30 +179,34 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        // Lifecycle appends share the session cursor. Failures are
-        // swallowed: losing a marker never takes down a job.
-        let lifecycle_hook =
-            |cursor: &crate::session::store::SessionCursor,
-             kind: fn(u64) -> lofi_types::SessionEventKind| {
-                let cursor = cursor.clone();
-                std::sync::Arc::new(move |job_id: u64| {
-                    let mut events = [lofi_types::SessionEvent {
-                        id: String::new(),
-                        parent_id: None,
-                        kind: kind(job_id),
-                    }];
-                    let _ = cursor.append_events(&mut events);
-                }) as lofi_code::JobStartedFn
-            };
-        let on_job_started = session.map(|c| {
-            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobStarted {
-                job_id,
-            })
+        // JobStarted goes through the recorder's pending queue so its parent
+        // chains off the current turn's events (not the pre-turn leaf). That
+        // keeps the marker on the same lineage as the conversation that
+        // spawned it: a /tree rollback to before the turn drops the marker
+        // from the lineage, and reconcile kills the off-lineage job.
+        // JobFinished fires when the job exits, which can be long after the
+        // spawning turn ends — by then the recorder is dropped. Write it
+        // directly to the cursor, chained off whatever the current leaf is.
+        // Failures are swallowed: losing a marker never takes down a job.
+        let on_job_started = recorder.as_ref().map(|r| {
+            let queue = r.job_lifecycle_queue();
+            std::sync::Arc::new(move |job_id: u64| {
+                let mut q = queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                q.push(lofi_types::SessionEventKind::JobStarted { job_id });
+            }) as lofi_code::JobStartedFn
         });
         let on_job_finished = session.map(|c| {
-            lifecycle_hook(c, |job_id| lofi_types::SessionEventKind::JobFinished {
-                job_id,
-            })
+            let cursor = c.clone();
+            std::sync::Arc::new(move |job_id: u64| {
+                let mut events = [lofi_types::SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: lofi_types::SessionEventKind::JobFinished { job_id },
+                }];
+                let _ = cursor.append_events(&mut events);
+            }) as lofi_code::JobFinishedFn
         });
         // `lofi.recall` streams the on-disk transcript through a lightweight
         // index instead of deserializing the whole append-only file. It still
