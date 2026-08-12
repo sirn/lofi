@@ -320,13 +320,26 @@ impl JobRegistry {
     }
 
     /// Kills and unregisters every job whose id is not in `keep`. Returns
-    /// the ids that were killed.
+    /// the ids that were killed. The kill is silent: notifications are
+    /// disabled before termination so the job driver does not push a
+    /// "cancelled" notice. Used by `/tree` rollback reconcile, where the
+    /// user has explicitly asked to drop the lineage that owned the job —
+    /// neither the agent nor the user needs to be told the subsidiary
+    /// process went away; the separate UI toast covers the user side.
     pub fn kill_not_in(&self, keep: &[u64]) -> Vec<u64> {
         let keep: std::collections::HashSet<u64> = keep.iter().copied().collect();
         let mut killed = Vec::new();
         for id in self.live_ids() {
             if keep.contains(&id) {
                 continue;
+            }
+            if let Some(handle) = self.get(id) {
+                handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .notify
+                    .enabled = false;
             }
             if self.kill(id) {
                 killed.push(id);
@@ -1073,5 +1086,37 @@ mod tests {
         let mut bytes = 0;
         // No interval configured: periodic mode is off.
         assert!(progress_tick(&h, &mut tick, &mut bytes).is_none());
+    }
+
+    #[test]
+    fn kill_not_in_disables_notify_before_killing() {
+        // Regression: /tree rollback reconcile used to kill the off-lineage
+        // job with notify still enabled, so the driver poll saw the
+        // Cancelled state and pushed a "cancelled: <cmd>" notice that the UI
+        // then delivered to the agent as a user-role message. The user
+        // already opted the job out of the conversation by rolling back;
+        // nothing should reach the agent.
+        let registry = JobRegistry::new();
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let handle = handle_with(NotifyOpts::terminal_only(), f.path().to_string_lossy().into_owned());
+        let id = handle.data.lock().unwrap().id;
+        registry
+            .inner
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(id, handle.clone());
+        assert_eq!(registry.live_ids(), std::collections::HashSet::from([id]));
+
+        let killed = registry.kill_not_in(&[]);
+        assert_eq!(killed, vec![id]);
+
+        // Job is gone from the registry...
+        assert!(registry.live_ids().is_empty());
+        // ...and notify was disabled before terminal, so the driver poll
+        // (if it were running) would never push the "cancelled" notice.
+        let job = handle.data.lock().unwrap();
+        assert!(job.state.is_terminal());
+        assert!(!job.notify.enabled);
     }
 }

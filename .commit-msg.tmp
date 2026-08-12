@@ -1,0 +1,17 @@
+code: kill_not_in disables notify so /tree rollback stays silent
+
+The lineage-switch reconcile in lofi-ui calls JobRegistry::kill_not_in to
+drop off-lineage jobs. The kill flipped state to Cancelled, and the driver
+poll loop saw the terminal state with notify.enabled still true, so it
+pushed a "job <id> cancelled: <cmd> — log: ..." notice. The UI then
+delivered that to the agent as a queued user-role Notice.
+
+That is wrong: the user just rolled back in /tree, explicitly dropping
+the lineage that owned the job. Nothing about the subsidiary process
+should reach the agent. The UI toast ("killed N off-lineage job(s):")
+is the right channel for the user; the agent never gets a Notice.
+
+Disable notify on the handle before kill() flips the state, so the
+driver's terminal branch sees enabled=false and skips format_notice.
+The restore path through jobKill, /tree's mid-run kill, and live poll
+are unaffected — they still get the normal notice.
