@@ -32,6 +32,7 @@ pub(super) fn handle_event(
     agent: Option<&Agent>,
     current_run: &mut Option<RunHandle>,
 ) {
+    eprintln!("[EV] mode={:?} {:?}", app.mode, ev);
     if let Event::Mouse(m) = ev {
         if !app.modal_open() {
             handle_mouse(*m, app);

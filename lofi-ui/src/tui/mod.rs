@@ -1348,6 +1348,7 @@ async fn run_loop(
                 dirty = true;
             }
             maybe_ev = events.next() => {
+                eprintln!("[EV-ARM] {:?}", maybe_ev);
                 let defer_redraw;
                 match maybe_ev {
                     Some(Ok(ev)) => {
@@ -1410,7 +1411,7 @@ async fn run_loop(
                 resize.deadline = None;
                 dirty = true;
             }
-            _ = tick.tick() => {
+            _ = std::future::pending::<()>() => {
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
@@ -1447,7 +1448,7 @@ async fn run_loop(
                     dirty = true;
                 }
             }
-            notice = async {
+            _junk_from_lofi = async {
                 match job_notice_rx.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
