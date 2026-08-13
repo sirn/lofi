@@ -286,7 +286,7 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     use std::io::{BufReader, Seek};
 
     let mut reader = BufReader::new(std::fs::File::open(path)?);
-    let Some((_header_start, header_end, header)) = read_jsonl_value::<Header, _>(&mut reader)?
+    let Some((_header_start, _header_end, header)) = read_jsonl_value::<Header, _>(&mut reader)?
     else {
         return Err(Error::State(format!(
             "session file has no header: {}",
@@ -300,14 +300,12 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
             path.display()
         )));
     }
-    // The event region's byte length bounds the number of event lines: a line
-    // carries at least its type/id skeleton (conservatively 128 bytes), so
-    // region_bytes / 128 undercounts events and the Vec never reallocs upward.
-    // Growth still happens below the bound; this only skips the doubler's
-    // up-to-2x overallocation on long sessions.
-    let file_size = reader.get_ref().metadata().map_or(0, |m| m.len());
-    let event_bytes = file_size.saturating_sub(header_end);
-    let mut indices = Vec::with_capacity((event_bytes / 128) as usize);
+    // Don't preallocate from file size: events average much larger than the
+    // 128-byte skeleton lower bound (a 305 MB session file has ~138 K events,
+    // not 2.4 M), and EventIndex is ~64 bytes, so size/128 over-reserves by
+    // ~150 MB on long sessions. Let the Vec double-grow from zero instead;
+    // worst-case overallocation is bounded by 2x of the actual count.
+    let mut indices = Vec::new();
     // Cursor records are append-only head metadata. Only the latest one can
     // affect a read; retaining one per committed batch would make index memory
     // grow with writes rather than conversation events.
