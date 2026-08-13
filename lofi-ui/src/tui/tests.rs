@@ -4949,7 +4949,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         blocks: vec![ContentBlock::ToolUse {
             id: id.to_string(),
             name: "exec".to_string(),
-            input: serde_json::json!({"code": format!("[code cleared — re-expand with lofi.result(\"{eid}\")]" )}),
+            input: serde_json::json!({"code": format!("[{eid}]")}),
         }],
         kind: PromptKind::default(),
     };
@@ -4957,7 +4957,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         role: Role::User,
         blocks: vec![ContentBlock::ToolResult {
             tool_use_id: id.to_string(),
-            content: format!("[exec result cleared — re-expand with lofi.result(\"{eid}\")]"),
+            content: format!("[{eid}]"),
             is_error: false,
             images: Vec::new(),
         }],
@@ -5014,8 +5014,8 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         panic!()
     };
     assert!(
-        content.contains("lofi.result"),
-        "older kept-tail result should be the stub written by compact_now, got {content}"
+        content == "[e2]",
+        "older kept-tail result should be the id stub written by compact, got {content}"
     );
 
     let ContentBlock::ToolResult { content, .. } = &msgs[6].blocks[0] else {
