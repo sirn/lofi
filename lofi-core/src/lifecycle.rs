@@ -250,6 +250,8 @@ impl AgentLifecycle {
         *history = new_history;
         drop(history);
         self.reset_compaction_policy();
+        // Summarized messages are gone; trim so those pages leave this arena.
+        crate::malloc_trim::release_freed_memory();
         Ok(Some(compaction))
     }
 

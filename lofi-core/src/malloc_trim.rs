@@ -1,15 +1,12 @@
 //! Best-effort release of freed heap pages back to the OS.
 //!
-//! The IO worker thread accumulates freed pages in its glibc arena as tree
-//! snapshots and hydration HashMaps come and go. Glibc's default trim
-//! threshold only fires when the arena top is mostly free; the worker's
-//! steady-state working set sits below that, so RSS ratchets up by the
-//! peak /tree working set the first time the picker opens.
+//! Glibc's default trim threshold only fires when an arena top is mostly
+//! free. Agent turns, compaction, and /tree snapshots allocate a burst
+//! and then drop it; the steady-state working set sits below that
+//! threshold, so RSS ratchets by the peak unless we force a trim.
 //!
-//! `release_freed_memory` calls `malloc_trim(0)` to force-release all free
-//! pages at the top of every arena. We invoke it from the IO worker after a
-//! tree snapshot is dropped, so the pages freed on this thread return to the
-//! kernel promptly.
+//! `release_freed_memory` calls `malloc_trim(0)` to release free pages
+//! from every arena. Call it on the thread that just dropped the burst.
 
 /// Release freed heap pages back to the OS when supported.
 ///
@@ -28,5 +25,15 @@ pub fn release_freed_memory() {
             fn malloc_trim(pad: usize) -> std::ffi::c_int;
         }
         let _ = malloc_trim(0);
+    }
+}
+
+/// Trim when this value is dropped. Hold it across a function that
+/// allocates a burst and then frees it, so every return path trims.
+pub struct ReleaseFreedMemoryOnDrop;
+
+impl Drop for ReleaseFreedMemoryOnDrop {
+    fn drop(&mut self) {
+        release_freed_memory();
     }
 }

@@ -123,6 +123,9 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
+        // Provider/HTTP/JSON buffers drop on every return from this function.
+        // Trim here so the UI does not have to know about glibc slack.
+        let _trim = crate::malloc_trim::ReleaseFreedMemoryOnDrop;
         let prev_len = messages.len();
         let turn_start = if continuation {
             None

@@ -7,6 +7,7 @@ pub mod config_loader;
 pub mod context_edit;
 pub mod image;
 mod lifecycle;
+pub mod malloc_trim;
 pub mod models;
 pub mod recall;
 pub mod retry;
