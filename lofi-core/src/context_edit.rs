@@ -17,9 +17,8 @@ fn category(b: &ContentBlock) -> Cat {
     }
 }
 
-fn result_stub(event_id: &str, is_error: bool) -> String {
-    let kind = if is_error { "error result" } else { "result" };
-    format!("[exec {kind} cleared — re-expand with lofi.result(\"{event_id}\")]")
+fn cleared_stub(event_id: &str) -> String {
+    format!("[{event_id}]")
 }
 
 /// Rebuild a tool-call (`ToolUse`) input so the `display` label survives but
@@ -28,7 +27,7 @@ fn result_stub(event_id: &str, is_error: bool) -> String {
 /// pairing is preserved.
 fn trim_tool_use_input(input: &serde_json::Value, event_id: &str) -> serde_json::Value {
     use serde_json::json;
-    let stub = format!("[code cleared — re-expand with lofi.result(\"{event_id}\")]");
+    let stub = cleared_stub(event_id);
     match input {
         serde_json::Value::Object(obj) => {
             let mut out = serde_json::Map::new();
@@ -107,7 +106,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                         ..
                     } => blocks.push(ContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
-                        content: result_stub(event_id, *is_error),
+                        content: cleared_stub(event_id),
                         is_error: *is_error,
                         images: Vec::new(),
                     }),
@@ -290,11 +289,11 @@ mod tests {
         let ContentBlock::ToolResult { content, .. } = &out[0].blocks[0] else {
             panic!()
         };
-        assert!(content.contains("lofi.result(\"e1\")"));
+        assert_eq!(content, "[e1]");
         let ContentBlock::ToolResult { content, .. } = &out[1].blocks[0] else {
             panic!()
         };
-        assert!(content.contains("lofi.result(\"e2\")"));
+        assert_eq!(content, "[e2]");
     }
 
     #[test]
@@ -363,6 +362,6 @@ mod tests {
             Some("do thing")
         );
         let code = old.get("code").and_then(|v| v.as_str()).unwrap();
-        assert!(code.contains("lofi.result(\"e1\")"));
+        assert_eq!(code, "[e1]");
     }
 }
