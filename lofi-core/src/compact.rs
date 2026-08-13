@@ -12,6 +12,10 @@ use crate::session::store;
 
 pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.";
 
+/// Stubs in the kept tail carry only the event id, so this line is the
+/// single place that tells the model how to recover them.
+const RESULT_RECALL_INSTRUCTION: &str = "Cleared tool results and exec source show only an event id. Recover the original with lofi.result(eventId).";
+
 #[derive(Debug, Clone)]
 struct LiveMessage {
     event_id: String,
@@ -553,7 +557,7 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
         return String::new();
     }
     let body = parts.join(SEPARATOR);
-    format!("{HANDOFF_PREAMBLE}\n\n{body}")
+    format_handoff(&body)
 }
 
 fn section(title: &str, items: &[String]) -> String {
@@ -1040,6 +1044,8 @@ const SECTION_HEADERS: &[&str] = &[
     "User Preferences",
     "Files And Changes",
     "Commits",
+    "APIs Used",
+    "Skills",
     "Outstanding Context",
 ];
 
@@ -1099,14 +1105,21 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    format!("{HANDOFF_PREAMBLE}\n\n{}", parts.join(SEPARATOR))
+    format_handoff(&parts.join(SEPARATOR))
+}
+
+fn format_handoff(body: &str) -> String {
+    format!("{HANDOFF_PREAMBLE}\n\n{RESULT_RECALL_INSTRUCTION}\n\n{body}")
 }
 
 fn strip_preamble(text: &str) -> String {
-    text.strip_prefix(HANDOFF_PREAMBLE).map_or_else(
-        || text.to_string(),
-        |rest| rest.trim_start_matches('\n').to_string(),
-    )
+    let rest = text
+        .strip_prefix(HANDOFF_PREAMBLE)
+        .map_or(text, |rest| rest.trim_start_matches('\n'));
+    rest.strip_prefix(RESULT_RECALL_INSTRUCTION)
+        .unwrap_or(rest)
+        .trim_start_matches('\n')
+        .to_string()
 }
 
 fn split_headers_brief(body: &str) -> (String, String) {
@@ -1597,6 +1610,7 @@ mod tests {
         let c = compact(&events, &CompactOptions::default()).expect("some compaction");
         assert!(c.summarized_count >= 1);
         assert!(c.summary.starts_with(HANDOFF_PREAMBLE));
+        assert!(c.summary.contains(RESULT_RECALL_INSTRUCTION));
         assert!(c.summary.contains("[Session Goal]"));
         assert!(c.summary.contains("login form"));
         assert_eq!(
@@ -1678,6 +1692,27 @@ mod tests {
         let merged = merge_previous(&prev, &fresh);
         assert!(merged.contains("goal one"));
         assert!(merged.contains("goal two"));
+        assert_eq!(merged.matches(RESULT_RECALL_INSTRUCTION).count(), 1);
+    }
+
+    #[test]
+    fn merge_previous_keeps_apis_and_skills_before_outstanding() {
+        let prev = format!(
+            "{HANDOFF_PREAMBLE}\n\n[APIs Used]\n- exec\n\n[Skills]\n- code-commit — Write a commit message\n\n[Outstanding Context]\n- old blocker"
+        );
+        let fresh = format!(
+            "{HANDOFF_PREAMBLE}\n\n[APIs Used]\n- exec\n- lofi.read\n\n[Skills]\n- code-iterate — Iterate until clean\n\n[Outstanding Context]\n- new blocker"
+        );
+        let merged = merge_previous(&prev, &fresh);
+        let apis = merged.find("[APIs Used]").unwrap();
+        let skills = merged.find("[Skills]").unwrap();
+        let outstanding = merged.find("[Outstanding Context]").unwrap();
+        assert!(apis < skills && skills < outstanding);
+        assert!(merged.contains("lofi.read"));
+        assert!(merged.contains("code-commit"));
+        assert!(merged.contains("code-iterate"));
+        assert!(merged.contains("new blocker"));
+        assert!(!merged.contains("old blocker"));
     }
 
     #[test]
