@@ -1345,6 +1345,13 @@ async fn run_loop(
                             let was_user_bash = r.user_bash.is_some();
                             r.handle.abort();
                             app.run_finished();
+                            // Large HTTP/JSON buffers from the turn are already
+                            // dropped here. Glibc keeps those pages in arena
+                            // free lists (and mmap slack) until a trim, which
+                            // is why RSS ratcheted across settles while the
+                            // measured components stayed flat. Trim before
+                            // the sample so debug RSS is the retained set.
+                            lofi_core::session::malloc_trim::release_freed_memory();
                             app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
                             if !app.should_quit {
                                 if was_user_bash {

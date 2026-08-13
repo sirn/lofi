@@ -785,6 +785,9 @@ impl App {
         }
         self.apply_event(event);
         self.bump_render_epoch();
+        // Compaction rebuilds history and drops the summarized tail.
+        // Trim so those pages do not stay in this thread's arena.
+        lofi_core::session::malloc_trim::release_freed_memory();
         self.debug_sample("compaction");
     }
 
