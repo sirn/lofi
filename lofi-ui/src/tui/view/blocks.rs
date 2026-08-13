@@ -883,11 +883,15 @@ fn analyze(text: &str, t: Theme, base: Style) -> Vec<MdBlock> {
 
     for (ev, range) in MdParser::new_ext(text, opts).into_offset_iter() {
         match ev {
-            Event::Start(MdTag::Paragraph) => stack.push(BlockFrame::Para {
-                ext: InlineExtent::new(),
-                src: range,
-            }),
-            Event::End(TagEnd::Paragraph) => {
+            // CommonMark treats tags like `<input>` as HTML, not text.
+            // Keep them as paragraphs so the transcript shows the source.
+            Event::Start(MdTag::Paragraph | MdTag::HtmlBlock) => {
+                stack.push(BlockFrame::Para {
+                    ext: InlineExtent::new(),
+                    src: range,
+                });
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => {
                 if let Some(BlockFrame::Para { ext, src }) = stack.pop() {
                     let spans = if ext.seen {
                         inline_extent_spans(&ext, text, t, base)
@@ -1600,7 +1604,7 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
                     link: None,
                 });
             }
-            Event::Text(text) => {
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 if text.is_empty() {
                     continue;
                 }
@@ -3452,6 +3456,26 @@ mod tests {
                 std::mem::discriminant(other)
             ),
         }
+    }
+
+    fn rendered_text(src: &str) -> Vec<String> {
+        render_markdown_body(src, Theme::default(), 80, 78, Style::default(), |_| vec![])
+            .iter()
+            .map(|l| l.line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn html_block_tag_renders_as_text() {
+        assert_eq!(rendered_text("<input>"), ["<input>"]);
+    }
+
+    #[test]
+    fn inline_html_tag_renders_as_text() {
+        assert_eq!(
+            rendered_text("before <input> after"),
+            ["before <input> after"]
+        );
     }
 
     #[test]
