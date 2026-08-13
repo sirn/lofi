@@ -41,7 +41,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -1015,6 +1016,7 @@ struct ResizeState {
     started: Option<Instant>,
     last: Option<Instant>,
     events: usize,
+    refresh_theme: bool,
 }
 
 struct TerminalGuard {
@@ -1066,6 +1068,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -1100,6 +1103,7 @@ pub(crate) async fn run(
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -1115,6 +1119,7 @@ pub(crate) async fn run(
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableFocusChange,
             EnableBracketedPaste
         )?;
         let backend = CrosstermBackend::new(stdout);
@@ -1126,6 +1131,7 @@ pub(crate) async fn run(
             let _ = execute!(
                 io::stdout(),
                 DisableBracketedPaste,
+                DisableFocusChange,
                 DisableMouseCapture,
                 LeaveAlternateScreen
             );
@@ -1158,6 +1164,17 @@ pub(crate) async fn run(
         })
         .await;
     result
+}
+
+/// `EventStream`'s wake thread owns stdin. Drop it before OSC 11, then
+/// open a fresh stream. Forced Light/Dark skip the pause.
+fn pause_events_and_refresh_theme(events: EventStream, app: &mut App) -> (EventStream, bool) {
+    if app.theme_mode != lofi_types::ThemeMode::Auto {
+        return (events, false);
+    }
+    drop(events);
+    let changed = app.refresh_auto_theme();
+    (EventStream::new(), changed)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1390,6 +1407,7 @@ async fn run_loop(
                         if !app.should_quit {
                             handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                         }
+                        resize.refresh_theme = matches!(ev, Event::FocusGained);
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
                             Err(lofi_core::Error::Config("no model registry".into())),
@@ -1467,6 +1485,9 @@ async fn run_loop(
                 }
             } => {
                 resize.deadline = None;
+                // Tmux reattach often arrives as a resize burst, not a
+                // focus event. Re-probe once the burst settles.
+                resize.refresh_theme = true;
                 dirty = true;
             }
             _ = tick.tick() => {
@@ -1546,6 +1567,15 @@ async fn run_loop(
                     }
                 }
             }
+        }
+
+        if resize.refresh_theme {
+            let (next, changed) = pause_events_and_refresh_theme(events, &mut app);
+            events = next;
+            if changed {
+                dirty = true;
+            }
+            resize.refresh_theme = false;
         }
 
         if app.should_quit {

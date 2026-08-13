@@ -7782,6 +7782,32 @@ fn theme_picker_confirm_updates_mode_and_clears_frozen_cache() {
 }
 
 #[test]
+fn apply_resolved_theme_clears_frozen_only_on_change() {
+    let mut a = app();
+    a.theme = Theme::dark();
+    a.frozen_render.insert(0, Vec::new());
+    assert!(!a.apply_resolved_theme(Theme::dark()));
+    assert!(a.frozen_render.contains(0));
+    assert!(a.apply_resolved_theme(Theme::light()));
+    assert_eq!(a.theme, Theme::light());
+    assert!(!a.frozen_render.contains(0));
+}
+
+#[test]
+fn refresh_auto_theme_skips_forced_modes() {
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.theme_mode = ThemeMode::Dark;
+    a.theme = Theme::dark();
+    a.frozen_render.insert(0, Vec::new());
+    assert!(!a.refresh_auto_theme());
+    assert!(a.frozen_render.contains(0));
+    a.theme_mode = ThemeMode::Light;
+    assert!(!a.refresh_auto_theme());
+    assert!(a.frozen_render.contains(0));
+}
+
+#[test]
 fn notify_lines_counts_verbose_chip_width() {
     let msg = "an error long enough to matter when the verbose chip eats ten cells off the available width of the line".to_string();
     let mut quiet = app();
