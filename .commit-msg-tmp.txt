@@ -1,0 +1,13 @@
+code: drop Vec::with_capacity in session index loader
+
+The loader preallocated indices by event_bytes / 128, assuming 128
+bytes per event as an undercount. Real sessions average much larger
+events (a 305 MB session file has ~138 K events, not 2.4 M), and
+EventIndex is ~64 bytes, so this over-reserved ~150 MB of heap on
+long sessions and the excess stayed resident for the process
+lifetime because Vec capacity is not shrunk on drain.
+
+Drop the preallocation; let the Vec double-grow from zero. Worst-case
+overallocation is bounded by 2x of the actual event count rather
+than a linear factor of the file size. For the same 305 MB session
+this brings peak index load from ~150 MB down to ~9 MB.
