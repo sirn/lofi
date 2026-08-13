@@ -692,26 +692,21 @@ fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
     let mut modified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut read: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for b in blocks {
-        let CompactBlock::ToolCall { native, .. } = b else {
+    for rec in blocks.iter().flat_map(CompactBlock::native_records) {
+        if rec.is_error {
             continue;
-        };
-        for rec in native {
-            if rec.is_error {
-                continue;
+        }
+        match rec.name.as_str() {
+            "edit" if !rec.args.is_empty() => {
+                modified.insert(rec.args.clone());
             }
-            match rec.name.as_str() {
-                "edit" if !rec.args.is_empty() => {
-                    modified.insert(rec.args.clone());
-                }
-                "write" if !rec.args.is_empty() => {
-                    created.insert(rec.args.clone());
-                }
-                "read" | "bash_read" if !rec.args.is_empty() => {
-                    read.insert(rec.args.clone());
-                }
-                _ => {}
+            "write" if !rec.args.is_empty() => {
+                created.insert(rec.args.clone());
             }
+            "read" | "bash_read" if !rec.args.is_empty() => {
+                read.insert(rec.args.clone());
+            }
+            _ => {}
         }
     }
     for p in &modified {
@@ -743,27 +738,21 @@ fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
 fn extract_commits(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for b in blocks {
-        let CompactBlock::ToolCall { native, .. } = b else {
+    for rec in blocks.iter().flat_map(CompactBlock::native_records) {
+        if rec.name != "bash" || !rec.args.contains("git commit") {
             continue;
+        }
+        let msg = extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
+        let hash = first_hash(&rec.result);
+        let line = match hash {
+            Some(h) => format!("{h} {msg}"),
+            None => msg,
         };
-        for rec in native {
-            if rec.name != "bash" || !rec.args.contains("git commit") {
-                continue;
-            }
-            let msg =
-                extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
-            let hash = first_hash(&rec.result);
-            let line = match hash {
-                Some(h) => format!("{h} {msg}"),
-                None => msg,
-            };
-            if seen.insert(line.clone()) {
-                out.push(line);
-            }
-            if out.len() >= 8 {
-                break;
-            }
+        if seen.insert(line.clone()) {
+            out.push(line);
+        }
+        if out.len() >= 8 {
+            break;
         }
     }
     out

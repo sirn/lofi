@@ -325,6 +325,16 @@ pub enum CompactBlock {
     },
 }
 
+impl CompactBlock {
+    #[must_use]
+    pub fn native_records(&self) -> &[NativeToolRecord] {
+        match self {
+            Self::ToolCall { native, .. } => native,
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SummarySection {
     pub title: String,
@@ -1342,6 +1352,39 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_block_native_records_only_from_tool_call() {
+        let rec = NativeToolRecord {
+            parent: "t1".into(),
+            call_id: 1,
+            name: "read".into(),
+            args: "a.rs".into(),
+            result: String::new(),
+            is_error: false,
+        };
+        let call = CompactBlock::ToolCall {
+            id: "t1".into(),
+            code: String::new(),
+            label: None,
+            native: vec![rec.clone()],
+        };
+        assert_eq!(call.native_records().len(), 1);
+        assert_eq!(call.native_records()[0].name, "read");
+        assert!(CompactBlock::User { text: "hi".into() }
+            .native_records()
+            .is_empty());
+        assert!(CompactBlock::Assistant { text: "ok".into() }
+            .native_records()
+            .is_empty());
+        assert!(CompactBlock::ToolResult {
+            id: "t1".into(),
+            text: String::new(),
+            is_error: false,
+        }
+        .native_records()
+        .is_empty());
+    }
 
     fn round_trip<T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
         value: &T,

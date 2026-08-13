@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use lofi_types::{CompactBlock, CompactionHook, SummarySection};
+use lofi_types::{CompactBlock, CompactionHook, NativeToolRecord, SummarySection};
 
 use crate::docs;
 
@@ -40,26 +40,25 @@ fn tool_description(name: &str, args: &str) -> String {
     }
 }
 
+fn native_records(blocks: &[CompactBlock]) -> impl Iterator<Item = &NativeToolRecord> {
+    blocks.iter().flat_map(CompactBlock::native_records)
+}
+
 fn loaded_skills(blocks: &[CompactBlock]) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut items: Vec<String> = Vec::new();
-    for b in blocks {
-        let CompactBlock::ToolCall { native, .. } = b else {
+    for rec in native_records(blocks) {
+        if rec.name != "skill" || rec.args.is_empty() || rec.is_error {
             continue;
-        };
-        for rec in native {
-            if rec.name != "skill" || rec.args.is_empty() || rec.is_error {
-                continue;
-            }
-            if !seen.insert(rec.args.clone()) {
-                continue;
-            }
-            let desc = skill_blurb(&rec.result);
-            if desc.is_empty() {
-                items.push(rec.args.clone());
-            } else {
-                items.push(format!("{} — {desc}", rec.args));
-            }
+        }
+        if !seen.insert(rec.args.clone()) {
+            continue;
+        }
+        let desc = skill_blurb(&rec.result);
+        if desc.is_empty() {
+            items.push(rec.args.clone());
+        } else {
+            items.push(format!("{} — {desc}", rec.args));
         }
     }
     items
@@ -114,14 +113,9 @@ impl CompactionHook for CodeCompactionHook {
         );
         seen.insert("exec".to_string());
 
-        for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else {
-                continue;
-            };
-            for rec in native {
-                if seen.insert(rec.name.clone()) {
-                    items.push(tool_description(&rec.name, &rec.args));
-                }
+        for rec in native_records(blocks) {
+            if seen.insert(rec.name.clone()) {
+                items.push(tool_description(&rec.name, &rec.args));
             }
         }
 
@@ -144,26 +138,21 @@ impl CompactionHook for CodeCompactionHook {
         let mut created: HashSet<String> = HashSet::new();
         let mut read: HashSet<String> = HashSet::new();
 
-        for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else {
+        for rec in native_records(blocks) {
+            if rec.is_error || rec.args.is_empty() {
                 continue;
-            };
-            for rec in native {
-                if rec.is_error || rec.args.is_empty() {
-                    continue;
+            }
+            match file_effect(&rec.name) {
+                Some(FileEffect::Modify) => {
+                    modified.insert(rec.args.clone());
                 }
-                match file_effect(&rec.name) {
-                    Some(FileEffect::Modify) => {
-                        modified.insert(rec.args.clone());
-                    }
-                    Some(FileEffect::Create) => {
-                        created.insert(rec.args.clone());
-                    }
-                    Some(FileEffect::Read) => {
-                        read.insert(rec.args.clone());
-                    }
-                    None => {}
+                Some(FileEffect::Create) => {
+                    created.insert(rec.args.clone());
                 }
+                Some(FileEffect::Read) => {
+                    read.insert(rec.args.clone());
+                }
+                None => {}
             }
         }
 
@@ -199,27 +188,22 @@ impl CompactionHook for CodeCompactionHook {
         let mut out: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        for b in blocks {
-            let CompactBlock::ToolCall { native, .. } = b else {
+        for rec in native_records(blocks) {
+            if rec.name != "bash" || !rec.args.contains("git commit") {
                 continue;
+            }
+            let msg =
+                extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
+            let hash = first_hash(&rec.result);
+            let line = match hash {
+                Some(h) => format!("{h} {msg}"),
+                None => msg,
             };
-            for rec in native {
-                if rec.name != "bash" || !rec.args.contains("git commit") {
-                    continue;
-                }
-                let msg =
-                    extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
-                let hash = first_hash(&rec.result);
-                let line = match hash {
-                    Some(h) => format!("{h} {msg}"),
-                    None => msg,
-                };
-                if seen.insert(line.clone()) {
-                    out.push(line);
-                }
-                if out.len() >= 8 {
-                    break;
-                }
+            if seen.insert(line.clone()) {
+                out.push(line);
+            }
+            if out.len() >= 8 {
+                break;
             }
         }
         out
