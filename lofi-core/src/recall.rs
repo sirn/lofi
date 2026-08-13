@@ -409,7 +409,7 @@ fn render_assistant(
             ContentBlock::Image { media_type, .. } => {
                 text_parts.push(format!("[image: {media_type}]"));
             }
-            ContentBlock::ToolResult { .. } => {}
+            ContentBlock::ToolResult { .. } | ContentBlock::PartSignature { .. } => {}
         }
     }
     for eid in &exec_ids {
@@ -648,6 +648,7 @@ fn for_each_search_text(message: &Message, mut visit: impl FnMut(&str)) {
                 }
             }
             ContentBlock::Image { media_type, .. } => visit(media_type),
+            ContentBlock::PartSignature { .. } => {}
         }
     }
 }

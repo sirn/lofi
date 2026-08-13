@@ -773,6 +773,25 @@ impl Agent {
                                 | StreamingEvent::ThinkingDelta(s)
                                 | StreamingEvent::ThinkingSignature(s)
                                 | StreamingEvent::Error(s) => s.len(),
+                                StreamingEvent::PartSignature {
+                                    provider,
+                                    model,
+                                    format,
+                                    target,
+                                    signature,
+                                } => {
+                                    provider.len()
+                                        + model.len()
+                                        + match format {
+                                            lofi_types::PartSignatureFormat::OpenAiExtraContent {
+                                                namespace,
+                                            } => namespace.len(),
+                                            lofi_types::PartSignatureFormat::Google
+                                            | lofi_types::PartSignatureFormat::OpenAiReasoningDetail => 0,
+                                        }
+                                        + target.as_ref().map_or(0, String::len)
+                                        + signature.len()
+                                }
                                 StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
                                 StreamingEvent::ToolUseInputDelta { id, delta } => {
                                     id.len() + delta.len()
