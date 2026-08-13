@@ -18,7 +18,10 @@ pub use agent::{
     build_agent, exec_input_code_and_label, exec_result_display, rebuild_agent, select_model,
     Agent, AgentEvent, ConfirmRequest,
 };
-pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
+pub use compact::{
+    compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE,
+    RESULT_RECALL_INSTRUCTION,
+};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome};
 pub use lofi_code::compact_hook::CodeCompactionHook;
 pub use lofi_code::tools::{JobInfo, JobRegistry};
