@@ -5626,6 +5626,50 @@ fn ctrl_d_deletes_char_or_quits_on_empty() {
     assert!(b.should_quit);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_d_on_empty_cancels_run_without_aborting() {
+    let mut a = app();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    });
+
+    handle_event(&ctrl_key(KeyCode::Char('d')), &mut a, None, &mut run);
+
+    assert!(a.should_quit);
+    assert!(cancel.load(Ordering::Relaxed));
+    assert!(run.is_some(), "quit must not abort the handle");
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settle_run_for_quit_waits_for_flush_then_joins() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let started = cancel.clone();
+    let handle = tokio::spawn(async move {
+        while !started.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        drop(tx);
+    });
+    let run = RunHandle {
+        handle,
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        user_bash: None,
+    };
+
+    settle_run_for_quit(run, Duration::from_secs(1)).await;
+    assert!(cancel.load(Ordering::Relaxed));
+}
+
 fn plain_key(code: KeyCode) -> Event {
     Event::Key(crossterm::event::KeyEvent::new_with_kind(
         code,
