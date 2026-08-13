@@ -4,8 +4,8 @@ use futures::StreamExt;
 use lofi_providers::assemble_message;
 use lofi_providers::open;
 use lofi_types::{
-    Api, ContentBlock, Message, Model, PricingConvention, PricingFieldMappings, PromptKind,
-    ProviderConfig, Role, StreamingEvent, Usage,
+    Api, ContentBlock, Message, Model, PartSignatureFormat, PricingConvention,
+    PricingFieldMappings, PromptKind, ProviderConfig, Role, StreamingEvent, Usage,
 };
 
 fn user_msg() -> Message {
@@ -23,6 +23,7 @@ fn model_for(api: Api, base_url: &str) -> Model {
         Api::OpenAiCompletions => "/v1/chat/completions",
         Api::OpenAiResponses => "/v1/responses",
         Api::AnthropicMessages => "/v1/messages",
+        Api::GoogleGenerativeAi => "/v1beta",
     };
     Model {
         id: "test-model".to_string(),
@@ -267,5 +268,80 @@ async fn anthropic_messages_maps_canned_stream() {
         ContentBlock::Text {
             text: "Done".to_string()
         }
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_maps_canned_stream() {
+    let body = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"Checking","thought":true}]}}]}
+
+"#,
+        r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"exec","args":{"code":"1+1"}},"thoughtSignature":"c2ln"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"cachedContentTokenCount":2,"candidatesTokenCount":3,"thoughtsTokenCount":4}}
+
+"#,
+    );
+
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock(
+            "POST",
+            "/v1beta/models/test-model:streamGenerateContent?alt=sse",
+        )
+        .match_header("x-goog-api-key", "dummy-key")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+        })))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(body)
+        .create_async()
+        .await;
+
+    let provider = open(
+        Api::GoogleGenerativeAi,
+        &cfg(Api::GoogleGenerativeAi, server.url()),
+    )
+    .unwrap();
+    let stream = provider
+        .stream(
+            &model_for(Api::GoogleGenerativeAi, &server.url()),
+            &[user_msg()],
+            &[],
+        )
+        .await
+        .unwrap();
+    let events = collect(stream).await;
+    mock.assert_async().await;
+
+    assert_eq!(
+        events,
+        vec![
+            StreamingEvent::ThinkingDelta("Checking".to_string()),
+            StreamingEvent::ToolUseStart {
+                id: "call_1".to_string(),
+                name: "exec".to_string(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: "call_1".to_string(),
+                delta: "{\"code\":\"1+1\"}".to_string(),
+            },
+            StreamingEvent::ToolUseEnd {
+                id: "call_1".to_string(),
+            },
+            StreamingEvent::PartSignature {
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+                format: PartSignatureFormat::Google,
+                target: Some("call_1".to_string()),
+                signature: "c2ln".to_string(),
+            },
+            StreamingEvent::Done(Usage {
+                input_tokens: 6,
+                output_tokens: 7,
+                cache_read_tokens: 2,
+                cache_write_tokens: 0,
+            }),
+        ]
     );
 }
