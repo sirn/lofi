@@ -20,6 +20,7 @@ mod app_nav;
 mod app_render;
 mod debug_stats;
 mod input;
+mod malloc_trim;
 mod replay;
 mod resume;
 mod text;
