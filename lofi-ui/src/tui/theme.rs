@@ -117,6 +117,13 @@ impl Theme {
         }
     }
 
+    pub(crate) fn from_scheme(scheme: crate::tui::tty_events::ColorScheme) -> Self {
+        match scheme {
+            crate::tui::tty_events::ColorScheme::Light => Self::light(),
+            crate::tui::tty_events::ColorScheme::Dark => Self::dark(),
+        }
+    }
+
     pub(crate) fn from_background(rgb: crate::tui::terminal_bg::Rgb) -> Self {
         if rgb.luminance() > 0.5 {
             Self::light()
@@ -125,15 +132,14 @@ impl Theme {
         }
     }
 
-    /// `None` is a missed reply, not dark. Live callers must not fall back.
+    /// `None` is a missed reply, not dark.
     pub(crate) fn probe_auto(timeout: std::time::Duration) -> Option<Self> {
         crate::tui::terminal_bg::query_background(timeout).map(Self::from_background)
     }
 
     /// `Auto` falls back to `dark()` on a failed startup probe: dark
     /// text on an unknown background is more likely to read than
-    /// washed-out light. Live refresh must use `probe_auto` so a
-    /// missed reply does not flip an already-correct palette.
+    /// washed-out light.
     pub(crate) fn resolve(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Light => Self::light(),

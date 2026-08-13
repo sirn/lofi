@@ -7794,17 +7794,16 @@ fn apply_resolved_theme_clears_frozen_only_on_change() {
 }
 
 #[test]
-fn refresh_auto_theme_skips_forced_modes() {
+fn apply_color_scheme_applies_only_in_auto() {
+    use crate::tui::tty_events::ColorScheme;
     use lofi_types::ThemeMode;
     let mut a = app();
-    a.theme_mode = ThemeMode::Dark;
+    a.theme_mode = ThemeMode::Auto;
     a.theme = Theme::dark();
-    a.frozen_render.insert(0, Vec::new());
-    assert!(!a.refresh_auto_theme());
-    assert!(a.frozen_render.contains(0));
-    a.theme_mode = ThemeMode::Light;
-    assert!(!a.refresh_auto_theme());
-    assert!(a.frozen_render.contains(0));
+    assert!(a.apply_color_scheme(ColorScheme::Light));
+    assert_eq!(a.theme, Theme::light());
+    a.theme_mode = ThemeMode::Dark;
+    assert!(!a.apply_color_scheme(ColorScheme::Light));
 }
 
 #[test]
