@@ -159,6 +159,7 @@ fn build_openai_responses_request(
         "model": model.id,
         "input": input,
         "stream": true,
+        "store": false,
     });
     req["prompt_cache_key"] = json!(prompt_cache_key(model, &input));
     if let Some(mt) = model.max_tokens {
@@ -415,6 +416,7 @@ mod tests {
         let req = build_openai_responses_request(&model(), &[], &[]);
         assert_eq!(req["model"], "gpt-4o");
         assert_eq!(req["stream"], true);
+        assert_eq!(req["store"], false);
         assert!(req.get("input").is_some());
         assert_eq!(
             req["prompt_cache_key"].as_str().map(str::len),
