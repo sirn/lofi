@@ -7,6 +7,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 pub mod recall;
+pub mod text;
+
+pub use text::clip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Api {
