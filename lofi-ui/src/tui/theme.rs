@@ -5,7 +5,7 @@ use lofi_types::ThemeMode;
 /// The resolved color palette. Colors are ANSI 256 values so the UI works
 /// in any terminal that advertises 256-color support without depending on
 /// truecolor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Theme {
     pub primary: Color,
     pub user: Color,
@@ -117,20 +117,29 @@ impl Theme {
         }
     }
 
-    /// `Auto` falls back to `dark()` on a failed probe: dark text on an
-    /// unknown background is more likely to read than washed-out light.
+    pub(crate) fn from_background(rgb: crate::tui::terminal_bg::Rgb) -> Self {
+        if rgb.luminance() > 0.5 {
+            Self::light()
+        } else {
+            Self::dark()
+        }
+    }
+
+    /// `None` is a missed reply, not dark. Live callers must not fall back.
+    pub(crate) fn probe_auto(timeout: std::time::Duration) -> Option<Self> {
+        crate::tui::terminal_bg::query_background(timeout).map(Self::from_background)
+    }
+
+    /// `Auto` falls back to `dark()` on a failed startup probe: dark
+    /// text on an unknown background is more likely to read than
+    /// washed-out light. Live refresh must use `probe_auto` so a
+    /// missed reply does not flip an already-correct palette.
     pub(crate) fn resolve(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Light => Self::light(),
             ThemeMode::Dark => Self::dark(),
             ThemeMode::Auto => {
-                let bg = crate::tui::terminal_bg::query_background(
-                    std::time::Duration::from_millis(150),
-                );
-                match bg {
-                    Some(rgb) if rgb.luminance() > 0.5 => Self::light(),
-                    _ => Self::dark(),
-                }
+                Self::probe_auto(std::time::Duration::from_millis(150)).unwrap_or_else(Self::dark)
             }
         }
     }
@@ -139,5 +148,27 @@ impl Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::terminal_bg::Rgb;
+
+    #[test]
+    fn from_background_splits_on_luminance() {
+        assert_eq!(
+            Theme::from_background(Rgb {
+                r: 255,
+                g: 255,
+                b: 255,
+            }),
+            Theme::light()
+        );
+        assert_eq!(
+            Theme::from_background(Rgb { r: 0, g: 0, b: 0 }),
+            Theme::dark()
+        );
     }
 }
