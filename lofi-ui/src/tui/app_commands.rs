@@ -838,15 +838,43 @@ impl App {
         if let Some(picker) = self.theme_picker.take() {
             if let Some(&mode) = picker.modes.get(picker.selected) {
                 self.theme_mode = mode;
-                // 'Auto' re-runs the OSC 11 probe so a system light<->dark
-                // flip is picked up; 'Light'/'Dark' short-circuit without
-                // terminal I/O.
-                self.theme = Theme::resolve(mode);
-                // Frozen render lines carry the old palette; CollapsedTurnCache
-                // stores unstyled turns and can stay.
-                self.frozen_render.clear();
+                self.sync_color_scheme_reports();
+                match mode {
+                    lofi_types::ThemeMode::Auto => {
+                        crate::tui::tty_events::request_color_scheme();
+                    }
+                    lofi_types::ThemeMode::Light => {
+                        self.apply_resolved_theme(Theme::light());
+                    }
+                    lofi_types::ThemeMode::Dark => {
+                        self.apply_resolved_theme(Theme::dark());
+                    }
+                }
             }
         }
+    }
+
+    pub(super) fn apply_color_scheme(
+        &mut self,
+        scheme: crate::tui::tty_events::ColorScheme,
+    ) -> bool {
+        if self.theme_mode != lofi_types::ThemeMode::Auto {
+            return false;
+        }
+        self.apply_resolved_theme(Theme::from_scheme(scheme))
+    }
+
+    pub(super) fn sync_color_scheme_reports(&self) {
+        crate::tui::tty_events::set_reports_enabled(self.theme_mode == lofi_types::ThemeMode::Auto);
+    }
+
+    pub(super) fn apply_resolved_theme(&mut self, next: Theme) -> bool {
+        if self.theme == next {
+            return false;
+        }
+        self.theme = next;
+        self.frozen_render.clear();
+        true
     }
 
     pub(super) fn thinking_picker_confirm(&mut self) {
