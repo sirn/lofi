@@ -124,14 +124,8 @@ impl Agent {
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
         let prev_len = messages.len();
-        if continuation {
-            // Force-continue after a hard-cap force-compact: resume the
-            // loop on the compacted history (which ends in a tool result)
-            // without appending a new user prompt, and signal the UI to
-            // append to the current turn rather than push a new one.
-            if !emit(Some(&tx), AgentEvent::TurnContinue).await {
-                return Ok(());
-            }
+        let turn_start = if continuation {
+            None
         } else {
             // Surface attachments on the turn header (TurnStart.prompt and,
             // via the recorder, the durable turn label) as a marker per image,
@@ -164,10 +158,19 @@ impl Agent {
                 blocks,
                 kind: prompt_kind,
             });
+            Some(prompt_for_event)
+        };
+        let mut stats = TurnStats::new();
+        let mut recorder =
+            session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        if let Some(prompt) = turn_start {
+            // Persist the user prompt before TurnStart so a closed consumer
+            // cannot drop a submitted turn. Later checkpoints skip this suffix.
+            commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {
-                    prompt: prompt_for_event,
+                    prompt,
                     kind: prompt_kind,
                 },
             )
@@ -175,10 +178,9 @@ impl Agent {
             {
                 return Ok(());
             }
+        } else if !emit(Some(&tx), AgentEvent::TurnContinue).await {
+            return Ok(());
         }
-        let mut stats = TurnStats::new();
-        let mut recorder =
-            session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
         // JobStarted goes through the recorder's pending queue so its parent
         // chains off the current turn's events (not the pre-turn leaf). That
         // keeps the marker on the same lineage as the conversation that
@@ -200,12 +202,7 @@ impl Agent {
         let on_job_finished = session.map(|c| {
             let cursor = c.clone();
             std::sync::Arc::new(move |job_id: u64| {
-                let mut events = [lofi_types::SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: lofi_types::SessionEventKind::JobFinished { job_id },
-                }];
-                let _ = cursor.append_events(&mut events);
+                let _ = cursor.record(SessionRecord::JobFinished { job_id });
             }) as lofi_code::JobFinishedFn
         });
         // `lofi.recall` streams the on-disk transcript through a lightweight
@@ -284,32 +281,17 @@ impl Agent {
                 retry_attempt = 0;
             }
             match round {
-                Ok(true) => {
-                    finished_normally = true;
-                    break;
-                }
-                Ok(false) if tx.is_closed() => {
-                    detached = true;
-                    break;
-                }
-                Ok(false) => {
-                    // The assistant tool call and its results form a complete,
-                    // provider-valid round. Persist that suffix now instead of
-                    // retaining the entire long turn only in memory.
-                    if let Some(recorder) = recorder.as_mut() {
-                        let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                        if let Some((byte_start, byte_end)) = recorder
-                            .checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?
-                        {
-                            if !tx.is_closed() {
-                                let _ = tx
-                                    .send(AgentEvent::RoundCommitted {
-                                        byte_start,
-                                        byte_end,
-                                    })
-                                    .await;
-                            }
-                        }
+                Ok(finished) => {
+                    // Persist before inspecting the consumer so a completed
+                    // round is on disk even if the UI already went away.
+                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
+                    if finished {
+                        finished_normally = true;
+                        break;
+                    }
+                    if tx.is_closed() {
+                        detached = true;
+                        break;
                     }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
@@ -430,6 +412,18 @@ impl Agent {
         } else {
             None
         };
+        // Disk first: a crash after the UI terminal event must not lose a
+        // settled turn that was still only in memory.
+        let mut committed = None;
+        if let Some(recorder) = recorder.as_mut() {
+            let summary = stats.summary(elapsed_ms);
+            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
+            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
+                Ok(range) => committed = range,
+                Err(e) if err.is_none() => return Err(e),
+                Err(_) => {}
+            }
+        }
         if let Some(outcome) = &outcome {
             if !tx.is_closed() {
                 let _ = match outcome {
@@ -473,19 +467,14 @@ impl Agent {
                 };
             }
         }
-        if let Some(recorder) = recorder.as_mut() {
-            let summary = stats.summary(elapsed_ms);
-            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
-            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
-                Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
-                    let _ = tx
-                        .send(AgentEvent::TurnCommitted {
-                            byte_start,
-                            byte_end,
-                        })
-                        .await;
-                }
-                _ => {}
+        if let Some((byte_start, byte_end)) = committed {
+            if !tx.is_closed() {
+                let _ = tx
+                    .send(AgentEvent::TurnCommitted {
+                        byte_start,
+                        byte_end,
+                    })
+                    .await;
             }
         }
         if matches!(&outcome, Some(TurnOutcome::Failed(_))) {
@@ -1172,6 +1161,31 @@ impl Agent {
         }
         Ok(results)
     }
+}
+
+async fn commit_progress(
+    recorder: Option<&mut SessionRecorder>,
+    messages: &[Message],
+    stats: &TurnStats,
+    tx: &Sender<AgentEvent>,
+) -> Result<()> {
+    let Some(recorder) = recorder else {
+        return Ok(());
+    };
+    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+    if let Some((byte_start, byte_end)) =
+        recorder.checkpoint(messages, &stats.summary(elapsed_ms))?
+    {
+        if !tx.is_closed() {
+            let _ = tx
+                .send(AgentEvent::RoundCommitted {
+                    byte_start,
+                    byte_end,
+                })
+                .await;
+        }
+    }
+    Ok(())
 }
 
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block
