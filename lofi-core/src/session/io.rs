@@ -55,7 +55,7 @@ impl WorkerState {
         self.tree_snapshots.remove(&id);
         // The freed Vec<EventIndex> stays in this thread's glibc arena
         // otherwise. Trim so the next /tree open doesn't ratchet RSS.
-        super::malloc_trim::release_freed_memory();
+        crate::malloc_trim::release_freed_memory();
     }
 }
 
