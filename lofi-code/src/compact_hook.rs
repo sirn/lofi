@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use lofi_types::{CompactBlock, CompactionHook, NativeToolRecord, SummarySection};
+use lofi_types::{clip, CompactBlock, CompactionHook, NativeToolRecord, SummarySection};
 
 use crate::docs;
 
@@ -247,36 +247,6 @@ impl CompactionHook for CodeCompactionHook {
             None
         }
     }
-}
-
-fn clip(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    let mut end_byte = 0;
-    for (i, (b, _)) in text.char_indices().enumerate() {
-        if i == max {
-            end_byte = b;
-            break;
-        }
-    }
-    let window = &text[..end_byte];
-    let mut cut = window
-        .rfind(' ')
-        .filter(|&i| i > end_byte * 3 / 5)
-        .unwrap_or(end_byte);
-    if cut > 0 && text.is_char_boundary(cut) {
-        let prev = &text[..cut];
-        if let Some(last) = prev.chars().next_back() {
-            if ((last as u32) & 0xFFFF) >= 0xD800 && (last as u32) <= 0xDBFF {
-                if let Some((p, _)) = prev.char_indices().next_back() {
-                    cut = p;
-                }
-            }
-        }
-    }
-    text[..cut].trim_end().to_string()
 }
 
 fn extract_commit_message(cmd: &str) -> Option<String> {
