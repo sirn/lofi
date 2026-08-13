@@ -227,7 +227,7 @@ pub(super) fn handle_event(
         }
         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.input.is_empty() {
-                app.should_quit = true;
+                request_quit(app, current_run);
             } else {
                 app.delete_forward_char();
             }
@@ -576,6 +576,14 @@ fn interrupt_run(
             }
         }
         app.ctrl_c_at = None;
+    }
+}
+
+fn request_quit(app: &mut App, current_run: &mut Option<RunHandle>) {
+    app.should_quit = true;
+    if let Some(r) = current_run.as_mut() {
+        // Signal cancel now. The event loop waits for flush and does not abort.
+        r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

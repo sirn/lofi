@@ -331,6 +331,209 @@ async fn run_once_stops_at_done_without_polling_stream_again() {
 }
 
 #[tokio::test]
+async fn user_prompt_is_persisted_before_first_provider_round() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let agent = Agent {
+        provider: Arc::new(PendingAfterRoundProvider {
+            first: std::sync::Mutex::new(None),
+        }),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
+    let run = agent.run_continuation(
+        &mut messages,
+        "keep this".into(),
+        lofi_types::PromptKind::User,
+        tx,
+        Some(&cursor),
+        false,
+        None,
+        None,
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), run)
+            .await
+            .is_err(),
+        "first provider round should still be pending"
+    );
+
+    let events = cursor.load_tree_events().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            SessionEventKind::Message(message)
+                if message.role == Role::User
+                    && message.blocks.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text } if text == "keep this"
+                    ))
+        )),
+        "settled user prompt must be on disk before the first stream"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event.kind,
+        SessionEventKind::TurnEnd { .. }
+            | SessionEventKind::TurnFailed { .. }
+            | SessionEventKind::TurnCancelled { .. }
+    )));
+}
+
+#[tokio::test]
+async fn settled_messages_remain_on_disk_after_consumer_drops() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::TextDelta("kept".into()),
+            StreamingEvent::Done(Usage::default()),
+        ]],
+        dir.path(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
+    let run = agent.run_continuation(
+        &mut messages,
+        "go".into(),
+        lofi_types::PromptKind::User,
+        tx,
+        Some(&cursor),
+        false,
+        None,
+        None,
+    );
+    tokio::pin!(run);
+    let mut run_done = false;
+    let mut saw_text = false;
+    while !saw_text {
+        tokio::select! {
+            biased;
+            event = rx.recv() => match event {
+                Some(AgentEvent::Text(_)) => saw_text = true,
+                None if run_done => panic!("run sent no Text"),
+                _ => {}
+            },
+            result = run.as_mut(), if !run_done => {
+                result.expect("run should succeed");
+                run_done = true;
+            }
+        }
+    }
+    drop(rx);
+    if !run_done {
+        run.await
+            .expect("run should finish after the consumer drops");
+    }
+
+    let events = cursor.load_tree_events().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            SessionEventKind::Message(message)
+                if message.role == Role::User
+                    && message.blocks.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text } if text == "go"
+                    ))
+        )),
+        "user prompt must survive a dropped consumer"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            SessionEventKind::Message(message)
+                if message.role == Role::Assistant
+                    && message.blocks.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text } if text == "kept"
+                    ))
+        )),
+        "completed assistant message must survive a dropped consumer"
+    );
+}
+
+#[tokio::test]
+async fn completed_final_round_is_on_disk_before_turn_end() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::TextDelta("final answer".into()),
+            StreamingEvent::Done(Usage::default()),
+        ]],
+        dir.path(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
+    let run = agent.run_continuation(
+        &mut messages,
+        "go".into(),
+        lofi_types::PromptKind::User,
+        tx,
+        Some(&cursor),
+        false,
+        None,
+        None,
+    );
+    tokio::pin!(run);
+
+    let mut saw_text = false;
+    let mut run_done = false;
+    loop {
+        let event = tokio::select! {
+            biased;
+            event = rx.recv() => event.expect("run event channel closed"),
+            result = run.as_mut(), if !run_done => {
+                result.expect("run should succeed");
+                run_done = true;
+                continue;
+            }
+        };
+        match event {
+            AgentEvent::Text(_) => saw_text = true,
+            AgentEvent::TurnEnd { .. } => {
+                panic!("finished assistant must be durable before TurnEnd");
+            }
+            AgentEvent::RoundCommitted { .. } if saw_text => break,
+            _ => {}
+        }
+    }
+
+    let events = cursor.load_tree_events().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            SessionEventKind::Message(message)
+                if message.role == Role::Assistant
+                    && message.blocks.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text } if text == "final answer"
+                    ))
+        )),
+        "completed final assistant message must be on disk before TurnEnd"
+    );
+}
+
+#[tokio::test]
 async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
