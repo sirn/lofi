@@ -1,0 +1,22 @@
+ui: call malloc_trim when the tree picker closes
+
+Opening /tree on a 300 MB session spikes RSS by ~30 MB. Most of that
+is the EventIndex vec built on the IO thread, plus the tree-row
+skeletons sent over the picker channel. The picker correctly drops
+the Arc and entries on close, but the free runs on the main thread
+while the buffer was allocated on the IO thread — glibc routes the
+freed pages back to the allocating thread's arena, where they sit
+indefinitely. Repeat /tree cycles grew RSS by ~25 MB per open before
+plateauing at ~89 MB on a long session.
+
+Call malloc_trim(0) after the picker closes (both Escape and confirm
+paths). RSS drops back to the post-resume baseline (~36 MB) on the
+first close, and stays there across repeat opens. The new helper is
+a no-op on non-glibc platforms so the change carries no portability
+risk.
+
+Measured on a 293 MB session:
+  open /tree   close /tree
+  64 MB        35 MB
+  80 MB        29 MB
+  57 MB        36 MB

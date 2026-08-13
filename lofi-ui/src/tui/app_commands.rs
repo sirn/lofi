@@ -1078,6 +1078,8 @@ impl App {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
         self.tree_picker_index = None;
         self.tree_picker_pending.clear();
+        // See Escape path: release the freed tree snapshot arena pages.
+        super::malloc_trim::release_freed_memory();
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
@@ -1438,6 +1440,11 @@ impl App {
                     self.tree_picker_index = None;
                     self.tree_picker_pending.clear();
                     self.picker_generation.fetch_add(1, Ordering::Relaxed);
+                    // The tree snapshot was built on a background IO thread;
+                    // freeing its Vec here on the main thread leaves the
+                    // freed pages in the IO thread's glibc arena. Trim so the
+                    // freed ~30 MB returns to the kernel instead of sticking.
+                    super::malloc_trim::release_freed_memory();
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,
