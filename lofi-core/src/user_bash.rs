@@ -141,35 +141,6 @@ pub async fn run_user_bash(root: &Path, command_text: String) -> Result<UserBash
     })
 }
 
-/// Append a completed user-shell command to the session transcript as a
-/// `UserBash` event, returning its byte range. This is the durable write for
-/// `run_user_bash`: event construction stays in core so callers never
-/// assemble or append session events themselves.
-///
-/// # Errors
-/// Propagates transcript serialization and I/O failures.
-pub fn append_user_bash(
-    cursor: &crate::session::store::SessionCursor,
-    result: &UserBashResult,
-    exclude_from_context: bool,
-) -> Result<(u64, u64)> {
-    let mut events = [lofi_types::SessionEvent {
-        id: String::new(),
-        parent_id: None,
-        kind: lofi_types::SessionEventKind::UserBash {
-            command: result.command.clone(),
-            output: result.output.clone(),
-            exit_code: result.exit_code,
-            signal: result.signal,
-            duration_ms: result.duration_ms,
-            truncated: result.truncated,
-            cancelled: result.cancelled,
-            exclude_from_context,
-        },
-    }];
-    cursor.append_events(&mut events)
-}
-
 async fn read_tail<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     cap: usize,
