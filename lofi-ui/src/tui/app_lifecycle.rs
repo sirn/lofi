@@ -85,6 +85,7 @@ impl App {
             no_models_hint: None,
             theme: Theme::default(),
             theme_mode: lofi_types::ThemeMode::default(),
+            color_scheme_known: false,
             kill_ring: String::new(),
             last_kill_was_kill: false,
             ctrl_c_at: None,

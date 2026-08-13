@@ -7808,6 +7808,32 @@ fn refresh_auto_theme_skips_forced_modes() {
 }
 
 #[test]
+fn osc11_refresh_skips_when_997_is_known() {
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.theme_mode = ThemeMode::Auto;
+    assert!(a.uses_osc11_refresh());
+    a.color_scheme_known = true;
+    assert!(!a.uses_osc11_refresh());
+    assert!(!a.refresh_auto_theme());
+}
+
+#[test]
+fn apply_color_scheme_marks_997_known() {
+    use crate::tui::tty_events::ColorScheme;
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.theme_mode = ThemeMode::Auto;
+    a.theme = Theme::dark();
+    assert!(!a.color_scheme_known);
+    assert!(a.apply_color_scheme(ColorScheme::Light));
+    assert!(a.color_scheme_known);
+    assert_eq!(a.theme, Theme::light());
+    a.theme_mode = ThemeMode::Dark;
+    assert!(!a.apply_color_scheme(ColorScheme::Light));
+}
+
+#[test]
 fn notify_lines_counts_verbose_chip_width() {
     let msg = "an error long enough to matter when the verbose chip eats ten cells off the available width of the line".to_string();
     let mut quiet = app();
