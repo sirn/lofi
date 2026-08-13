@@ -1098,7 +1098,10 @@ mod tests {
         // nothing should reach the agent.
         let registry = JobRegistry::new();
         let f = tempfile::NamedTempFile::new().unwrap();
-        let handle = handle_with(NotifyOpts::terminal_only(), f.path().to_string_lossy().into_owned());
+        let handle = handle_with(
+            NotifyOpts::terminal_only(),
+            f.path().to_string_lossy().into_owned(),
+        );
         let id = handle.data.lock().unwrap().id;
         registry
             .inner
