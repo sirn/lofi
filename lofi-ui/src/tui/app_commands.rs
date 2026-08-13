@@ -849,6 +849,28 @@ impl App {
         }
     }
 
+    /// Re-probe OSC 11 while `theme_mode` is Auto. Keeps the current
+    /// palette when the probe fails so a missed reply cannot flip light
+    /// to dark. Returns whether the palette changed.
+    pub(super) fn refresh_auto_theme(&mut self) -> bool {
+        if self.theme_mode != lofi_types::ThemeMode::Auto {
+            return false;
+        }
+        let Some(next) = Theme::probe_auto(std::time::Duration::from_millis(80)) else {
+            return false;
+        };
+        self.apply_resolved_theme(next)
+    }
+
+    pub(super) fn apply_resolved_theme(&mut self, next: Theme) -> bool {
+        if self.theme == next {
+            return false;
+        }
+        self.theme = next;
+        self.frozen_render.clear();
+        true
+    }
+
     pub(super) fn thinking_picker_confirm(&mut self) {
         if let Some(picker) = self.thinking_picker.take() {
             if let Some(level) = picker.levels.get(picker.selected) {

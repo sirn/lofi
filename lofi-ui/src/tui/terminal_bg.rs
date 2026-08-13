@@ -45,9 +45,9 @@ pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
     stdout.flush().ok()?;
 
     // Poll stdin's fd directly with a hard deadline, then read when ready.
-    // We start this probe before crossterm's EventStream takes over stdin,
-    // so a bounded, single-threaded read is safe and leaves no reader
-    // thread behind to compete for keystrokes after a timeout.
+    // EventStream's wake thread also reads stdin, so the caller must drop
+    // any live EventStream before this returns. A bounded single-threaded
+    // read then cannot race and leaves no extra reader behind.
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
     // SAFETY: fd 0 is a live, readable descriptor while we hold `stdin`.
