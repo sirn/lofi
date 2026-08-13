@@ -1171,9 +1171,8 @@ fn default_retry_max_delay_ms() -> u64 {
     60_000
 }
 
-/// Color scheme selection. `Auto` queries the terminal via OSC 11 at
-/// startup and whenever the user picks "Auto" interactively; `Light` /
-/// `Dark` force the corresponding palette without probing.
+/// Color scheme selection. `Auto` queries the terminal via OSC 11;
+/// `Light` / `Dark` force the corresponding palette without probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {

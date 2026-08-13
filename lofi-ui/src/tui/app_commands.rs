@@ -841,12 +841,29 @@ impl App {
                 // 'Auto' re-runs the OSC 11 probe so a system light<->dark
                 // flip is picked up; 'Light'/'Dark' short-circuit without
                 // terminal I/O.
-                self.theme = Theme::resolve(mode);
-                // Frozen render lines carry the old palette; CollapsedTurnCache
-                // stores unstyled turns and can stay.
-                self.frozen_render.clear();
+                self.apply_resolved_theme(Theme::resolve(mode));
             }
         }
+    }
+
+    /// A missed OSC 11 reply must not flip an already-correct palette to dark.
+    pub(super) fn refresh_auto_theme(&mut self) -> bool {
+        if self.theme_mode != lofi_types::ThemeMode::Auto {
+            return false;
+        }
+        let Some(next) = Theme::probe_auto(std::time::Duration::from_millis(80)) else {
+            return false;
+        };
+        self.apply_resolved_theme(next)
+    }
+
+    pub(super) fn apply_resolved_theme(&mut self, next: Theme) -> bool {
+        if self.theme == next {
+            return false;
+        }
+        self.theme = next;
+        self.frozen_render.clear();
+        true
     }
 
     pub(super) fn thinking_picker_confirm(&mut self) {

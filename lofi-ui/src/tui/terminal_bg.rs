@@ -37,17 +37,13 @@ impl Rgb {
 }
 
 /// Query the terminal's background colour. `timeout` bounds how long we
-/// wait for a reply; on time-out or any I/O error the function returns
-/// `None` and the caller falls back to the dark palette.
+/// wait for a reply. Timeout or I/O error returns `None`.
 pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
     let mut stdout = io::stdout();
     stdout.write_all(b"\x1b]11;?\x07").ok()?;
     stdout.flush().ok()?;
 
-    // Poll stdin's fd directly with a hard deadline, then read when ready.
-    // We start this probe before crossterm's EventStream takes over stdin,
-    // so a bounded, single-threaded read is safe and leaves no reader
-    // thread behind to compete for keystrokes after a timeout.
+    // `EventStream`'s wake thread also reads stdin; drop any live stream first.
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
     // SAFETY: fd 0 is a live, readable descriptor while we hold `stdin`.
