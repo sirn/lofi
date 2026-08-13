@@ -203,6 +203,8 @@ pub enum ContentBlock {
         images: Vec<ToolResultImage>,
     },
     /// Chain-of-thought / reasoning trace (where the API exposes it).
+    /// `signature` is the opaque replay blob: Anthropic's thinking signature
+    /// or Responses `encrypted_content`.
     Thinking {
         text: String,
         signature: Option<String>,
