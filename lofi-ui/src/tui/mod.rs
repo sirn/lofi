@@ -764,7 +764,12 @@ enum PickerLoad {
     TreeReady {
         generation: u64,
         entries: Vec<TreeEntry>,
-        index: Arc<Vec<store::EventIndex>>,
+        /// Handle for the IO-thread-owned snapshot. The full
+        /// `Vec<EventIndex>` stays on the worker that built it so its free
+        /// happens on the same thread that allocated — sending the Vec itself
+        /// would push ~9 MB onto the main thread and leave the freed slack in
+        /// the worker's arena on close.
+        snapshot_id: u64,
     },
     TreeRows {
         generation: u64,
@@ -833,7 +838,7 @@ pub(crate) struct App {
     session: SessionState,
     picker: Option<PickerState>,
     tree_picker: Option<TreePickerState>,
-    tree_picker_index: Option<Arc<Vec<store::EventIndex>>>,
+    tree_picker_snapshot: Option<u64>,
     tree_picker_pending: std::collections::HashSet<usize>,
     picker_load_tx: Option<tokio::sync::mpsc::UnboundedSender<PickerLoad>>,
     picker_generation: Arc<AtomicU64>,
