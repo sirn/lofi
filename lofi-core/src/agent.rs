@@ -178,8 +178,8 @@ pub struct Agent {
     auto_mode: Option<lofi_code::AutoModeFn>,
     skills_dir: Option<PathBuf>,
     /// Session-scoped background jobs. Shared with every exec so a job
-    /// spawned in one round is visible to the next; dropping the agent
-    /// (and with it the last registry clone) kills any survivors.
+    /// spawned in one round is visible to the next. The host shuts down
+    /// survivors when the session ends.
     jobs: lofi_code::tools::JobRegistry,
 }
 

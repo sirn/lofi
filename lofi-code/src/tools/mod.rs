@@ -60,8 +60,8 @@ pub struct BuiltinTools {
     read_roots: Vec<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     /// Background jobs spawned by this session. Shared with the owning
-    /// agent so jobs survive across the per-exec tool bundles; dropping the
-    /// last clone kills any survivors.
+    /// agent so jobs survive across the per-exec tool bundles. Explicit host
+    /// shutdown kills survivors; dropping the last clone is the fallback.
     jobs: JobRegistry,
     on_job_started: Option<crate::JobStartedFn>,
     /// Visible-output caps for tool results (file reads and bash output).

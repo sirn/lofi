@@ -418,10 +418,10 @@ impl JobRegistry {
             .cloned()
     }
 
-    /// Sigkill every still-running job's process group. Called from
-    /// [`Drop`] when the owning session ends, so a model-started process
-    /// never outlives the session that owns it.
-    fn kill_all(&self) {
+    /// Sigkill every still-running job's process group. Hosts call this
+    /// during graceful shutdown; [`Drop`] is the final fallback when the
+    /// owning session releases its last registry clone.
+    pub fn shutdown(&self) {
         let jobs: Vec<Arc<JobHandle>> = self
             .inner
             .jobs
@@ -457,7 +457,7 @@ impl Drop for JobRegistry {
         // Only the last clone tears down; intermediate clones (per-exec tool
         // bundles) must not kill jobs still owned by the session.
         if Arc::strong_count(&self.inner) == 1 {
-            self.kill_all();
+            self.shutdown();
         }
     }
 }
@@ -1089,6 +1089,34 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_cancels_every_running_job() {
+        let registry = JobRegistry::new();
+        let first_log = tempfile::NamedTempFile::new().unwrap();
+        let second_log = tempfile::NamedTempFile::new().unwrap();
+        let first = handle_with(
+            NotifyOpts::terminal_only(),
+            first_log.path().to_string_lossy().into_owned(),
+        );
+        let second = handle_with(
+            NotifyOpts::terminal_only(),
+            second_log.path().to_string_lossy().into_owned(),
+        );
+        second.data.lock().unwrap().id = 2;
+        {
+            let mut jobs = registry.inner.jobs.lock().unwrap();
+            jobs.insert(1, first.clone());
+            jobs.insert(2, second.clone());
+        }
+
+        registry.shutdown();
+
+        for handle in [first, second] {
+            assert_eq!(handle.data.lock().unwrap().state, State::Cancelled);
+            assert!(handle.cancel.load(Ordering::Relaxed));
+        }
+    }
+
+    #[test]
     fn kill_not_in_disables_notify_before_killing() {
         // Regression: /tree rollback reconcile used to kill the off-lineage
         // job with notify still enabled, so the driver poll saw the
@@ -1098,7 +1126,10 @@ mod tests {
         // nothing should reach the agent.
         let registry = JobRegistry::new();
         let f = tempfile::NamedTempFile::new().unwrap();
-        let handle = handle_with(NotifyOpts::terminal_only(), f.path().to_string_lossy().into_owned());
+        let handle = handle_with(
+            NotifyOpts::terminal_only(),
+            f.path().to_string_lossy().into_owned(),
+        );
         let id = handle.data.lock().unwrap().id;
         registry
             .inner
