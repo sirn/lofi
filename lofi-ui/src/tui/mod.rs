@@ -24,6 +24,7 @@ mod replay;
 mod resume;
 mod text;
 mod tree;
+mod tty_events;
 pub mod view;
 
 #[cfg(test)]
@@ -41,17 +42,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use futures::StreamExt;
 use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
     ContentBlock, Message, PromptKind, Role, RunModel, SessionEvent, SessionEventKind,
@@ -1066,9 +1066,11 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        tty_events::set_reports_enabled(false);
         let _ = disable_raw_mode();
     }
 }
@@ -1100,9 +1102,11 @@ pub(crate) async fn run(
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        tty_events::set_reports_enabled(false);
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
@@ -1115,6 +1119,7 @@ pub(crate) async fn run(
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableFocusChange,
             EnableBracketedPaste
         )?;
         let backend = CrosstermBackend::new(stdout);
@@ -1126,6 +1131,7 @@ pub(crate) async fn run(
             let _ = execute!(
                 io::stdout(),
                 DisableBracketedPaste,
+                DisableFocusChange,
                 DisableMouseCapture,
                 LeaveAlternateScreen
             );
@@ -1138,7 +1144,8 @@ pub(crate) async fn run(
     let local = LocalSet::new();
     let result = local
         .run_until(async move {
-            run_loop(
+            // `run_loop` exceeds clippy's large_futures stack limit.
+            Box::pin(run_loop(
                 &mut guard,
                 agent,
                 theme,
@@ -1153,7 +1160,7 @@ pub(crate) async fn run(
                 model_supports_image,
                 switcher,
                 system_prompt,
-            )
+            ))
             .await
         })
         .await;
@@ -1268,7 +1275,14 @@ async fn run_loop(
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
     let mut current_run: Option<RunHandle> = None;
-    let mut events = EventStream::new();
+    let mut events = tty_events::TtyEvents::start();
+    app.sync_color_scheme_reports();
+    if app.theme_mode == lofi_types::ThemeMode::Auto {
+        tty_events::request_color_scheme();
+    }
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+            .map_err(Error::Io)?;
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1382,10 +1396,37 @@ async fn run_loop(
                 }
                 dirty = true;
             }
-            maybe_ev = events.next() => {
+            _ = sigwinch.recv() => {
+                if let Ok((w, h)) = crossterm::terminal::size() {
+                    handle_event(
+                        &Event::Resize(w, h),
+                        &mut app,
+                        agent.as_ref(),
+                        &mut current_run,
+                    );
+                    let now = Instant::now();
+                    if resize.deadline.is_none() {
+                        resize.started = Some(now);
+                        resize.events = 0;
+                    }
+                    resize.events = resize.events.saturating_add(1);
+                    resize.last = Some(now);
+                    resize.deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    );
+                }
+            }
+            maybe_ev = events.recv() => {
                 let defer_redraw;
                 match maybe_ev {
-                    Some(Ok(ev)) => {
+                    Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
+                        defer_redraw = false;
+                        if app.apply_color_scheme(scheme) {
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Input(ev))) => {
                         defer_redraw = matches!(ev, Event::Resize(_, _));
                         if !app.should_quit {
                             handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
