@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{
+    ContentBlock, Message, Model, PartSignatureFormat, Role, StreamingEvent, ThinkingLevel, Usage,
+};
 use serde_json::{json, Value};
 
 use super::ProtocolIr;
@@ -53,23 +55,46 @@ fn push_user(m: &Message, out: &mut Vec<Value>) {
     }
 }
 
-fn push_assistant(m: &Message, out: &mut Vec<Value>) {
+fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
     let text = collect_text(&m.blocks);
-    let tool_calls: Vec<Value> = m
-        .blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => {
-                let args = serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
-                Some(json!({
-                    "id": id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args},
-                }))
+    let mut tool_calls = Vec::new();
+    let mut reasoning_details = Vec::new();
+    for (index, block) in m.blocks.iter().enumerate() {
+        if let ContentBlock::ToolUse { id, name, input } = block {
+            let args = serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+            let mut tool_call = json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            });
+            if let Some(ContentBlock::PartSignature {
+                provider,
+                model: signed_model,
+                format,
+                signature,
+            }) = m.blocks.get(index + 1)
+            {
+                if provider == &model.provider && signed_model == &model.id {
+                    match format {
+                        PartSignatureFormat::OpenAiExtraContent { namespace } => {
+                            tool_call["extra_content"] = Value::Object(
+                                [(namespace.clone(), json!({"thought_signature": signature}))]
+                                    .into_iter()
+                                    .collect(),
+                            );
+                        }
+                        PartSignatureFormat::OpenAiReasoningDetail => {
+                            if let Ok(detail) = serde_json::from_str::<Value>(signature) {
+                                reasoning_details.push(detail);
+                            }
+                        }
+                        PartSignatureFormat::Google => {}
+                    }
+                }
             }
-            _ => None,
-        })
-        .collect();
+            tool_calls.push(tool_call);
+        }
+    }
     let mut msg = json!({"role": "assistant"});
     msg["content"] = if text.is_empty() {
         Value::Null
@@ -78,6 +103,9 @@ fn push_assistant(m: &Message, out: &mut Vec<Value>) {
     };
     if !tool_calls.is_empty() {
         msg["tool_calls"] = json!(tool_calls);
+    }
+    if !reasoning_details.is_empty() {
+        msg["reasoning_details"] = json!(reasoning_details);
     }
     out.push(msg);
 }
@@ -123,13 +151,13 @@ fn push_tool(m: &Message, out: &mut Vec<Value>) {
 }
 
 #[must_use]
-pub fn to_openai_chat_messages(messages: &[Message]) -> Vec<Value> {
+pub fn to_openai_chat_messages(model: &Model, messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
             Role::System => push_system(m, &mut out),
             Role::User => push_user(m, &mut out),
-            Role::Assistant => push_assistant(m, &mut out),
+            Role::Assistant => push_assistant(model, m, &mut out),
             Role::Tool => push_tool(m, &mut out),
         }
     }
@@ -143,6 +171,14 @@ impl ProtocolIr for OpenAiCompletionsIr {
 
     fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
         build_openai_chat_request(model, messages, tools)
+    }
+
+    fn new_state(model: &Model) -> Self::State {
+        ChatMapperState {
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            ..ChatMapperState::default()
+        }
     }
 
     fn map_event(
@@ -166,7 +202,7 @@ impl ProtocolIr for OpenAiCompletionsIr {
 
 #[must_use]
 fn build_openai_chat_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
-    let msgs = to_openai_chat_messages(messages);
+    let msgs = to_openai_chat_messages(model, messages);
     let mut req = json!({
         "model": model.id,
         "messages": msgs,
@@ -217,6 +253,9 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ChatMapperState {
     index_to_id: std::collections::HashMap<u64, String>,
+    pending_signature_by_index: std::collections::HashMap<u64, (String, String)>,
+    provider: String,
+    model: String,
 }
 
 /// Handles `choices[0].delta.content` (text), `choices[0].delta.tool_calls`
@@ -291,51 +330,129 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
         }
     }
 
-    if let Some(arr) = delta.get("tool_calls").and_then(Value::as_array) {
-        for tc in arr {
-            let idx = tc.get("index").and_then(Value::as_u64);
-            let id = tc.get("id").and_then(Value::as_str);
-            let function = tc.get("function");
-            let name = function.and_then(|f| f.get("name")).and_then(Value::as_str);
-            let args = function
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str);
-
-            if let (Some(idx), Some(id)) = (idx, id) {
-                state
-                    .index_to_id
-                    .entry(idx)
-                    .or_insert_with(|| id.to_string());
-            }
-
-            if let (Some(id), Some(name)) = (id, name) {
-                if !name.is_empty() {
-                    out.push(StreamingEvent::ToolUseStart {
-                        id: id.to_string(),
-                        name: name.to_string(),
-                    });
-                }
-            }
-
-            if let Some(args) = args {
-                if !args.is_empty() {
-                    let cid = idx
-                        .and_then(|i| state.index_to_id.get(&i))
-                        .cloned()
-                        .or_else(|| id.map(str::to_string));
-                    if let Some(cid) = cid {
-                        out.push(StreamingEvent::ToolUseInputDelta {
-                            id: cid,
-                            delta: args.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
+    map_tool_calls(delta, state, &mut out);
+    map_reasoning_details(delta, state, &mut out);
 
     drain(&mut out);
     Ok(out)
+}
+
+fn map_tool_calls(delta: &Value, state: &mut ChatMapperState, out: &mut Vec<StreamingEvent>) {
+    let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) else {
+        return;
+    };
+    for call in calls {
+        map_tool_call(call, state, out);
+    }
+}
+
+fn map_tool_call(call: &Value, state: &mut ChatMapperState, out: &mut Vec<StreamingEvent>) {
+    let index = call.get("index").and_then(Value::as_u64);
+    let id = call.get("id").and_then(Value::as_str);
+    let function = call.get("function");
+    let name = function
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str);
+    let args = function
+        .and_then(|value| value.get("arguments"))
+        .and_then(Value::as_str);
+
+    if let (Some(index), Some(id)) = (index, id) {
+        state
+            .index_to_id
+            .entry(index)
+            .or_insert_with(|| id.to_string());
+    }
+    if let (Some(id), Some(name)) = (id, name) {
+        if !name.is_empty() {
+            out.push(StreamingEvent::ToolUseStart {
+                id: id.to_string(),
+                name: name.to_string(),
+            });
+        }
+    }
+
+    map_tool_signature(call, index, id, state, out);
+    if let Some(args) = args.filter(|args| !args.is_empty()) {
+        if let Some(id) = tool_call_id(index, id, state) {
+            out.push(StreamingEvent::ToolUseInputDelta {
+                id,
+                delta: args.to_string(),
+            });
+        }
+    }
+}
+
+fn map_tool_signature(
+    call: &Value,
+    index: Option<u64>,
+    id: Option<&str>,
+    state: &mut ChatMapperState,
+    out: &mut Vec<StreamingEvent>,
+) {
+    let signature = extra_content_signature(call)
+        .map(|(namespace, signature)| (namespace.to_string(), signature.to_string()));
+    if let (Some(index), Some(signature)) = (index, signature.as_ref()) {
+        if id.is_none() && !state.index_to_id.contains_key(&index) {
+            state
+                .pending_signature_by_index
+                .insert(index, signature.clone());
+        }
+    }
+    let signature = signature
+        .or_else(|| index.and_then(|index| state.pending_signature_by_index.remove(&index)));
+    let Some((namespace, signature)) = signature else {
+        return;
+    };
+    if let Some(target) = tool_call_id(index, id, state) {
+        out.push(StreamingEvent::PartSignature {
+            provider: state.provider.clone(),
+            model: state.model.clone(),
+            format: PartSignatureFormat::OpenAiExtraContent { namespace },
+            target: Some(target),
+            signature,
+        });
+    }
+}
+
+fn tool_call_id(index: Option<u64>, id: Option<&str>, state: &ChatMapperState) -> Option<String> {
+    index
+        .and_then(|index| state.index_to_id.get(&index))
+        .cloned()
+        .or_else(|| id.map(str::to_string))
+}
+
+fn map_reasoning_details(delta: &Value, state: &ChatMapperState, out: &mut Vec<StreamingEvent>) {
+    let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) else {
+        return;
+    };
+    for detail in details {
+        let Some(id) = detail.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if detail.get("type").and_then(Value::as_str) != Some("reasoning.encrypted") {
+            continue;
+        }
+        out.push(StreamingEvent::PartSignature {
+            provider: state.provider.clone(),
+            model: state.model.clone(),
+            format: PartSignatureFormat::OpenAiReasoningDetail,
+            target: Some(id.to_string()),
+            signature: detail.to_string(),
+        });
+    }
+}
+
+fn extra_content_signature(tool_call: &Value) -> Option<(&str, &str)> {
+    let extra = tool_call.get("extra_content")?.as_object()?;
+    for (namespace, value) in extra {
+        if let Some(signature) = value.get("thought_signature").and_then(Value::as_str) {
+            if !signature.is_empty() {
+                return Some((namespace.as_str(), signature));
+            }
+        }
+    }
+    None
 }
 
 fn usage_from_openai_chat(v: &Value) -> Usage {
@@ -498,6 +615,81 @@ mod tests {
         assert!(matches!(&out[1], StreamingEvent::ToolUseInputDelta { id, .. } if id == "call_a"));
         assert!(matches!(&out[2], StreamingEvent::ToolUseStart { id, .. } if id == "call_b"));
         assert!(matches!(&out[3], StreamingEvent::ToolUseInputDelta { id, .. } if id == "call_b"));
+    }
+
+    #[test]
+    fn gemini_extra_content_signature_round_trips_on_tool_call() {
+        for namespace in ["google", "vertex"] {
+            let mut model = model();
+            model.provider = "plexus".to_string();
+            model.id = "google/gemini-3.7-flash".to_string();
+            let mut state = ChatMapperState {
+                provider: model.provider.clone(),
+                model: model.id.clone(),
+                ..ChatMapperState::default()
+            };
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "exec", "arguments": "{}"},
+                "extra_content": {
+                    namespace: {"thought_signature": "opaque-signature"}
+                }
+            }]}}]});
+
+            let events = map_openai_chat_event(&chunk, &mut state).unwrap();
+            let message = crate::assemble_message(&events);
+            assert_eq!(
+                message.blocks[1],
+                ContentBlock::PartSignature {
+                    provider: "plexus".to_string(),
+                    model: "google/gemini-3.7-flash".to_string(),
+                    format: PartSignatureFormat::OpenAiExtraContent {
+                        namespace: namespace.to_string(),
+                    },
+                    signature: "opaque-signature".to_string(),
+                }
+            );
+
+            let request = build_openai_chat_request(&model, &[message], &[]);
+            assert_eq!(
+                request["messages"][0]["tool_calls"][0]["extra_content"][namespace]
+                    ["thought_signature"],
+                "opaque-signature"
+            );
+        }
+    }
+
+    #[test]
+    fn delayed_extra_content_signature_targets_its_tool_call() {
+        let mut state = ChatMapperState {
+            provider: "plexus".to_string(),
+            model: "google/gemini-3.7-flash".to_string(),
+            ..ChatMapperState::default()
+        };
+        let signature = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": 1,
+            "extra_content": {"google": {"thought_signature": "opaque"}}
+        }]}}]});
+        assert!(map_openai_chat_event(&signature, &mut state)
+            .unwrap()
+            .is_empty());
+
+        let start = json!({"choices":[{"delta":{"tool_calls":[{
+            "index": 1,
+            "id": "call_2",
+            "function": {"name": "exec", "arguments": "{}"}
+        }]}}]});
+        let events = map_openai_chat_event(&start, &mut state).unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamingEvent::PartSignature {
+                target: Some(target),
+                signature,
+                ..
+            } if target == "call_2" && signature == "opaque"
+        )));
     }
 
     #[test]

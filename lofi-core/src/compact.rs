@@ -441,6 +441,7 @@ fn normalize(
                             });
                         }
                         ContentBlock::Thinking { .. }
+                        | ContentBlock::PartSignature { .. }
                         | ContentBlock::ToolResult { .. }
                         | ContentBlock::Image { .. } => {}
                     }
@@ -1407,6 +1408,7 @@ fn estimate_message_tokens(m: &Message) -> usize {
             ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => text.len(),
             ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             ContentBlock::ToolResult { content, .. } => content.len(),
+            ContentBlock::PartSignature { .. } => 0,
             // Image tokens scale with pixel dimensions, not byte length, and
             // we don't retain dimensions on the block. Use a fixed per-image
             // estimate (in chars so the outer `/4` yields ~1000 tokens, the

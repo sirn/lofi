@@ -19,6 +19,8 @@ pub enum Api {
     OpenAiResponses,
     #[serde(rename = "anthropic_messages", alias = "anthropic-messages")]
     AnthropicMessages,
+    #[serde(rename = "google_generative_ai", alias = "google-generative-ai")]
+    GoogleGenerativeAi,
 }
 
 impl Api {
@@ -28,6 +30,7 @@ impl Api {
             Self::OpenAiCompletions => "openai_completions",
             Self::OpenAiResponses => "openai_responses",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::GoogleGenerativeAi => "google_generative_ai",
         }
     }
 
@@ -37,6 +40,7 @@ impl Api {
             Self::OpenAiCompletions => "openai-completions",
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
+            Self::GoogleGenerativeAi => "google-generative-ai",
         }
     }
 
@@ -46,6 +50,7 @@ impl Api {
             Self::OpenAiCompletions => "OpenAI Chat Completions",
             Self::OpenAiResponses => "OpenAI Responses",
             Self::AnthropicMessages => "Anthropic Messages",
+            Self::GoogleGenerativeAi => "Google Generative AI",
         }
     }
 
@@ -57,6 +62,7 @@ impl Api {
             "openai_completions" | "openai-completions" => Some(Self::OpenAiCompletions),
             "openai_responses" | "openai-responses" => Some(Self::OpenAiResponses),
             "anthropic_messages" | "anthropic-messages" => Some(Self::AnthropicMessages),
+            "google_generative_ai" | "google-generative-ai" => Some(Self::GoogleGenerativeAi),
             _ => None,
         }
     }
@@ -71,6 +77,7 @@ impl Api {
         match self {
             Self::OpenAiCompletions | Self::OpenAiResponses => "https://api.openai.com",
             Self::AnthropicMessages => "https://api.anthropic.com",
+            Self::GoogleGenerativeAi => "https://generativelanguage.googleapis.com",
         }
     }
 
@@ -80,6 +87,7 @@ impl Api {
             Self::OpenAiCompletions => "/v1/chat/completions",
             Self::OpenAiResponses => "/v1/responses",
             Self::AnthropicMessages => "/v1/messages",
+            Self::GoogleGenerativeAi => "/v1beta",
         }
     }
 }
@@ -212,6 +220,14 @@ pub enum ContentBlock {
         text: String,
         signature: Option<String>,
     },
+    /// Opaque metadata for the preceding provider part. Keeping it adjacent
+    /// lets each provider IR restore the signature to the exact wire part.
+    PartSignature {
+        provider: String,
+        model: String,
+        format: PartSignatureFormat,
+        signature: String,
+    },
     /// An attached image, held as raw bytes plus its media type and only
     /// base64-encoded at the serde and per-provider IR boundaries. Encoding
     /// on demand keeps the in-memory block and the durable transcript free
@@ -268,15 +284,41 @@ fn is_default_prompt_kind(kind: &PromptKind) -> bool {
     *kind == PromptKind::User
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PartSignatureFormat {
+    Google,
+    OpenAiExtraContent { namespace: String },
+    OpenAiReasoningDetail,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamingEvent {
     TextDelta(String),
-    ToolUseStart { id: String, name: String },
-    ToolUseInputDelta { id: String, delta: String },
-    ToolUseEnd { id: String },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
+    ToolUseInputDelta {
+        id: String,
+        delta: String,
+    },
+    ToolUseEnd {
+        id: String,
+    },
     ThinkingDelta(String),
     ThinkingSignature(String),
+    /// Opaque signature attached to a streamed provider part. Tool-call
+    /// signatures carry a target because compatible streams can deliver
+    /// parallel call metadata after a different call became current.
+    PartSignature {
+        provider: String,
+        model: String,
+        format: PartSignatureFormat,
+        target: Option<String>,
+        signature: String,
+    },
     Done(Usage),
     Error(String),
 }
