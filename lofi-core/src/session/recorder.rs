@@ -1,22 +1,16 @@
-//! Durable-event recorder: translates a finished turn into the
-//! [`SessionEvent`] subset that gets appended to the transcript.
-//! This is the single place that shapes `SessionEvent`s, so the agent loop
-//! (`agent::run_continuation`) is free of on-disk-format concerns — it emits
-//! `AgentEvent`s to the live channel and, at turn end, hands the recorder the
-//! growing message slice plus a [`TurnSummary`] of the engine's accumulators.
-//! The recorder appends the newly completed suffix after each round, then
-//! writes the terminal marker when the turn settles.
-//! The recorder is checkpoint-based rather than a streaming subscriber:
-//! native-tool events originate in a synchronous sandbox callback and are
-//! accumulated in `TurnStats`. Snapshotting at clean provider-round boundaries
-//! keeps complete assistant/tool-result cycles durable without duplicating the
-//! live event fan-out machinery.
+//! Durable session writer.
+//!
+//! Every production append goes through [`SessionCursor::record`]. This module
+//! shapes `SessionEvent`s and dispatches compaction to its own on-disk format.
+//! [`SessionRecorder`] only tracks turn deltas and calls `record` with a
+//! [`SessionRecord::Turn`] batch after each settled round.
 
 use std::{collections::HashSet, path::Path};
 
 use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind, Usage};
 
-use crate::session::store;
+use crate::session::store::{self, CompactionCounts};
+use crate::user_bash::UserBashResult;
 use lofi_error::Result;
 
 #[derive(Debug, Clone)]
@@ -47,6 +41,154 @@ pub struct TurnSummary {
     pub tool_elapsed: Vec<(String, u64)>,
     pub thinking_elapsed: Vec<u64>,
     pub native_tools: Vec<NativeToolRecord>,
+}
+
+/// One durable session write. Callers never build a [`SessionEvent`].
+pub enum SessionRecord<'a> {
+    System {
+        prompt: &'a str,
+    },
+    UserBash {
+        result: &'a UserBashResult,
+        exclude_from_context: bool,
+    },
+    JobFinished {
+        job_id: u64,
+    },
+    Compaction {
+        kept_messages: &'a [Message],
+        summary: &'a str,
+        summarized_range: &'a [String; 2],
+        counts: CompactionCounts,
+        system_prompt: &'a str,
+    },
+    /// Incremental turn suffix. Built only by [`SessionRecorder`].
+    Turn(TurnBatch<'a>),
+}
+
+/// New messages, timings, and job markers for one checkpoint.
+pub struct TurnBatch<'a> {
+    messages: &'a [Message],
+    native_tools: &'a [NativeToolRecord],
+    tool_elapsed: Vec<(&'a String, &'a u64)>,
+    thinking_elapsed: &'a [u64],
+    extra: Vec<SessionEventKind>,
+    terminal: Option<SessionEventKind>,
+}
+
+impl store::SessionCursor {
+    /// Persist one [`SessionRecord`]. This is the only production write path.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
+        match record {
+            SessionRecord::System { prompt } => self.append_system(prompt),
+            SessionRecord::UserBash {
+                result,
+                exclude_from_context,
+            } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::UserBash {
+                        command: result.command.clone(),
+                        output: result.output.clone(),
+                        exit_code: result.exit_code,
+                        signal: result.signal,
+                        duration_ms: result.duration_ms,
+                        truncated: result.truncated,
+                        cancelled: result.cancelled,
+                        exclude_from_context,
+                    },
+                }];
+                self.append_events(&mut events)
+            }
+            SessionRecord::JobFinished { job_id } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::JobFinished { job_id },
+                }];
+                self.append_events(&mut events)
+            }
+            SessionRecord::Compaction {
+                kept_messages,
+                summary,
+                summarized_range,
+                counts,
+                system_prompt,
+            } => {
+                let (start, end) =
+                    self.append_compaction(kept_messages, summary, summarized_range, counts)?;
+                if system_prompt.is_empty() {
+                    return Ok((start, end));
+                }
+                let (_, sys_end) = self.append_system(system_prompt)?;
+                Ok((start, sys_end))
+            }
+            SessionRecord::Turn(batch) => record_turn(self, batch),
+        }
+    }
+}
+
+fn record_turn(cursor: &store::SessionCursor, batch: TurnBatch<'_>) -> Result<(u64, u64)> {
+    let mut events = Vec::new();
+    events.extend(batch.messages.iter().cloned().map(|message| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::Message(message),
+    }));
+    events.extend(
+        batch
+            .native_tools
+            .iter()
+            .cloned()
+            .map(|record| SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::NativeTool(record),
+            }),
+    );
+    for (id, elapsed_ms) in &batch.tool_elapsed {
+        events.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::ToolTiming {
+                tool_call_id: (*id).clone(),
+                elapsed_ms: **elapsed_ms,
+            },
+        });
+    }
+    events.extend(
+        batch
+            .thinking_elapsed
+            .iter()
+            .copied()
+            .map(|elapsed_ms| SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::ThinkingTiming { elapsed_ms },
+            }),
+    );
+    for kind in batch.extra {
+        events.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        });
+    }
+    if let Some(kind) = batch.terminal {
+        events.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        });
+    }
+    if events.is_empty() {
+        return Ok((0, 0));
+    }
+    cursor.append_events(&mut events)
 }
 
 #[derive(Debug)]
@@ -167,74 +309,41 @@ impl SessionRecorder {
             .thinking_elapsed
             .get(self.thinking_timing_count..)
             .unwrap_or_default();
-        let mut events = Vec::new();
-        events.extend(new_messages.iter().cloned().map(|message| SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::Message(message),
-        }));
-        events.extend(new_native.iter().cloned().map(|record| SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::NativeTool(record),
-        }));
         let new_tool_timings: Vec<(&String, &u64)> = summary
             .tool_elapsed
             .iter()
             .filter(|(id, _)| !self.tool_timing_ids.contains(id))
             .map(|(id, elapsed_ms)| (id, elapsed_ms))
             .collect();
-        for (id, elapsed_ms) in &new_tool_timings {
-            events.push(SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::ToolTiming {
-                    tool_call_id: (*id).clone(),
-                    elapsed_ms: **elapsed_ms,
-                },
-            });
-        }
-        events.extend(new_thinking.iter().copied().map(|elapsed_ms| SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind: SessionEventKind::ThinkingTiming { elapsed_ms },
-        }));
-        {
+        let new_tool_ids: Vec<String> = new_tool_timings
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        let extra = {
             let mut pending = self
                 .pending_job_lifecycle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for kind in pending.drain(..) {
-                events.push(SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind,
-                });
-            }
-        }
-        if let Some(kind) = terminal {
-            events.push(SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind,
-            });
-        }
-        if events.is_empty() {
+            pending.drain(..).collect()
+        };
+        let (start, end) = self.cursor.record(SessionRecord::Turn(TurnBatch {
+            messages: new_messages,
+            native_tools: new_native,
+            tool_elapsed: new_tool_timings,
+            thinking_elapsed: new_thinking,
+            extra,
+            terminal,
+        }))?;
+        if end <= start {
             return Ok(None);
         }
-        let (start, end) = self.cursor.append_events(&mut events)?;
         self.message_count = messages.len();
         self.native_tool_count = summary.native_tools.len();
         self.thinking_timing_count = summary.thinking_elapsed.len();
-        self.tool_timing_ids
-            .extend(new_tool_timings.into_iter().map(|(id, _)| id.clone()));
-        if end > start {
-            self.byte_start.get_or_insert(start);
-            self.byte_end = Some(end);
-            Ok(Some((start, end)))
-        } else {
-            Ok(None)
-        }
+        self.tool_timing_ids.extend(new_tool_ids);
+        self.byte_start.get_or_insert(start);
+        self.byte_end = Some(end);
+        Ok(Some((start, end)))
     }
 
     #[must_use]
@@ -619,5 +728,68 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn record_writes_system_bash_job_and_compaction() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path, None);
+
+        cursor
+            .record(SessionRecord::System { prompt: "sys" })
+            .unwrap();
+        let bash = UserBashResult {
+            command: "pwd".into(),
+            output: "/".into(),
+            exit_code: Some(0),
+            signal: None,
+            duration_ms: 1,
+            truncated: false,
+            cancelled: false,
+        };
+        cursor
+            .record(SessionRecord::UserBash {
+                result: &bash,
+                exclude_from_context: false,
+            })
+            .unwrap();
+        cursor
+            .record(SessionRecord::JobFinished { job_id: 7 })
+            .unwrap();
+        cursor
+            .record(SessionRecord::Compaction {
+                kept_messages: &[user_msg("kept")],
+                summary: "sum",
+                summarized_range: &["a".into(), "b".into()],
+                counts: CompactionCounts {
+                    summarized: 1,
+                    represented: 1,
+                    kept: 1,
+                },
+                system_prompt: "sys2",
+            })
+            .unwrap();
+
+        let kinds: Vec<&'static str> = cursor
+            .load_tree_events()
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                SessionEventKind::Message(message) if message.role == Role::System => {
+                    Some("system")
+                }
+                SessionEventKind::UserBash { .. } => Some("bash"),
+                SessionEventKind::JobFinished { .. } => Some("job"),
+                SessionEventKind::Message(message) if message.role == Role::User => Some("kept"),
+                SessionEventKind::Compaction { .. } => Some("compaction"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["system", "bash", "job", "kept", "compaction", "system"]
+        );
     }
 }

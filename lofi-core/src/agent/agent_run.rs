@@ -202,12 +202,7 @@ impl Agent {
         let on_job_finished = session.map(|c| {
             let cursor = c.clone();
             std::sync::Arc::new(move |job_id: u64| {
-                let mut events = [lofi_types::SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: lofi_types::SessionEventKind::JobFinished { job_id },
-                }];
-                let _ = cursor.append_events(&mut events);
+                let _ = cursor.record(SessionRecord::JobFinished { job_id });
             }) as lofi_code::JobFinishedFn
         });
         // `lofi.recall` streams the on-disk transcript through a lightweight

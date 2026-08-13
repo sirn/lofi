@@ -434,7 +434,8 @@ async fn settled_messages_remain_on_disk_after_consumer_drops() {
     }
     drop(rx);
     if !run_done {
-        run.await.expect("run should finish after the consumer drops");
+        run.await
+            .expect("run should finish after the consumer drops");
     }
 
     let events = cursor.load_tree_events().unwrap();

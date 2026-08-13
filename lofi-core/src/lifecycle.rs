@@ -9,6 +9,7 @@ use crate::compact::{compact, compacted_history, CompactOptions, Compaction};
 use crate::recall::{
     recall, recall_cursor, CompactionTarget, RecallOutcome, RecallRequest, RecallScope,
 };
+use crate::session::recorder::SessionRecord;
 use crate::session::store::{CompactionCounts, EventIndex, IndexKind, SessionCursor};
 use crate::session::view::SessionView;
 use crate::{CodeCompactionHook, Error, Result};
@@ -232,20 +233,19 @@ impl AgentLifecycle {
             .lock()
             .map_err(|_| Error::State("agent history lock poisoned".to_string()))?;
         if let Some(cursor) = cursor {
-            cursor.append_compaction(
-                &compaction.kept_messages,
-                &compaction.summary,
-                &compaction.summarized_range.clone().unwrap_or_default(),
-                CompactionCounts {
+            // System is re-pinned in the same record so the next restore
+            // finds this latest System first.
+            cursor.record(SessionRecord::Compaction {
+                kept_messages: &compaction.kept_messages,
+                summary: &compaction.summary,
+                summarized_range: &compaction.summarized_range.clone().unwrap_or_default(),
+                counts: CompactionCounts {
                     summarized: compaction.summarized_count,
                     represented: compaction.represented_count,
                     kept: compaction.kept_count,
                 },
-            )?;
-            // Re-emit the System after the compaction marker so the next
-            // restore (leaf→root walk) finds this latest System first —
-            // the transcript remains self-describing about the boundary.
-            cursor.append_system(system_prompt)?;
+                system_prompt,
+            })?;
         }
         *history = new_history;
         drop(history);
