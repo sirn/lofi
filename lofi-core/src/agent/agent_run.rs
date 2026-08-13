@@ -124,14 +124,8 @@ impl Agent {
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
         let prev_len = messages.len();
-        if continuation {
-            // Force-continue after a hard-cap force-compact: resume the
-            // loop on the compacted history (which ends in a tool result)
-            // without appending a new user prompt, and signal the UI to
-            // append to the current turn rather than push a new one.
-            if !emit(Some(&tx), AgentEvent::TurnContinue).await {
-                return Ok(());
-            }
+        let turn_start = if continuation {
+            None
         } else {
             // Surface attachments on the turn header (TurnStart.prompt and,
             // via the recorder, the durable turn label) as a marker per image,
@@ -164,35 +158,28 @@ impl Agent {
                 blocks,
                 kind: prompt_kind,
             });
+            Some(prompt_for_event)
+        };
+        let mut stats = TurnStats::new();
+        let mut recorder =
+            session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        if let Some(prompt) = turn_start {
+            // Persist the user prompt before TurnStart so a closed consumer
+            // cannot drop a submitted turn. Later checkpoints skip this suffix.
+            commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {
-                    prompt: prompt_for_event,
+                    prompt,
                     kind: prompt_kind,
                 },
             )
             .await
             {
-                // The UI is already gone. Still persist the settled user
-                // prompt so a quit during TurnStart cannot drop it.
-                persist_settled_user_prompt(session, self.run_model(), &messages[prev_len..]);
                 return Ok(());
             }
-        }
-        let mut stats = TurnStats::new();
-        let mut recorder =
-            session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        // The user prompt is settled the moment it is appended. Persist it
-        // before the first provider call so a quit during that stream cannot
-        // drop it. Later checkpoints skip this already-written suffix.
-        if !continuation {
-            commit_settled(
-                recorder.as_mut(),
-                &messages[prev_len..],
-                &stats.summary(0),
-                &tx,
-            )
-            .await?;
+        } else if !emit(Some(&tx), AgentEvent::TurnContinue).await {
+            return Ok(());
         }
         // JobStarted goes through the recorder's pending queue so its parent
         // chains off the current turn's events (not the pre-turn leaf). That
@@ -299,36 +286,18 @@ impl Agent {
                 retry_attempt = 0;
             }
             match round {
-                Ok(true) => {
-                    finished_normally = true;
-                    // The last assistant message is settled. Persist it now
-                    // so a crash before TurnEnd cannot drop a finished turn.
-                    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                    commit_settled(
-                        recorder.as_mut(),
-                        &messages[prev_len..],
-                        &stats.summary(elapsed_ms),
-                        &tx,
-                    )
-                    .await?;
-                    break;
-                }
-                Ok(false) if tx.is_closed() => {
-                    detached = true;
-                    break;
-                }
-                Ok(false) => {
-                    // The assistant tool call and its results form a complete,
-                    // provider-valid round. Persist that suffix now instead of
-                    // retaining the entire long turn only in memory.
-                    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                    commit_settled(
-                        recorder.as_mut(),
-                        &messages[prev_len..],
-                        &stats.summary(elapsed_ms),
-                        &tx,
-                    )
-                    .await?;
+                Ok(finished) => {
+                    // Persist before inspecting the consumer so a completed
+                    // round is on disk even if the UI already went away.
+                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
+                    if finished {
+                        finished_normally = true;
+                        break;
+                    }
+                    if tx.is_closed() {
+                        detached = true;
+                        break;
+                    }
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
                     // tool cycle that compaction keeps verbatim). Stop before
@@ -1199,16 +1168,19 @@ impl Agent {
     }
 }
 
-async fn commit_settled(
+async fn commit_progress(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
-    summary: &crate::session::recorder::TurnSummary,
+    stats: &TurnStats,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
 ) -> Result<()> {
     let Some(recorder) = recorder else {
         return Ok(());
     };
-    if let Some((byte_start, byte_end)) = recorder.checkpoint(messages, summary)? {
+    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+    if let Some((byte_start, byte_end)) =
+        recorder.checkpoint(messages, &stats.summary(elapsed_ms))?
+    {
         if !tx.is_closed() {
             let _ = tx
                 .send(AgentEvent::RoundCommitted {
@@ -1219,26 +1191,6 @@ async fn commit_settled(
         }
     }
     Ok(())
-}
-
-fn persist_settled_user_prompt(
-    session: Option<&crate::session::store::SessionCursor>,
-    model: lofi_types::RunModel,
-    messages: &[Message],
-) {
-    let Some(cursor) = session else {
-        return;
-    };
-    let mut recorder = SessionRecorder::new(cursor.clone(), model);
-    let summary = crate::session::recorder::TurnSummary {
-        elapsed_ms: 0,
-        cost: 0.0,
-        usage: Usage::default(),
-        tool_elapsed: Vec::new(),
-        thinking_elapsed: Vec::new(),
-        native_tools: Vec::new(),
-    };
-    let _ = recorder.flush(messages, &TurnOutcome::Detached, &summary);
 }
 
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block

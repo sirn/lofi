@@ -1328,37 +1328,8 @@ async fn run_loop(
                             r.handle.abort();
                             app.run_finished();
                             app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
-                            if !app.should_quit && was_user_bash {
-                                if let Some(queued) = app.prompt_queue.first().cloned() {
-                                    app.prompt_queue.remove(0);
-                                    spawn_prompt(
-                                        &mut app,
-                                        agent.as_ref(),
-                                        &mut current_run,
-                                        queued.text,
-                                        queued.kind,
-                                    );
-                                }
-                            } else if !app.should_quit && app.context_pressure {
-                                // Core owns hard-cap eligibility and
-                                // compaction; the UI only presents its outcome.
-                                app.context_pressure = false;
-                                match app.hard_compact() {
-                                    HardCompactOutcome::Compacted(_) => {
-                                        spawn_continue(&mut app, agent.as_ref(), &mut current_run);
-                                    }
-                                    HardCompactOutcome::Cooldown => app.notify(
-                                        NotifyKind::Warn,
-                                        "context exceeded the hard cap too soon after a compaction; cannot continue",
-                                    ),
-                                    HardCompactOutcome::NotEnoughHistory => app.notify(
-                                        NotifyKind::Warn,
-                                        "could not compact at the hard cap; cannot continue",
-                                    ),
-                                }
-                            } else if !app.should_quit {
-                                app.maybe_auto_compact();
-                                if app.run.is_none() {
+                            if !app.should_quit {
+                                if was_user_bash {
                                     if let Some(queued) = app.prompt_queue.first().cloned() {
                                         app.prompt_queue.remove(0);
                                         spawn_prompt(
@@ -1368,6 +1339,41 @@ async fn run_loop(
                                             queued.text,
                                             queued.kind,
                                         );
+                                    }
+                                } else if app.context_pressure {
+                                    // Core owns hard-cap eligibility and
+                                    // compaction; the UI only presents its outcome.
+                                    app.context_pressure = false;
+                                    match app.hard_compact() {
+                                        HardCompactOutcome::Compacted(_) => {
+                                            spawn_continue(
+                                                &mut app,
+                                                agent.as_ref(),
+                                                &mut current_run,
+                                            );
+                                        }
+                                        HardCompactOutcome::Cooldown => app.notify(
+                                            NotifyKind::Warn,
+                                            "context exceeded the hard cap too soon after a compaction; cannot continue",
+                                        ),
+                                        HardCompactOutcome::NotEnoughHistory => app.notify(
+                                            NotifyKind::Warn,
+                                            "could not compact at the hard cap; cannot continue",
+                                        ),
+                                    }
+                                } else {
+                                    app.maybe_auto_compact();
+                                    if app.run.is_none() {
+                                        if let Some(queued) = app.prompt_queue.first().cloned() {
+                                            app.prompt_queue.remove(0);
+                                            spawn_prompt(
+                                                &mut app,
+                                                agent.as_ref(),
+                                                &mut current_run,
+                                                queued.text,
+                                                queued.kind,
+                                            );
+                                        }
                                     }
                                 }
                             }
