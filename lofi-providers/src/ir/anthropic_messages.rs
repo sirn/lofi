@@ -32,7 +32,12 @@ pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<
                 }
             }
             Role::User | Role::Assistant => {
-                let blocks: Vec<Value> = m.blocks.iter().map(block_to_anthropic).collect();
+                let blocks: Vec<Value> = m
+                    .blocks
+                    .iter()
+                    .map(block_to_anthropic)
+                    .filter(|block| !block.is_null())
+                    .collect();
                 if !blocks.is_empty() {
                     out.push(json!({"role": m.role.as_str(), "content": blocks}));
                 }
@@ -123,6 +128,7 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             }
             obj
         }
+        ContentBlock::PartSignature { .. } => Value::Null,
         ContentBlock::Image { bytes, media_type } => json!({
             "type": "image",
             "source": {

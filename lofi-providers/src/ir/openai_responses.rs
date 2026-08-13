@@ -19,6 +19,41 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
+fn append_tool_results(out: &mut Vec<Value>, blocks: &[ContentBlock]) {
+    for b in blocks {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            images,
+            ..
+        } = b
+        {
+            out.push(json!({
+                "type": "function_call_output",
+                "call_id": tool_use_id,
+                "output": content,
+            }));
+            if !images.is_empty() {
+                let content: Vec<Value> = images
+                    .iter()
+                    .map(|img| {
+                        json!({
+                            "type": "input_image",
+                            "detail": "auto",
+                            "image_url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
+                        })
+                    })
+                    .collect();
+                out.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": content,
+                }));
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -91,45 +126,10 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
             Role::Tool => {
-                for b in &m.blocks {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        images,
-                        ..
-                    } = b
-                    {
-                        // Keep `output` a plain string and carry any images on a
-                        // following user `message`. Some OpenAI-compatible
-                        // Responses gateways accept a request where
-                        // `function_call_output.output` is an array of content
-                        // items but silently drop the image items; a user-role
-                        // `message` with `input_image` content is the
-                        // universally supported position for an image.
-                        out.push(json!({
-                            "type": "function_call_output",
-                            "call_id": tool_use_id,
-                            "output": content,
-                        }));
-                        if !images.is_empty() {
-                            let content: Vec<Value> = images
-                                .iter()
-                                .map(|img| {
-                                    json!({
-                                        "type": "input_image",
-                                        "detail": "auto",
-                                        "image_url": format!("data:{};base64,{}", img.media_type, super::b64(&img.bytes)),
-                                    })
-                                })
-                                .collect();
-                            out.push(json!({
-                                "type": "message",
-                                "role": "user",
-                                "content": content,
-                            }));
-                        }
-                    }
-                }
+                // Keep tool output as text. Put images in a following user
+                // message because compatible gateways can drop images from
+                // function-call output arrays.
+                append_tool_results(&mut out, &m.blocks);
             }
         }
     }
