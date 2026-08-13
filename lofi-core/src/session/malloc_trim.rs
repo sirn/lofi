@@ -1,23 +1,22 @@
 //! Best-effort release of freed heap pages back to the OS.
 //!
-//! Background work in lofi (tree snapshot loading, transcript indexing,
-//! compaction) runs on dedicated IO threads. Glibc malloc assigns each thread
-//! its own arena, and a free from a different thread routes back to the
-//! allocating thread's arena where it sits on the free list indefinitely —
-//! /tree opens on a 300 MB session cost ~30 MB of RSS that never comes back
-//! even after the picker closes and the data is dropped.
+//! The IO worker thread accumulates freed pages in its glibc arena as tree
+//! snapshots and hydration HashMaps come and go. Glibc's default trim
+//! threshold only fires when the arena top is mostly free; the worker's
+//! steady-state working set sits below that, so RSS ratchets up by the
+//! peak /tree working set the first time the picker opens.
 //!
-//! `malloc_trim(0)` asks glibc to release all free pages at the top of every
-//! arena's heap. We call it after closing a heavy picker modal so the freed
-//! arena slack returns to the kernel instead of accumulating. No-op on
-//! non-glibc platforms.
+//! `release_freed_memory` calls `malloc_trim(0)` to force-release all free
+//! pages at the top of every arena. We invoke it from the IO worker after a
+//! tree snapshot is dropped, so the pages freed on this thread return to the
+//! kernel promptly.
 
 /// Release freed heap pages back to the OS when supported.
 ///
 /// On glibc this calls `malloc_trim(0)`. Other allocators and platforms
 /// either don't expose an equivalent or handle decay internally; in both
 /// cases this is a no-op.
-pub(crate) fn release_freed_memory() {
+pub fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[allow(unsafe_code)]
     unsafe {

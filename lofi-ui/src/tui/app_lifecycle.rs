@@ -68,7 +68,7 @@ impl App {
             },
             picker: None,
             tree_picker: None,
-            tree_picker_index: None,
+            tree_picker_snapshot: None,
             tree_picker_pending: std::collections::HashSet::new(),
             picker_load_tx: None,
             picker_generation: Arc::new(AtomicU64::new(0)),
