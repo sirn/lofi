@@ -4,13 +4,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lofi_types::{
-    CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, PromptKind, Role,
+    clip, CompactBlock, CompactionHook, ContentBlock, Message, NativeToolRecord, PromptKind, Role,
     SessionEvent, SessionEventKind,
 };
 
 use crate::session::store;
 
 pub const HANDOFF_PREAMBLE: &str = "This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.";
+
+/// Stubs in the kept tail carry only the event id, so this line is the
+/// single place that tells the model how to recover them.
+const RESULT_RECALL_INSTRUCTION: &str = "Cleared tool results and exec source show only an event id. Recover the original with lofi.result(eventId).";
 
 #[derive(Debug, Clone)]
 struct LiveMessage {
@@ -553,7 +557,7 @@ fn build_summary(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> 
         return String::new();
     }
     let body = parts.join(SEPARATOR);
-    format!("{HANDOFF_PREAMBLE}\n\n{body}")
+    format_handoff(&body)
 }
 
 fn section(title: &str, items: &[String]) -> String {
@@ -688,26 +692,21 @@ fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
     let mut modified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut read: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for b in blocks {
-        let CompactBlock::ToolCall { native, .. } = b else {
+    for rec in blocks.iter().flat_map(CompactBlock::native_records) {
+        if rec.is_error {
             continue;
-        };
-        for rec in native {
-            if rec.is_error {
-                continue;
+        }
+        match rec.name.as_str() {
+            "edit" if !rec.args.is_empty() => {
+                modified.insert(rec.args.clone());
             }
-            match rec.name.as_str() {
-                "edit" if !rec.args.is_empty() => {
-                    modified.insert(rec.args.clone());
-                }
-                "write" if !rec.args.is_empty() => {
-                    created.insert(rec.args.clone());
-                }
-                "read" | "bash_read" if !rec.args.is_empty() => {
-                    read.insert(rec.args.clone());
-                }
-                _ => {}
+            "write" if !rec.args.is_empty() => {
+                created.insert(rec.args.clone());
             }
+            "read" | "bash_read" if !rec.args.is_empty() => {
+                read.insert(rec.args.clone());
+            }
+            _ => {}
         }
     }
     for p in &modified {
@@ -739,27 +738,21 @@ fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
 fn extract_commits(blocks: &[CompactBlock]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for b in blocks {
-        let CompactBlock::ToolCall { native, .. } = b else {
+    for rec in blocks.iter().flat_map(CompactBlock::native_records) {
+        if rec.name != "bash" || !rec.args.contains("git commit") {
             continue;
+        }
+        let msg = extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
+        let hash = first_hash(&rec.result);
+        let line = match hash {
+            Some(h) => format!("{h} {msg}"),
+            None => msg,
         };
-        for rec in native {
-            if rec.name != "bash" || !rec.args.contains("git commit") {
-                continue;
-            }
-            let msg =
-                extract_commit_message(&rec.args).unwrap_or_else(|| "(git commit)".to_string());
-            let hash = first_hash(&rec.result);
-            let line = match hash {
-                Some(h) => format!("{h} {msg}"),
-                None => msg,
-            };
-            if seen.insert(line.clone()) {
-                out.push(line);
-            }
-            if out.len() >= 8 {
-                break;
-            }
+        if seen.insert(line.clone()) {
+            out.push(line);
+        }
+        if out.len() >= 8 {
+            break;
         }
     }
     out
@@ -1040,6 +1033,8 @@ const SECTION_HEADERS: &[&str] = &[
     "User Preferences",
     "Files And Changes",
     "Commits",
+    "APIs Used",
+    "Skills",
     "Outstanding Context",
 ];
 
@@ -1099,14 +1094,21 @@ fn merge_previous(prev: &str, fresh: &str) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    format!("{HANDOFF_PREAMBLE}\n\n{}", parts.join(SEPARATOR))
+    format_handoff(&parts.join(SEPARATOR))
+}
+
+fn format_handoff(body: &str) -> String {
+    format!("{HANDOFF_PREAMBLE}\n\n{RESULT_RECALL_INSTRUCTION}\n\n{body}")
 }
 
 fn strip_preamble(text: &str) -> String {
-    text.strip_prefix(HANDOFF_PREAMBLE).map_or_else(
-        || text.to_string(),
-        |rest| rest.trim_start_matches('\n').to_string(),
-    )
+    let rest = text
+        .strip_prefix(HANDOFF_PREAMBLE)
+        .map_or(text, |rest| rest.trim_start_matches('\n'));
+    rest.strip_prefix(RESULT_RECALL_INSTRUCTION)
+        .unwrap_or(rest)
+        .trim_start_matches('\n')
+        .to_string()
 }
 
 fn split_headers_brief(body: &str) -> (String, String) {
@@ -1279,36 +1281,6 @@ fn user_text(m: &Message) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn clip(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    let mut end_byte = 0;
-    for (i, (b, _)) in text.char_indices().enumerate() {
-        if i == max {
-            end_byte = b;
-            break;
-        }
-    }
-    let window = &text[..end_byte];
-    let mut cut = window
-        .rfind(' ')
-        .filter(|&i| i > end_byte * 3 / 5)
-        .unwrap_or(end_byte);
-    if cut > 0 && text.is_char_boundary(cut) {
-        let prev = &text[..cut];
-        if let Some(last) = prev.chars().next_back() {
-            if ((last as u32) & 0xFFFF) >= 0xD800 && (last as u32) <= 0xDBFF {
-                if let Some((p, _)) = prev.char_indices().next_back() {
-                    cut = p;
-                }
-            }
-        }
-    }
-    text[..cut].trim_end().to_string()
 }
 
 fn first_line(text: &str, max: usize) -> String {
@@ -1520,12 +1492,6 @@ mod tests {
     }
 
     #[test]
-    fn clip_word_boundary() {
-        assert_eq!(clip("hello world foo bar", 11), "hello world");
-        assert_eq!(clip("short", 10), "short");
-    }
-
-    #[test]
     fn compact_returns_none_for_too_few() {
         let events = events_of(&[user("hi"), assistant("hello")]);
         assert!(compact(&events, &CompactOptions::default()).is_none());
@@ -1597,6 +1563,7 @@ mod tests {
         let c = compact(&events, &CompactOptions::default()).expect("some compaction");
         assert!(c.summarized_count >= 1);
         assert!(c.summary.starts_with(HANDOFF_PREAMBLE));
+        assert!(c.summary.contains(RESULT_RECALL_INSTRUCTION));
         assert!(c.summary.contains("[Session Goal]"));
         assert!(c.summary.contains("login form"));
         assert_eq!(
@@ -1678,6 +1645,27 @@ mod tests {
         let merged = merge_previous(&prev, &fresh);
         assert!(merged.contains("goal one"));
         assert!(merged.contains("goal two"));
+        assert_eq!(merged.matches(RESULT_RECALL_INSTRUCTION).count(), 1);
+    }
+
+    #[test]
+    fn merge_previous_keeps_apis_and_skills_before_outstanding() {
+        let prev = format!(
+            "{HANDOFF_PREAMBLE}\n\n[APIs Used]\n- exec\n\n[Skills]\n- code-commit — Write a commit message\n\n[Outstanding Context]\n- old blocker"
+        );
+        let fresh = format!(
+            "{HANDOFF_PREAMBLE}\n\n[APIs Used]\n- exec\n- lofi.read\n\n[Skills]\n- code-iterate — Iterate until clean\n\n[Outstanding Context]\n- new blocker"
+        );
+        let merged = merge_previous(&prev, &fresh);
+        let apis = merged.find("[APIs Used]").unwrap();
+        let skills = merged.find("[Skills]").unwrap();
+        let outstanding = merged.find("[Outstanding Context]").unwrap();
+        assert!(apis < skills && skills < outstanding);
+        assert!(merged.contains("lofi.read"));
+        assert!(merged.contains("code-commit"));
+        assert!(merged.contains("code-iterate"));
+        assert!(merged.contains("new blocker"));
+        assert!(!merged.contains("old blocker"));
     }
 
     #[test]
