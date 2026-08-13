@@ -579,7 +579,7 @@ fn interrupt_run(
     }
 }
 
-fn request_quit(app: &mut App, current_run: &mut Option<RunHandle>) {
+pub(super) fn request_quit(app: &mut App, current_run: &mut Option<RunHandle>) {
     app.should_quit = true;
     if let Some(r) = current_run.as_mut() {
         // Signal cancel now. The event loop waits for flush and does not abort.
