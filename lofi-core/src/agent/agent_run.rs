@@ -1172,7 +1172,7 @@ async fn commit_progress(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
     stats: &TurnStats,
-    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    tx: &Sender<AgentEvent>,
 ) -> Result<()> {
     let Some(recorder) = recorder else {
         return Ok(());
