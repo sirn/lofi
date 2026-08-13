@@ -359,7 +359,7 @@ When both thresholds are present, the lower threshold wins. Soft compaction is c
 | `keep_thinking` | integer | `2` | Recent thinking blocks kept verbatim. |
 | `keep_calls` | integer | `6` | Recent tool-call code blocks kept verbatim. |
 
-Older tool results and tool-call code become `lofi.result`-recoverable stubs; older thinking is dropped, while assistant prose is retained.
+Older tool results and tool-call code become event-id stubs; the compaction handoff tells the model to recover them with `lofi.result(eventId)`. Older thinking is dropped, while assistant prose is retained.
 
 ## Bash environment
 
