@@ -23,6 +23,7 @@ fn model_for(api: Api, base_url: &str) -> Model {
         Api::OpenAiCompletions => "/v1/chat/completions",
         Api::OpenAiResponses => "/v1/responses",
         Api::AnthropicMessages => "/v1/messages",
+        Api::GoogleGenerativeAi => "/v1beta",
     };
     Model {
         id: "test-model".to_string(),

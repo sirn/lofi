@@ -6,7 +6,7 @@ The configuration directory is read-only from lofi's perspective, so it can be m
 
 Set `$LOFI_CONFIG` to use a different main configuration file, or `$LOFI_POLICY` to use a different shell-policy file.
 
-When `config.toml` is absent, lofi falls back to its built-in OpenAI Responses and Anthropic Messages definitions. They become available when `$OPENAI_API_KEY` or `$ANTHROPIC_API_KEY` is set. An explicit config file replaces that built-in provider tree.
+When `config.toml` is absent, lofi falls back to built-in OpenAI Responses, Anthropic Messages, and Google Generative AI definitions. They become available when `$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, or `$GEMINI_API_KEY` is set. An explicit config file replaces that built-in provider tree.
 
 ## Minimal configuration
 
@@ -118,6 +118,7 @@ Supported protocols are:
 | `openai-completions` | `https://api.openai.com` | `/v1/chat/completions` |
 | `openai-responses` | `https://api.openai.com` | `/v1/responses` |
 | `anthropic-messages` | `https://api.anthropic.com` | `/v1/messages` |
+| `google-generative-ai` | `https://generativelanguage.googleapis.com` | `/v1beta` |
 
 ### Endpoint routing with `api_types`
 
@@ -148,6 +149,9 @@ path = "/v1/responses"
 
 [providers.proxy.api_types."anthropic-messages"]
 path = "/v1/messages"
+
+[providers.proxy.api_types."google-generative-ai"]
+path = "/v1beta"
 
 [providers.proxy.models]
 chat = { api_type = "openai-completions" }
@@ -230,6 +234,22 @@ api_key = "$ANTHROPIC_API_KEY"
 Lofi automatically adds ephemeral prompt-cache breakpoints to Anthropic
 requests at the tool definitions, system prompt, and latest user message. No
 cache header or per-message configuration is required.
+
+### Google Generative AI example
+
+```toml
+[providers.google]
+api_type = "google-generative-ai"
+api_key = "$GEMINI_API_KEY"
+
+[providers.google.models."gemini-3.7-flash"]
+reasoning = true
+supports_image = true
+thinking_levels = ["low", "medium", "high"]
+```
+
+The native transport preserves Gemini thought signatures on model parts and
+replays them only with the same provider and model.
 
 ### Unauthenticated local provider example
 

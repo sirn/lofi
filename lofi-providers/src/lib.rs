@@ -1,4 +1,5 @@
 mod anthropic_messages;
+mod google_generative_ai;
 mod ir;
 mod message_assembler;
 mod openai_completions;
@@ -18,6 +19,7 @@ use lofi_error::{Error, Result};
 
 use anthropic_messages::AnthropicMessagesProvider;
 pub use anthropic_messages::ANTHROPIC_VERSION;
+use google_generative_ai::GoogleGenerativeAiProvider;
 pub use message_assembler::{assemble_message, MessageAssembler};
 use openai_completions::OpenAiCompletionsProvider;
 use openai_responses::OpenAiResponsesProvider;
@@ -74,6 +76,12 @@ pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
             client,
         }),
         Api::AnthropicMessages => Box::new(AnthropicMessagesProvider {
+            base_url,
+            api_key,
+            headers,
+            client,
+        }),
+        Api::GoogleGenerativeAi => Box::new(GoogleGenerativeAiProvider {
             base_url,
             api_key,
             headers,
@@ -244,6 +252,10 @@ fn authed_get(
                 .header("x-api-key", k)
                 .header("anthropic-version", ANTHROPIC_VERSION),
             None => req.header("anthropic-version", ANTHROPIC_VERSION),
+        },
+        Api::GoogleGenerativeAi => match key {
+            Some(k) => req.header("x-goog-api-key", k),
+            None => req,
         },
     }
 }
