@@ -450,6 +450,23 @@ fn content_heap_bytes(block: &ContentBlock) -> usize {
             content,
             ..
         } => tool_use_id.capacity() + content.capacity(),
+        ContentBlock::PartSignature {
+            provider,
+            model,
+            format,
+            signature,
+        } => {
+            provider.capacity()
+                + model.capacity()
+                + match format {
+                    lofi_types::PartSignatureFormat::OpenAiExtraContent { namespace } => {
+                        namespace.capacity()
+                    }
+                    lofi_types::PartSignatureFormat::Google
+                    | lofi_types::PartSignatureFormat::OpenAiReasoningDetail => 0,
+                }
+                + signature.capacity()
+        }
         ContentBlock::Image { bytes, media_type } => bytes.capacity() + media_type.capacity(),
     }
 }

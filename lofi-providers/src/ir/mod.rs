@@ -5,14 +5,16 @@ use serde_json::Value;
 use crate::ToolSchema;
 
 pub(crate) mod anthropic_messages;
+pub(crate) mod google_generative_ai;
 pub(crate) mod openai_completions;
 pub(crate) mod openai_responses;
 
 pub(crate) use anthropic_messages::AnthropicMessagesIr;
+pub(crate) use google_generative_ai::GoogleGenerativeAiIr;
 pub(crate) use openai_completions::OpenAiCompletionsIr;
 pub(crate) use openai_responses::OpenAiResponsesIr;
 
-/// Base64-encodes an image payload for the wire. All three protocols take
+/// Base64-encodes an image payload for the wire. All protocols take
 /// image bytes base64-encoded; the in-memory block stores raw bytes, so the
 /// encoding happens here at the IR boundary rather than on the block itself.
 pub(crate) fn b64(bytes: &[u8]) -> String {
@@ -26,6 +28,10 @@ pub(crate) trait ProtocolIr: Send + 'static {
     type State: Default + Send + 'static;
 
     fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value;
+
+    fn new_state(_model: &Model) -> Self::State {
+        Self::State::default()
+    }
 
     fn map_event(
         event: Option<&str>,
