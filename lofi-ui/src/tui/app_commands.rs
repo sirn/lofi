@@ -1126,7 +1126,7 @@ impl App {
         self.release_tree_snapshot();
         self.tree_picker_pending.clear();
         // See Escape path for why we trim after dropping picker state.
-        lofi_core::session::malloc_trim::release_freed_memory();
+        lofi_core::malloc_trim::release_freed_memory();
         let Some(entry) = picker.entries.get(picker.selected).cloned() else {
             return;
         };
@@ -1491,7 +1491,7 @@ impl App {
                     // thread before being sent here; dropping it on this
                     // thread leaves the freed pages stranded in this arena.
                     // Trim after drop so RSS returns to the pre-/tree level.
-                    lofi_core::session::malloc_trim::release_freed_memory();
+                    lofi_core::malloc_trim::release_freed_memory();
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,

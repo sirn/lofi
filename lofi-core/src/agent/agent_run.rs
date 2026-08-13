@@ -123,6 +123,9 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
+        // Rejected: trim from the TUI when the channel closes. The burst
+        // is allocated and dropped on this task's return paths.
+        let _trim = crate::malloc_trim::ReleaseFreedMemoryOnDrop;
         let prev_len = messages.len();
         let turn_start = if continuation {
             None
