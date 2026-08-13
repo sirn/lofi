@@ -838,23 +838,51 @@ impl App {
         if let Some(picker) = self.theme_picker.take() {
             if let Some(&mode) = picker.modes.get(picker.selected) {
                 self.theme_mode = mode;
-                // 'Auto' re-runs the OSC 11 probe so a system light<->dark
-                // flip is picked up; 'Light'/'Dark' short-circuit without
-                // terminal I/O.
-                self.apply_resolved_theme(Theme::resolve(mode));
+                self.sync_color_scheme_reports();
+                match mode {
+                    lofi_types::ThemeMode::Auto => {
+                        crate::tui::tty_events::request_color_scheme();
+                    }
+                    lofi_types::ThemeMode::Light => {
+                        self.apply_resolved_theme(Theme::light());
+                    }
+                    lofi_types::ThemeMode::Dark => {
+                        self.apply_resolved_theme(Theme::dark());
+                    }
+                }
             }
         }
     }
 
+    /// OSC 11 is the fallback when the terminal has not spoken 997.
+    pub(super) fn uses_osc11_refresh(&self) -> bool {
+        self.theme_mode == lofi_types::ThemeMode::Auto && !self.color_scheme_known
+    }
+
     /// A missed OSC 11 reply must not flip an already-correct palette to dark.
     pub(super) fn refresh_auto_theme(&mut self) -> bool {
-        if self.theme_mode != lofi_types::ThemeMode::Auto {
+        if !self.uses_osc11_refresh() {
             return false;
         }
         let Some(next) = Theme::probe_auto(std::time::Duration::from_millis(80)) else {
             return false;
         };
         self.apply_resolved_theme(next)
+    }
+
+    pub(super) fn apply_color_scheme(
+        &mut self,
+        scheme: crate::tui::tty_events::ColorScheme,
+    ) -> bool {
+        if self.theme_mode != lofi_types::ThemeMode::Auto {
+            return false;
+        }
+        self.color_scheme_known = true;
+        self.apply_resolved_theme(Theme::from_scheme(scheme))
+    }
+
+    pub(super) fn sync_color_scheme_reports(&self) {
+        crate::tui::tty_events::set_reports_enabled(self.theme_mode == lofi_types::ThemeMode::Auto);
     }
 
     pub(super) fn apply_resolved_theme(&mut self, next: Theme) -> bool {
