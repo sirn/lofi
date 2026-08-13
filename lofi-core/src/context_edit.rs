@@ -13,7 +13,9 @@ fn category(b: &ContentBlock) -> Cat {
         ContentBlock::ToolResult { .. } => Cat::ToolResult,
         ContentBlock::Thinking { .. } => Cat::Thinking,
         ContentBlock::ToolUse { .. } => Cat::ToolUse,
-        ContentBlock::Text { .. } | ContentBlock::Image { .. } => Cat::Other,
+        ContentBlock::Text { .. }
+        | ContentBlock::PartSignature { .. }
+        | ContentBlock::Image { .. } => Cat::Other,
     }
 }
 
@@ -95,6 +97,11 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
         .map(|(mi, (event_id, msg))| {
             let mut blocks = Vec::with_capacity(msg.blocks.len());
             for (bi, block) in msg.blocks.iter().enumerate() {
+                if matches!(block, ContentBlock::PartSignature { .. })
+                    && (bi == 0 || !kept_flag[mi][bi - 1])
+                {
+                    continue;
+                }
                 if kept_flag[mi][bi] {
                     blocks.push(block.clone());
                     continue;
@@ -118,9 +125,9 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                             input: trim_tool_use_input(input, event_id),
                         });
                     }
-                    other @ (ContentBlock::Text { .. } | ContentBlock::Image { .. }) => {
-                        blocks.push(other.clone());
-                    }
+                    other @ (ContentBlock::Text { .. }
+                    | ContentBlock::PartSignature { .. }
+                    | ContentBlock::Image { .. }) => blocks.push(other.clone()),
                 }
             }
             Message {

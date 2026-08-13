@@ -53,6 +53,14 @@ pub(crate) struct IrSseMapper<I: ProtocolIr> {
     state: I::State,
 }
 
+impl<I: ProtocolIr> IrSseMapper<I> {
+    pub(crate) fn new(model: &lofi_types::Model) -> Self {
+        Self {
+            state: I::new_state(model),
+        }
+    }
+}
+
 impl<I: ProtocolIr> Default for IrSseMapper<I> {
     fn default() -> Self {
         Self {

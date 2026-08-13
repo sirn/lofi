@@ -773,6 +773,11 @@ impl Agent {
                                 | StreamingEvent::ThinkingDelta(s)
                                 | StreamingEvent::ThinkingSignature(s)
                                 | StreamingEvent::Error(s) => s.len(),
+                                StreamingEvent::PartSignature {
+                                    provider,
+                                    model,
+                                    signature,
+                                } => provider.len() + model.len() + signature.len(),
                                 StreamingEvent::ToolUseStart { id, name } => id.len() + name.len(),
                                 StreamingEvent::ToolUseInputDelta { id, delta } => {
                                     id.len() + delta.len()
