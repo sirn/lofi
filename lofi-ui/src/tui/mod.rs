@@ -18,6 +18,7 @@ mod app_input;
 mod app_lifecycle;
 mod app_nav;
 mod app_render;
+mod color_scheme;
 mod debug_stats;
 mod input;
 mod replay;
@@ -870,6 +871,12 @@ pub(crate) struct App {
     no_models_hint: Option<String>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
+    /// Set when the 997 interceptor owns stdin. Without it, DECSET 2031
+    /// would stall EventStream, so /theme Auto must not enable reports.
+    color_scheme_watch: bool,
+    /// Terminal answered CSI 996 or pushed CSI 997. Focus/resize can
+    /// skip OSC 11; 2031 carries later scheme changes.
+    color_scheme_known: bool,
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
@@ -1073,6 +1080,7 @@ impl Drop for TerminalGuard {
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        color_scheme::set_reports_enabled(false);
         let _ = disable_raw_mode();
     }
 }
@@ -1108,12 +1116,13 @@ pub(crate) async fn run(
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        color_scheme::set_reports_enabled(false);
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
-    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
-    // (see terminal_bg module doc for why).
-    let theme = Theme::resolve(ui_theme);
+    // `Theme::resolve(Auto)` probes CSI 996, then OSC 11. Raw mode
+    // is required (see terminal_bg module doc for why).
+    let (theme, color_scheme_known) = Theme::resolve(ui_theme);
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1151,6 +1160,7 @@ pub(crate) async fn run(
                 agent,
                 theme,
                 ui_theme,
+                color_scheme_known,
                 model_label,
                 thinking,
                 session,
@@ -1170,7 +1180,7 @@ pub(crate) async fn run(
 
 /// `EventStream`'s wake thread owns stdin; drop it before OSC 11.
 fn pause_events_and_refresh_theme(events: EventStream, app: &mut App) -> (EventStream, bool) {
-    if app.theme_mode != lofi_types::ThemeMode::Auto {
+    if !app.uses_osc11_refresh() {
         return (events, false);
     }
     drop(events);
@@ -1184,6 +1194,7 @@ async fn run_loop(
     mut agent: Option<Agent>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
+    color_scheme_known: bool,
     model_label: String,
     thinking: ThinkingLevel,
     session: SessionConfig,
@@ -1216,6 +1227,10 @@ async fn run_loop(
     );
     app.theme = theme;
     app.theme_mode = theme_mode;
+    app.color_scheme_known = color_scheme_known;
+    let mut color_watch = color_scheme::ColorSchemeWatch::install();
+    app.color_scheme_watch = color_watch.is_active();
+    app.sync_color_scheme_reports();
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
@@ -1399,6 +1414,13 @@ async fn run_loop(
                     }
                 }
                 dirty = true;
+            }
+            scheme = color_watch.recv() => {
+                if let Some(scheme) = scheme {
+                    if app.apply_color_scheme(scheme) {
+                        dirty = true;
+                    }
+                }
             }
             maybe_ev = events.next() => {
                 let defer_redraw;

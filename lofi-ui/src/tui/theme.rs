@@ -125,6 +125,13 @@ impl Theme {
         }
     }
 
+    pub(crate) fn from_scheme(scheme: crate::tui::color_scheme::ColorScheme) -> Self {
+        match scheme {
+            crate::tui::color_scheme::ColorScheme::Light => Self::light(),
+            crate::tui::color_scheme::ColorScheme::Dark => Self::dark(),
+        }
+    }
+
     /// `None` is a missed reply, not dark. Live callers must not fall back.
     pub(crate) fn probe_auto(timeout: std::time::Duration) -> Option<Self> {
         crate::tui::terminal_bg::query_background(timeout).map(Self::from_background)
@@ -134,12 +141,29 @@ impl Theme {
     /// text on an unknown background is more likely to read than
     /// washed-out light. Live refresh must use `probe_auto` so a
     /// missed reply does not flip an already-correct palette.
-    pub(crate) fn resolve(mode: ThemeMode) -> Self {
+    ///
+    /// The bool is true when CSI 996 answered. Focus/resize can then
+    /// skip OSC 11: 2031 will push later changes.
+    pub(crate) fn resolve(mode: ThemeMode) -> (Self, bool) {
         match mode {
-            ThemeMode::Light => Self::light(),
-            ThemeMode::Dark => Self::dark(),
+            ThemeMode::Light => (Self::light(), false),
+            ThemeMode::Dark => (Self::dark(), false),
+            // 996 only here: this runs before the 997 interceptor. A later
+            // query would never see the reply (the watch already took it).
             ThemeMode::Auto => {
-                Self::probe_auto(std::time::Duration::from_millis(150)).unwrap_or_else(Self::dark)
+                if let Some(theme) = crate::tui::color_scheme::query_color_scheme(
+                    std::time::Duration::from_millis(150),
+                )
+                .map(Self::from_scheme)
+                {
+                    (theme, true)
+                } else {
+                    (
+                        Self::probe_auto(std::time::Duration::from_millis(150))
+                            .unwrap_or_else(Self::dark),
+                        false,
+                    )
+                }
             }
         }
     }
