@@ -1,0 +1,27 @@
+session: pin tree snapshots to the IO worker thread
+
+Opening /tree on a long session allocated a multi-MB Vec<EventIndex>
+plus parent/child HashMaps on the shared IO worker, then sent the
+index to the main thread inside an Arc. When the picker closed the
+main thread dropped the Arc, and glibc routed the freed pages back
+to the IO worker's arena — where they sat at the arena's high-water
+mark indefinitely. Each /tree cycle ratcheted RSS by ~25 MB, and
+after a few opens on a 293 MB session the process plateaued at
+~90 MB even though no live data justified it.
+
+Pin the snapshot lifecycle to the IO worker instead. The sink's
+submit_io now hands jobs a mutable WorkerState with a snapshot
+registry. run_tree_snapshot inserts the snapshot and returns only a
+u64 id; hydration looks the snapshot up by id; picker close sends a
+remove job. Allocation and free happen on the same thread, so the
+arena's freed pages are reusable on the next /tree open instead of
+stranded.
+
+remove_tree_snapshot also calls malloc_trim(0) (glibc only) so the
+freed slack returns to the kernel promptly rather than waiting for
+glibc's lazy decay. The trim call lives next to the registry so the
+intent ("release when the picker closes") stays readable.
+
+Measured on a 293 MB session, repeat /tree cycles:
+  before: 37 -> 89 -> 90 -> 91 MB (ratcheting, never released)
+  after:  37 -> 80 -> 30 -> 80 -> 30 MB (transient open, baseline close)
