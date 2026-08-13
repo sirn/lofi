@@ -49,24 +49,44 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
             Role::Assistant => {
-                let text = collect_text(&m.blocks);
-                if !text.is_empty() {
-                    out.push(json!({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": text}],
-                    }));
-                }
                 for b in &m.blocks {
-                    if let ContentBlock::ToolUse { id, name, input } = b {
-                        let args =
-                            serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
-                        out.push(json!({
-                            "type": "function_call",
-                            "call_id": id,
-                            "name": name,
-                            "arguments": args,
-                        }));
+                    match b {
+                        ContentBlock::Thinking {
+                            text,
+                            signature: Some(sig),
+                        } if !sig.is_empty() => {
+                            // Responses needs the encrypted blob on later
+                            // turns when `store` is false. Plaintext-only
+                            // traces (no blob) stay local.
+                            let summary = if text.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![json!({"type": "summary_text", "text": text})]
+                            };
+                            out.push(json!({
+                                "type": "reasoning",
+                                "encrypted_content": sig,
+                                "summary": summary,
+                            }));
+                        }
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            out.push(json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": text}],
+                            }));
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            let args =
+                                serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+                            out.push(json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": args,
+                            }));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -161,6 +181,10 @@ fn build_openai_responses_request(
         "stream": true,
         "store": false,
     });
+    // Stateless Responses (store=false / ZDR) needs the encrypted reasoning
+    // blob on later turns. OpenAI now emits it by default; `include` remains
+    // for older and compatible endpoints.
+    req["include"] = json!(["reasoning.encrypted_content"]);
     req["prompt_cache_key"] = json!(prompt_cache_key(model, &input));
     if let Some(mt) = model.max_tokens {
         req["max_output_tokens"] = json!(mt);
@@ -301,11 +325,8 @@ fn map_openai_responses_event(
             }
         }
         "response.output_item.done" => {
-            if let Some(event) = v
-                .get("item")
-                .and_then(|item| map_completed_output_item(item, state))
-            {
-                out.push(event);
+            if let Some(item) = v.get("item") {
+                out.extend(map_completed_output_item(item, state));
             }
         }
         "response.completed" => {
@@ -326,23 +347,37 @@ fn map_openai_responses_event(
     Ok(out)
 }
 
-fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Option<StreamingEvent> {
+fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Vec<StreamingEvent> {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => item
             .get("call_id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .map(|id| StreamingEvent::ToolUseEnd { id: id.to_string() }),
+            .map(|id| StreamingEvent::ToolUseEnd { id: id.to_string() })
+            .into_iter()
+            .collect(),
         Some("reasoning") => {
             // Some Responses-compatible providers omit summary deltas but
             // include the completed item. Avoid duplicating streamed text.
+            // Always take `encrypted_content` from the completed item; it is
+            // not streamed as a delta.
             let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
-            (!state.reasoning_items_with_deltas.contains(item_id))
-                .then(|| reasoning_item_text(item))
-                .flatten()
-                .map(StreamingEvent::ThinkingDelta)
+            let mut events = Vec::new();
+            if !state.reasoning_items_with_deltas.contains(item_id) {
+                if let Some(text) = reasoning_item_text(item) {
+                    events.push(StreamingEvent::ThinkingDelta(text));
+                }
+            }
+            if let Some(blob) = item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                events.push(StreamingEvent::ThinkingSignature(blob.to_string()));
+            }
+            events
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -424,6 +459,7 @@ mod tests {
         );
         assert!(req.get("tools").is_none());
         assert!(req.get("reasoning").is_none());
+        assert_eq!(req["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[test]
@@ -638,6 +674,104 @@ mod tests {
         assert!(map_openai_responses_event(&done, &mut state)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn completed_reasoning_item_emits_encrypted_content_as_signature() {
+        let ev = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"reasoning",
+                "id":"rs_1",
+                "encrypted_content":"enc_blob",
+                "summary":[{"type":"summary_text","text":"Checked the inputs."}]
+            }
+        });
+        assert_eq!(
+            map_openai_responses_event(&ev, &mut ResponsesMapperState::default()).unwrap(),
+            vec![
+                StreamingEvent::ThinkingDelta("Checked the inputs.".to_string()),
+                StreamingEvent::ThinkingSignature("enc_blob".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn streamed_reasoning_still_captures_encrypted_content() {
+        let mut state = ResponsesMapperState::default();
+        let delta = json!({
+            "type":"response.reasoning_summary_text.delta",
+            "item_id":"rs_1",
+            "delta":"Checked the inputs."
+        });
+        map_openai_responses_event(&delta, &mut state).unwrap();
+        let done = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"reasoning",
+                "id":"rs_1",
+                "encrypted_content":"enc_blob",
+                "summary":[{"type":"summary_text","text":"Checked the inputs."}]
+            }
+        });
+        assert_eq!(
+            map_openai_responses_event(&done, &mut state).unwrap(),
+            vec![StreamingEvent::ThinkingSignature("enc_blob".to_string())]
+        );
+    }
+
+    #[test]
+    fn encrypted_reasoning_replays_before_function_call() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Thinking {
+                    text: "Need a tool.".to_string(),
+                    signature: Some("enc_blob".to_string()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "1"}),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let input = to_openai_responses_input(&msgs);
+        assert_eq!(
+            input[0],
+            json!({
+                "type": "reasoning",
+                "encrypted_content": "enc_blob",
+                "summary": [{"type": "summary_text", "text": "Need a tool."}],
+            })
+        );
+        assert_eq!(input[1]["type"], json!("function_call"));
+        assert_eq!(input[1]["call_id"], json!("call_1"));
+    }
+
+    #[test]
+    fn plaintext_thinking_is_not_replayed() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Thinking {
+                    text: "local only".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "done".to_string(),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let input = to_openai_responses_input(&msgs);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], json!("message"));
+        assert_eq!(
+            input[0]["content"][0],
+            json!({"type": "output_text", "text": "done"})
+        );
     }
 
     #[test]
