@@ -261,9 +261,9 @@ pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
 
 /// The built-in default configuration, shipped as TOML so the default
 /// provider/model set is expressed in the same format the user edits.
-/// Defines `openai` (Responses API) and `anthropic` (Messages API) providers,
-/// each keyed off an environment variable (`OPENAI_API_KEY` /
-/// `ANTHROPIC_API_KEY`). Both are resolved *leniently* by [`resolve_config`]:
+/// Defines `OpenAI` Responses, Anthropic Messages, and Google Generative AI
+/// providers. Each is keyed off its standard API-key environment variable.
+/// They are resolved *leniently* by [`resolve_config`]:
 /// if the variable is unset the provider is left keyless and simply not
 /// available, so a fresh checkout with no keys starts up and reports "no
 /// models configured" rather than aborting.
@@ -296,6 +296,15 @@ thinking_levels = ["low", "medium", "high", "xhigh"]
 
 [providers.anthropic.models."claude-sonnet-5"]
 thinking_levels = ["low", "medium", "high", "xhigh"]
+
+[providers.google]
+env_name = "GEMINI_API_KEY"
+api_type = "google-generative-ai"
+
+[providers.google.models."gemini-3.7-flash"]
+reasoning = true
+supports_image = true
+thinking_levels = ["low", "medium", "high"]
 "#;
 
 /// # Panics
@@ -436,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn default_config_has_openai_and_anthropic() {
+    fn default_config_has_native_providers() {
         let cfg = default_config();
-        assert_eq!(cfg.providers.len(), 2);
+        assert_eq!(cfg.providers.len(), 3);
         assert!(cfg.providers.contains_key("openai"));
         assert!(cfg.providers.contains_key("anthropic"));
         let openai = cfg.providers.get("openai").unwrap();
@@ -451,6 +460,9 @@ mod tests {
         let anthropic = cfg.providers.get("anthropic").unwrap();
         assert_eq!(anthropic.default_api(), Api::AnthropicMessages);
         assert_eq!(anthropic.env_name.as_deref(), Some("ANTHROPIC_API_KEY"));
+        let google = cfg.providers.get("google").unwrap();
+        assert_eq!(google.default_api(), Api::GoogleGenerativeAi);
+        assert_eq!(google.env_name.as_deref(), Some("GEMINI_API_KEY"));
     }
 
     #[tokio::test]

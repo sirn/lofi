@@ -450,6 +450,11 @@ fn content_heap_bytes(block: &ContentBlock) -> usize {
             content,
             ..
         } => tool_use_id.capacity() + content.capacity(),
+        ContentBlock::PartSignature {
+            provider,
+            model,
+            signature,
+        } => provider.capacity() + model.capacity() + signature.capacity(),
         ContentBlock::Image { bytes, media_type } => bytes.capacity() + media_type.capacity(),
     }
 }
