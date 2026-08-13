@@ -935,10 +935,8 @@ impl App {
     /// then reuse the pages for the next IO job instead of leaving them in
     /// the worker's arena because the free ran on the main thread.
     fn release_tree_snapshot(&mut self) {
-        let (Some(id), Some(sink)) = (
-            self.tree_picker_snapshot.take(),
-            self.session.sink.as_ref(),
-        ) else {
+        let (Some(id), Some(sink)) = (self.tree_picker_snapshot.take(), self.session.sink.as_ref())
+        else {
             return;
         };
         sink.submit_io(Box::new(move |state| {
@@ -1102,8 +1100,8 @@ impl App {
             );
         }
         let live = jobs.live_ids();
-        let outstanding = lofi_core::session::replay::outstanding_job_ids_at(cursor, index)
-            .unwrap_or_default();
+        let outstanding =
+            lofi_core::session::replay::outstanding_job_ids_at(cursor, index).unwrap_or_default();
         let stale: Vec<u64> = outstanding
             .into_iter()
             .filter(|id| !live.contains(id))

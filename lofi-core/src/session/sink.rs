@@ -1,9 +1,7 @@
 //! Core-owned session write endpoint.
 //!
-//! Callers must never assemble or append session events themselves; every
-//! mutation — creating the session file, moving the branch head, and
-//! recording user-shell output — flows through this sink so the write
-//! channel and its policy live entirely in core.
+//! Callers never assemble session events. The sink owns which session is
+//! active. Durable appends go through [`crate::session::store::SessionCursor::record`].
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +9,7 @@ use lofi_error::Result;
 use lofi_types::RunModel;
 
 use super::store::{self, SessionCursor, SessionStore};
-use crate::user_bash::{self, UserBashResult};
+use crate::user_bash::UserBashResult;
 
 #[derive(Debug)]
 pub struct SessionSink {
@@ -122,7 +120,9 @@ impl SessionSink {
         if self.cursor.is_none() {
             let cursor = self.store.create_cursor(&self.cwd, model)?;
             if !system_prompt.is_empty() {
-                cursor.append_system(system_prompt)?;
+                cursor.record(super::recorder::SessionRecord::System {
+                    prompt: system_prompt,
+                })?;
             }
             self.cursor = Some(cursor);
         }
@@ -143,7 +143,10 @@ impl SessionSink {
         system_prompt: &str,
     ) -> Result<(u64, u64)> {
         let cursor = self.cursor_or_create(model, system_prompt)?;
-        user_bash::append_user_bash(&cursor, result, exclude_from_context)
+        cursor.record(super::recorder::SessionRecord::UserBash {
+            result,
+            exclude_from_context,
+        })
     }
 
     /// Move the active session head to the given entry, returning the snapshot
@@ -194,10 +197,7 @@ impl SessionSink {
     /// Picker scans and tree hydration funnel here so their transient
     /// allocations reuse one arena instead of spawning a fresh thread per
     /// action.
-    pub fn submit_io(
-        &self,
-        job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>,
-    ) {
+    pub fn submit_io(&self, job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>) {
         super::io::submit(self.store.root().to_path_buf(), job);
     }
 }
