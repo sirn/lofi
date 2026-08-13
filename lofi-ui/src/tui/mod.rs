@@ -1283,6 +1283,10 @@ async fn run_loop(
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
             .map_err(Error::Io)?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(Error::Io)?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(Error::Io)?;
     let mut last_err: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1395,6 +1399,12 @@ async fn run_loop(
                     }
                 }
                 dirty = true;
+            }
+            _ = sigterm.recv() => {
+                request_quit(&mut app, &mut current_run);
+            }
+            _ = sighup.recv() => {
+                request_quit(&mut app, &mut current_run);
             }
             _ = sigwinch.recv() => {
                 if let Ok((w, h)) = crossterm::terminal::size() {
