@@ -1,10 +1,13 @@
-use lofi_types::{ContentBlock, Message, Role, StreamingEvent};
+use std::collections::HashMap;
+
+use lofi_types::{ContentBlock, Message, PartSignatureFormat, Role, StreamingEvent};
 use serde_json::Value;
 
 #[derive(Default)]
 pub struct MessageAssembler {
     order: Vec<Slot>,
     tools: Vec<ToolBuilder>,
+    pending_tool_sigs: HashMap<String, PartSig>,
 }
 
 #[derive(Debug)]
@@ -13,11 +16,27 @@ struct ToolBuilder {
     name: String,
     input: String,
     ended: bool,
+    sig: Option<PartSig>,
+}
+
+#[derive(Debug)]
+struct PartSig {
+    provider: String,
+    model: String,
+    format: PartSignatureFormat,
+    signature: String,
 }
 
 enum Slot {
-    Text(String),
-    Thinking { text: String, sig: Option<String> },
+    Text {
+        text: String,
+        sig: Option<PartSig>,
+    },
+    Thinking {
+        text: String,
+        sig: Option<String>,
+        part_sig: Option<PartSig>,
+    },
     Tool(usize),
 }
 
@@ -30,12 +49,16 @@ impl MessageAssembler {
     pub fn push(&mut self, event: StreamingEvent) {
         match event {
             StreamingEvent::TextDelta(d) => match self.order.last_mut() {
-                Some(Slot::Text(s)) => s.push_str(&d),
-                _ => self.order.push(Slot::Text(d)),
+                Some(Slot::Text { text, .. }) => text.push_str(&d),
+                _ => self.order.push(Slot::Text { text: d, sig: None }),
             },
             StreamingEvent::ThinkingDelta(d) => match self.order.last_mut() {
                 Some(Slot::Thinking { text, .. }) => text.push_str(&d),
-                _ => self.order.push(Slot::Thinking { text: d, sig: None }),
+                _ => self.order.push(Slot::Thinking {
+                    text: d,
+                    sig: None,
+                    part_sig: None,
+                }),
             },
             StreamingEvent::ThinkingSignature(s) => {
                 if let Some(Slot::Thinking { sig, .. }) = self
@@ -49,15 +72,46 @@ impl MessageAssembler {
                     self.order.push(Slot::Thinking {
                         text: String::new(),
                         sig: Some(s),
+                        part_sig: None,
                     });
                 }
             }
+            StreamingEvent::PartSignature {
+                provider,
+                model,
+                format,
+                target,
+                signature,
+            } => {
+                let sig = PartSig {
+                    provider,
+                    model,
+                    format,
+                    signature,
+                };
+                if let Some(target) = target {
+                    if let Some(tool) = self.tools.iter_mut().rfind(|tool| tool.id == target) {
+                        tool.sig = Some(sig);
+                    } else {
+                        self.pending_tool_sigs.insert(target, sig);
+                    }
+                } else {
+                    match self.order.last_mut() {
+                        Some(Slot::Text { sig: slot_sig, .. }) => *slot_sig = Some(sig),
+                        Some(Slot::Thinking { part_sig, .. }) => *part_sig = Some(sig),
+                        Some(Slot::Tool(i)) => self.tools[*i].sig = Some(sig),
+                        None => {}
+                    }
+                }
+            }
             StreamingEvent::ToolUseStart { id, name } => {
+                let sig = self.pending_tool_sigs.remove(&id);
                 self.tools.push(ToolBuilder {
                     id,
                     name,
                     input: String::new(),
                     ended: false,
+                    sig,
                 });
                 self.order.push(Slot::Tool(self.tools.len() - 1));
             }
@@ -82,11 +136,35 @@ impl MessageAssembler {
         let mut blocks = Vec::with_capacity(self.order.len());
         for slot in self.order {
             match slot {
-                Slot::Text(text) => blocks.push(ContentBlock::Text { text }),
-                Slot::Thinking { text, sig } => blocks.push(ContentBlock::Thinking {
+                Slot::Text { text, sig } => {
+                    blocks.push(ContentBlock::Text { text });
+                    if let Some(sig) = sig {
+                        blocks.push(ContentBlock::PartSignature {
+                            provider: sig.provider,
+                            model: sig.model,
+                            format: sig.format,
+                            signature: sig.signature,
+                        });
+                    }
+                }
+                Slot::Thinking {
                     text,
-                    signature: sig,
-                }),
+                    sig,
+                    part_sig,
+                } => {
+                    blocks.push(ContentBlock::Thinking {
+                        text,
+                        signature: sig,
+                    });
+                    if let Some(sig) = part_sig {
+                        blocks.push(ContentBlock::PartSignature {
+                            provider: sig.provider,
+                            model: sig.model,
+                            format: sig.format,
+                            signature: sig.signature,
+                        });
+                    }
+                }
                 Slot::Tool(i) => {
                     let t = &self.tools[i];
                     let input = if t.input.is_empty() {
@@ -99,6 +177,14 @@ impl MessageAssembler {
                         name: t.name.clone(),
                         input,
                     });
+                    if let Some(signature) = &t.sig {
+                        blocks.push(ContentBlock::PartSignature {
+                            provider: signature.provider.clone(),
+                            model: signature.model.clone(),
+                            format: signature.format.clone(),
+                            signature: signature.signature.clone(),
+                        });
+                    }
                 }
             }
         }
