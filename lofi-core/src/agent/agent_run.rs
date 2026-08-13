@@ -173,12 +173,27 @@ impl Agent {
             )
             .await
             {
+                // The UI is already gone. Still persist the settled user
+                // prompt so a quit during TurnStart cannot drop it.
+                persist_settled_user_prompt(session, self.run_model(), &messages[prev_len..]);
                 return Ok(());
             }
         }
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        // The user prompt is settled the moment it is appended. Persist it
+        // before the first provider call so a quit during that stream cannot
+        // drop it. Later checkpoints skip this already-written suffix.
+        if !continuation {
+            commit_settled(
+                recorder.as_mut(),
+                &messages[prev_len..],
+                &stats.summary(0),
+                &tx,
+            )
+            .await?;
+        }
         // JobStarted goes through the recorder's pending queue so its parent
         // chains off the current turn's events (not the pre-turn leaf). That
         // keeps the marker on the same lineage as the conversation that
@@ -286,6 +301,16 @@ impl Agent {
             match round {
                 Ok(true) => {
                     finished_normally = true;
+                    // The last assistant message is settled. Persist it now
+                    // so a crash before TurnEnd cannot drop a finished turn.
+                    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+                    commit_settled(
+                        recorder.as_mut(),
+                        &messages[prev_len..],
+                        &stats.summary(elapsed_ms),
+                        &tx,
+                    )
+                    .await?;
                     break;
                 }
                 Ok(false) if tx.is_closed() => {
@@ -296,21 +321,14 @@ impl Agent {
                     // The assistant tool call and its results form a complete,
                     // provider-valid round. Persist that suffix now instead of
                     // retaining the entire long turn only in memory.
-                    if let Some(recorder) = recorder.as_mut() {
-                        let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-                        if let Some((byte_start, byte_end)) = recorder
-                            .checkpoint(&messages[prev_len..], &stats.summary(elapsed_ms))?
-                        {
-                            if !tx.is_closed() {
-                                let _ = tx
-                                    .send(AgentEvent::RoundCommitted {
-                                        byte_start,
-                                        byte_end,
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
+                    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+                    commit_settled(
+                        recorder.as_mut(),
+                        &messages[prev_len..],
+                        &stats.summary(elapsed_ms),
+                        &tx,
+                    )
+                    .await?;
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
                     // tool cycle that compaction keeps verbatim). Stop before
@@ -430,6 +448,18 @@ impl Agent {
         } else {
             None
         };
+        // Disk first: a crash after the UI terminal event must not lose a
+        // settled turn that was still only in memory.
+        let mut committed = None;
+        if let Some(recorder) = recorder.as_mut() {
+            let summary = stats.summary(elapsed_ms);
+            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
+            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
+                Ok(range) => committed = range,
+                Err(e) if err.is_none() => return Err(e),
+                Err(_) => {}
+            }
+        }
         if let Some(outcome) = &outcome {
             if !tx.is_closed() {
                 let _ = match outcome {
@@ -473,19 +503,14 @@ impl Agent {
                 };
             }
         }
-        if let Some(recorder) = recorder.as_mut() {
-            let summary = stats.summary(elapsed_ms);
-            let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
-            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
-                Ok(Some((byte_start, byte_end))) if !tx.is_closed() => {
-                    let _ = tx
-                        .send(AgentEvent::TurnCommitted {
-                            byte_start,
-                            byte_end,
-                        })
-                        .await;
-                }
-                _ => {}
+        if let Some((byte_start, byte_end)) = committed {
+            if !tx.is_closed() {
+                let _ = tx
+                    .send(AgentEvent::TurnCommitted {
+                        byte_start,
+                        byte_end,
+                    })
+                    .await;
             }
         }
         if matches!(&outcome, Some(TurnOutcome::Failed(_))) {
@@ -1172,6 +1197,48 @@ impl Agent {
         }
         Ok(results)
     }
+}
+
+async fn commit_settled(
+    recorder: Option<&mut SessionRecorder>,
+    messages: &[Message],
+    summary: &crate::session::recorder::TurnSummary,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+) -> Result<()> {
+    let Some(recorder) = recorder else {
+        return Ok(());
+    };
+    if let Some((byte_start, byte_end)) = recorder.checkpoint(messages, summary)? {
+        if !tx.is_closed() {
+            let _ = tx
+                .send(AgentEvent::RoundCommitted {
+                    byte_start,
+                    byte_end,
+                })
+                .await;
+        }
+    }
+    Ok(())
+}
+
+fn persist_settled_user_prompt(
+    session: Option<&crate::session::store::SessionCursor>,
+    model: lofi_types::RunModel,
+    messages: &[Message],
+) {
+    let Some(cursor) = session else {
+        return;
+    };
+    let mut recorder = SessionRecorder::new(cursor.clone(), model);
+    let summary = crate::session::recorder::TurnSummary {
+        elapsed_ms: 0,
+        cost: 0.0,
+        usage: Usage::default(),
+        tool_elapsed: Vec::new(),
+        thinking_elapsed: Vec::new(),
+        native_tools: Vec::new(),
+    };
+    let _ = recorder.flush(messages, &TurnOutcome::Detached, &summary);
 }
 
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block

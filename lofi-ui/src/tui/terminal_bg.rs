@@ -71,7 +71,7 @@ pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
         }
         let mut chunk = [0u8; 64];
         match read(stdin_fd, &mut chunk) {
-            Ok(0) | Err(_) => return None,  // EOF or I/O error
+            Ok(0) | Err(_) => return None, // EOF or I/O error
             Ok(m) => {
                 let end = (n + m).min(buf.len());
                 buf[n..end].copy_from_slice(&chunk[..end - n]);

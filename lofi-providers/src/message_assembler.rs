@@ -38,8 +38,18 @@ impl MessageAssembler {
                 _ => self.order.push(Slot::Thinking { text: d, sig: None }),
             },
             StreamingEvent::ThinkingSignature(s) => {
-                if let Some(Slot::Thinking { sig, .. }) = self.order.last_mut() {
+                if let Some(Slot::Thinking { sig, .. }) = self
+                    .order
+                    .iter_mut()
+                    .rev()
+                    .find(|slot| matches!(slot, Slot::Thinking { .. }))
+                {
                     *sig = Some(s);
+                } else {
+                    self.order.push(Slot::Thinking {
+                        text: String::new(),
+                        sig: Some(s),
+                    });
                 }
             }
             StreamingEvent::ToolUseStart { id, name } => {
@@ -240,6 +250,37 @@ mod tests {
             ContentBlock::Thinking { ref signature, .. } if signature.as_deref() == Some("sig_abc")
         ));
         assert!(matches!(m.blocks[1], ContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn thinking_signature_attaches_after_later_tool() {
+        let events = [
+            StreamingEvent::ThinkingDelta("plan".to_string()),
+            StreamingEvent::ToolUseStart {
+                id: "tu_0".to_string(),
+                name: "exec".to_string(),
+            },
+            StreamingEvent::ThinkingSignature("enc_blob".to_string()),
+        ];
+        let m = assemble_message(&events);
+        assert!(matches!(
+            &m.blocks[0],
+            ContentBlock::Thinking { text, signature }
+                if text == "plan" && signature.as_deref() == Some("enc_blob")
+        ));
+    }
+
+    #[test]
+    fn thinking_signature_without_delta_creates_block() {
+        let events = [StreamingEvent::ThinkingSignature("enc_blob".to_string())];
+        let m = assemble_message(&events);
+        assert_eq!(
+            m.blocks[0],
+            ContentBlock::Thinking {
+                text: String::new(),
+                signature: Some("enc_blob".to_string()),
+            }
+        );
     }
 
     #[test]

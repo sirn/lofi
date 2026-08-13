@@ -91,9 +91,7 @@ impl SessionRecorder {
     /// starts or finishes. Pushes into the pending queue; the next
     /// `append_pending` call drains it into the durable transcript.
     #[must_use]
-    pub fn job_lifecycle_queue(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>> {
+    pub fn job_lifecycle_queue(&self) -> std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>> {
         std::sync::Arc::clone(&self.pending_job_lifecycle)
     }
 

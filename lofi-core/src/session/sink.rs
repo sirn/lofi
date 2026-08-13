@@ -194,10 +194,7 @@ impl SessionSink {
     /// Picker scans and tree hydration funnel here so their transient
     /// allocations reuse one arena instead of spawning a fresh thread per
     /// action.
-    pub fn submit_io(
-        &self,
-        job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>,
-    ) {
+    pub fn submit_io(&self, job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>) {
         super::io::submit(self.store.root().to_path_buf(), job);
     }
 }

@@ -139,6 +139,9 @@ const NOTIFY_MAX_LINES: usize = 3;
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
+/// How long quit waits for the agent to flush the current turn. After this
+/// the task is aborted so an uninterruptible tool cannot pin the process.
+const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -949,6 +952,28 @@ impl App {
     }
 }
 
+/// Cancel an in-flight run and wait for its recorder to flush. Aborting the
+/// task skips that flush and drops the current turn.
+async fn settle_run_for_quit(run: RunHandle, timeout: Duration) {
+    run.cancel.store(true, Ordering::Relaxed);
+    let RunHandle { handle, mut rx, .. } = run;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        tokio::select! {
+            ev = rx.recv() => {
+                if ev.is_none() {
+                    break;
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    if !handle.is_finished() {
+        handle.abort();
+    }
+    let _ = handle.await;
+}
+
 struct RunHandle {
     handle: JoinHandle<()>,
     rx: Receiver<AgentEvent>,
@@ -1232,7 +1257,6 @@ async fn run_loop(
         agent = Some(a);
     }
 
-
     // Live notice feed. The job driver pushes onto this the moment a job
     // transitions; the select arm below reacts without waiting for a tick.
     // Buffered pre-UI notices flush into this receiver on subscribe.
@@ -1304,7 +1328,7 @@ async fn run_loop(
                             r.handle.abort();
                             app.run_finished();
                             app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
-                            if was_user_bash {
+                            if !app.should_quit && was_user_bash {
                                 if let Some(queued) = app.prompt_queue.first().cloned() {
                                     app.prompt_queue.remove(0);
                                     spawn_prompt(
@@ -1315,7 +1339,7 @@ async fn run_loop(
                                         queued.kind,
                                     );
                                 }
-                            } else if app.context_pressure {
+                            } else if !app.should_quit && app.context_pressure {
                                 // Core owns hard-cap eligibility and
                                 // compaction; the UI only presents its outcome.
                                 app.context_pressure = false;
@@ -1332,7 +1356,7 @@ async fn run_loop(
                                         "could not compact at the hard cap; cannot continue",
                                     ),
                                 }
-                            } else {
+                            } else if !app.should_quit {
                                 app.maybe_auto_compact();
                                 if app.run.is_none() {
                                     if let Some(queued) = app.prompt_queue.first().cloned() {
@@ -1357,7 +1381,9 @@ async fn run_loop(
                 match maybe_ev {
                     Some(Ok(ev)) => {
                         defer_redraw = matches!(ev, Event::Resize(_, _));
-                        handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
+                        if !app.should_quit {
+                            handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
+                        }
                     if let Some(q) = app.pending_model_switch.take() {
                         match switcher.as_ref().map_or(
                             Err(lofi_core::Error::Config("no model registry".into())),
@@ -1379,7 +1405,11 @@ async fn run_loop(
                     // current_run select arm; without a live run, that arm
                     // never fires and the notice would sit forever. Drain
                     // at rest here, matching the mpsc notice path.
-                    if current_run.is_none() && !app.prompt_queue.is_empty() && agent.is_some() {
+                    if !app.should_quit
+                        && current_run.is_none()
+                        && !app.prompt_queue.is_empty()
+                        && agent.is_some()
+                    {
                         if let Some(queued) = app.prompt_queue.first().cloned() {
                             app.prompt_queue.remove(0);
                             spawn_prompt(
@@ -1513,13 +1543,11 @@ async fn run_loop(
         }
 
         if app.should_quit {
+            if let Some(r) = current_run.take() {
+                settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await;
+            }
             break;
         }
-    }
-
-    if let Some(r) = current_run.take() {
-        r.cancel.store(true, Ordering::Relaxed);
-        r.handle.abort();
     }
     if let Some(msg) = last_err {
         return Err(Error::Io(std::io::Error::other(msg)));
