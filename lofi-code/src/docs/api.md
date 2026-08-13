@@ -244,7 +244,7 @@ Recover the original, full content of a tool result or tool-call that
 compaction elided.
 
 **Parameters:**
-- `eventId` (string, required) — the event id from a compaction stub.
+- `eventId` (string, required) — the event id shown in a cleared stub (`[id]`).
 
 **Returns:** `string` — the raw content (a tool result's output text, or a
 tool call's input JSON). Cheap and on-demand.
