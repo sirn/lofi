@@ -250,6 +250,8 @@ impl AgentLifecycle {
         *history = new_history;
         drop(history);
         self.reset_compaction_policy();
+        // /compact can finish with no following agent run.
+        crate::malloc_trim::release_freed_memory();
         Ok(Some(compaction))
     }
 
