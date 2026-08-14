@@ -2781,6 +2781,39 @@ fn elapsed_auto_evaluation_is_shown_by_the_ui() {
 }
 
 #[test]
+fn topmost_permission_dialog_handles_input_before_tree_picker() {
+    let mut a = app();
+    let mut run = None;
+    a.tree_picker = Some(TreePickerState {
+        entries: vec![TreeEntry {
+            branch_point: "root".into(),
+            label: "user: earlier prompt".into(),
+            prefix: "- ".into(),
+            prefill: String::new(),
+            is_active: true,
+            source_index: 0,
+            source_offset: 0,
+            source_kind: store::IndexKind::UserPrompt,
+            hydrated: true,
+        }],
+        selected: 0,
+        generation: 0,
+        loading: false,
+    });
+    let (req, mut response) = confirm_request("rm generated.txt");
+    a.pending_confirms.push(req);
+
+    handle_event(&plain_key(KeyCode::Char('d')), &mut a, None, &mut run);
+
+    assert_eq!(response.try_recv(), Ok(false));
+    assert!(a.pending_confirms.is_empty());
+    assert!(a.tree_picker.is_some());
+
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+    assert!(a.tree_picker.is_none());
+}
+
+#[test]
 fn permission_dialog_requires_an_explicit_choice() {
     let mut a = app();
     let (req, mut response) = confirm_request("rm -rf build");
