@@ -1252,7 +1252,7 @@ async fn run_loop(
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
     let mut current_run: Option<RunHandle> = None;
-    let mut events = tty_events::TtyEvents::start();
+    let mut events = tty_events::TtyEvents::start().map_err(Error::Io)?;
     app.sync_color_scheme_reports();
     if app.theme_mode == lofi_types::ThemeMode::Auto {
         tty_events::request_color_scheme();

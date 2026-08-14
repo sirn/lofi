@@ -6,8 +6,7 @@
 //! dropped. jjui does the same in bubbletea/ultraviolet.
 
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,7 +14,6 @@ use std::thread::JoinHandle;
 
 use crossterm::event::Event;
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::unistd::{pipe, read, write};
 
@@ -64,20 +62,11 @@ struct ReaderRestore {
 }
 
 impl TtyEvents {
-    pub(crate) fn start() -> Self {
-        if let Ok(events) = start_reader() {
-            events
-        } else {
-            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            Self { rx, restore: None }
-        }
+    pub(crate) fn start() -> io::Result<Self> {
+        start_reader()
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<TuiEvent, io::Error>> {
-        if self.restore.is_none() {
-            std::future::pending::<()>().await;
-            return None;
-        }
         self.rx.recv().await
     }
 }
@@ -96,10 +85,8 @@ impl Drop for TtyEvents {
 }
 
 fn start_reader() -> io::Result<TtyEvents> {
-    let tty = open_tty()?;
-    set_nonblock(tty.as_raw_fd())?;
+    let input = open_input()?;
     let (stop_r, stop_w) = pipe().map_err(io_err)?;
-    set_nonblock(stop_r.as_raw_fd())?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -108,7 +95,7 @@ fn start_reader() -> io::Result<TtyEvents> {
         .name("lofi-tty-events".into())
         .spawn(move || {
             ReaderTask {
-                tty,
+                input,
                 stop_r,
                 stop: stop_flag,
                 tx,
@@ -127,20 +114,14 @@ fn start_reader() -> io::Result<TtyEvents> {
     })
 }
 
-fn open_tty() -> io::Result<OwnedFd> {
-    // F_SETFL acts on the open file description, not one descriptor. A dup of
-    // stdin can therefore make terminal output nonblocking when stdin and
-    // stdout refer to the same description. Open the controlling terminal
-    // independently so the reader's O_NONBLOCK flag stays local.
-    let file = File::options().read(true).write(true).open("/dev/tty")?;
-    Ok(file.into())
-}
-
-fn set_nonblock(fd: std::os::fd::RawFd) -> io::Result<()> {
-    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(io_err)?;
-    let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(flags)).map_err(io_err)?;
-    Ok(())
+fn open_input() -> io::Result<io::Stdin> {
+    let input = io::stdin();
+    if !input.is_terminal() {
+        return Err(io::Error::other(
+            "interactive mode requires a terminal on stdin",
+        ));
+    }
+    Ok(input)
 }
 
 fn io_err(err: Errno) -> io::Error {
@@ -148,7 +129,7 @@ fn io_err(err: Errno) -> io::Error {
 }
 
 struct ReaderTask {
-    tty: OwnedFd,
+    input: io::Stdin,
     stop_r: OwnedFd,
     stop: Arc<AtomicBool>,
     tx: tokio::sync::mpsc::UnboundedSender<Result<TuiEvent, io::Error>>,
@@ -157,7 +138,7 @@ struct ReaderTask {
 impl ReaderTask {
     fn run(self) {
         let Self {
-            tty,
+            input,
             stop_r,
             stop,
             tx,
@@ -166,7 +147,7 @@ impl ReaderTask {
         let mut buf = [0u8; 1024];
         while !stop.load(Ordering::Relaxed) {
             let mut fds = [
-                PollFd::new(tty.as_fd(), PollFlags::POLLIN),
+                PollFd::new(input.as_fd(), PollFlags::POLLIN),
                 PollFd::new(stop_r.as_fd(), PollFlags::POLLIN),
             ];
             match poll(&mut fds, PollTimeout::NONE) {
@@ -184,9 +165,9 @@ impl ReaderTask {
             {
                 break;
             }
-            match read(tty.as_raw_fd(), &mut buf) {
+            match read(input.as_raw_fd(), &mut buf) {
                 Ok(0) | Err(Errno::EBADF) => {
-                    let _ = tx.send(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tty")));
+                    let _ = tx.send(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stdin")));
                     break;
                 }
                 Err(Errno::EINTR | Errno::EAGAIN) => {}
