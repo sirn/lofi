@@ -10,13 +10,14 @@ use crossterm::event::{
     MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::ColorScheme;
+use crate::tui::terminal_bg::Rgb;
 
-// Parse result. Crossterm's private event enum plus color scheme.
+// Parse result. Crossterm's private event enum plus terminal reports.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Parsed {
     Event(Event),
-    ColorScheme(ColorScheme),
+    ColorSchemeChanged,
+    Background(Rgb),
     CursorPosition(u16, u16),
     KeyboardEnhancementFlags(KeyboardEnhancementFlags),
     PrimaryDeviceAttributes,
@@ -74,6 +75,7 @@ pub(crate) fn parse_event(buffer: &[u8], input_available: bool) -> io::Result<Op
                         }
                     }
                     b'[' => parse_csi(buffer),
+                    b']' => parse_osc(buffer),
                     b'\x1B' => Ok(Some(Parsed::Event(Event::Key(KeyCode::Esc.into())))),
                     _ => parse_event(&buffer[1..], input_available).map(|event_option| {
                         event_option.map(|event| {
@@ -262,10 +264,20 @@ fn parse_csi_color_scheme(buffer: &[u8]) -> io::Result<Option<Parsed>> {
     }
     let params = &buffer[3..buffer.len() - 1];
     match params {
-        b"997;1" => Ok(Some(Parsed::ColorScheme(ColorScheme::Dark))),
-        b"997;2" => Ok(Some(Parsed::ColorScheme(ColorScheme::Light))),
+        b"997;1" | b"997;2" => Ok(Some(Parsed::ColorSchemeChanged)),
         _ => Err(could_not_parse_event_error()),
     }
+}
+
+fn parse_osc(buffer: &[u8]) -> io::Result<Option<Parsed>> {
+    let terminated = buffer.last() == Some(&0x07) || buffer.ends_with(b"\x1b\\");
+    if !terminated {
+        return Ok(None);
+    }
+    crate::tui::terminal_bg::parse_osc11(buffer)
+        .map(Parsed::Background)
+        .map(Some)
+        .ok_or_else(could_not_parse_event_error)
 }
 
 fn parse_csi_keyboard_enhancement_flags(buffer: &[u8]) -> io::Result<Option<Parsed>> {
