@@ -7794,16 +7794,36 @@ fn apply_resolved_theme_clears_frozen_only_on_change() {
 }
 
 #[test]
-fn apply_color_scheme_applies_only_in_auto() {
-    use crate::tui::tty_events::ColorScheme;
+fn apply_background_applies_only_in_auto() {
+    use crate::tui::terminal_bg::Rgb;
     use lofi_types::ThemeMode;
     let mut a = app();
     a.theme_mode = ThemeMode::Auto;
     a.theme = Theme::dark();
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    assert!(a.apply_background(white));
+    assert_eq!(a.theme, Theme::from_background(white));
+    a.theme_mode = ThemeMode::Dark;
+    assert!(!a.apply_background(white));
+}
+
+#[test]
+fn color_scheme_report_takes_priority_over_background_report() {
+    use crate::tui::terminal_bg::Rgb;
+    use crate::tui::tty_events::ColorScheme;
+    use lofi_types::ThemeMode;
+
+    let mut a = app();
+    a.theme_mode = ThemeMode::Auto;
     assert!(a.apply_color_scheme(ColorScheme::Light));
     assert_eq!(a.theme, Theme::light());
-    a.theme_mode = ThemeMode::Dark;
-    assert!(!a.apply_color_scheme(ColorScheme::Light));
+    assert!(a.auto_scheme_reported);
+    assert!(!a.apply_background(Rgb { r: 0, g: 0, b: 0 }));
+    assert_eq!(a.theme, Theme::light());
 }
 
 #[test]

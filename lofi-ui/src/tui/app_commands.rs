@@ -841,7 +841,9 @@ impl App {
                 self.sync_color_scheme_reports();
                 match mode {
                     lofi_types::ThemeMode::Auto => {
+                        self.auto_scheme_reported = false;
                         crate::tui::tty_events::request_color_scheme();
+                        crate::tui::tty_events::request_background();
                     }
                     lofi_types::ThemeMode::Light => {
                         self.apply_resolved_theme(Theme::light());
@@ -854,6 +856,14 @@ impl App {
         }
     }
 
+    pub(super) fn apply_background(&mut self, rgb: crate::tui::terminal_bg::Rgb) -> bool {
+        self.reported_background = Some(rgb);
+        if self.theme_mode != lofi_types::ThemeMode::Auto || self.auto_scheme_reported {
+            return false;
+        }
+        self.apply_resolved_theme(Theme::from_background(rgb))
+    }
+
     pub(super) fn apply_color_scheme(
         &mut self,
         scheme: crate::tui::tty_events::ColorScheme,
@@ -861,6 +871,8 @@ impl App {
         if self.theme_mode != lofi_types::ThemeMode::Auto {
             return false;
         }
+        self.reported_scheme = Some(scheme);
+        self.auto_scheme_reported = true;
         self.apply_resolved_theme(Theme::from_scheme(scheme))
     }
 

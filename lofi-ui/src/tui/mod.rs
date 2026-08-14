@@ -869,6 +869,10 @@ pub(crate) struct App {
     no_models_hint: Option<String>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
+    auto_scheme_reported: bool,
+    reported_scheme: Option<tty_events::ColorScheme>,
+    reported_background: Option<terminal_bg::Rgb>,
+    reverse_screen: Option<bool>,
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
@@ -1110,9 +1114,25 @@ pub(crate) async fn run(
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
-    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
-    // (see terminal_bg module doc for why).
-    let theme = Theme::resolve(ui_theme);
+    let mut events = tty_events::TtyEvents::start();
+    let (theme, auto_scheme_reported) = match ui_theme {
+        lofi_types::ThemeMode::Light => (Theme::light(), false),
+        lofi_types::ThemeMode::Dark => (Theme::dark(), false),
+        lofi_types::ThemeMode::Auto => {
+            tty_events::request_color_scheme();
+            tty_events::request_background();
+            match events
+                .wait_for_color_report(Duration::from_millis(500))
+                .await
+            {
+                Some(tty_events::ColorReport::Scheme(scheme)) => (Theme::from_scheme(scheme), true),
+                Some(tty_events::ColorReport::Background(rgb)) => {
+                    (Theme::from_background(rgb), false)
+                }
+                None => (Theme::terminal(), false),
+            }
+        }
+    };
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1147,9 +1167,11 @@ pub(crate) async fn run(
             // `run_loop` exceeds clippy's large_futures stack limit.
             Box::pin(run_loop(
                 &mut guard,
+                &mut events,
                 agent,
                 theme,
                 ui_theme,
+                auto_scheme_reported,
                 model_label,
                 thinking,
                 session,
@@ -1170,9 +1192,11 @@ pub(crate) async fn run(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_loop(
     guard: &mut TerminalGuard,
+    events: &mut tty_events::TtyEvents,
     mut agent: Option<Agent>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
+    auto_scheme_reported: bool,
     model_label: String,
     thinking: ThinkingLevel,
     session: SessionConfig,
@@ -1205,6 +1229,7 @@ async fn run_loop(
     );
     app.theme = theme;
     app.theme_mode = theme_mode;
+    app.auto_scheme_reported = auto_scheme_reported;
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
@@ -1275,10 +1300,11 @@ async fn run_loop(
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
     let mut current_run: Option<RunHandle> = None;
-    let mut events = tty_events::TtyEvents::start();
     app.sync_color_scheme_reports();
-    if app.theme_mode == lofi_types::ThemeMode::Auto {
+    if app.debug.is_some() {
         tty_events::request_color_scheme();
+        tty_events::request_background();
+        tty_events::request_reverse_screen();
     }
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -1430,11 +1456,26 @@ async fn run_loop(
             maybe_ev = events.recv() => {
                 let defer_redraw;
                 match maybe_ev {
-                    Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
+                    Some(Ok(tty_events::TuiEvent::Color(
+                        tty_events::ColorReport::Scheme(scheme),
+                    ))) => {
                         defer_redraw = false;
                         if app.apply_color_scheme(scheme) {
                             dirty = true;
                         }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Color(
+                        tty_events::ColorReport::Background(rgb),
+                    ))) => {
+                        defer_redraw = false;
+                        if app.apply_background(rgb) {
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::ReverseScreen(enabled))) => {
+                        defer_redraw = false;
+                        app.reverse_screen = enabled;
+                        dirty = true;
                     }
                     Some(Ok(tty_events::TuiEvent::Input(ev))) => {
                         defer_redraw = matches!(ev, Event::Resize(_, _));

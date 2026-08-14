@@ -1,7 +1,5 @@
 use ratatui::style::Color;
 
-use lofi_types::ThemeMode;
-
 /// The resolved color palette. Colors are ANSI 256 values so the UI works
 /// in any terminal that advertises 256-color support without depending on
 /// truecolor.
@@ -70,6 +68,28 @@ impl Theme {
         self.panel_bg
     }
 
+    /// Use terminal defaults until Auto receives an OSC 11 report.
+    pub(crate) fn terminal() -> Self {
+        Self {
+            primary: BASE16.primary,
+            user: BASE16.user,
+            agent: BASE16.agent,
+            success: BASE16.success,
+            warn: BASE16.warn,
+            error: BASE16.error,
+            info: BASE16.info,
+            fg: Color::Reset,
+            muted: Color::Reset,
+            subtle: Color::Reset,
+            surface: Color::Reset,
+            inline_bg: Color::Reset,
+            panel_bg: Color::Reset,
+            selection: Color::Reset,
+            cursor_line: Color::Reset,
+            select_cursor: BASE16.primary,
+        }
+    }
+
     pub(crate) fn dark() -> Self {
         Self {
             primary: BASE16.primary,
@@ -125,29 +145,15 @@ impl Theme {
     }
 
     pub(crate) fn from_background(rgb: crate::tui::terminal_bg::Rgb) -> Self {
-        if rgb.luminance() > 0.5 {
+        let mut theme = if rgb.luminance() > 0.5 {
             Self::light()
         } else {
             Self::dark()
-        }
-    }
-
-    /// `None` is a missed reply, not dark.
-    pub(crate) fn probe_auto(timeout: std::time::Duration) -> Option<Self> {
-        crate::tui::terminal_bg::query_background(timeout).map(Self::from_background)
-    }
-
-    /// `Auto` falls back to `dark()` on a failed startup probe: dark
-    /// text on an unknown background is more likely to read than
-    /// washed-out light.
-    pub(crate) fn resolve(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Light => Self::light(),
-            ThemeMode::Dark => Self::dark(),
-            ThemeMode::Auto => {
-                Self::probe_auto(std::time::Duration::from_millis(150)).unwrap_or_else(Self::dark)
-            }
-        }
+        };
+        // Auto follows the terminal's foreground. Forced themes keep their
+        // explicit foreground so they remain readable against forced panels.
+        theme.fg = Color::Reset;
+        theme
     }
 }
 
@@ -163,18 +169,17 @@ mod tests {
     use crate::tui::terminal_bg::Rgb;
 
     #[test]
-    fn from_background_splits_on_luminance() {
-        assert_eq!(
-            Theme::from_background(Rgb {
-                r: 255,
-                g: 255,
-                b: 255,
-            }),
-            Theme::light()
-        );
-        assert_eq!(
-            Theme::from_background(Rgb { r: 0, g: 0, b: 0 }),
-            Theme::dark()
-        );
+    fn from_background_splits_on_luminance_and_uses_terminal_foreground() {
+        let light = Theme::from_background(Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        });
+        assert_eq!(light.surface, Theme::light().surface);
+        assert_eq!(light.fg, Color::Reset);
+
+        let dark = Theme::from_background(Rgb { r: 0, g: 0, b: 0 });
+        assert_eq!(dark.surface, Theme::dark().surface);
+        assert_eq!(dark.fg, Color::Reset);
     }
 }

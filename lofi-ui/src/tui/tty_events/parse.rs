@@ -11,12 +11,15 @@ use crossterm::event::{
 };
 
 use super::ColorScheme;
+use crate::tui::terminal_bg::Rgb;
 
-// Parse result. Crossterm's private event enum plus color scheme.
+// Parse result. Crossterm's private event enum plus terminal reports.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Parsed {
     Event(Event),
     ColorScheme(ColorScheme),
+    Background(Rgb),
+    ReverseScreen(Option<bool>),
     CursorPosition(u16, u16),
     KeyboardEnhancementFlags(KeyboardEnhancementFlags),
     PrimaryDeviceAttributes,
@@ -74,6 +77,7 @@ pub(crate) fn parse_event(buffer: &[u8], input_available: bool) -> io::Result<Op
                         }
                     }
                     b'[' => parse_csi(buffer),
+                    b']' => parse_osc(buffer),
                     b'\x1B' => Ok(Some(Parsed::Event(Event::Key(KeyCode::Esc.into())))),
                     _ => parse_event(&buffer[1..], input_available).map(|event_option| {
                         event_option.map(|event| {
@@ -177,6 +181,7 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<Parsed>> {
             b'u' => return parse_csi_keyboard_enhancement_flags(buffer),
             b'c' => return parse_csi_primary_device_attributes(buffer),
             b'n' => return parse_csi_color_scheme(buffer),
+            b'y' => return parse_csi_private_mode_report(buffer),
             // Finished DEC private report. Not incomplete (crossterm#1104).
             0x40..=0x7e => return Err(could_not_parse_event_error()),
             _ => None,
@@ -266,6 +271,34 @@ fn parse_csi_color_scheme(buffer: &[u8]) -> io::Result<Option<Parsed>> {
         b"997;2" => Ok(Some(Parsed::ColorScheme(ColorScheme::Light))),
         _ => Err(could_not_parse_event_error()),
     }
+}
+
+fn parse_csi_private_mode_report(buffer: &[u8]) -> io::Result<Option<Parsed>> {
+    if !buffer.ends_with(b"$y") {
+        return Err(could_not_parse_event_error());
+    }
+    let params = &buffer[3..buffer.len() - 2];
+    let Some(status) = params.strip_prefix(b"5;") else {
+        return Err(could_not_parse_event_error());
+    };
+    let enabled = match status {
+        b"1" | b"3" => Some(true),
+        b"2" | b"4" => Some(false),
+        b"0" => None,
+        _ => return Err(could_not_parse_event_error()),
+    };
+    Ok(Some(Parsed::ReverseScreen(enabled)))
+}
+
+fn parse_osc(buffer: &[u8]) -> io::Result<Option<Parsed>> {
+    let terminated = buffer.last() == Some(&0x07) || buffer.ends_with(b"\x1b\\");
+    if !terminated {
+        return Ok(None);
+    }
+    crate::tui::terminal_bg::parse_osc11(buffer)
+        .map(Parsed::Background)
+        .map(Some)
+        .ok_or_else(could_not_parse_event_error)
 }
 
 fn parse_csi_keyboard_enhancement_flags(buffer: &[u8]) -> io::Result<Option<Parsed>> {

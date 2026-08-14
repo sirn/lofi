@@ -1,4 +1,4 @@
-//! TTY input events, including CSI 997 color-scheme reports.
+//! TTY input events, including terminal color reports.
 //!
 //! Crossterm 0.29 treats a finished unknown `CSI ? …` as incomplete
 //! (crossterm#1104) and then swallows later keys. We read the tty and
@@ -22,21 +22,25 @@ use nix::unistd::{pipe, read, write};
 mod parse;
 use parse::Parsed;
 
-/// Terminal color preference from a CSI 997 DSR.
+const ENABLE_2031: &[u8] = b"\x1b[?2031h";
+const DISABLE_2031: &[u8] = b"\x1b[?2031l";
+const QUERY_996: &[u8] = b"\x1b[?996n";
+const QUERY_REVERSE_SCREEN: &[u8] = b"\x1b[?5$p";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ColorScheme {
     Dark,
     Light,
 }
 
-const ENABLE_2031: &[u8] = b"\x1b[?2031h";
-const DISABLE_2031: &[u8] = b"\x1b[?2031l";
-const QUERY_996: &[u8] = b"\x1b[?996n";
-
 pub(crate) fn set_reports_enabled(enabled: bool) {
     let mut out = io::stdout();
     let _ = out.write_all(if enabled { ENABLE_2031 } else { DISABLE_2031 });
     let _ = out.flush();
+}
+
+pub(crate) fn request_background() {
+    let _ = crate::tui::terminal_bg::request_background();
 }
 
 pub(crate) fn request_color_scheme() {
@@ -45,15 +49,29 @@ pub(crate) fn request_color_scheme() {
     let _ = out.flush();
 }
 
+pub(crate) fn request_reverse_screen() {
+    let mut out = io::stdout();
+    let _ = out.write_all(QUERY_REVERSE_SCREEN);
+    let _ = out.flush();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorReport {
+    Scheme(ColorScheme),
+    Background(crate::tui::terminal_bg::Rgb),
+}
+
 #[derive(Debug)]
 pub(crate) enum TuiEvent {
     Input(Event),
-    ColorScheme(ColorScheme),
+    Color(ColorReport),
+    ReverseScreen(Option<bool>),
 }
 
 /// Blocking tty reader that yields [`TuiEvent`]s on a channel.
 pub(crate) struct TtyEvents {
     rx: tokio::sync::mpsc::UnboundedReceiver<Result<TuiEvent, io::Error>>,
+    pending: VecDeque<Result<TuiEvent, io::Error>>,
     restore: Option<ReaderRestore>,
 }
 
@@ -69,17 +87,48 @@ impl TtyEvents {
             Ok(events) => events,
             Err(_) => {
                 let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                Self { rx, restore: None }
+                Self {
+                    rx,
+                    pending: VecDeque::new(),
+                    restore: None,
+                }
             }
         }
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<TuiEvent, io::Error>> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
         if self.restore.is_none() {
             std::future::pending::<()>().await;
             return None;
         }
         self.rx.recv().await
+    }
+
+    pub(crate) async fn wait_for_color_report(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Option<ColorReport> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut background = None;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(Ok(TuiEvent::Color(ColorReport::Scheme(scheme))))) => {
+                    return Some(ColorReport::Scheme(scheme));
+                }
+                Ok(Some(Ok(TuiEvent::Color(ColorReport::Background(rgb))))) => {
+                    background = Some(ColorReport::Background(rgb));
+                }
+                Ok(Some(event @ Ok(_))) => self.pending.push_back(event),
+                Ok(Some(event @ Err(_))) => {
+                    self.pending.push_back(event);
+                    return background;
+                }
+                Ok(None) | Err(_) => return background,
+            }
+        }
     }
 }
 
@@ -112,6 +161,7 @@ fn start_reader() -> io::Result<TtyEvents> {
 
     Ok(TtyEvents {
         rx,
+        pending: VecDeque::new(),
         restore: Some(ReaderRestore {
             stop,
             stop_w,
@@ -207,7 +257,17 @@ impl Parser {
                     self.buffer.clear();
                 }
                 Ok(Some(Parsed::ColorScheme(scheme))) => {
-                    self.ready.push_back(TuiEvent::ColorScheme(scheme));
+                    self.ready
+                        .push_back(TuiEvent::Color(ColorReport::Scheme(scheme)));
+                    self.buffer.clear();
+                }
+                Ok(Some(Parsed::Background(rgb))) => {
+                    self.ready
+                        .push_back(TuiEvent::Color(ColorReport::Background(rgb)));
+                    self.buffer.clear();
+                }
+                Ok(Some(Parsed::ReverseScreen(enabled))) => {
+                    self.ready.push_back(TuiEvent::ReverseScreen(enabled));
                     self.buffer.clear();
                 }
                 Ok(Some(_)) => {
@@ -237,25 +297,40 @@ mod tests {
     }
 
     #[test]
-    fn parses_dark_and_keys() {
+    fn parses_color_scheme_change_and_keys() {
         let out = parse_all(b"a\x1b[?997;1nb");
         assert!(matches!(
             &out[..],
             [
                 TuiEvent::Input(Event::Key(_)),
-                TuiEvent::ColorScheme(ColorScheme::Dark),
+                TuiEvent::Color(ColorReport::Scheme(ColorScheme::Dark)),
                 TuiEvent::Input(Event::Key(_)),
             ]
         ));
     }
 
     #[test]
-    fn parses_light() {
-        let out = parse_all(b"\x1b[?997;2n");
+    fn parses_background() {
+        let out = parse_all(b"\x1b]11;rgb:ffff/0000/8000\x1b\\");
         assert!(matches!(
             &out[..],
-            [TuiEvent::ColorScheme(ColorScheme::Light)]
+            [TuiEvent::Color(ColorReport::Background(
+                crate::tui::terminal_bg::Rgb {
+                    r: 255,
+                    g: 0,
+                    b: 128,
+                }
+            ))]
         ));
+    }
+
+    #[test]
+    fn parses_reverse_screen_mode_report() {
+        let out = parse_all(b"\x1b[?5;1$y");
+        assert!(matches!(&out[..], [TuiEvent::ReverseScreen(Some(true))]));
+
+        let out = parse_all(b"\x1b[?5;2$y");
+        assert!(matches!(&out[..], [TuiEvent::ReverseScreen(Some(false))]));
     }
 
     #[test]
@@ -274,7 +349,7 @@ mod tests {
         assert!(matches!(
             &out[..],
             [
-                TuiEvent::ColorScheme(ColorScheme::Dark),
+                TuiEvent::Color(ColorReport::Scheme(ColorScheme::Dark)),
                 TuiEvent::Input(Event::Key(_)),
             ]
         ));

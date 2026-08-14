@@ -174,8 +174,26 @@ impl App {
         let measured = components["estimated_total_bytes"].as_u64().unwrap_or(0);
         let history = components["history_bytes"].as_u64().unwrap_or(0);
         let value = |n: Option<u64>| n.map_or_else(|| "–".to_string(), format_bytes);
+        let scheme = self.reported_scheme.map_or("–", |scheme| match scheme {
+            tty_events::ColorScheme::Dark => "dark",
+            tty_events::ColorScheme::Light => "light",
+        });
+        let background = self.reported_background.map_or_else(
+            || "–".to_string(),
+            |rgb| format!("{}/{}/{} ({:.3})", rgb.r, rgb.g, rgb.b, rgb.luminance()),
+        );
+        let reverse = self
+            .reverse_screen
+            .map_or("–", |enabled| if enabled { "on" } else { "off" });
+        let palette = if self.theme.surface == Theme::light().surface {
+            "light"
+        } else if self.theme.surface == Theme::dark().surface {
+            "dark"
+        } else {
+            "terminal"
+        };
         Some(Line::from(format!(
-            "  Debug · Total RSS {} · Heap RSS {} · Measured {} · History {}",
+            "  Debug · Scheme {scheme} · BG {background} · Reverse {reverse} · Palette {palette} · RSS {} · Heap {} · Measured {} · History {}",
             value(debug.latest_rss_bytes),
             value(debug.latest_heap_bytes),
             format_bytes(measured),
