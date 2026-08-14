@@ -104,6 +104,11 @@ impl SessionSink {
         self.cursor = Some(cursor);
     }
 
+    /// Detach the active cursor so the next persisted action creates a new session.
+    pub fn clear_cursor(&mut self) {
+        self.cursor = None;
+    }
+
     /// Return the active cursor, creating the session file on first use. This
     /// is the single place new session files come into existence, and a fresh
     /// lineage is pinned with its system prompt as the first event — exactly
