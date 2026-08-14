@@ -10,11 +10,6 @@
 //! caller pick a fallback theme.
 
 use std::io::{self, Write};
-use std::os::unix::io::{AsRawFd, BorrowedFd};
-use std::time::{Duration, Instant};
-
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::unistd::read;
 
 /// A 24-bit RGB triple reported by the terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,63 +31,19 @@ impl Rgb {
     }
 }
 
-/// Query the terminal's background colour. `timeout` bounds how long we
-/// wait for a reply. Timeout or I/O error returns `None`.
-pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
+/// Ask the terminal to report its current background colour.
+pub(crate) fn request_background() -> io::Result<()> {
     let mut stdout = io::stdout();
-    stdout.write_all(b"\x1b]11;?\x07").ok()?;
-    stdout.flush().ok()?;
-
-    // `EventStream`'s wake thread also reads stdin; drop any live stream first.
-    let stdin = io::stdin();
-    let stdin_fd = stdin.as_raw_fd();
-    // SAFETY: fd 0 is a live, readable descriptor while we hold `stdin`.
-    // The workspace forbids `unsafe` by default; lift that here because
-    // BorrowedFd::borrow_raw is the only safe-API-free way to hand a raw
-    // stdin descriptor to nix::poll without taking ownership.
-    #[allow(unsafe_code)]
-    let borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
-    let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; 128];
-    let mut n = 0usize;
-    loop {
-        let remaining = deadline.checked_duration_since(Instant::now())?;
-        let Ok(timeout_ms) = PollTimeout::try_from(remaining) else {
-            return None;
-        };
-        let mut fds = [PollFd::new(borrowed, PollFlags::POLLIN)];
-        match poll(&mut fds, timeout_ms) {
-            Ok(n) if n > 0 => {}
-            _ => return None, // timeout, EINTR, or other — bail to fallback theme
-        }
-        let mut chunk = [0u8; 64];
-        match read(stdin_fd, &mut chunk) {
-            Ok(0) | Err(_) => return None, // EOF or I/O error
-            Ok(m) => {
-                let end = (n + m).min(buf.len());
-                buf[n..end].copy_from_slice(&chunk[..end - n]);
-                n = end;
-                // Response terminator: BEL (\x07) or ST (ESC \\).
-                if chunk[..m].contains(&0x07)
-                    || (m >= 2 && chunk[m - 2] == 0x1b && chunk[m - 1] == b'\\')
-                {
-                    break;
-                }
-                if n >= buf.len() {
-                    return None;
-                }
-            }
-        }
-    }
-    parse_osc11(&buf[..n])
+    stdout.write_all(b"\x1b]11;?\x07")?;
+    stdout.flush()
 }
 
 /// Parse an OSC 11 response. The terminal replies with the literal
 /// `ESC]11;rgb:RR/GG/BB<terminator>`; each component is 1–4 hex digits.
 /// Short (1-digit) components are scaled by replication, per `XParseColor`.
-fn parse_osc11(buf: &[u8]) -> Option<Rgb> {
+pub(crate) fn parse_osc11(buf: &[u8]) -> Option<Rgb> {
     let mut i = 0;
-    while i + 7 < buf.len() {
+    while i + 8 < buf.len() {
         if buf[i] == 0x1b
             && buf[i + 1] == b']'
             && buf[i + 2] == b'1'
@@ -165,6 +116,24 @@ mod tests {
     fn parses_canonical_response() {
         let buf = b"\x1b]11;rgb:0000/0000/0000\x07";
         assert_eq!(parse_osc11(buf), Some(Rgb { r: 0, g: 0, b: 0 }));
+    }
+
+    #[test]
+    fn parses_16bit_hex() {
+        let buf = b"\x1b]11;rgb:ffff/0000/8000\x07";
+        assert_eq!(
+            parse_osc11(buf),
+            Some(Rgb {
+                r: 255,
+                g: 0,
+                b: 128
+            })
+        );
+    }
+
+    #[test]
+    fn short_marker_does_not_parse() {
+        assert_eq!(parse_osc11(b"\x1b]11;rgb"), None);
     }
 
     #[test]
