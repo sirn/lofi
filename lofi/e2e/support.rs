@@ -1,0 +1,665 @@
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use nix::pty::{openpty, Winsize};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use serde_json::{json, Value};
+
+pub const WAIT: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Debug)]
+pub struct MockRequest {
+    pub path: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MockResponse {
+    status: u16,
+    content_type: &'static str,
+    body: String,
+}
+
+impl MockResponse {
+    pub fn sse(body: String) -> Self {
+        Self {
+            status: 200,
+            content_type: "text/event-stream",
+            body,
+        }
+    }
+
+    pub fn error(status: u16, message: &str) -> Self {
+        Self {
+            status,
+            content_type: "application/json",
+            body: json!({ "error": { "message": message } }).to_string(),
+        }
+    }
+}
+
+pub struct MockServer {
+    addr: SocketAddr,
+    responses: Arc<Mutex<VecDeque<MockResponse>>>,
+    requests: Arc<Mutex<Vec<MockRequest>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl MockServer {
+    pub fn start(responses: Vec<MockResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_responses = Arc::clone(&responses);
+        let thread_requests = Arc::clone(&requests);
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        thread_requests
+                            .lock()
+                            .unwrap()
+                            .push(read_request(&mut stream));
+                        let response = thread_responses
+                            .lock()
+                            .unwrap()
+                            .pop_front()
+                            .unwrap_or_else(|| MockResponse::error(500, "unexpected mock request"));
+                        write_response(&mut stream, &response);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            responses,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    pub fn requests(&self) -> Vec<MockRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    pub fn push(&self, response: MockResponse) {
+        self.responses.lock().unwrap().push_back(response);
+    }
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn read_request(stream: &mut TcpStream) -> MockRequest {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut body_start = None;
+    let mut content_length = 0;
+    loop {
+        let read = stream.read(&mut chunk).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if body_start.is_none() {
+            body_start = bytes
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .map(|index| index + 4);
+            if let Some(start) = body_start {
+                let headers = String::from_utf8_lossy(&bytes[..start]);
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+            }
+        }
+        if body_start.is_some_and(|start| bytes.len() >= start + content_length) {
+            break;
+        }
+    }
+    let start = body_start.unwrap_or(bytes.len());
+    let headers = String::from_utf8_lossy(&bytes[..start]);
+    let path = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_string();
+    MockRequest {
+        path,
+        body: String::from_utf8_lossy(&bytes[start..]).into_owned(),
+    }
+}
+
+fn write_response(stream: &mut TcpStream, response: &MockResponse) {
+    let reason = match response.status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        response.content_type,
+        response.body.len(),
+        response.body,
+    )
+    .unwrap();
+    stream.flush().unwrap();
+}
+
+pub fn tool_response(call_id: &str, code: &str) -> MockResponse {
+    let arguments = json!({ "code": code }).to_string();
+    let event = json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": "exec", "arguments": arguments }
+                }]
+            }
+        }]
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: [DONE]
+
+"
+    ))
+}
+
+pub fn text_response(text: &str) -> MockResponse {
+    let event = json!({ "choices": [{ "delta": { "content": text } }] });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: [DONE]
+
+"
+    ))
+}
+
+pub fn thinking_response(thinking: &str, text: &str) -> MockResponse {
+    let thinking = json!({ "choices": [{ "delta": { "reasoning_content": thinking } }] });
+    let text = json!({ "choices": [{ "delta": { "content": text } }] });
+    MockResponse::sse(format!(
+        "data: {thinking}
+
+data: {text}
+
+data: [DONE]
+
+"
+    ))
+}
+
+pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
+    let thinking = json!({
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "reasoning-1",
+        "delta": thinking,
+    });
+    let text = json!({ "type": "response.output_text.delta", "delta": text });
+    let done = json!({
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 5,
+                "input_tokens_details": { "cached_tokens": 2 }
+            }
+        }
+    });
+    MockResponse::sse(format!(
+        "data: {thinking}
+
+data: {text}
+
+data: {done}
+
+data: [DONE]
+
+"
+    ))
+}
+
+pub struct Fixture {
+    _root: tempfile::TempDir,
+    pub workspace: PathBuf,
+    pub config: PathBuf,
+    pub policy: PathBuf,
+    pub state: PathBuf,
+}
+
+impl Fixture {
+    pub fn new(server: &MockServer) -> Self {
+        Self::with_policy(server, "unrestricted")
+    }
+
+    pub fn with_policy(server: &MockServer, mode: &str) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = root.path().join("config.toml");
+        let policy = root.path().join("policy.toml");
+        std::fs::write(&config, config_text(&server.url())).unwrap();
+        std::fs::write(
+            &policy,
+            format!(
+                "mode = \"{mode}\"
+"
+            ),
+        )
+        .unwrap();
+        Self {
+            _root: root,
+            workspace,
+            config,
+            policy,
+            state,
+        }
+    }
+
+    pub fn without_models() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = root.path().join("config.toml");
+        let policy = root.path().join("policy.toml");
+        std::fs::write(
+            &config,
+            "[providers]
+",
+        )
+        .unwrap();
+        std::fs::write(
+            &policy,
+            "mode = \"confirm\"
+",
+        )
+        .unwrap();
+        Self {
+            _root: root,
+            workspace,
+            config,
+            policy,
+            state,
+        }
+    }
+
+    pub fn spawn(&self, args: &[&str]) -> Tui {
+        Tui::spawn(self, args)
+    }
+
+    pub fn output(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lofi"));
+        command.args(args).current_dir(&self.workspace);
+        configure_command(&mut command, self);
+        command.output().unwrap()
+    }
+
+    pub fn events(&self) -> Vec<Value> {
+        let path = self
+            .session_files()
+            .into_iter()
+            .next()
+            .expect("session transcript");
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    pub fn session_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_files(&self.state.join("lofi").join("sessions"), &mut files);
+        files.retain(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
+        files.sort();
+        files
+    }
+}
+
+fn config_text(base_url: &str) -> String {
+    format!(
+        r#"default_model = "mock/chat"
+
+[retry]
+max_retries = 2
+base_delay_ms = 1
+max_delay_ms = 1
+
+[providers.mock]
+base_url = "{base_url}"
+api_type = "openai-completions"
+no_auth = true
+
+[providers.mock.models.chat]
+name = "A Chat"
+context_window = 100000
+reasoning = true
+thinking_level = "medium"
+thinking_levels = ["low", "medium", "high"]
+
+[providers.mock.models.alt]
+name = "B Alternate"
+context_window = 100000
+reasoning = true
+thinking_level = "medium"
+thinking_levels = ["low", "medium", "high"]
+
+[providers.responses]
+base_url = "{base_url}"
+api_type = "openai-responses"
+no_auth = true
+
+[providers.responses.models.reasoning]
+name = "C Responses"
+context_window = 100000
+reasoning = true
+thinking_level = "medium"
+thinking_levels = ["low", "medium", "high"]
+"#
+    )
+}
+
+fn configure_command(command: &mut Command, fixture: &Fixture) {
+    command
+        .env("LOFI_CONFIG", &fixture.config)
+        .env("LOFI_POLICY", &fixture.policy)
+        .env("LOFI_STATE_HOME", &fixture.state)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY");
+}
+
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+pub struct Tui {
+    child: Child,
+    input: File,
+    output: Arc<Mutex<Vec<u8>>>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl Tui {
+    fn spawn(fixture: &Fixture, args: &[&str]) -> Self {
+        let pty = openpty(
+            Some(&Winsize {
+                ws_row: 40,
+                ws_col: 120,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            }),
+            None,
+        )
+        .unwrap();
+        let master = File::from(pty.master);
+        let slave = File::from(pty.slave);
+        let stdin = slave.try_clone().unwrap();
+        let stdout = slave.try_clone().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lofi"));
+        command
+            .args(args)
+            .current_dir(&fixture.workspace)
+            .env("TERM", "xterm-256color")
+            .env("COLUMNS", "120")
+            .env("LINES", "40")
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(slave));
+        configure_command(&mut command, fixture);
+        let child = command.spawn().unwrap();
+        let mut reader_file = master.try_clone().unwrap();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let reader_output = Arc::clone(&output);
+        let reader = thread::spawn(move || {
+            let mut chunk = [0_u8; 8192];
+            while let Ok(read) = reader_file.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                reader_output
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&chunk[..read]);
+            }
+        });
+        let mut tui = Self {
+            child,
+            input: master,
+            output,
+            reader: Some(reader),
+        };
+        tui.wait_for_any(&["mock/chat", "responses/reasoning", "(no model)"], WAIT);
+        tui
+    }
+
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).unwrap();
+        self.input.flush().unwrap();
+    }
+
+    pub fn submit(&mut self, text: &str) {
+        self.send(text.as_bytes());
+        self.send(b"\r");
+    }
+
+    pub fn clear_output(&self) {
+        self.output.lock().unwrap().clear();
+    }
+
+    pub fn output(&self) -> String {
+        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+    }
+
+    pub fn wait_for(&mut self, needle: &str, timeout: Duration) {
+        self.wait_for_any(&[needle], timeout);
+    }
+
+    pub fn wait_for_any(&mut self, needles: &[&str], timeout: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let found = {
+                let output = self.output.lock().unwrap();
+                let output = String::from_utf8_lossy(&output);
+                needles.iter().any(|needle| output.contains(needle))
+            };
+            if found {
+                return;
+            }
+            if self.child.try_wait().unwrap().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {needles:?}; terminal output:
+{}",
+            self.output()
+        );
+    }
+
+    pub fn wait_exit(&mut self) {
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            if self.child.try_wait().unwrap().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "lofi did not exit; terminal output:
+{}",
+            self.output()
+        );
+    }
+
+    pub fn kill_now(&mut self) {
+        self.child.kill().unwrap();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Tui {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.reader.take();
+    }
+}
+
+pub fn process_is_alive(pid: i32) -> bool {
+    kill(Pid::from_raw(pid), None).is_ok()
+}
+
+pub struct ProcessGuard(Option<i32>);
+
+impl ProcessGuard {
+    pub fn new(pid: i32) -> Self {
+        Self(Some(pid))
+    }
+
+    pub fn pid(&self) -> i32 {
+        self.0.expect("armed process guard")
+    }
+
+    pub fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        }
+    }
+}
+
+pub fn wait_for_process_exit(pid: i32) {
+    let start = Instant::now();
+    while start.elapsed() < WAIT {
+        if !process_is_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("process {pid} did not exit");
+}
+
+pub fn job_events(events: &[Value], kind: &str) -> Vec<u64> {
+    events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some(kind))
+        .filter_map(|event| event.get("job_id").and_then(Value::as_u64))
+        .collect()
+}
+
+fn find_number(value: &Value, key: &str) -> Option<u64> {
+    match value {
+        Value::Object(object) => object
+            .get(key)
+            .and_then(Value::as_u64)
+            .or_else(|| object.values().find_map(|value| find_number(value, key))),
+        Value::Array(array) => array.iter().find_map(|value| find_number(value, key)),
+        Value::String(text) => serde_json::from_str(text)
+            .ok()
+            .and_then(|value| find_number(&value, key)),
+        _ => None,
+    }
+}
+
+pub fn spawned_pid(fixture: &Fixture) -> i32 {
+    fixture
+        .events()
+        .iter()
+        .find_map(|event| find_number(event, "pid"))
+        .and_then(|pid| i32::try_from(pid).ok())
+        .expect("job pid in transcript")
+}
+
+pub fn event_types(events: &[Value]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| event.get("type").and_then(Value::as_str))
+        .collect()
+}
+
+pub fn transcript_text(events: &[Value]) -> String {
+    events
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
