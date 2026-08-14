@@ -20,8 +20,8 @@ struct RoundOpts<'a> {
 
 impl Agent {
     /// Seeds a fresh `[User]` history and drives [`Self::run_once`] in a loop.
-    /// The system prompt is pinned on the durable transcript by the lifecycle
-    /// before the first call here, so the engine never materializes it inline.
+    /// The configured system prompt is added to each provider request when the
+    /// caller-owned history does not already contain one.
     /// If the receiver is dropped (the channel closes), the run exits gracefully.
     /// # Errors
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
@@ -527,6 +527,29 @@ impl Agent {
         .await
     }
 
+    fn request_messages(&self, messages: &[Message]) -> Option<Vec<Message>> {
+        if self.system_prompt.is_empty()
+            || messages.iter().any(|message| {
+                message.role == Role::System
+                    && message.blocks.iter().any(
+                        |block| matches!(block, ContentBlock::Text { text } if !text.is_empty()),
+                    )
+            })
+        {
+            return None;
+        }
+        let mut request = Vec::with_capacity(messages.len() + 1);
+        request.push(Message {
+            role: Role::System,
+            blocks: vec![ContentBlock::Text {
+                text: self.system_prompt.clone(),
+            }],
+            kind: lofi_types::PromptKind::default(),
+        });
+        request.extend_from_slice(messages);
+        Some(request)
+    }
+
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
@@ -596,7 +619,9 @@ impl Agent {
                 None
             }
         };
-        let send_messages: &Vec<Message> = stripped.as_ref().unwrap_or(messages);
+        let visible_messages = stripped.as_deref().unwrap_or(messages);
+        let with_system = self.request_messages(visible_messages);
+        let send_messages = with_system.as_deref().unwrap_or(visible_messages);
         // Send-time byte guard: the provider caps the request body, not just
         // the token count, so an image-heavy history can be rejected (HTTP
         // 413) while the token-threshold compaction never trips. Stop before
