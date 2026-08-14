@@ -20,8 +20,8 @@ struct RoundOpts<'a> {
 
 impl Agent {
     /// Seeds a fresh `[User]` history and drives [`Self::run_once`] in a loop.
-    /// The system prompt is pinned on the durable transcript by the lifecycle
-    /// before the first call here, so the engine never materializes it inline.
+    /// The configured system prompt is added to each provider request when the
+    /// caller-owned history does not already contain one.
     /// If the receiver is dropped (the channel closes), the run exits gracefully.
     /// # Errors
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
@@ -527,6 +527,29 @@ impl Agent {
         .await
     }
 
+    fn request_messages(&self, messages: &[Message]) -> Option<Vec<Message>> {
+        if self.system_prompt.is_empty()
+            || messages.iter().any(|message| {
+                message.role == Role::System
+                    && message.blocks.iter().any(
+                        |block| matches!(block, ContentBlock::Text { text } if !text.is_empty()),
+                    )
+            })
+        {
+            return None;
+        }
+        let mut request = Vec::with_capacity(messages.len() + 1);
+        request.push(Message {
+            role: Role::System,
+            blocks: vec![ContentBlock::Text {
+                text: self.system_prompt.clone(),
+            }],
+            kind: lofi_types::PromptKind::default(),
+        });
+        request.extend_from_slice(messages);
+        Some(request)
+    }
+
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
@@ -596,7 +619,9 @@ impl Agent {
                 None
             }
         };
-        let send_messages: &Vec<Message> = stripped.as_ref().unwrap_or(messages);
+        let visible_messages = stripped.as_deref().unwrap_or(messages);
+        let with_system = self.request_messages(visible_messages);
+        let send_messages = with_system.as_deref().unwrap_or(visible_messages);
         // Send-time byte guard: the provider caps the request body, not just
         // the token count, so an image-heavy history can be rejected (HTTP
         // 413) while the token-threshold compaction never trips. Stop before
@@ -1121,11 +1146,15 @@ impl Agent {
             let (content, is_error, result_images) = match outcome {
                 Ok(r) => {
                     let mut value = r.value;
-                    let img = upgrade_tagged_image(&mut value);
-                    let payload = serde_json::json!({ "value": value, "logs": r.logs });
-                    let content =
-                        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-                    (cap_exec_result(&content), false, img)
+                    match upgrade_tagged_image(&mut value, &self.image) {
+                        Ok(img) => {
+                            let payload = serde_json::json!({ "value": value, "logs": r.logs });
+                            let content = serde_json::to_string(&payload)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            (cap_exec_result(&content), false, img)
+                        }
+                        Err(error) => (cap_exec_result(&error.to_string()), true, None),
+                    }
                 }
                 Err(e) => (cap_exec_result(&e.to_string()), true, None),
             };
@@ -1331,27 +1360,35 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
 /// [`lofi_types::ToolResultImage`] carried on that result block. `lofi.read`
 /// returns `{type:"image", media_type, data_b64}` when it reads an image file
 /// (the sandbox boundary is JSON, so bytes cannot cross directly). On a match
-/// the base64 is decoded into `bytes` and the `data_b64` field is replaced with
-/// a compact `bytes` count, so the durable transcript keeps a small marker
-/// while the decoded image rides the `ToolResult` for same-round vision.
-/// Returns `None` (and leaves `value` untouched) for any non-image payload.
-fn upgrade_tagged_image(value: &mut serde_json::Value) -> Option<lofi_types::ToolResultImage> {
+/// the base64 is decoded and normalized with the configured image limits.
+/// The `data_b64` field is replaced with a compact byte count, so the durable
+/// transcript keeps a small marker while the image rides the `ToolResult` for
+/// same-round vision. Non-image payloads are left unchanged.
+fn upgrade_tagged_image(
+    value: &mut serde_json::Value,
+    config: &lofi_types::ImageConfig,
+) -> Result<Option<lofi_types::ToolResultImage>> {
     use base64::Engine as _;
-    let obj = value.as_object()?;
-    if obj.get("type")?.as_str()? != "image" {
-        return None;
+    let Some(obj) = value.as_object() else {
+        return Ok(None);
+    };
+    if obj.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+        return Ok(None);
     }
-    let media_type = obj.get("media_type")?.as_str()?.to_string();
-    let data_b64 = obj.get("data_b64")?.as_str()?;
-    let bytes = base64::engine::general_purpose::STANDARD
+    let data_b64 = obj
+        .get("data_b64")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Error::Tool("image result has no data_b64".to_string()))?;
+    let source = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
-        .ok()?;
-    let byte_len = bytes.len();
+        .map_err(|error| Error::Tool(format!("decode image result: {error}")))?;
+    let (bytes, media_type) = crate::image::normalize(&source, config)?;
     if let Some(obj) = value.as_object_mut() {
         obj.remove("data_b64");
-        obj.insert("bytes".to_string(), serde_json::json!(byte_len));
+        obj.insert("bytes".to_string(), serde_json::json!(bytes.len()));
+        obj.insert("media_type".to_string(), serde_json::json!(&media_type));
     }
-    Some(lofi_types::ToolResultImage { bytes, media_type })
+    Ok(Some(lofi_types::ToolResultImage { bytes, media_type }))
 }
 
 /// Request image payload budget (base64 bytes). Providers cap the request
@@ -1512,35 +1549,49 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_tagged_image_decodes_and_strips_base64() {
-        let raw = vec![1u8, 2, 3, 4, 5];
-        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+    fn upgrade_tagged_image_normalizes_and_strips_base64() {
+        const TINY_PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(TINY_PNG);
         let mut value = serde_json::json!({
-            "ok": true,
             "type": "image",
             "media_type": "image/png",
             "data_b64": data_b64,
         });
-        let img = upgrade_tagged_image(&mut value).unwrap();
-        assert_eq!(img.bytes, raw);
-        assert_eq!(img.media_type, "image/png");
-        // The heavyweight base64 is gone; a compact byte count remains.
+
+        let img = upgrade_tagged_image(&mut value, &lofi_types::ImageConfig::default())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(img.media_type, "image/jpeg");
+        assert!(!img.bytes.is_empty());
         assert!(value.get("data_b64").is_none());
-        assert_eq!(value["bytes"], serde_json::json!(5));
+        assert_eq!(value["bytes"], serde_json::json!(img.bytes.len()));
+        assert_eq!(value["media_type"], serde_json::json!("image/jpeg"));
     }
 
     #[test]
     fn upgrade_tagged_image_ignores_non_image_payloads() {
+        let config = lofi_types::ImageConfig::default();
         let mut text = serde_json::json!({"ok": true, "content": "hi"});
-        assert!(upgrade_tagged_image(&mut text).is_none());
+        assert!(upgrade_tagged_image(&mut text, &config).unwrap().is_none());
         assert_eq!(text["content"], serde_json::json!("hi"));
-        // Wrong type tag.
+
         let mut other = serde_json::json!({"type": "text", "data_b64": "AAAA"});
-        assert!(upgrade_tagged_image(&mut other).is_none());
-        // Bad base64 must not produce a block.
+        assert!(upgrade_tagged_image(&mut other, &config).unwrap().is_none());
+    }
+
+    #[test]
+    fn upgrade_tagged_image_rejects_invalid_image_data() {
         let mut bad =
             serde_json::json!({"type": "image", "media_type": "image/png", "data_b64": "!!!"});
-        assert!(upgrade_tagged_image(&mut bad).is_none());
+
+        assert!(upgrade_tagged_image(&mut bad, &lofi_types::ImageConfig::default()).is_err());
     }
 
     #[test]
