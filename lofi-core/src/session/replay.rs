@@ -529,14 +529,33 @@ pub fn outstanding_job_ids_at(
     cursor: &SessionCursor,
     index: &[EventIndex],
 ) -> lofi_error::Result<Vec<u64>> {
+    Ok(job_lifecycle_ids_at(cursor, index)?.outstanding)
+}
+
+pub(crate) struct JobLifecycleIds {
+    pub started: Vec<u64>,
+    pub outstanding: Vec<u64>,
+}
+
+pub(crate) fn job_lifecycle_ids_at(
+    cursor: &SessionCursor,
+    index: &[EventIndex],
+) -> lofi_error::Result<JobLifecycleIds> {
     let mut started: Vec<u64> = Vec::new();
     let mut finished: HashSet<u64> = HashSet::new();
     for entry in index.iter().filter(|e| e.kind == IndexKind::JobLifecycle) {
         let ev = cursor.event_at(entry.offset)?;
         track_lifecycle(&ev.kind, &mut started, &mut finished);
     }
-    started.retain(|id| !finished.contains(id));
-    Ok(started)
+    let outstanding = started
+        .iter()
+        .copied()
+        .filter(|id| !finished.contains(id))
+        .collect();
+    Ok(JobLifecycleIds {
+        started,
+        outstanding,
+    })
 }
 
 fn track_lifecycle(kind: &SessionEventKind, started: &mut Vec<u64>, finished: &mut HashSet<u64>) {
