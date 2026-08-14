@@ -49,6 +49,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
+use crossterm::style::{Attribute, ResetColor, SetAttribute};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -1068,6 +1069,8 @@ impl Drop for TerminalGuard {
             DisableBracketedPaste,
             DisableFocusChange,
             DisableMouseCapture,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             LeaveAlternateScreen
         );
         tty_events::set_reports_enabled(false);
@@ -1104,20 +1107,33 @@ pub(crate) async fn run(
             DisableBracketedPaste,
             DisableFocusChange,
             DisableMouseCapture,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             LeaveAlternateScreen
         );
         tty_events::set_reports_enabled(false);
         default_hook(info);
     }));
     enable_raw_mode().map_err(Error::Io)?;
-    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
-    // (see terminal_bg module doc for why).
-    let theme = Theme::resolve(ui_theme);
+    let mut events = tty_events::TtyEvents::start();
+    let theme = match ui_theme {
+        lofi_types::ThemeMode::Light => Theme::light(),
+        lofi_types::ThemeMode::Dark => Theme::dark(),
+        lofi_types::ThemeMode::Auto => {
+            tty_events::request_background();
+            events
+                .wait_for_background(Duration::from_millis(500))
+                .await
+                .map_or_else(Theme::terminal, Theme::from_background)
+        }
+    };
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
             stdout,
             EnterAlternateScreen,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             EnableMouseCapture,
             EnableFocusChange,
             EnableBracketedPaste
@@ -1133,6 +1149,8 @@ pub(crate) async fn run(
                 DisableBracketedPaste,
                 DisableFocusChange,
                 DisableMouseCapture,
+                SetAttribute(Attribute::Reset),
+                ResetColor,
                 LeaveAlternateScreen
             );
             let _ = disable_raw_mode();
@@ -1147,6 +1165,7 @@ pub(crate) async fn run(
             // `run_loop` exceeds clippy's large_futures stack limit.
             Box::pin(run_loop(
                 &mut guard,
+                &mut events,
                 agent,
                 theme,
                 ui_theme,
@@ -1170,6 +1189,7 @@ pub(crate) async fn run(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_loop(
     guard: &mut TerminalGuard,
+    events: &mut tty_events::TtyEvents,
     mut agent: Option<Agent>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
@@ -1275,11 +1295,7 @@ async fn run_loop(
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
     let mut current_run: Option<RunHandle> = None;
-    let mut events = tty_events::TtyEvents::start();
     app.sync_color_scheme_reports();
-    if app.theme_mode == lofi_types::ThemeMode::Auto {
-        tty_events::request_color_scheme();
-    }
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
             .map_err(Error::Io)?;
@@ -1430,9 +1446,15 @@ async fn run_loop(
             maybe_ev = events.recv() => {
                 let defer_redraw;
                 match maybe_ev {
-                    Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
+                    Some(Ok(tty_events::TuiEvent::ColorSchemeChanged)) => {
                         defer_redraw = false;
-                        if app.apply_color_scheme(scheme) {
+                        if app.theme_mode == lofi_types::ThemeMode::Auto {
+                            tty_events::request_background();
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Background(rgb))) => {
+                        defer_redraw = false;
+                        if app.apply_background(rgb) {
                             dirty = true;
                         }
                     }
