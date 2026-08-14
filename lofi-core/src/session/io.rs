@@ -9,7 +9,7 @@
 //!
 //! The worker additionally owns a registry of in-flight /tree snapshots.
 //! Tree picking allocates a multi-MB `Vec<EventIndex>` plus parent/child
-//! HashMaps on whichever thread builds them; if those allocations are freed
+//! `HashMaps` on whichever thread builds them; if those allocations are freed
 //! on a different thread (e.g. the UI dropping `Arc<Vec<EventIndex>>` after
 //! the picker closes), glibc returns the pages to the *allocating* thread's
 //! arena where they sit idle until that thread allocates again. Pinning the

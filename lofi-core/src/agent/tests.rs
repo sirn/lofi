@@ -427,15 +427,14 @@ async fn settled_messages_remain_on_disk_after_consumer_drops() {
                 _ => {}
             },
             result = run.as_mut(), if !run_done => {
-                result.expect("run should succeed");
+                result.unwrap();
                 run_done = true;
             }
         }
     }
     drop(rx);
     if !run_done {
-        run.await
-            .expect("run should finish after the consumer drops");
+        run.await.unwrap();
     }
 
     let events = cursor.load_tree_events().unwrap();
@@ -501,9 +500,9 @@ async fn completed_final_round_is_on_disk_before_turn_end() {
     loop {
         let event = tokio::select! {
             biased;
-            event = rx.recv() => event.expect("run event channel closed"),
+            event = rx.recv() => event.unwrap(),
             result = run.as_mut(), if !run_done => {
-                result.expect("run should succeed");
+                result.unwrap();
                 run_done = true;
                 continue;
             }
