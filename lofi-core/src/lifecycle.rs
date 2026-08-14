@@ -42,6 +42,12 @@ pub struct HistoryStats {
     pub estimated_retained_bytes: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageJobReconciliation {
+    pub killed: Vec<u64>,
+    pub stale: Vec<u64>,
+}
+
 impl AgentLifecycle {
     #[must_use]
     pub fn new(compaction: CompactionConfig, context_window: u64) -> Self {
@@ -143,6 +149,37 @@ impl AgentLifecycle {
         self.replace_history(messages)?;
         self.reset_compaction_policy();
         Ok(())
+    }
+
+    /// Reconcile session-owned jobs after a branch switch has been loaded.
+    /// Jobs acquired on another lineage are cancelled and removed. Started
+    /// jobs that belong to this lineage but no longer have a live process are
+    /// reported as stale for the frontend to present.
+    ///
+    /// # Errors
+    /// Propagates lifecycle-marker reads. No jobs are changed if those reads
+    /// fail.
+    pub fn reconcile_jobs_after_lineage_switch(
+        &self,
+        cursor: &SessionCursor,
+        index: &[EventIndex],
+        jobs: &lofi_code::tools::JobRegistry,
+    ) -> Result<LineageJobReconciliation> {
+        let lineage = crate::session::replay::job_lifecycle_ids_at(cursor, index)?;
+        tracing::info!(
+            target: "lofi::reconcile",
+            spawn_ids = ?lineage.started,
+            live = ?jobs.live_ids(),
+            "reconcile"
+        );
+        let killed = jobs.kill_not_in(&lineage.started);
+        let live = jobs.live_ids();
+        let stale = lineage
+            .outstanding
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .collect();
+        Ok(LineageJobReconciliation { killed, stale })
     }
 
     /// # Errors

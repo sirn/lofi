@@ -388,9 +388,6 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 
     let intr = install_cpu_guard(&rt, opts.timeout, opts.cancel.clone()).await;
 
-    // Terminal transitions fire on the shared registry so a finish outlives
-    // the per-exec bundle's drop; spawns go through the per-exec BuiltinTools.
-    ctx.jobs.set_on_finished(ctx.on_job_finished.clone());
     let tools = Arc::new(
         BuiltinTools::with_skills_dir(
             ctx.root.clone(),
@@ -405,7 +402,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         .with_cancel(opts.cancel.clone())
         .with_truncate(ctx.truncate)
         .with_jobs(ctx.jobs.clone())
-        .with_on_job_started(ctx.on_job_started.clone()),
+        .with_on_job_started(ctx.on_job_started.clone())
+        .with_on_job_finished(ctx.on_job_finished.clone()),
     );
     let strings = ctx.strings.clone();
     let recall = ctx.recall.clone();

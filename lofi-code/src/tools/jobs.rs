@@ -152,6 +152,9 @@ struct JobHandle {
     done: Notify,
     /// Set by `jobKill`; the driver task polls it between `try_wait`s.
     cancel: std::sync::atomic::AtomicBool,
+    /// Completion belongs to the exec that acquired this job. Retaining the
+    /// hook here prevents a later exec from replacing its transcript owner.
+    on_finished: Mutex<Option<crate::JobFinishedFn>>,
 }
 
 struct Inner {
@@ -169,7 +172,6 @@ struct Inner {
     /// test drives the registry headless. `subscribe_notices` flushes this
     /// buffer through the newly added subscriber.
     pending: Mutex<Vec<String>>,
-    on_finished: Mutex<Option<crate::JobFinishedFn>>,
 }
 
 /// Per-session registry of background jobs. Cheap to clone; every clone
@@ -200,7 +202,6 @@ impl JobRegistry {
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(Vec::new()),
-                on_finished: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -296,17 +297,6 @@ impl JobRegistry {
             .count()
     }
 
-    /// Installs the terminal-transition hook; called exactly once per job
-    /// when the driver records a terminal state. `None` un-installs.
-    pub fn set_on_finished(&self, hook: Option<crate::JobFinishedFn>) {
-        let mut slot = self
-            .inner
-            .on_finished
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = hook;
-    }
-
     /// Ids of jobs currently registered, regardless of state.
     #[must_use]
     pub fn live_ids(&self) -> std::collections::HashSet<u64> {
@@ -334,6 +324,14 @@ impl JobRegistry {
                 continue;
             }
             if let Some(handle) = self.get(id) {
+                // This resource no longer belongs to the selected lineage.
+                // Do not let its asynchronous driver append a release marker
+                // to the branch that replaced it.
+                handle
+                    .on_finished
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
                 handle
                     .data
                     .lock()
@@ -566,6 +564,7 @@ impl BuiltinTools {
             }),
             done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
+            on_finished: Mutex::new(self.on_job_finished.clone()),
         });
         self.jobs
             .inner
@@ -574,10 +573,12 @@ impl BuiltinTools {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, handle.clone());
 
-        tokio::spawn(run_job(self.jobs.clone(), handle, child, timeout_ms));
         if let Some(hook) = &self.on_job_started {
             hook(id);
         }
+        // Start the driver only after the acquisition marker is published, so
+        // even an immediately exiting child cannot finish first.
+        tokio::spawn(run_job(self.jobs.clone(), handle, child, timeout_ms));
 
         Ok(json!({
             "ok": true,
@@ -855,12 +856,11 @@ async fn run_job(
         }
     };
     handle.done.notify_waiters();
-    let hook = jobs
-        .inner
+    let hook = handle
         .on_finished
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+        .take();
     if let Some(hook) = hook {
         let id = handle
             .data
@@ -997,6 +997,7 @@ mod tests {
             }),
             done: Notify::new(),
             cancel: AtomicBool::new(false),
+            on_finished: Mutex::new(None),
         })
     }
 

@@ -64,6 +64,7 @@ pub struct BuiltinTools {
     /// shutdown kills survivors; dropping the last clone is the fallback.
     jobs: JobRegistry,
     on_job_started: Option<crate::JobStartedFn>,
+    on_job_finished: Option<crate::JobFinishedFn>,
     /// Visible-output caps for tool results (file reads and bash output).
     truncate: truncate::TruncatedCap,
 }
@@ -124,6 +125,7 @@ impl BuiltinTools {
             cancel: None,
             jobs: JobRegistry::new(),
             on_job_started: None,
+            on_job_finished: None,
             truncate: truncate::TruncatedCap::default(),
         }
     }
@@ -150,6 +152,12 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_on_job_started(mut self, hook: Option<crate::JobStartedFn>) -> Self {
         self.on_job_started = hook;
+        self
+    }
+
+    #[must_use]
+    pub fn with_on_job_finished(mut self, hook: Option<crate::JobFinishedFn>) -> Self {
+        self.on_job_finished = hook;
         self
     }
 
