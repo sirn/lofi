@@ -1277,9 +1277,8 @@ async fn run_loop(
     let mut current_run: Option<RunHandle> = None;
     let mut events = tty_events::TtyEvents::start();
     app.sync_color_scheme_reports();
-    if app.theme_mode == lofi_types::ThemeMode::Auto {
-        tty_events::request_color_scheme();
-    }
+    // The startup OSC 11 probe already resolved the initial palette. Mode
+    // 2031 reports now only tell us when to query that background again.
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
             .map_err(Error::Io)?;
@@ -1430,9 +1429,15 @@ async fn run_loop(
             maybe_ev = events.recv() => {
                 let defer_redraw;
                 match maybe_ev {
-                    Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
+                    Some(Ok(tty_events::TuiEvent::ColorSchemeChanged)) => {
                         defer_redraw = false;
-                        if app.apply_color_scheme(scheme) {
+                        if app.theme_mode == lofi_types::ThemeMode::Auto {
+                            tty_events::request_background();
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Background(rgb))) => {
+                        defer_redraw = false;
+                        if app.apply_background(rgb) {
                             dirty = true;
                         }
                     }

@@ -39,9 +39,7 @@ impl Rgb {
 /// Query the terminal's background colour. `timeout` bounds how long we
 /// wait for a reply. Timeout or I/O error returns `None`.
 pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
-    let mut stdout = io::stdout();
-    stdout.write_all(b"\x1b]11;?\x07").ok()?;
-    stdout.flush().ok()?;
+    request_background().ok()?;
 
     // `EventStream`'s wake thread also reads stdin; drop any live stream first.
     let stdin = io::stdin();
@@ -87,12 +85,19 @@ pub(crate) fn query_background(timeout: Duration) -> Option<Rgb> {
     parse_osc11(&buf[..n])
 }
 
+/// Ask the terminal to report its current background colour.
+pub(crate) fn request_background() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x1b]11;?\x07")?;
+    stdout.flush()
+}
+
 /// Parse an OSC 11 response. The terminal replies with the literal
 /// `ESC]11;rgb:RR/GG/BB<terminator>`; each component is 1–4 hex digits.
 /// Short (1-digit) components are scaled by replication, per `XParseColor`.
-fn parse_osc11(buf: &[u8]) -> Option<Rgb> {
+pub(crate) fn parse_osc11(buf: &[u8]) -> Option<Rgb> {
     let mut i = 0;
-    while i + 7 < buf.len() {
+    while i + 8 < buf.len() {
         if buf[i] == 0x1b
             && buf[i + 1] == b']'
             && buf[i + 2] == b'1'
