@@ -1,0 +1,7 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+mod agent;
+mod cli;
+mod sessions;
+mod support;
+mod tui;
