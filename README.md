@@ -41,7 +41,6 @@ Model-generated shell commands run on the host through `sh -c`; QuickJS isolatio
 | `Enter` | Submit the input box as a prompt. |
 | `Ctrl+C` | Cancel the in-flight run. |
 | `Ctrl+D` | Quit. |
-| `q` | Quit (only when the input box is empty and no run is active). |
 | `Esc` | Clear the input box. |
 | `Up` / `Down` | Scroll the message log. |
 
