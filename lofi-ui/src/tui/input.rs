@@ -28,14 +28,7 @@ pub(super) fn handle_event(
     if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return;
     }
-    if app.handle_info_key(k) {
-        return;
-    }
-    if app.handle_modal_key(k) {
-        return;
-    }
-
-    if app.handle_confirm_key(k) {
+    if app.handle_modal_stack_key(k) {
         return;
     }
 
@@ -410,8 +403,16 @@ pub(super) fn spawn_user_bash(
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_run = Arc::clone(&cancel);
     let handle = tokio::task::spawn_local(async move {
-        let event = match Box::pin(lofi_core::run_user_bash(&cwd, command_for_run.clone())).await {
+        let event = match Box::pin(lofi_core::run_user_bash(
+            &cwd,
+            command_for_run.clone(),
+            cancel_for_run,
+        ))
+        .await
+        {
             Ok(result) => AgentEvent::UserBash {
                 command: result.command,
                 output: result.output,
@@ -440,7 +441,7 @@ pub(super) fn spawn_user_bash(
         current_run,
         handle,
         rx,
-        Arc::new(AtomicBool::new(false)),
+        cancel,
         Arc::new(AtomicBool::new(false)),
         Some((command, exclude_from_context)),
     );
