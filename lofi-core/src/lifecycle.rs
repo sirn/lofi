@@ -42,6 +42,12 @@ pub struct HistoryStats {
     pub estimated_retained_bytes: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageJobReconciliation {
+    pub killed: Vec<u64>,
+    pub stale: Vec<u64>,
+}
+
 impl AgentLifecycle {
     #[must_use]
     pub fn new(compaction: CompactionConfig, context_window: u64) -> Self {
@@ -143,6 +149,37 @@ impl AgentLifecycle {
         self.replace_history(messages)?;
         self.reset_compaction_policy();
         Ok(())
+    }
+
+    /// Reconcile session-owned jobs after a branch switch has been loaded.
+    /// Jobs acquired on another lineage are cancelled and removed. Started
+    /// jobs that belong to this lineage but no longer have a live process are
+    /// reported as stale for the frontend to present.
+    ///
+    /// # Errors
+    /// Propagates lifecycle-marker reads. No jobs are changed if those reads
+    /// fail.
+    pub fn reconcile_jobs_after_lineage_switch(
+        &self,
+        cursor: &SessionCursor,
+        index: &[EventIndex],
+        jobs: &lofi_code::tools::JobRegistry,
+    ) -> Result<LineageJobReconciliation> {
+        let lineage = crate::session::replay::job_lifecycle_ids_at(cursor, index)?;
+        tracing::info!(
+            target: "lofi::reconcile",
+            spawn_ids = ?lineage.started,
+            live = ?jobs.live_ids(),
+            "reconcile"
+        );
+        let killed = jobs.kill_not_in(&lineage.started);
+        let live = jobs.live_ids();
+        let stale = lineage
+            .outstanding
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .collect();
+        Ok(LineageJobReconciliation { killed, stale })
     }
 
     /// # Errors
@@ -574,6 +611,54 @@ mod tests {
             "a history carrying a resume/turn is not a birth point"
         );
         assert_eq!(lifecycle.history_stats().messages, 1);
+    }
+
+    #[test]
+    fn job_release_does_not_attach_after_owner_branch_is_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let root = cursor.leaf_id();
+        let owner = cursor.record_job_started(42).unwrap();
+
+        cursor.restore_branch(root).unwrap();
+        cursor.record_job_finished(&owner, 42).unwrap();
+
+        let snapshot = cursor.snapshot().unwrap();
+        let lineage =
+            crate::session::replay::job_lifecycle_ids_at(&cursor, &snapshot.index).unwrap();
+        assert!(lineage.started.is_empty());
+        assert!(lineage.outstanding.is_empty());
+    }
+
+    #[test]
+    fn lineage_job_reconciliation_reports_only_outstanding_missing_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let mut started = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobStarted { job_id: 42 },
+        }];
+        cursor.append_events(&mut started).unwrap();
+        let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+        let jobs = lofi_code::tools::JobRegistry::new();
+
+        let snapshot = cursor.snapshot().unwrap();
+        let reconciliation = lifecycle
+            .reconcile_jobs_after_lineage_switch(&cursor, &snapshot.index, &jobs)
+            .unwrap();
+        assert!(reconciliation.killed.is_empty());
+        assert_eq!(reconciliation.stale, vec![42]);
+
+        cursor.record_job_finished(&started[0].id, 42).unwrap();
+        let snapshot = cursor.snapshot().unwrap();
+        let reconciliation = lifecycle
+            .reconcile_jobs_after_lineage_switch(&cursor, &snapshot.index, &jobs)
+            .unwrap();
+        assert!(reconciliation.killed.is_empty());
+        assert!(reconciliation.stale.is_empty());
     }
 
     #[test]
