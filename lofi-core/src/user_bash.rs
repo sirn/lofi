@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use lofi_code::tools::PgrpKillGuard;
@@ -95,7 +97,11 @@ pub fn cancelled_user_bash(command: String, duration_ms: u64) -> UserBashResult 
 /// # Errors
 /// Returns an error if the shell cannot be spawned, its pipes are unavailable,
 /// or command output/status cannot be read.
-pub async fn run_user_bash(root: &Path, command_text: String) -> Result<UserBashResult> {
+pub async fn run_user_bash(
+    root: &Path,
+    command_text: String,
+    cancel: Arc<AtomicBool>,
+) -> Result<UserBashResult> {
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -115,11 +121,29 @@ pub async fn run_user_bash(root: &Path, command_text: String) -> Result<UserBash
         .stderr
         .take()
         .ok_or_else(|| Error::State("bash: stderr pipe unavailable".into()))?;
-    let (out, err, status) = tokio::try_join!(
-        read_tail(&mut stdout, CAPTURE_TAIL_BYTES),
-        read_tail(&mut stderr, CAPTURE_TAIL_BYTES),
-        child.wait(),
-    )?;
+    let cancelled = async {
+        while !cancel.load(Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let completed = async {
+        tokio::try_join!(
+            read_tail(&mut stdout, CAPTURE_TAIL_BYTES),
+            read_tail(&mut stderr, CAPTURE_TAIL_BYTES),
+            child.wait(),
+        )
+    };
+    let (out, err, status) = tokio::select! {
+        result = completed => result?,
+        () = cancelled => {
+            drop(guard);
+            let _ = child.wait().await;
+            return Ok(cancelled_user_bash(
+                command_text,
+                started.elapsed().as_millis() as u64,
+            ));
+        }
+    };
     guard.disarm();
 
     let mut bytes = out.0;
@@ -216,7 +240,12 @@ mod tests {
     #[tokio::test]
     async fn runs_in_root_and_formats_context() -> Result<()> {
         let dir = tempfile::tempdir().map_err(Error::Io)?;
-        let result = Box::pin(run_user_bash(dir.path(), "printf 'ok'; pwd".into())).await?;
+        let result = Box::pin(run_user_bash(
+            dir.path(),
+            "printf 'ok'; pwd".into(),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .await?;
         assert_eq!(result.exit_code, Some(0));
         assert!(result.output.starts_with("ok"));
         assert!(result
