@@ -1,7 +1,5 @@
-//! Image attachment processing: decode, downscale, and re-encode an attached
-//! image so the base64 payload that lands in the context window and the
-//! durable transcript stays bounded: downscale to fit a bounding box, then
-//! sweep JPEG quality down until the encoded payload fits a byte cap.
+//! Image processing for model context. Decode, downscale, and re-encode an
+//! image so the provider payload stays bounded.
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView};
@@ -18,7 +16,7 @@ const QUALITY_START: u8 = 90;
 const QUALITY_MIN: u8 = 40;
 const QUALITY_STEP: u8 = 10;
 
-/// Normalize an attached image: decode `bytes`, downscale to fit
+/// Normalize an image: decode `bytes`, downscale to fit
 /// `cfg.max_width`×`cfg.max_height` (preserving aspect ratio), and re-encode
 /// as JPEG no larger than `cfg.max_bytes`. Returns the JPEG bytes and
 /// [`OUTPUT_MEDIA_TYPE`].

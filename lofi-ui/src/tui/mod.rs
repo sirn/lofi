@@ -857,15 +857,6 @@ pub(crate) struct App {
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,
     slash_complete: Option<SlashComplete>,
-    /// Image attach limits from config (`[image]`), applied on paste-to-attach.
-    image_config: lofi_types::ImageConfig,
-    /// Whether the active model accepts image input. Updated on `/model`
-    /// switch so paste-to-attach can refuse up front instead of relying
-    /// solely on the engine's send-time omission.
-    model_supports_image: bool,
-    /// Attachments staged by paste-to-attach for the next submitted prompt.
-    /// A run consumes them on the next submitted prompt.
-    pending_attachments: Vec<lofi_types::ContentBlock>,
     no_models_hint: Option<String>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
@@ -1088,8 +1079,6 @@ pub(crate) async fn run(
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
-    image_config: lofi_types::ImageConfig,
-    model_supports_image: bool,
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
@@ -1156,8 +1145,6 @@ pub(crate) async fn run(
                 no_models_hint,
                 ctx_limit,
                 compaction,
-                image_config,
-                model_supports_image,
                 switcher,
                 system_prompt,
             ))
@@ -1179,8 +1166,6 @@ async fn run_loop(
     no_models_hint: Option<String>,
     ctx_limit: u64,
     compaction: lofi_types::CompactionConfig,
-    image_config: lofi_types::ImageConfig,
-    model_supports_image: bool,
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
@@ -1194,15 +1179,7 @@ async fn run_loop(
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
-    let mut app = App::new(
-        model_label,
-        thinking,
-        ctx_limit,
-        compaction,
-        system_prompt,
-        image_config,
-        model_supports_image,
-    );
+    let mut app = App::new(model_label, thinking, ctx_limit, compaction, system_prompt);
     app.theme = theme;
     app.theme_mode = theme_mode;
     app.model_choices = model_choices;

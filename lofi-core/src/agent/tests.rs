@@ -135,6 +135,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
+        image: lofi_types::ImageConfig::default(),
     }
 }
 
@@ -737,6 +738,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
+        image: lofi_types::ImageConfig::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -803,6 +805,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
+        image: lofi_types::ImageConfig::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
