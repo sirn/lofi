@@ -20,7 +20,7 @@ pub use agent::{
     Agent, AgentEvent, ConfirmRequest,
 };
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
-pub use lifecycle::{AgentLifecycle, HardCompactOutcome};
+pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};
 pub use lofi_code::compact_hook::CodeCompactionHook;
 pub use lofi_code::tools::{JobInfo, JobRegistry};
 pub use lofi_code::ConfirmReason;
