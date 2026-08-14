@@ -140,7 +140,7 @@ impl App {
                 self.toggle_debug();
                 true
             }
-            "/recall" => {
+            _ if cmd == "/recall" || cmd.starts_with("/recall ") => {
                 self.recall_now(cmd);
                 true
             }
@@ -385,6 +385,9 @@ impl App {
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
+        if let Some(sink) = self.session.sink.as_mut() {
+            sink.clear_cursor();
+        }
         self.session.cursor = None;
         self.pinned = true;
         self.top_line = 0;

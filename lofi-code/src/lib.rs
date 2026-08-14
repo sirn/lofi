@@ -32,6 +32,7 @@ pub mod compact_hook;
 mod convert;
 pub mod docs;
 pub mod policy;
+mod skill_metadata;
 use convert::{js_to_json, json_to_js};
 
 mod bind;
