@@ -202,7 +202,6 @@ pub(super) fn handle_event(
                 app.delete_forward_char();
             }
         }
-
         KeyCode::Char(c)
             if !k
                 .modifiers
