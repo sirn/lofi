@@ -227,20 +227,12 @@ fn validate_skill_name(name: &str) -> Result<()> {
 
 fn read_description(path: &Path) -> Option<String> {
     let content = read_bounded(path, MAX_SKILL_FILE_BYTES).ok()?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') || trimmed == "---" {
-            continue;
-        }
-        return Some(trimmed.to_string());
-    }
-    path.parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .map(std::string::ToString::to_string)
+    crate::skill_metadata::description(&content).or_else(|| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(std::string::ToString::to_string)
+    })
 }
 
 /// Read a file up to `max` bytes as a UTF-8 string, returning an error when
