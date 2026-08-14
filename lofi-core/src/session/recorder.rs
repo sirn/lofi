@@ -52,9 +52,6 @@ pub enum SessionRecord<'a> {
         result: &'a UserBashResult,
         exclude_from_context: bool,
     },
-    JobFinished {
-        job_id: u64,
-    },
     Compaction {
         kept_messages: &'a [Message],
         summary: &'a str,
@@ -72,11 +69,36 @@ pub struct TurnBatch<'a> {
     native_tools: &'a [NativeToolRecord],
     tool_elapsed: Vec<(&'a String, &'a u64)>,
     thinking_elapsed: &'a [u64],
-    extra: Vec<SessionEventKind>,
     terminal: Option<SessionEventKind>,
 }
 
 impl store::SessionCursor {
+    /// Record a job acquisition and return its durable event id. The id owns
+    /// the corresponding release marker and remains stable across branch
+    /// switches.
+    pub(crate) fn record_job_started(&self, job_id: u64) -> Result<String> {
+        let mut events = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobStarted { job_id },
+        }];
+        self.append_events(&mut events)?;
+        Ok(events[0].id.clone())
+    }
+
+    /// Record a job release only if its acquisition is still on the selected
+    /// lineage. A job that finishes after a branch switch cannot attach its
+    /// release marker to the replacement branch.
+    pub(crate) fn record_job_finished(&self, owner_event_id: &str, job_id: u64) -> Result<()> {
+        let mut events = [SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::JobFinished { job_id },
+        }];
+        self.append_events_if_ancestor(owner_event_id, &mut events)?;
+        Ok(())
+    }
+
     /// Persist one [`SessionRecord`]. This is the only production write path.
     ///
     /// # Errors
@@ -101,14 +123,6 @@ impl store::SessionCursor {
                         cancelled: result.cancelled,
                         exclude_from_context,
                     },
-                }];
-                self.append_events(&mut events)
-            }
-            SessionRecord::JobFinished { job_id } => {
-                let mut events = [SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: SessionEventKind::JobFinished { job_id },
                 }];
                 self.append_events(&mut events)
             }
@@ -171,13 +185,6 @@ fn record_turn(cursor: &store::SessionCursor, batch: TurnBatch<'_>) -> Result<(u
                 kind: SessionEventKind::ThinkingTiming { elapsed_ms },
             }),
     );
-    for kind in batch.extra {
-        events.push(SessionEvent {
-            id: String::new(),
-            parent_id: None,
-            kind,
-        });
-    }
     if let Some(kind) = batch.terminal {
         events.push(SessionEvent {
             id: String::new(),
@@ -202,14 +209,6 @@ pub struct SessionRecorder {
     tool_timing_ids: HashSet<String>,
     byte_start: Option<u64>,
     byte_end: Option<u64>,
-    /// Job lifecycle events emitted by tool hooks mid-turn. Drained into
-    /// the next `append_pending` so the `JobStarted` `parent_id` chains off
-    /// the current turn's user message — not the cursor's pre-turn leaf —
-    /// keeping the lifecycle on the same lineage as the conversation that
-    /// spawned it. Without this, /tree rollback to before the turn would
-    /// leave the `JobStarted` event on the new lineage, so reconcile would
-    /// see the job as in-lineage and skip both kill and stale-notice.
-    pending_job_lifecycle: std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>>,
 }
 
 impl SessionRecorder {
@@ -225,16 +224,7 @@ impl SessionRecorder {
             tool_timing_ids: HashSet::new(),
             byte_start: None,
             byte_end: None,
-            pending_job_lifecycle: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
-    }
-
-    /// Handle for the tool-runtime hook that fires when a background job
-    /// starts or finishes. Pushes into the pending queue; the next
-    /// `append_pending` call drains it into the durable transcript.
-    #[must_use]
-    pub fn job_lifecycle_queue(&self) -> std::sync::Arc<std::sync::Mutex<Vec<SessionEventKind>>> {
-        std::sync::Arc::clone(&self.pending_job_lifecycle)
     }
 
     /// Append everything completed since the previous checkpoint, without a
@@ -319,19 +309,11 @@ impl SessionRecorder {
             .iter()
             .map(|(id, _)| (*id).clone())
             .collect();
-        let extra = {
-            let mut pending = self
-                .pending_job_lifecycle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending.drain(..).collect()
-        };
         let (start, end) = self.cursor.record(SessionRecord::Turn(TurnBatch {
             messages: new_messages,
             native_tools: new_native,
             tool_elapsed: new_tool_timings,
             thinking_elapsed: new_thinking,
-            extra,
             terminal,
         }))?;
         if end <= start {
@@ -755,9 +737,8 @@ mod tests {
                 exclude_from_context: false,
             })
             .unwrap();
-        cursor
-            .record(SessionRecord::JobFinished { job_id: 7 })
-            .unwrap();
+        let owner = cursor.record_job_started(7).unwrap();
+        cursor.record_job_finished(&owner, 7).unwrap();
         cursor
             .record(SessionRecord::Compaction {
                 kept_messages: &[user_msg("kept")],
@@ -781,7 +762,8 @@ mod tests {
                     Some("system")
                 }
                 SessionEventKind::UserBash { .. } => Some("bash"),
-                SessionEventKind::JobFinished { .. } => Some("job"),
+                SessionEventKind::JobStarted { .. } => Some("job-started"),
+                SessionEventKind::JobFinished { .. } => Some("job-finished"),
                 SessionEventKind::Message(message) if message.role == Role::User => Some("kept"),
                 SessionEventKind::Compaction { .. } => Some("compaction"),
                 _ => None,
@@ -789,7 +771,15 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["system", "bash", "job", "kept", "compaction", "system"]
+            [
+                "system",
+                "bash",
+                "job-started",
+                "job-finished",
+                "kept",
+                "compaction",
+                "system"
+            ]
         );
     }
 }

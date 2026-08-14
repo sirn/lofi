@@ -110,8 +110,10 @@ pub type RecallFn = Arc<
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 // Must not block: called synchronously from the sandbox / job driver.
-pub type JobStartedFn = Arc<dyn Fn(u64) + Send + Sync>;
 pub type JobFinishedFn = Arc<dyn Fn(u64) + Send + Sync>;
+/// Acquire lifecycle ownership for a spawned job. The returned release hook
+/// is retained by that job and called once when it reaches a terminal state.
+pub type JobStartedFn = Arc<dyn Fn(u64) -> Option<JobFinishedFn> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {
@@ -188,11 +190,9 @@ pub struct ExecCtx {
     /// agent.
     pub jobs: crate::tools::JobRegistry,
     /// Fired at successful `jobSpawn`. `None` keeps lifecycle in-memory
-    /// only (pre-session resume, tests, `--no-session`).
+    /// only (pre-session resume, tests, `--no-session`). The callback
+    /// returns the completion hook retained by that job.
     pub on_job_started: Option<crate::JobStartedFn>,
-    /// Fired once when a job reaches a terminal state. Same in-memory
-    /// fallback as `on_job_started`.
-    pub on_job_finished: Option<crate::JobFinishedFn>,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -388,9 +388,6 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
 
     let intr = install_cpu_guard(&rt, opts.timeout, opts.cancel.clone()).await;
 
-    // Terminal transitions fire on the shared registry so a finish outlives
-    // the per-exec bundle's drop; spawns go through the per-exec BuiltinTools.
-    ctx.jobs.set_on_finished(ctx.on_job_finished.clone());
     let tools = Arc::new(
         BuiltinTools::with_skills_dir(
             ctx.root.clone(),
@@ -636,7 +633,6 @@ mod tests {
             truncate: crate::tools::truncate::TruncatedCap::default(),
             jobs: crate::tools::JobRegistry::new(),
             on_job_started: None,
-            on_job_finished: None,
         }
     }
 
@@ -861,7 +857,6 @@ mod tests {
             truncate: crate::tools::truncate::TruncatedCap::default(),
             jobs: crate::tools::JobRegistry::new(),
             on_job_started: None,
-            on_job_finished: None,
         };
         let res = exec(
             "return lofi_strings.greeting;",

@@ -1019,15 +1019,8 @@ impl App {
         }));
     }
 
-    /// Confirm the hovered entry: roll the transcript back to the chosen
-    /// branch point, move the shared cursor so the next run chains off it, and
-    /// (for "edit and resend" entries) load the original prompt into the
-    /// input box. The visual rollback replaces the old "branch ready" badge —
-    /// the user sees the conversation up to the branch point immediately.
-    /// Roll the live-job registry back to match the freshly selected
-    /// lineage. Kills jobs whose spawn event is now off-lineage; flags
-    /// outstanding spawns that no longer have a live process so the model
-    /// learns the ids are stale.
+    /// Present the result of core-owned job reconciliation after the new
+    /// lineage has loaded successfully.
     fn reconcile_jobs_after_lineage_switch(
         &mut self,
         cursor: &store::SessionCursor,
@@ -1036,41 +1029,34 @@ impl App {
         let Some(jobs) = self.jobs.clone() else {
             return;
         };
-        let spawn_ids: Vec<u64> = index
-            .iter()
-            .filter(|e| e.kind == store::IndexKind::JobLifecycle)
-            .filter_map(|e| match cursor.event_at(e.offset).ok()?.kind {
-                lofi_types::SessionEventKind::JobStarted { job_id } => Some(job_id),
-                _ => None,
-            })
-            .collect();
-        tracing::info!(
-            target: "lofi::reconcile",
-            spawn_ids = ?spawn_ids,
-            live = ?jobs.live_ids(),
-            "reconcile"
-        );
-        let killed = jobs.kill_not_in(&spawn_ids);
-        if !killed.is_empty() {
-            let ids = killed
+        let reconciliation = match self
+            .lifecycle
+            .reconcile_jobs_after_lineage_switch(cursor, index, &jobs)
+        {
+            Ok(reconciliation) => reconciliation,
+            Err(error) => {
+                self.notify(NotifyKind::Error, format!("reconcile branch jobs: {error}"));
+                return;
+            }
+        };
+        if !reconciliation.killed.is_empty() {
+            let ids = reconciliation
+                .killed
                 .iter()
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
             self.notify(
                 NotifyKind::Info,
-                format!("killed {} off-lineage job(s): {ids}", killed.len()),
+                format!(
+                    "killed {} off-lineage job(s): {ids}",
+                    reconciliation.killed.len()
+                ),
             );
         }
-        let live = jobs.live_ids();
-        let outstanding =
-            lofi_core::session::replay::outstanding_job_ids_at(cursor, index).unwrap_or_default();
-        let stale: Vec<u64> = outstanding
-            .into_iter()
-            .filter(|id| !live.contains(id))
-            .collect();
-        if !stale.is_empty() {
-            let ids = stale
+        if !reconciliation.stale.is_empty() {
+            let ids = reconciliation
+                .stale
                 .iter()
                 .map(u64::to_string)
                 .collect::<Vec<_>>()

@@ -27,7 +27,6 @@ fn ctx(root: &Path) -> ExecCtx {
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         on_job_started: None,
-        on_job_finished: None,
     }
 }
 
@@ -327,7 +326,6 @@ async fn strings_exposed_as_lofi_strings() {
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         on_job_started: None,
-        on_job_finished: None,
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -417,7 +415,6 @@ async fn write_and_edit_emit_written_content_as_result() {
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         on_job_started: None,
-        on_job_finished: None,
     };
     let src = "await lofi.write({path:'a.txt', text:'written line one\\nwritten line two'}); \
                await lofi.edit({path:'a.txt', old:'written line one', new:'edited line one'}); \
@@ -513,6 +510,59 @@ async fn job_spawn_returns_immediately_and_completes() {
     let done = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(done.value["state"], json!("completed"));
     assert_eq!(done.value["code"], json!(0));
+}
+
+#[tokio::test]
+async fn job_completion_keeps_its_spawn_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = lofi_code::tools::JobRegistry::new();
+    let first_finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let second_finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut first = trusted_ctx(dir.path());
+    first.jobs = jobs.clone();
+    first.on_job_started = Some({
+        let finished = first_finished.clone();
+        std::sync::Arc::new(move |_| {
+            let finished = finished.clone();
+            Some(std::sync::Arc::new(move |id| {
+                finished.lock().unwrap().push(id);
+            }) as lofi_code::JobFinishedFn)
+        })
+    });
+    let spawn = exec(
+        "return await lofi.jobSpawn({ cmd: 'sleep 0.1' });",
+        &first,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let id = spawn.value["id"].as_str().unwrap();
+
+    let mut second = trusted_ctx(dir.path());
+    second.jobs = jobs;
+    second.on_job_started = Some({
+        let finished = second_finished.clone();
+        std::sync::Arc::new(move |_| {
+            let finished = finished.clone();
+            Some(std::sync::Arc::new(move |id| {
+                finished.lock().unwrap().push(id);
+            }) as lofi_code::JobFinishedFn)
+        })
+    });
+    exec(
+        &format!("return await lofi.jobWait({{ id: '{id}' }});"),
+        &second,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        first_finished.lock().unwrap().as_slice(),
+        [id.parse::<u64>().unwrap()]
+    );
+    assert!(second_finished.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
