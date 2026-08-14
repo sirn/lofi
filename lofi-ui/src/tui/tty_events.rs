@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -17,7 +17,7 @@ use crossterm::event::Event;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::unistd::{dup, isatty, pipe, read, write};
+use nix::unistd::{pipe, read, write};
 
 mod parse;
 use parse::Parsed;
@@ -121,13 +121,10 @@ fn start_reader() -> io::Result<TtyEvents> {
 }
 
 fn open_tty() -> io::Result<OwnedFd> {
-    let stdin = io::stdin();
-    if isatty(stdin.as_raw_fd()).unwrap_or(false) {
-        let fd = dup(stdin.as_raw_fd()).map_err(io_err)?;
-        #[allow(unsafe_code)]
-        // SAFETY: dup returned a fresh fd we now own.
-        return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-    }
+    // F_SETFL acts on the open file description, not one descriptor. A dup of
+    // stdin can therefore make terminal output nonblocking when stdin and
+    // stdout refer to the same description. Open the controlling terminal
+    // independently so the reader's O_NONBLOCK flag stays local.
     let file = File::options().read(true).write(true).open("/dev/tty")?;
     Ok(file.into())
 }
