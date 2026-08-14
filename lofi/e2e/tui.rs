@@ -1,0 +1,351 @@
+use serde_json::Value;
+
+use crate::support::{
+    delayed_text_response, process_is_alive, spawned_pid, text_response, tool_response,
+    transcript_text, wait_for_process_exit, Fixture, MockServer, ProcessGuard, WAIT,
+};
+
+#[test]
+fn direct_shell_context_marker_controls_the_next_model_request() {
+    let server = MockServer::start(vec![text_response("shell context answer marker")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("!!printf omitted-shell-marker");
+    tui.wait_for("omitted-shell-marker", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.submit("!printf included-shell-marker");
+    tui.wait_for("included-shell-marker", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.submit("shell context prompt marker");
+    tui.wait_for("shell context answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.contains("included-shell-marker"));
+    assert!(!requests[0].body.contains("omitted-shell-marker"));
+    let transcript = transcript_text(&fixture.events());
+    assert!(transcript.contains("included-shell-marker"));
+    assert!(transcript.contains("omitted-shell-marker"));
+}
+
+#[test]
+fn slash_commands_autocomplete_and_information_modals_work() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.send(b"/he\t\r");
+    tui.wait_for("Keys", WAIT);
+    tui.send(b"\x1b");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    tui.clear_output();
+    tui.submit("/session");
+    tui.wait_for("Workspace", WAIT);
+    tui.send(b"\x1b");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    tui.clear_output();
+    tui.submit("/theme");
+    tui.wait_for("Color scheme", WAIT);
+    tui.send(b"\x1b[B\r");
+
+    tui.clear_output();
+    tui.submit("/unknown-e2e-command");
+    tui.wait_for("unknown command", WAIT);
+    assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn model_and_thinking_pickers_change_the_next_request() {
+    let server = MockServer::start(vec![text_response("picker answer marker")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("/model");
+    tui.wait_for("Switch model", WAIT);
+    tui.send(b"\x1b[A\r");
+    tui.wait_for("switched to mock/alt", WAIT);
+
+    tui.submit("/thinking");
+    tui.wait_for("Thinking level", WAIT);
+    tui.send(b"\x1b[B\r");
+    tui.submit("picker prompt marker");
+    tui.wait_for("picker answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(request["model"], "alt");
+    assert_eq!(request["reasoning_effort"], "high");
+}
+
+#[test]
+fn no_model_mode_launches_and_rejects_prompts_without_a_request() {
+    let fixture = Fixture::without_models();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.wait_for("No models configured", WAIT);
+    tui.clear_output();
+    tui.submit("prompt with no model");
+    tui.wait_for("No models configured", WAIT);
+    assert!(fixture.session_files().is_empty());
+}
+
+#[test]
+fn no_session_mode_runs_without_writing_a_transcript() {
+    let server = MockServer::start(vec![text_response("ephemeral answer marker")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--no-session"]);
+
+    tui.submit("ephemeral prompt marker");
+    tui.wait_for("ephemeral answer marker", WAIT);
+    tui.submit("/session");
+    tui.wait_for("No session file", WAIT);
+    assert!(fixture.session_files().is_empty());
+}
+
+#[test]
+fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
+    let server = MockServer::start(vec![
+        text_response("command history answer marker"),
+        text_response("command history follow-up answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("command history prompt marker");
+    tui.wait_for("command history answer marker", WAIT);
+    tui.clear_output();
+    tui.submit("/debug");
+    tui.wait_for("Debug mode activated", WAIT);
+    tui.submit("/verbose");
+    tui.wait_for("VERBOSE", WAIT);
+
+    tui.clear_output();
+    tui.submit("/recall command history prompt marker");
+    tui.wait_for("matches", WAIT);
+    tui.wait_for("command history prompt marker", WAIT);
+
+    tui.submit("/clear");
+    tui.submit("command history follow-up prompt");
+    tui.wait_for("command history follow-up answer", WAIT);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("command history prompt marker"));
+    assert!(requests[1].body.contains("command history answer marker"));
+    assert!(requests[1]
+        .body
+        .contains("command history follow-up prompt"));
+
+    tui.submit("/exit");
+    tui.wait_exit();
+}
+
+#[test]
+fn jobs_modal_lists_opens_logs_and_stops_a_running_job() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "modal-job-call",
+            r#"return await lofi.jobSpawn({ cmd: "printf modal-job-log-marker; sleep 60", notify: false });"#,
+        ),
+        text_response("modal job answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start modal job");
+    tui.wait_for("modal job answer marker", WAIT);
+    let mut job = ProcessGuard::new(spawned_pid(&fixture));
+    assert!(process_is_alive(job.pid()));
+
+    tui.clear_output();
+    tui.submit("/job");
+    tui.wait_for("background jobs", WAIT);
+    tui.send(b"\r");
+    tui.wait_for("modal-job-log-marker", WAIT);
+    tui.clear_output();
+    tui.send(b"\x1b");
+    tui.wait_for("x", WAIT);
+    tui.clear_output();
+    tui.send(b"x");
+    tui.wait_for("this job?", WAIT);
+    tui.send(b"y");
+    wait_for_process_exit(job.pid());
+    job.disarm();
+}
+
+#[test]
+fn prompts_submitted_during_a_run_are_queued_and_sent_in_order() {
+    let server = MockServer::start(vec![
+        delayed_text_response(
+            "queued first answer marker",
+            std::time::Duration::from_millis(250),
+        ),
+        text_response("queued second answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("queued first prompt marker");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    tui.submit("queued second prompt marker");
+    tui.wait_for("queued second answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].body.contains("queued first prompt marker"));
+    assert!(!requests[0].body.contains("queued second prompt marker"));
+    assert!(requests[1].body.contains("queued first answer marker"));
+    assert!(requests[1].body.contains("queued second prompt marker"));
+}
+
+#[test]
+fn bracketed_multiline_paste_is_submitted_as_one_prompt() {
+    let server = MockServer::start(vec![text_response("paste answer marker")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.send(b"\x1b[200~paste line one\npaste line two\x1b[201~\r");
+    tui.wait_for("paste answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.contains("paste line one\\npaste line two"));
+}
+
+#[test]
+fn selecting_rendered_text_copies_the_original_markdown_over_osc52() {
+    let server = MockServer::start(vec![text_response("**copy-markdown-marker**")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("render markdown for copy");
+    tui.wait_for("copy-markdown-marker", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.clear_output();
+
+    tui.send(b"\tkk0v$y");
+    tui.wait_for("Copied to clipboard", WAIT);
+
+    let output = tui.output();
+    assert!(
+        output.contains("\x1b]52;c;Kipjb3B5LW1hcmtkb3duLW1hcmtlcioq\x07"),
+        "terminal output: {output:?}"
+    );
+}
+
+#[test]
+fn escape_clears_input_and_ctrl_d_exits() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.send(b"input that escape must clear");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.send(b"\x1b");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(server.request_count(), 0);
+    tui.send(b"\x04");
+    tui.wait_exit();
+}
+
+#[test]
+fn ctrl_c_cancels_direct_shell_and_kills_its_process_group() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("!echo $$ > direct-shell.pid; exec sleep 60");
+    let pid_path = fixture.workspace.join("direct-shell.pid");
+    let started = std::time::Instant::now();
+    while !pid_path.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid: i32 = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut guard = ProcessGuard::new(pid);
+    assert!(process_is_alive(pid));
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
+    wait_for_process_exit(pid);
+    guard.disarm();
+
+    let events = fixture.events();
+    let bash = events
+        .iter()
+        .find(|event| event["type"] == "user_bash")
+        .unwrap();
+    assert_eq!(bash["cancelled"], true);
+    assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn direct_shell_records_exit_signal_and_large_output_without_blocking_shutdown() {
+    let server = MockServer::start(vec![text_response("shell edge context answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("!printf nonzero-shell-marker; exit 23");
+    tui.wait_for("Exit 23", WAIT);
+    tui.submit("!kill -TERM $$");
+    tui.wait_for("Signal 15", WAIT);
+    tui.submit("!i=0; while [ $i -lt 8000 ]; do printf 'large-shell-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done");
+    tui.wait_for("· truncated", WAIT);
+    tui.submit("shell edge context prompt");
+    tui.wait_for("shell edge context answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.contains("nonzero-shell-marker"));
+    assert!(requests[0].body.contains("Command exited with code 23"));
+    assert!(requests[0].body.contains("Command terminated by signal 15"));
+    assert!(requests[0].body.contains("Output truncated"));
+    assert!(!requests[0].body.contains("large-shell-0000"));
+
+    tui.submit("!echo $$ > shutdown-shell.pid; printf shutdown-stream-start; sleep 60");
+    let pid_path = fixture.workspace.join("shutdown-shell.pid");
+    let started = std::time::Instant::now();
+    while !pid_path.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid: i32 = std::fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut guard = ProcessGuard::new(pid);
+    tui.send(b"\x04");
+    tui.wait_exit();
+    wait_for_process_exit(pid);
+    guard.disarm();
+}
+
+#[test]
+fn no_session_recall_and_result_report_that_persistence_is_unavailable() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "ephemeral-recovery",
+            r#"const recall = await lofi.recall({ query: "anything", scope: "all" });
+const result = await lofi.result("missing-event");
+return { recall, result };"#,
+        ),
+        text_response("ephemeral recovery answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--no-session"]);
+
+    tui.submit("try recovery without a session");
+    tui.wait_for("ephemeral recovery answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("recall unavailable"));
+    assert!(requests[1].body.contains("result unavailable"));
+    assert!(fixture.session_files().is_empty());
+}
