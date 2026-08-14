@@ -13,6 +13,117 @@ cargo build --release
 target/release/lofi
 ```
 
+## End-to-end test coverage
+
+The deterministic suite in [`lofi/e2e/`](lofi/e2e/) runs the real `lofi` binary in a pseudo-terminal or in print mode. It uses a local mock model server. It does not use API keys or make external requests.
+
+In this matrix, **Full** means that all principal public workflows and entry points in the area have process-level tests. **Partial** means that the main workflow has a process-level test, but the listed branches do not. **Missing** means that coverage is limited to unit or crate-level integration tests, or that no automated coverage exists. Lower-level tests are not counted as E2E here.
+
+### Coverage summary by component
+
+Some workflows cross component boundaries. The detailed matrix puts each workflow under its primary implementation owner.
+
+| Component | Full | Partial | Missing |
+| --- | ---: | ---: | ---: |
+| [`lofi`](lofi/) | 0 | 1 | 0 |
+| [`lofi-core`](lofi-core/) | 2 | 9 | 2 |
+| [`lofi-code`](lofi-code/) | 0 | 4 | 1 |
+| [`lofi-providers`](lofi-providers/) | 0 | 6 | 0 |
+| [`lofi-types`](lofi-types/) and [`lofi-error`](lofi-error/) | 1 | 1 | 0 |
+| [`lofi-ui`](lofi-ui/) | 0 | 5 | 0 |
+| Workspace | 0 | 0 | 1 |
+| **Total** | **3** | **26** | **4** |
+
+#### [`lofi`](lofi/) — executable entry points
+
+This component owns process bootstrap and runtime initialization.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| Process bootstrap | **Partial** | Every E2E starts the real binary, initializes the current-thread runtime, dispatches into `lofi-ui`, and checks normal process exit in print or TUI mode. | Add explicit checks for startup failures, `RUST_LOG` initialization, preservation of a caller-set `MALLOC_ARENA_MAX`, signal exit status, and terminal restoration after bootstrap failure. |
+
+#### [`lofi-core`](lofi-core/) — orchestration, state, and persistence
+
+This component owns agent execution, sessions, compaction, configuration, model selection, images, recall, and direct shell input.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| Session lifecycle | **Full** | Lazy creation, `/new`, `--continue`, explicit and picker resume, latest-session selection, workspace isolation, model restore and override, no-model transcript access, and restart recovery after failed, cancelled, or interrupted turns. | None known for the supported public lifecycle. |
+| Session branches and job ownership | **Full** | Rollback, active-branch persistence, sibling exclusion, old-branch retention, job ownership across later calls, off-lineage job cleanup, and stale jobs after process restart. | None known for the supported public lifecycle. |
+| System prompt assembly | **Partial** | Global and project `AGENTS.md`, nested project instructions in outermost-first order, skill metadata injection without eager body loading, de-duplication, and stable prompt replay after resume. | Add workspace skill override, namespaced skills, invalid and oversized skill files, scan limits, empty files, and the other project-root boundary markers. |
+| Agent failure and recovery | **Partial** | Retry after a transient HTTP failure, no retry after authentication failure, truncated-stream retry, tool failure recovery, cancellation, and durable prompts before provider response. | Add retry exhaustion, configured delay and limit behavior, stream timeout, cancellation during retry delay, receiver loss, and failure after a completed tool round. |
+| Direct shell input | **Partial** | `!` and `!!` context control, transcript persistence, restart replay, cancellation, and process-group cleanup. | Add non-zero exit, signal death, large-output paging, environment redaction, and shutdown while output is still streaming. |
+| Compaction | **Partial** | Manual, automatic soft-threshold, hard-pressure continuation, resume, branch selection, and preservation of the latest tool cycle. | Add tiered retention settings, repeated hard-compaction guard, compact-all, image removal, summary budget limits, and failure during compaction. |
+| Recall and result recovery | **Partial** | TUI query recall, native recall by query, and exact tool-result recovery by event id. | Add all scope and pagination modes, compacted and off-branch content, missing ids, truncated values, and behavior with `--no-session`. |
+| Model discovery and selection | **Partial** | Static models, remote field and API mapping, online discovery, offline cache fallback, explicit models, picker changes, missing models, and resume overrides. | Add authenticated discovery, cache expiry and corruption, static/discovered merge precedence, default provider and model selection, custom endpoint paths, and ambiguous model queries. |
+| Configuration loading | **Partial** | Bash environment files, secret redaction, automatic policy approval, model discovery, truncation limits, no-model mode, and selected compaction settings. | Add environment and shell value resolution, `LOFI_CONFIG` and XDG path precedence, invalid TOML, custom headers, `no_auth`, image limits, retry settings, UI theme config, and all default-precedence rules. |
+| Images | **Partial** | Image file detection, normalization to JPEG, delivery to a vision model, omission for a non-vision model, and base64 exclusion from transcripts. | Add every supported input format, configured dimensions and byte limits, invalid and pathological images, multiple images, and provider-specific serialization for Responses, Anthropic, and Google. |
+| Diagnostics and resource lifecycle | **Partial** | Debug and verbose toggles, transcript result release, and large tree-picker memory release are exercised. | Add debug counters, long-stream memory bounds, repeated session and model switches, dropped consumers, temporary log cleanup, graceful live-run shutdown, and leak checks outside Linux/glibc. |
+| State directories and temporary leases | **Missing** | None. Fixtures redirect state into a temporary root but do not assert its lifecycle. | Add process tests for directory and file permissions, workspace-key collisions, lease cleanup on normal and abnormal exit, stale temporary directory collection, and `LOFI_STATE_HOME` and XDG precedence. |
+| Transcript compatibility and corruption | **Missing** | None. Lifecycle tests create well-formed transcripts in the current format. | Add process fixtures for files without cursor records, truncated final lines, malformed events, unsupported versions, invalid parent links, unreadable files, and concurrent writers. |
+
+#### [`lofi-code`](lofi-code/) — sandbox, tools, jobs, and policy
+
+This component owns the QuickJS host, native tools, skills, background jobs, and shell policy.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| Background job API and UI | **Partial** | Spawn, status, paged read, wait, notifications, timeout, kill, missing ids, completion notices, modal list and logs, and explicit process-group cleanup. | Add graceful TUI shutdown with live jobs, periodic and changed-only notice timing, multiple simultaneous jobs in the modal, and log-window truncation. |
+| Native file, search, docs, and skill APIs | **Partial** | `read`, `ls`, `find`, `grep`, `write`, `edit`, `patch`, `bash`, `skills`, `skill`, `docs`, `docsSearch`, and `tmp_dir`; successful round trips, contained errors, filtering, paging, and truncation recovery. | Add workspace and namespaced skills, missing and invalid API entries, all option forms, binary and invalid UTF-8 files, symlink and traversal permutations, write races, and each walk and result limit. |
+| Shell policy | **Partial** | Interactive allow and deny, unrestricted fixture execution, automatic model approval, and CLI policy explanation. | Add every policy mode, custom exact/prefix/substring/args rules, wrappers, redirects, heredocs, YOLO behavior, evaluator denial and failure, and concurrent confirmations. |
+| Filesystem and secret boundaries | **Partial** | Workspace path escape rejection, hidden and ignored filtering, full-output recovery under an allowed temporary root, and environment-secret redaction from requests and transcripts. | Add process tests for symlink leaves and cycles, absolute read roots, write races, oversized walks, credential-bearing error URLs, auth-header suppression, and redaction across chunk boundaries. |
+| QuickJS sandbox limits and unusual value conversion | **Missing** | None. E2E tests use ordinary object results but do not force a sandbox limit or unusual JavaScript value. | Heap, stack, CPU, log, conversion, opaque-value, `lofi_strings`, and guest-cancellation limits remain in `lofi-code` integration tests only. |
+
+#### [`lofi-providers`](lofi-providers/) — model APIs and streaming transport
+
+This component owns provider request mapping, stream decoding, tool protocol mapping, and SSE transport.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| OpenAI Chat Completions | **Partial** | Text and usage streaming, thinking-level request fields, fragmented tool arguments, parallel tools, tool results, errors, retries, and images through a vision model. | Add provider-specific E2E for reasoning-detail signatures, in-stream error objects, unexpected EOF, image tool results, custom headers, and no-auth requests. |
+| OpenAI Responses | **Partial** | Text, reasoning summaries, usage, default summary request, thinking off, encrypted reasoning replay, tools, truncated-stream retry, and resume replay. | Add image input and tool-result E2E, multiple reasoning summary parts, in-stream failed events, unexpected EOF, custom headers, and no-auth requests. |
+| Anthropic Messages | **Partial** | Text, tools, tool results, adaptive thinking, signed thinking replay, usage, and cache breakpoints. | Add image E2E, parallel and malformed tool calls, refusal or error events, unexpected EOF, custom headers, and no-auth requests. |
+| Google Generative AI | **Partial** | Text, function calls and responses, thinking budgets, thought streaming, signatures, signature replay, usage, and native endpoint routing. | Add image E2E, Gemini 3 thinking-level mappings, parallel and malformed function calls, safety and error responses, unexpected EOF, custom headers, and no-auth requests. |
+| Provider tool protocol | **Partial** | Tool execution and result replay for all four APIs, fragmented and parallel OpenAI Chat calls, cancellation closure after restart, and a valid tool cycle after compaction. | Add parallel and interleaved calls for Responses, Anthropic, and Google; malformed arguments; duplicate ids; orphan results; and provider-specific image results. |
+| HTTP and SSE transport | **Partial** | Real local HTTP requests, provider headers and paths, SSE event names, normal terminal events, non-2xx responses, and one truncated Responses stream. | Add fragmented network reads, multiline and malformed SSE frames, invalid UTF-8 and JSON, premature EOF for every API, oversized error and discovery bodies, connection failure and timeout, URL redaction, and backpressure. |
+
+#### [`lofi-types`](lofi-types/) and [`lofi-error`](lofi-error/) — shared contracts
+
+These components own shared request, event, usage, text, recall, and error contracts. `lofi-error` has no standalone public workflow. Its behavior is exercised through the core and provider workflows.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| Thinking-level controls | **Full** | `off`, `low`, `medium`, `high`, and `xhigh`; CLI selection; TUI picker selection; request propagation; resume restore; and explicit override. | None known for the supported levels and controls. |
+| Usage, pricing, and cost display | **Partial** | Provider usage fields are asserted for Responses, Anthropic, and Google. | Add process tests for accumulated cost, cache-read and cache-write prices, per-request prices, fallback rates, footer totals, and restore after resume or compaction. |
+
+#### [`lofi-ui`](lofi-ui/) — CLI presentation and terminal UI
+
+This component owns CLI parsing and output, interactive input, commands, modals, transcript rendering, and terminal protocol handling.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| CLI entry points | **Partial** | Print mode, model selection, session listing, invalid resume ids, docs, docs search, policy explanation, model listing, provider failures, and no-TTY operation. | Add process tests for `--help`, `--version`, conflicting flag precedence, malformed configuration, and signal exit status. |
+| TUI slash commands and modals | **Partial** | Autocomplete, help, session, theme, model, thinking, jobs, debug, verbose, recall, clear, compact, new, resume, tree, quit, exit, and unknown commands. | Add full keyboard navigation, scrolling, copy, cancellation, and narrow-terminal tests for each modal. |
+| TUI input and navigation | **Partial** | Prompt submission, queued prompts, bracketed multiline paste, input clearing, quit, cancellation, and raw-Markdown copy through OSC 52. | Add process tests for multiline editing, history recall keys, all Navigate/Select motions, resize reflow, Unicode width, focus events, and malformed or split terminal input sequences. |
+| Transcript rendering | **Partial** | Streamed text and thinking, tool blocks, status transitions, selected raw Markdown, and resumed transcript visibility are exercised through the TUI. | Markdown structures, links, tables, code blocks, wrapping, themes, viewport anchoring, and resize behavior remain unit-only. |
+| Terminal protocol and platform matrix | **Partial** | Linux PTY startup, input, paste, OSC 52 copy, cancellation, and shutdown are exercised; one memory-release test is Linux/glibc-only. | Add macOS CI, other Unix targets, resize and focus events, OSC 11 color reports, split CSI sequences, terminal restoration after signals and startup failures, and non-UTF-8 input. Windows is not supported. |
+
+#### Workspace — build and packaging
+
+These checks cover the assembled workspace rather than one Rust crate.
+
+| Area | Status | Covered by E2E | Remaining E2E gaps |
+| --- | --- | --- | --- |
+| Build and packaging | **Missing** | None. The E2E suite runs Cargo-built test binaries. | Add release-binary smoke tests, install-layout checks, Nix build checks, and checks on each supported Unix target. |
+
+Run the E2E suite with:
+
+```sh
+just e2e
+```
+
+See [Development](docs/development.md#end-to-end-tests) for the full check command and test design.
+
 ## Usage
 
 ### CLI flags
@@ -41,7 +152,6 @@ Model-generated shell commands run on the host through `sh -c`; QuickJS isolatio
 | `Enter` | Submit the input box as a prompt. |
 | `Ctrl+C` | Cancel the in-flight run. |
 | `Ctrl+D` | Quit. |
-| `q` | Quit (only when the input box is empty and no run is active). |
 | `Esc` | Clear the input box. |
 | `Up` / `Down` | Scroll the message log. |
 
