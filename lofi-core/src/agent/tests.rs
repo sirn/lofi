@@ -11,6 +11,26 @@ struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamingEvent>>>,
 }
 
+#[derive(Default)]
+struct RecordingProvider {
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        Ok(Box::pin(stream::iter([Ok(StreamingEvent::Done(
+            Usage::default(),
+        ))])))
+    }
+}
+
 struct PendingAfterRoundProvider {
     first: std::sync::Mutex<Option<Vec<StreamingEvent>>>,
 }
@@ -147,6 +167,75 @@ fn user_msg(text: &str) -> Message {
         }],
         kind: PromptKind::default(),
     }
+}
+
+fn system_msg(text: &str) -> Message {
+    Message {
+        role: Role::System,
+        blocks: vec![ContentBlock::Text {
+            text: text.to_string(),
+        }],
+        kind: PromptKind::default(),
+    }
+}
+
+#[tokio::test]
+async fn run_once_adds_configured_system_to_provider_request() {
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    let agent = Agent {
+        provider: provider.clone(),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let mut messages = vec![user_msg("hi")];
+
+    assert!(agent.run_once(&mut messages).await.unwrap());
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0][0], system_msg("sys"));
+    assert_eq!(requests[0][1], user_msg("hi"));
+    assert_eq!(messages[0], user_msg("hi"));
+}
+
+#[tokio::test]
+async fn run_once_ignores_empty_history_system() {
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    let agent = Agent {
+        provider: provider.clone(),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let mut messages = vec![system_msg(""), user_msg("hi")];
+
+    assert!(agent.run_once(&mut messages).await.unwrap());
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0][0], system_msg("sys"));
+}
+
+#[tokio::test]
+async fn run_once_keeps_history_system_in_provider_request() {
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    let agent = Agent {
+        provider: provider.clone(),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let mut messages = vec![system_msg("restored"), user_msg("hi")];
+
+    assert!(agent.run_once(&mut messages).await.unwrap());
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0][0], system_msg("restored"));
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .count(),
+        1
+    );
 }
 
 #[test]
