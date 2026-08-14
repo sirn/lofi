@@ -1016,11 +1016,10 @@ fn default_truncate_max_bytes() -> usize {
     50 * 1024
 }
 
-/// Limits applied when an image is attached. An
-/// attached image is downscaled to fit `max_width`×`max_height` and re-encoded
-/// as JPEG, sweeping quality down until the payload fits `max_bytes`. Bounds
-/// the base64 payload that lands in the context window and the durable
-/// transcript (whose turn cache caps at 64 MiB).
+/// Limits applied when an image enters model context. An image is downscaled
+/// to fit `max_width`×`max_height` and re-encoded as JPEG, sweeping quality
+/// down until the payload fits `max_bytes`. Bounds the base64 payload sent to
+/// the provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageConfig {
     /// Maximum pixel width after downscaling. Defaults to `2000`.
@@ -1035,8 +1034,7 @@ pub struct ImageConfig {
     pub max_bytes: usize,
 }
 
-/// Image file extensions recognized for attach and `read`. Shared so the TUI
-/// paste sniff and the sandbox `read` tool agree on what counts as an image.
+/// Image file extensions recognized by the sandbox `read` tool.
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
 impl Default for ImageConfig {
