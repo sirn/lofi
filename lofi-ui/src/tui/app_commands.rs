@@ -2,21 +2,6 @@
 
 use super::*;
 
-/// Expand a leading `~` or `~/` to the user's home directory. Other path
-/// forms pass through unchanged.
-pub(super) fn shellexpand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
 #[derive(Clone, Copy)]
 enum ModalSlot {
     Picker,
@@ -890,7 +875,6 @@ impl App {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
         self.thinking = level;
-        self.model_supports_image = model.supports_image;
         self.ctx_limit = model
             .context_window
             .filter(|&l| l > 0)
@@ -906,55 +890,6 @@ impl App {
             ),
         );
         self.bump_render_epoch();
-    }
-
-    /// Attach an image file to the next submitted prompt: read it, normalize
-    /// it (decode, downscale, re-encode as JPEG within the configured limits),
-    /// and stage it. Reached by pasting or typing an image path in the input
-    /// — no dedicated command. Refuses up front when the active model does not
-    /// support images so the user is not surprised by the engine's send-time
-    /// omission.
-    pub(super) fn attach_image_path(&mut self, path_str: &str) {
-        if !self.model_supports_image {
-            self.notify(
-                NotifyKind::Warn,
-                format!("{} does not support images", self.model_label),
-            );
-            return;
-        }
-        // Resolve relative paths against the session working directory and
-        // expand a leading `~` to the home directory.
-        let expanded = shellexpand_tilde(path_str);
-        let path = if expanded.is_absolute() {
-            expanded
-        } else {
-            self.session.cwd.join(&expanded)
-        };
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.notify(NotifyKind::Error, format!("read {}: {e}", path.display()));
-                return;
-            }
-        };
-        match lofi_core::image::normalize(&bytes, &self.image_config) {
-            Ok((bytes, media_type)) => {
-                let kb = bytes.len() / 1024;
-                self.pending_attachments
-                    .push(lofi_types::ContentBlock::Image { bytes, media_type });
-                self.notify(
-                    NotifyKind::Info,
-                    format!(
-                        "attached {} ({kb} KiB); {} staged",
-                        path.display(),
-                        self.pending_attachments.len()
-                    ),
-                );
-            }
-            Err(e) => {
-                self.notify(NotifyKind::Error, format!("attach {}: {e}", path.display()));
-            }
-        }
     }
 
     /// Drop the IO-thread-held tree snapshot, if any. Sends the release to

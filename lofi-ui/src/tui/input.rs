@@ -2,29 +2,6 @@
 
 use super::*;
 
-/// Detect a pasted image file path. Returns the trimmed path when the paste is
-/// a single line that names an existing file with an image extension — the
-/// drag-drop / copy-path flow. Anything else (multi-line, prose, a path that
-/// does not resolve, a non-image file) returns `None` and pastes as text.
-fn sniff_image_path<'a>(s: &'a str, app: &App) -> Option<&'a str> {
-    let trimmed = s.trim();
-    // One path only: no newlines, no surrounding prose.
-    if trimmed.is_empty() || trimmed.contains('\n') {
-        return None;
-    }
-    let ext = trimmed.rsplit('.').next()?.to_ascii_lowercase();
-    if !lofi_types::IMAGE_EXTENSIONS.contains(&ext.as_str()) {
-        return None;
-    }
-    let expanded = super::app_commands::shellexpand_tilde(trimmed);
-    let resolved = if expanded.is_absolute() {
-        expanded
-    } else {
-        app.session.cwd.join(&expanded)
-    };
-    resolved.is_file().then_some(trimmed)
-}
-
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub(super) fn handle_event(
     ev: &Event,
@@ -41,14 +18,7 @@ pub(super) fn handle_event(
     if let Event::Paste(s) = ev {
         if app.mode == Mode::Input && !app.modal_open() {
             app.sel = None;
-            // A pasted image file path attaches the image instead of
-            // inserting literal text — the standard drag-drop / paste flow,
-            // no dedicated command. Anything else pastes as text verbatim.
-            if let Some(path) = sniff_image_path(s, app) {
-                app.attach_image_path(path);
-            } else {
-                app.insert_str(s);
-            }
+            app.insert_str(s);
         }
         return;
     }
@@ -383,13 +353,6 @@ fn spawn_agent_run(
     let preempt_clone = preempt.clone();
     let continuation = prompt.is_none();
     let prompt = prompt.unwrap_or_default();
-    // Attachments staged by paste-to-attach ride this prompt into the engine and the
-    // durable transcript. A continuation (no new prompt) carries none.
-    let attachments = if continuation {
-        Vec::new()
-    } else {
-        std::mem::take(&mut app.pending_attachments)
-    };
     // Notices computed at session startup (e.g. stale job ids) ride the
     // first agent run so the model sees them inline before the user's text.
     // Continuations skip them: mid-run context is already shaped.
@@ -410,11 +373,10 @@ fn spawn_agent_run(
             });
         }
         let result = agent
-            .run_continuation_with_attachments(
+            .run_continuation(
                 &mut messages,
                 prompt,
                 prompt_kind,
-                attachments,
                 tx,
                 cursor.as_ref(),
                 continuation,
