@@ -1608,6 +1608,9 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "lofi-ui",
+ "nix",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
 ]
