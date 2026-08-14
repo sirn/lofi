@@ -1278,7 +1278,9 @@ async fn run_loop(
     let mut events = tty_events::TtyEvents::start();
     app.sync_color_scheme_reports();
     if app.theme_mode == lofi_types::ThemeMode::Auto {
-        tty_events::request_color_scheme();
+        // Retry through the active reader in case the synchronous startup
+        // probe timed out. Mode 2031 reports trigger the same query later.
+        tty_events::request_background();
     }
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -1430,9 +1432,15 @@ async fn run_loop(
             maybe_ev = events.recv() => {
                 let defer_redraw;
                 match maybe_ev {
-                    Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
+                    Some(Ok(tty_events::TuiEvent::ColorSchemeChanged)) => {
                         defer_redraw = false;
-                        if app.apply_color_scheme(scheme) {
+                        if app.theme_mode == lofi_types::ThemeMode::Auto {
+                            tty_events::request_background();
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Background(rgb))) => {
+                        defer_redraw = false;
+                        if app.apply_background(rgb) {
                             dirty = true;
                         }
                     }

@@ -117,13 +117,6 @@ impl Theme {
         }
     }
 
-    pub(crate) fn from_scheme(scheme: crate::tui::tty_events::ColorScheme) -> Self {
-        match scheme {
-            crate::tui::tty_events::ColorScheme::Light => Self::light(),
-            crate::tui::tty_events::ColorScheme::Dark => Self::dark(),
-        }
-    }
-
     pub(crate) fn from_background(rgb: crate::tui::terminal_bg::Rgb) -> Self {
         if rgb.luminance() > 0.5 {
             Self::light()
