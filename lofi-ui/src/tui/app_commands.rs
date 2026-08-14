@@ -140,7 +140,7 @@ impl App {
                 self.toggle_debug();
                 true
             }
-            "/recall" => {
+            _ if cmd == "/recall" || cmd.starts_with("/recall ") => {
                 self.recall_now(cmd);
                 true
             }

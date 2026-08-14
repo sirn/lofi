@@ -37,6 +37,9 @@
             # QuickJS (rquickjs) needs a C compiler at build time.
             gcc
 
+            # Task runner.
+            just
+
             # Dev runner / watcher.
             cargo-watch
 
