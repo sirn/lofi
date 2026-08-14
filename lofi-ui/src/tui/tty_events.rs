@@ -65,12 +65,11 @@ struct ReaderRestore {
 
 impl TtyEvents {
     pub(crate) fn start() -> Self {
-        match start_reader() {
-            Ok(events) => events,
-            Err(_) => {
-                let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                Self { rx, restore: None }
-            }
+        if let Ok(events) = start_reader() {
+            events
+        } else {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Self { rx, restore: None }
         }
     }
 
@@ -107,7 +106,15 @@ fn start_reader() -> io::Result<TtyEvents> {
     let stop_flag = stop.clone();
     let thread = std::thread::Builder::new()
         .name("lofi-tty-events".into())
-        .spawn(move || reader_loop(tty, stop_r, stop_flag, tx))
+        .spawn(move || {
+            ReaderTask {
+                tty,
+                stop_r,
+                stop: stop_flag,
+                tx,
+            }
+            .run();
+        })
         .map_err(io::Error::other)?;
 
     Ok(TtyEvents {
@@ -140,49 +147,59 @@ fn io_err(err: Errno) -> io::Error {
     io::Error::from_raw_os_error(err as i32)
 }
 
-fn reader_loop(
+struct ReaderTask {
     tty: OwnedFd,
     stop_r: OwnedFd,
     stop: Arc<AtomicBool>,
     tx: tokio::sync::mpsc::UnboundedSender<Result<TuiEvent, io::Error>>,
-) {
-    let mut parser = Parser::default();
-    let mut buf = [0u8; 1024];
-    while !stop.load(Ordering::Relaxed) {
-        let mut fds = [
-            PollFd::new(tty.as_fd(), PollFlags::POLLIN),
-            PollFd::new(stop_r.as_fd(), PollFlags::POLLIN),
-        ];
-        match poll(&mut fds, PollTimeout::NONE) {
-            Ok(0) | Err(Errno::EINTR) => continue,
-            Err(_) => {
-                let _ = tx.send(Err(io::Error::other("tty poll failed")));
+}
+
+impl ReaderTask {
+    fn run(self) {
+        let Self {
+            tty,
+            stop_r,
+            stop,
+            tx,
+        } = self;
+        let mut parser = Parser::default();
+        let mut buf = [0u8; 1024];
+        while !stop.load(Ordering::Relaxed) {
+            let mut fds = [
+                PollFd::new(tty.as_fd(), PollFlags::POLLIN),
+                PollFd::new(stop_r.as_fd(), PollFlags::POLLIN),
+            ];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Ok(0) | Err(Errno::EINTR) => continue,
+                Err(_) => {
+                    let _ = tx.send(Err(io::Error::other("tty poll failed")));
+                    break;
+                }
+                Ok(_) => {}
+            }
+            if stop.load(Ordering::Relaxed)
+                || fds[1]
+                    .revents()
+                    .is_some_and(|r| r.intersects(PollFlags::POLLIN | PollFlags::POLLHUP))
+            {
                 break;
             }
-            Ok(_) => {}
-        }
-        if stop.load(Ordering::Relaxed)
-            || fds[1]
-                .revents()
-                .is_some_and(|r| r.intersects(PollFlags::POLLIN | PollFlags::POLLHUP))
-        {
-            break;
-        }
-        match read(tty.as_raw_fd(), &mut buf) {
-            Ok(0) | Err(Errno::EBADF) => {
-                let _ = tx.send(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tty")));
-                break;
-            }
-            Err(Errno::EINTR | Errno::EAGAIN) => continue,
-            Err(err) => {
-                let _ = tx.send(Err(io_err(err)));
-                break;
-            }
-            Ok(n) => {
-                parser.advance(&buf[..n], n == buf.len());
-                for event in parser.drain() {
-                    if tx.send(Ok(event)).is_err() {
-                        return;
+            match read(tty.as_raw_fd(), &mut buf) {
+                Ok(0) | Err(Errno::EBADF) => {
+                    let _ = tx.send(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tty")));
+                    break;
+                }
+                Err(Errno::EINTR | Errno::EAGAIN) => {}
+                Err(err) => {
+                    let _ = tx.send(Err(io_err(err)));
+                    break;
+                }
+                Ok(n) => {
+                    parser.advance(&buf[..n], n == buf.len());
+                    for event in parser.drain() {
+                        if tx.send(Ok(event)).is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -210,13 +227,10 @@ impl Parser {
                     self.ready.push_back(TuiEvent::ColorScheme(scheme));
                     self.buffer.clear();
                 }
-                Ok(Some(_)) => {
+                Ok(Some(_)) | Err(_) => {
                     self.buffer.clear();
                 }
                 Ok(None) => {}
-                Err(_) => {
-                    self.buffer.clear();
-                }
             }
         }
     }

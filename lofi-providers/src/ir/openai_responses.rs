@@ -19,33 +19,39 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
+fn input_message(message: &Message) -> Option<Value> {
+    let text = collect_text(&message.blocks);
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({"type": "input_text", "text": text}));
+    }
+    if message.role == Role::User {
+        for block in &message.blocks {
+            if let ContentBlock::Image { bytes, media_type } = block {
+                content.push(json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{media_type};base64,{}", super::b64(bytes)),
+                }));
+            }
+        }
+    }
+    (!content.is_empty()).then(|| {
+        json!({
+            "type": "message",
+            "role": message.role.as_str(),
+            "content": content,
+        })
+    })
+}
+
 #[must_use]
 pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
             Role::System | Role::User => {
-                let text = collect_text(&m.blocks);
-                let mut content: Vec<Value> = Vec::new();
-                if !text.is_empty() {
-                    content.push(json!({"type": "input_text", "text": text}));
-                }
-                if m.role == Role::User {
-                    for b in &m.blocks {
-                        if let ContentBlock::Image { bytes, media_type } = b {
-                            content.push(json!({
-                                "type": "input_image",
-                                "image_url": format!("data:{media_type};base64,{}", super::b64(bytes)),
-                            }));
-                        }
-                    }
-                }
-                if !content.is_empty() {
-                    out.push(json!({
-                        "type": "message",
-                        "role": m.role.as_str(),
-                        "content": content,
-                    }));
+                if let Some(message) = input_message(m) {
+                    out.push(message);
                 }
             }
             Role::Assistant => {

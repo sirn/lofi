@@ -370,10 +370,7 @@ mod tests {
             "---\nname: code-commit\ndescription: Write a commit message\n---\n\n# Commit\n",
         )])];
         let sections = CodeCompactionHook.sections(&blocks);
-        let skills = sections
-            .iter()
-            .find(|s| s.title == "Skills")
-            .expect("Skills section");
+        let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(skills.items, vec!["code-commit — Write a commit message"]);
         assert!(sections.iter().any(|s| s.title == "APIs Used"));
     }
@@ -385,10 +382,7 @@ mod tests {
             "# Outline\n\nStructural search over a file.\n",
         )])];
         let sections = CodeCompactionHook.sections(&blocks);
-        let skills = sections
-            .iter()
-            .find(|s| s.title == "Skills")
-            .expect("Skills section");
+        let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(
             skills.items,
             vec!["outline — Structural search over a file."]
@@ -411,10 +405,7 @@ mod tests {
             failed,
         ])];
         let sections = CodeCompactionHook.sections(&blocks);
-        let skills = sections
-            .iter()
-            .find(|s| s.title == "Skills")
-            .expect("Skills section");
+        let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(skills.items.len(), 1);
     }
 }
