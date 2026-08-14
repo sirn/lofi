@@ -70,33 +70,8 @@ fn skill_blurb(result: &str) -> String {
         .as_ref()
         .and_then(|v| v.get("content").and_then(|c| c.as_str()))
         .unwrap_or(result);
-    let desc = yaml_description(content).unwrap_or_else(|| first_prose_line(content));
+    let desc = crate::skill_metadata::description(content).unwrap_or_default();
     clip(&desc, 80)
-}
-
-fn yaml_description(content: &str) -> Option<String> {
-    let rest = content.strip_prefix("---")?;
-    let rest = rest.strip_prefix('\n').unwrap_or(rest);
-    let (front, _) = rest.split_once("\n---")?;
-    for line in front.lines() {
-        let Some(value) = line.trim().strip_prefix("description:") else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['"', '\'']).trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn first_prose_line(content: &str) -> String {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#') && *line != "---")
-        .map(str::to_string)
-        .unwrap_or_default()
 }
 
 #[derive(Default)]
