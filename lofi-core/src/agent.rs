@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config_loader::load_config_or_default;
 use crate::models::ModelRegistry;
-use crate::session::recorder::{SessionRecord, SessionRecorder, TurnOutcome};
+use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use lofi_code::policy::ResolvedPolicy;
 use lofi_code::{exec, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};

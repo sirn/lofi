@@ -488,6 +488,14 @@ impl SessionCursor {
     /// Propagates transcript serialization and I/O failures.
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {
         let mut leaf = self.lock_leaf();
+        self.append_events_at_leaf(events, &mut leaf)
+    }
+
+    fn append_events_at_leaf(
+        &self,
+        events: &mut [SessionEvent],
+        leaf: &mut Option<String>,
+    ) -> Result<(u64, u64)> {
         let (start, end, next) = append_cursor_events(&self.path, events, leaf.as_deref())?;
         let appended = load_index_range(&self.path, start, end).ok();
         *leaf = next;
@@ -498,6 +506,23 @@ impl SessionCursor {
             (None, Some(_)) => {}
         }
         Ok((start, end))
+    }
+
+    /// Append events only while `ancestor_id` remains on the selected
+    /// lineage. The lineage check and append share the cursor-head lock, so a
+    /// branch switch cannot land between them.
+    pub(crate) fn append_events_if_ancestor(
+        &self,
+        ancestor_id: &str,
+        events: &mut [SessionEvent],
+    ) -> Result<Option<(u64, u64)>> {
+        let mut leaf = self.lock_leaf();
+        let (_meta, index, _file_size) = load_index(&self.path)?;
+        let selected = indexed_lineage(index, leaf.as_deref())?;
+        if !selected.iter().any(|entry| entry.id.matches(ancestor_id)) {
+            return Ok(None);
+        }
+        self.append_events_at_leaf(events, &mut leaf).map(Some)
     }
 
     /// Append the governing system prompt as a `Message(System)` event off the
