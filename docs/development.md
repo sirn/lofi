@@ -1,5 +1,13 @@
 # Development
 
+## End-to-end tests
+
+The `lofi` crate has deterministic TUI end-to-end tests in `lofi/e2e/`. They run the real binary in a pseudo-terminal and use a local mock LLM server, so they do not need API keys or network access. Run them with:
+
+```sh
+cargo test -p lofi --test e2e --offline
+```
+
 ## Session transcripts
 
 `lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-name>-<path-hash>/`, with one `.jsonl` file per session. The hash isolates workspaces whose readable names collide; legacy slug-only directories remain readable. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.
