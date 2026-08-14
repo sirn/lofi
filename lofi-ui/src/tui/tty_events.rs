@@ -1,4 +1,4 @@
-//! TTY input events, including CSI 997 color-scheme reports.
+//! TTY input events, including terminal color reports.
 //!
 //! Crossterm 0.29 treats a finished unknown `CSI ? …` as incomplete
 //! (crossterm#1104) and then swallows later keys. We read the tty and
@@ -22,16 +22,8 @@ use nix::unistd::{pipe, read, write};
 mod parse;
 use parse::Parsed;
 
-/// Terminal color preference from a CSI 997 DSR.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ColorScheme {
-    Dark,
-    Light,
-}
-
 const ENABLE_2031: &[u8] = b"\x1b[?2031h";
 const DISABLE_2031: &[u8] = b"\x1b[?2031l";
-const QUERY_996: &[u8] = b"\x1b[?996n";
 
 pub(crate) fn set_reports_enabled(enabled: bool) {
     let mut out = io::stdout();
@@ -39,16 +31,15 @@ pub(crate) fn set_reports_enabled(enabled: bool) {
     let _ = out.flush();
 }
 
-pub(crate) fn request_color_scheme() {
-    let mut out = io::stdout();
-    let _ = out.write_all(QUERY_996);
-    let _ = out.flush();
+pub(crate) fn request_background() {
+    let _ = crate::tui::terminal_bg::request_background();
 }
 
 #[derive(Debug)]
 pub(crate) enum TuiEvent {
     Input(Event),
-    ColorScheme(ColorScheme),
+    ColorSchemeChanged,
+    Background(crate::tui::terminal_bg::Rgb),
 }
 
 /// Blocking tty reader that yields [`TuiEvent`]s on a channel.
@@ -206,8 +197,12 @@ impl Parser {
                     self.ready.push_back(TuiEvent::Input(ev));
                     self.buffer.clear();
                 }
-                Ok(Some(Parsed::ColorScheme(scheme))) => {
-                    self.ready.push_back(TuiEvent::ColorScheme(scheme));
+                Ok(Some(Parsed::ColorSchemeChanged)) => {
+                    self.ready.push_back(TuiEvent::ColorSchemeChanged);
+                    self.buffer.clear();
+                }
+                Ok(Some(Parsed::Background(rgb))) => {
+                    self.ready.push_back(TuiEvent::Background(rgb));
                     self.buffer.clear();
                 }
                 Ok(Some(_)) => {
@@ -237,24 +232,28 @@ mod tests {
     }
 
     #[test]
-    fn parses_dark_and_keys() {
+    fn parses_color_scheme_change_and_keys() {
         let out = parse_all(b"a\x1b[?997;1nb");
         assert!(matches!(
             &out[..],
             [
                 TuiEvent::Input(Event::Key(_)),
-                TuiEvent::ColorScheme(ColorScheme::Dark),
+                TuiEvent::ColorSchemeChanged,
                 TuiEvent::Input(Event::Key(_)),
             ]
         ));
     }
 
     #[test]
-    fn parses_light() {
-        let out = parse_all(b"\x1b[?997;2n");
+    fn parses_background() {
+        let out = parse_all(b"\x1b]11;rgb:ffff/0000/8000\x1b\\");
         assert!(matches!(
             &out[..],
-            [TuiEvent::ColorScheme(ColorScheme::Light)]
+            [TuiEvent::Background(crate::tui::terminal_bg::Rgb {
+                r: 255,
+                g: 0,
+                b: 128,
+            })]
         ));
     }
 
@@ -273,10 +272,7 @@ mod tests {
         let out: Vec<_> = parser.drain().collect();
         assert!(matches!(
             &out[..],
-            [
-                TuiEvent::ColorScheme(ColorScheme::Dark),
-                TuiEvent::Input(Event::Key(_)),
-            ]
+            [TuiEvent::ColorSchemeChanged, TuiEvent::Input(Event::Key(_)),]
         ));
     }
 }
