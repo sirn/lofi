@@ -173,6 +173,7 @@ pub struct Agent {
     bash_env: BashEnv,
     shell_policy: ResolvedPolicy,
     truncate: lofi_code::TruncatedCap,
+    image: lofi_types::ImageConfig,
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
@@ -196,6 +197,7 @@ impl Agent {
         reserved_context_tokens: u64,
         bash: &BashConfig,
         truncate: lofi_types::TruncateConfig,
+        image: lofi_types::ImageConfig,
         shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
         let bash_env = crate::bash_env::resolve_bash_env(bash);
@@ -217,6 +219,7 @@ impl Agent {
             bash_env,
             shell_policy,
             truncate,
+            image,
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
@@ -247,6 +250,7 @@ impl Agent {
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
             truncate: self.truncate,
+            image: self.image,
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
@@ -275,6 +279,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             truncate: self.truncate,
+            image: self.image,
         }
     }
 
@@ -298,6 +303,7 @@ impl Agent {
             skills_dir,
             jobs: self.jobs.clone(),
             truncate: self.truncate,
+            image: self.image,
         }
     }
 

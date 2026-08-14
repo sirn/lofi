@@ -223,6 +223,7 @@ pub fn rebuild_agent(
             config.compaction.reserved_context_tokens,
             &config.bash,
             config.truncate,
+            config.image,
             &config.shell_policy,
         )
         .with_tmp_lease(tmp_lease)
