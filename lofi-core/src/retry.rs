@@ -78,10 +78,10 @@ fn non_retryable() -> &'static Regex {
             "incorrect.?api.?key",
             "authentication",
             "unauthorized",
-            "401",
-            "403",
+            r"\b401\b",
+            r"\b403\b",
             "invalid.?request",
-            "400",
+            r"\b400\b",
             "bad.?request",
             "context.?length",
             "context.?window",
@@ -100,12 +100,12 @@ fn retryable() -> &'static Regex {
             "overloaded",
             "rate.?limit",
             "too many requests",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-            "524",
+            r"\b429\b",
+            r"\b500\b",
+            r"\b502\b",
+            r"\b503\b",
+            r"\b504\b",
+            r"\b524\b",
             "service.?unavailable",
             "server.?error",
             "internal.?error",
@@ -125,7 +125,7 @@ fn retryable() -> &'static Regex {
             "timeout",
             "terminated",
             "ended without",
-            "stream ended before message_stop",
+            "stream ended before",
             "http2 request did not get a response",
             "you can retry your request",
             "try your request again",
@@ -141,6 +141,9 @@ fn error_text(e: &Error) -> String {
 
 #[must_use]
 pub fn is_retryable_error(e: &Error) -> bool {
+    if matches!(e, Error::Http(_)) {
+        return true;
+    }
     if matches!(e, Error::Cancelled) {
         return false;
     }
@@ -163,10 +166,13 @@ mod tests {
             "HTTP 429 Too Many Requests".into()
         )));
         assert!(is_retryable_error(&Error::Provider(
-            "503 service unavailable".into()
+            "HTTP 503 Service Unavailable from http://127.0.0.1:44037/v1/responses".into()
         )));
         assert!(is_retryable_error(&Error::Provider(
             "stream idle timeout".into()
+        )));
+        assert!(is_retryable_error(&Error::Provider(
+            "stream ended before response.completed".into()
         )));
         assert!(is_retryable_error(&Error::Provider(
             "connection refused: upstream connect".into()
@@ -192,6 +198,13 @@ mod tests {
         )));
         assert!(!is_retryable_error(&Error::Provider(
             "context length exceeded".into()
+        )));
+    }
+
+    #[test]
+    fn transport_errors_are_retryable() {
+        assert!(is_retryable_error(&Error::Http(
+            "error decoding response body".into()
         )));
     }
 
