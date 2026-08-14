@@ -78,10 +78,10 @@ fn non_retryable() -> &'static Regex {
             "incorrect.?api.?key",
             "authentication",
             "unauthorized",
-            "401",
-            "403",
+            r"\b401\b",
+            r"\b403\b",
             "invalid.?request",
-            "400",
+            r"\b400\b",
             "bad.?request",
             "context.?length",
             "context.?window",
@@ -100,12 +100,12 @@ fn retryable() -> &'static Regex {
             "overloaded",
             "rate.?limit",
             "too many requests",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-            "524",
+            r"\b429\b",
+            r"\b500\b",
+            r"\b502\b",
+            r"\b503\b",
+            r"\b504\b",
+            r"\b524\b",
             "service.?unavailable",
             "server.?error",
             "internal.?error",
@@ -163,7 +163,7 @@ mod tests {
             "HTTP 429 Too Many Requests".into()
         )));
         assert!(is_retryable_error(&Error::Provider(
-            "503 service unavailable".into()
+            "HTTP 503 Service Unavailable from http://127.0.0.1:44037/v1/responses".into()
         )));
         assert!(is_retryable_error(&Error::Provider(
             "stream idle timeout".into()

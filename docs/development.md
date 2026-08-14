@@ -1,5 +1,13 @@
 # Development
 
+## End-to-end tests
+
+The `lofi` crate has deterministic end-to-end tests in `lofi/e2e/`. They run the real binary in a pseudo-terminal or print mode and use a local mock LLM server. The suite covers CLI commands, OpenAI Completions and Responses streaming, thinking and usage, retries, errors, tools, permissions, cancellation, direct shell input, model controls, sessions, resume, compaction, recall, branches, and background jobs. The tests do not need API keys and do not make external requests. Run them with:
+
+```sh
+cargo test -p lofi --test e2e
+```
+
 ## Session transcripts
 
 `lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-name>-<path-hash>/`, with one `.jsonl` file per session. The hash isolates workspaces whose readable names collide; legacy slug-only directories remain readable. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.
