@@ -119,6 +119,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     if let Some(r) = rects[7] {
         render_debug_bar(f, r, app);
     }
+    if app.slash_complete.is_some() {
+        render_slash_complete(f, area, app);
+    }
     if app.picker.is_some() {
         render_picker(f, area, app);
     }
@@ -142,9 +145,6 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if !app.pending_confirms.is_empty() {
         render_confirm_modal(f, area, app);
-    }
-    if app.slash_complete.is_some() {
-        render_slash_complete(f, area, app);
     }
 }
 

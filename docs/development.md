@@ -1,5 +1,28 @@
 # Development
 
+## End-to-end tests
+
+The `lofi` crate has deterministic end-to-end tests in `lofi/e2e/`. They run the real binary in a pseudo-terminal or print mode and use a local mock LLM server. The suite covers CLI commands, OpenAI Completions and Responses streaming, thinking and usage, retries, errors, tools, permissions, cancellation, direct shell input, model controls, sessions, resume, compaction, recall, branches, and background jobs. The tests do not need API keys and do not make external requests. Run them with:
+
+```sh
+just e2e
+```
+
+Run all format, lint, and test checks with `just check`.
+
+### Bugs found by the E2E suite
+
+The first full process-level pass found and fixed these bugs:
+
+| Area | Previous behavior | Fix and regression coverage |
+| --- | --- | --- |
+| New sessions | `/new` cleared the UI cursor but left the session sink attached to the old transcript. The next prompt could append to the old session instead of creating a new file. | Detach both cursors. Session lifecycle E2E tests assert separate histories and correct `--continue` and `--resume` selection. |
+| Recall command | `/recall <query>` did not match the exact `/recall` command arm and was reported as an unknown command. | Accept the command with an argument. A PTY test runs a query and checks its results. |
+| Direct shell cancellation | `Ctrl+C` set a cancellation flag, but a running `!` command did not observe it. The command and its process group could survive cancellation or TUI shutdown. | Pass the cancellation token into the shell runner and terminate the process group before settling the event. PTY tests check cancellation and shutdown with live commands. |
+| Provider retries | Premature response-body EOF errors and some protocol terminal-event errors were not retried. Plain numeric status matching could also mistake digits in a URL or port for an HTTP status. | Retry typed HTTP transport errors, recognize all provider premature-end messages, and require status-code word boundaries. E2E tests truncate streams for all four provider protocols and assert a successful retry. |
+| Skill metadata | Skill discovery could use a frontmatter field such as `name:` as the description instead of reading `description:`. Compaction used a separate parser, so the two views could disagree. | Use one metadata parser for skill indexing and compaction. E2E tests assert lazy indexing, descriptions, namespaced skills, and workspace overrides. |
+| Popup stacking | A policy confirmation could render over `/tree` while keys still went to the tree picker. Autocomplete could also paint over centered modals because render and input orders differed. | Use the reverse render order for input dispatch and render autocomplete below centered modals. Unit and PTY tests assert that the top policy confirmation handles input before `/tree`. |
+
 ## Session transcripts
 
 `lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-name>-<path-hash>/`, with one `.jsonl` file per session. The hash isolates workspaces whose readable names collide; legacy slug-only directories remain readable. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.
