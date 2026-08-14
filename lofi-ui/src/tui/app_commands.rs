@@ -140,7 +140,7 @@ impl App {
                 self.toggle_debug();
                 true
             }
-            "/recall" => {
+            _ if cmd == "/recall" || cmd.starts_with("/recall ") => {
                 self.recall_now(cmd);
                 true
             }
@@ -385,6 +385,9 @@ impl App {
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
+        if let Some(sink) = self.session.sink.as_mut() {
+            sink.clear_cursor();
+        }
         self.session.cursor = None;
         self.pinned = true;
         self.top_line = 0;
@@ -1209,6 +1212,21 @@ impl App {
             || !self.pending_confirms.is_empty()
     }
 
+    /// Dispatch a key to the topmost visible popup. This order is the reverse
+    /// of the popup render order in `view::render`.
+    pub(super) fn handle_modal_stack_key(&mut self, k: &KeyEvent) -> bool {
+        if !self.pending_confirms.is_empty() {
+            return self.handle_confirm_key(k);
+        }
+        if self.info.is_some() {
+            return self.handle_info_key(k);
+        }
+        if self.jobs_modal.is_some() || self.active_modal_slot().is_some() {
+            return self.handle_modal_key(k);
+        }
+        self.handle_popover_key(k)
+    }
+
     pub(super) fn handle_confirm_key(&mut self, k: &KeyEvent) -> bool {
         if self.pending_confirms.is_empty() {
             return false;
@@ -1354,16 +1372,16 @@ impl App {
     }
 
     fn active_modal_slot(&self) -> Option<ModalSlot> {
-        if self.picker.is_some() {
-            Some(ModalSlot::Picker)
-        } else if self.tree_picker.is_some() {
-            Some(ModalSlot::Tree)
-        } else if self.model_picker.is_some() {
-            Some(ModalSlot::Model)
+        if self.theme_picker.is_some() {
+            Some(ModalSlot::Theme)
         } else if self.thinking_picker.is_some() {
             Some(ModalSlot::Thinking)
-        } else if self.theme_picker.is_some() {
-            Some(ModalSlot::Theme)
+        } else if self.model_picker.is_some() {
+            Some(ModalSlot::Model)
+        } else if self.tree_picker.is_some() {
+            Some(ModalSlot::Tree)
+        } else if self.picker.is_some() {
+            Some(ModalSlot::Picker)
         } else {
             None
         }
@@ -1485,16 +1503,16 @@ impl App {
     }
 
     pub(super) fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
-        if self.picker.is_some() {
-            self.picker.as_mut().map(|p| p as &mut dyn Modal)
-        } else if self.tree_picker.is_some() {
-            self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
-        } else if self.model_picker.is_some() {
-            self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
+        if self.theme_picker.is_some() {
+            self.theme_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else if self.thinking_picker.is_some() {
             self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
+        } else if self.model_picker.is_some() {
+            self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
+        } else if self.tree_picker.is_some() {
+            self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else {
-            self.theme_picker.as_mut().map(|t| t as &mut dyn Modal)
+            self.picker.as_mut().map(|p| p as &mut dyn Modal)
         }
     }
 
