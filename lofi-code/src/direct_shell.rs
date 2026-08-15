@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -7,18 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use lofi_code::tools::PgrpKillGuard;
 use lofi_error::{Error, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::tools::{truncate_tail_with, PgrpKillGuard};
+
 const CAPTURE_TAIL_BYTES: usize = 64 * 1024;
-const CONTEXT_MAX_BYTES: usize = 16 * 1024;
-const CONTEXT_MAX_LINES: usize = 40;
 
 #[derive(Debug, Clone)]
-pub struct UserBashResult {
-    pub command: String,
+pub struct DirectShellOutput {
     pub output: String,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
@@ -27,85 +24,23 @@ pub struct UserBashResult {
     pub cancelled: bool,
 }
 
-impl UserBashResult {
-    #[must_use]
-    pub fn from_session(
-        command: String,
-        output: String,
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-        duration_ms: u64,
-        truncated: bool,
-        cancelled: bool,
-    ) -> Self {
-        Self {
-            command,
-            output,
-            exit_code,
-            signal,
-            duration_ms,
-            truncated,
-            cancelled,
-        }
-    }
-
-    #[must_use]
-    pub fn context_text(&self) -> String {
-        let mut text = format!("Ran `{}`\n", self.command);
-        if self.output.is_empty() {
-            text.push_str("(no output)");
-        } else {
-            let compact = lofi_code::tools::truncate_tail_with(
-                self.output.trim_end_matches('\n'),
-                CONTEXT_MAX_LINES,
-                CONTEXT_MAX_BYTES,
-            );
-            text.push_str("```\n");
-            text.push_str(&compact.content);
-            text.push_str("\n```");
-            if compact.truncated {
-                text.push_str("\n[Output truncated for model context]");
-            }
-        }
-        if self.cancelled {
-            text.push_str("\n(command cancelled)");
-        } else if let Some(code) = self.exit_code.filter(|code| *code != 0) {
-            let _ = write!(text, "\nCommand exited with code {code}");
-        } else if let Some(signal) = self.signal {
-            let _ = write!(text, "\nCommand terminated by signal {signal}");
-        }
-        if self.truncated {
-            text.push_str("\n[Output truncated]");
-        }
-        text
-    }
-}
-
-#[must_use]
-pub fn cancelled_user_bash(command: String, duration_ms: u64) -> UserBashResult {
-    UserBashResult {
-        command,
-        output: String::new(),
-        exit_code: None,
-        signal: None,
-        duration_ms,
-        truncated: false,
-        cancelled: true,
-    }
-}
-
+/// Run a user-entered shell command outside the model tool sandbox.
+///
+/// The direct-shell path intentionally uses the interactive environment. The
+/// model-run `bash` tool resolves a separate policy-controlled environment.
+///
 /// # Errors
 /// Returns an error if the shell cannot be spawned, its pipes are unavailable,
 /// or command output/status cannot be read.
-pub async fn run_user_bash(
+pub async fn run_direct_shell(
     root: &Path,
-    command_text: String,
+    command_text: &str,
     cancel: Arc<AtomicBool>,
-) -> Result<UserBashResult> {
+) -> Result<DirectShellOutput> {
     let mut command = Command::new("sh");
     command
         .arg("-c")
-        .arg(&command_text)
+        .arg(command_text)
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -116,11 +51,11 @@ pub async fn run_user_bash(
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| Error::State("bash: stdout pipe unavailable".into()))?;
+        .ok_or_else(|| Error::State("direct shell: stdout pipe unavailable".into()))?;
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| Error::State("bash: stderr pipe unavailable".into()))?;
+        .ok_or_else(|| Error::State("direct shell: stderr pipe unavailable".into()))?;
     let cancelled = async {
         while !cancel.load(Ordering::Relaxed) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -138,10 +73,14 @@ pub async fn run_user_bash(
         () = cancelled => {
             drop(guard);
             let _ = child.wait().await;
-            return Ok(cancelled_user_bash(
-                command_text,
-                started.elapsed().as_millis() as u64,
-            ));
+            return Ok(DirectShellOutput {
+                output: String::new(),
+                exit_code: None,
+                signal: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                truncated: false,
+                cancelled: true,
+            });
         }
     };
     guard.disarm();
@@ -149,13 +88,8 @@ pub async fn run_user_bash(
     let mut bytes = out.0;
     bytes.extend_from_slice(&err.0);
     let clean = strip_ansi(&String::from_utf8_lossy(&bytes));
-    let captured = lofi_code::tools::truncate_tail_with(
-        clean.trim_end_matches('\n'),
-        usize::MAX,
-        CAPTURE_TAIL_BYTES,
-    );
-    Ok(UserBashResult {
-        command: command_text,
+    let captured = truncate_tail_with(clean.trim_end_matches('\n'), usize::MAX, CAPTURE_TAIL_BYTES);
+    Ok(DirectShellOutput {
         output: captured.content,
         exit_code: status.code(),
         signal: status.signal(),
@@ -238,11 +172,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn runs_in_root_and_formats_context() -> Result<()> {
+    async fn runs_in_root_and_captures_output() -> Result<()> {
         let dir = tempfile::tempdir().map_err(Error::Io)?;
-        let result = Box::pin(run_user_bash(
+        let result = Box::pin(run_direct_shell(
             dir.path(),
-            "printf 'ok'; pwd".into(),
+            "printf 'ok'; pwd",
             Arc::new(AtomicBool::new(false)),
         ))
         .await?;
@@ -251,7 +185,6 @@ mod tests {
         assert!(result
             .output
             .contains(&dir.path().to_string_lossy().into_owned()));
-        assert!(result.context_text().starts_with("Ran `printf 'ok'; pwd`"));
         Ok(())
     }
 
