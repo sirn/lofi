@@ -1001,6 +1001,7 @@ enum ParseState {
 
 struct TerminalScreen {
     cells: Vec<Vec<char>>,
+    history: Vec<Vec<char>>,
     row: usize,
     col: usize,
     saved: (usize, usize),
@@ -1013,6 +1014,7 @@ impl TerminalScreen {
     fn new() -> Self {
         Self {
             cells: vec![vec![' '; TERMINAL_COLS]; TERMINAL_ROWS],
+            history: Vec::new(),
             row: 0,
             col: 0,
             saved: (0, 0),
@@ -1110,8 +1112,9 @@ impl TerminalScreen {
         if self.row + 1 < TERMINAL_ROWS {
             self.row += 1;
         } else {
-            self.cells.rotate_left(1);
-            self.cells[TERMINAL_ROWS - 1].fill(' ');
+            let line = self.cells.remove(0);
+            self.history.push(line);
+            self.cells.push(vec![' '; TERMINAL_COLS]);
         }
     }
 
@@ -1192,8 +1195,9 @@ impl TerminalScreen {
     }
 
     fn text(&self) -> String {
-        self.cells
+        self.history
             .iter()
+            .chain(&self.cells)
             .map(|row| row.iter().collect::<String>().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -1258,17 +1262,49 @@ impl Tui {
             output,
             reader: Some(reader),
         };
-        tui.wait_for_any(
-            &[
-                "mock/chat",
-                "mock/alt",
-                "responses/reasoning",
-                "anthropic/tools",
-                "google/tools",
-                "(no model)",
-            ],
-            WAIT,
-        );
+        let start = Instant::now();
+        loop {
+            let saw_query = tui.output().contains("\u{1b}]11;?\u{7}");
+            if saw_query {
+                tui.send(b"\x1b]11;rgb:0000/0000/0000\x07");
+                break;
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "timed out waiting for terminal background query"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let start = Instant::now();
+        loop {
+            let found = {
+                let output = tui.output();
+                [
+                    "mock/chat",
+                    "mock/alt",
+                    "responses/reasoning",
+                    "anthropic/tools",
+                    "google/tools",
+                    "(no model)",
+                ]
+                .iter()
+                .any(|needle| output.contains(needle))
+            };
+            if found {
+                break;
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "timed out waiting for model label; terminal output:\n{}",
+                tui.output()
+            );
+            assert!(
+                tui.child.try_wait().unwrap().is_none(),
+                "lofi exited before startup: {}",
+                tui.output()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
         tui
     }
 

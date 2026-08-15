@@ -753,7 +753,9 @@ impl SessionStore {
     pub fn open() -> Result<Self> {
         let mut p = crate::state::state_dir()?;
         p.push("sessions");
-        Ok(Self { root: p })
+        let store = Self { root: p };
+        crate::state::ensure_private_dir(&store.root)?;
+        Ok(store)
     }
 
     #[must_use]
