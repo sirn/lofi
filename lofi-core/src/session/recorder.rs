@@ -48,7 +48,7 @@ pub enum SessionRecord<'a> {
     System {
         prompt: &'a str,
     },
-    UserBash {
+    UserShell {
         result: &'a DirectShellResult,
         exclude_from_context: bool,
     },
@@ -106,14 +106,14 @@ impl store::SessionCursor {
     pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
         match record {
             SessionRecord::System { prompt } => self.append_system(prompt),
-            SessionRecord::UserBash {
+            SessionRecord::UserShell {
                 result,
                 exclude_from_context,
             } => {
                 let mut events = [SessionEvent {
                     id: String::new(),
                     parent_id: None,
-                    kind: SessionEventKind::UserBash {
+                    kind: SessionEventKind::UserShell {
                         command: result.command.clone(),
                         output: result.output.clone(),
                         exit_code: result.exit_code,
@@ -732,7 +732,7 @@ mod tests {
             cancelled: false,
         };
         cursor
-            .record(SessionRecord::UserBash {
+            .record(SessionRecord::UserShell {
                 result: &bash,
                 exclude_from_context: false,
             })
@@ -761,7 +761,7 @@ mod tests {
                 SessionEventKind::Message(message) if message.role == Role::System => {
                     Some("system")
                 }
-                SessionEventKind::UserBash { .. } => Some("bash"),
+                SessionEventKind::UserShell { .. } => Some("bash"),
                 SessionEventKind::JobStarted { .. } => Some("job-started"),
                 SessionEventKind::JobFinished { .. } => Some("job-finished"),
                 SessionEventKind::Message(message) if message.role == Role::User => Some("kept"),
