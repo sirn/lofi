@@ -467,7 +467,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
 }
 
 #[test]
-fn user_bash_renders_as_shell_tree_with_exit_status() {
+fn user_shell_renders_as_shell_tree_with_exit_status() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
 
@@ -475,7 +475,7 @@ fn user_bash_renders_as_shell_tree_with_exit_status() {
     a.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
-        blocks: vec![Block::UserBash {
+        blocks: vec![Block::UserShell {
             command: "ps".to_string(),
             output: "PID TTY\n42 pts/3".to_string(),
             exit_code: Some(0),
@@ -521,7 +521,7 @@ fn user_bash_renders_as_shell_tree_with_exit_status() {
 }
 
 #[test]
-fn user_bash_nonzero_exit_is_visible_and_error_colored() {
+fn user_shell_nonzero_exit_is_visible_and_error_colored() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
 
@@ -529,7 +529,7 @@ fn user_bash_nonzero_exit_is_visible_and_error_colored() {
     a.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
-        blocks: vec![Block::UserBash {
+        blocks: vec![Block::UserShell {
             command: "false".to_string(),
             output: "failed".to_string(),
             exit_code: Some(7),
@@ -1895,7 +1895,7 @@ fn msg(m: Message) -> SessionEventKind {
 }
 
 #[test]
-fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
+fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
     let mut a = app();
     a.apply_event(AgentEvent::TurnStart {
         kind: lofi_types::PromptKind::User,
@@ -1907,7 +1907,7 @@ fn standalone_user_bash_keeps_turn_backing_metadata_aligned() {
         byte_end: 20,
     });
 
-    a.apply_event(AgentEvent::UserBash {
+    a.apply_event(AgentEvent::UserShell {
         command: "pwd".into(),
         output: "/tmp".into(),
         exit_code: Some(0),
@@ -1970,7 +1970,7 @@ fn resume_picker_attaches_selected_cursor_to_sink_and_ui() {
 }
 
 #[test]
-fn resumed_user_bash_and_final_turn_are_file_backed_shells() {
+fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
     let dir = tempfile::tempdir().unwrap();
     let store = store::SessionStore::new(dir.path().join("sessions"));
     let cursor = store
@@ -1985,7 +1985,7 @@ fn resumed_user_bash_and_final_turn_are_file_backed_shells() {
             cost: 0.0,
             usage: Usage::default(),
         },
-        SessionEventKind::UserBash {
+        SessionEventKind::UserShell {
             command: "pwd".into(),
             output: "/workspace".into(),
             exit_code: Some(0),
@@ -5585,7 +5585,7 @@ async fn ctrl_d_on_empty_cancels_run_without_aborting() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&ctrl_key(KeyCode::Char('d')), &mut a, None, &mut run);
@@ -5612,7 +5612,7 @@ async fn settle_run_for_quit_waits_for_flush_then_joins() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     };
 
     settle_run_for_quit(run, Duration::from_secs(1)).await;
@@ -5661,7 +5661,7 @@ async fn escape_interrupts_run_and_restores_queue_like_pi() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
@@ -5685,7 +5685,7 @@ async fn escape_dismisses_completion_before_interrupting_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
@@ -5707,7 +5707,7 @@ async fn ctrl_c_in_nav_does_not_interrupt_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
@@ -5729,7 +5729,7 @@ async fn ctrl_c_clears_draft_without_interrupting_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
@@ -5749,7 +5749,7 @@ async fn ctrl_c_on_empty_input_interrupts_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
-        user_bash: None,
+        user_shell: None,
     });
 
     handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
