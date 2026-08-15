@@ -30,6 +30,7 @@ use lofi_error::{Error, Result};
 
 pub mod compact_hook;
 mod convert;
+pub mod direct_shell;
 pub mod docs;
 pub mod policy;
 mod skill_metadata;
