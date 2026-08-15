@@ -105,7 +105,7 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         match &events[i].kind {
             SessionEventKind::TurnFailed { .. } => skipping = true,
             SessionEventKind::TurnEnd { .. } => skipping = false,
-            SessionEventKind::Message(_) | SessionEventKind::UserBash { .. } if !skipping => {
+            SessionEventKind::Message(_) | SessionEventKind::UserShell { .. } if !skipping => {
                 if let Some(message) =
                     crate::session::replay::agent_message_for_event(&events[i].kind)
                 {

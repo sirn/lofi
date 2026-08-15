@@ -361,7 +361,7 @@ fn direct_shell_output_creates_a_session_and_survives_restart() {
 
     first.submit("!printf durable-shell-output-marker");
     first.wait_for("durable-shell-output-marker", WAIT);
-    fixture.wait_for_event_count("user_bash", 1);
+    fixture.wait_for_event_count("user_shell", 1);
     first.submit("/quit");
     first.wait_exit();
 
@@ -373,7 +373,7 @@ fn direct_shell_output_creates_a_session_and_survives_restart() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].body.contains("durable-shell-output-marker"));
     assert!(requests[0].body.contains("shell resume prompt"));
-    assert!(event_types(&fixture.events()).contains(&"user_bash"));
+    assert!(event_types(&fixture.events()).contains(&"user_shell"));
 }
 
 #[test]
