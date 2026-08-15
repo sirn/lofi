@@ -17,7 +17,7 @@ use lofi_types::{
 use super::store::{self, EventIndex, IndexKind, SessionCursor};
 use crate::agent::AgentEvent;
 use crate::exec_input_code_and_label;
-use crate::user_bash::UserBashResult;
+use crate::shell::DirectShellResult;
 
 /// Positions of pre-compaction tail events hidden by checkpointed compaction
 /// markers along `path`. `compaction_at` returns the marker's
@@ -342,7 +342,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
             cancelled,
             exclude_from_context: false,
         } => {
-            let result = UserBashResult::from_session(
+            let result = DirectShellResult::from_session(
                 command.clone(),
                 output.clone(),
                 *exit_code,
