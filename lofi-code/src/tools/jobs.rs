@@ -163,6 +163,9 @@ struct Inner {
     /// reusing the same state dir) never mint the same job id and
     /// collide on the same `create_new` log file.
     next_id: AtomicU64,
+    /// Changes whenever the host starts or attaches a different session.
+    /// Drivers publish only into the generation they were spawned in.
+    generation: AtomicU64,
     jobs: Mutex<HashMap<u64, Arc<JobHandle>>>,
     /// Live notice subscribers (one per UI host). Zero subscribers means
     /// headless; notices still land in `pending` so a late subscriber or a
@@ -199,6 +202,7 @@ impl JobRegistry {
         Self {
             inner: Arc::new(Inner {
                 next_id: AtomicU64::new(nanos),
+                generation: AtomicU64::new(0),
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(Vec::new()),
@@ -223,17 +227,22 @@ impl JobRegistry {
     #[must_use]
     pub fn subscribe_notices(&self) -> tokio::sync::mpsc::UnboundedReceiver<String> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        // Install the subscriber and drain the buffer under the same lock
+        // order used by publish. Otherwise a completion can land after the
+        // buffer drain but before subscriber insertion and remain stranded
+        // in `pending` until a second subscriber appears.
+        let mut subscribers = self
+            .inner
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        subscribers.push(tx.clone());
         let buffered = self
             .inner
             .pending
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
-        self.inner
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(tx.clone());
         for notice in buffered {
             let _ = tx.send(notice);
         }
@@ -370,6 +379,7 @@ impl JobRegistry {
             }
             job.state = State::Cancelled;
             job.ended = Some(Instant::now());
+            job.signal = Some(nix::libc::SIGKILL);
             job.pid
         };
         if let Some(pid) = pid {
@@ -439,6 +449,55 @@ impl JobRegistry {
                 }
                 job.state = State::Cancelled;
                 job.ended = Some(Instant::now());
+                job.signal = Some(nix::libc::SIGKILL);
+                job.pid
+            };
+            if let Some(pid) = pid {
+                kill_pgrp(pid);
+            }
+            handle.cancel.store(true, Ordering::Relaxed);
+            handle.done.notify_waiters();
+        }
+    }
+
+    /// End the current session's job scope. Running process groups are
+    /// cancelled without notices, completed rows are removed, and buffered
+    /// notices are discarded. Subscribers are disconnected so notices that
+    /// were already delivered to an old receiver cannot enter the next
+    /// session. Hosts must subscribe again after this reset.
+    pub fn reset(&self) {
+        self.inner.generation.fetch_add(1, Ordering::SeqCst);
+        let jobs: Vec<Arc<JobHandle>> = self
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        self.inner
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        for handle in jobs {
+            let pid = {
+                let mut job = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                job.notify.enabled = false;
+                if job.state.is_terminal() {
+                    continue;
+                }
+                job.state = State::Cancelled;
+                job.ended = Some(Instant::now());
+                job.signal = Some(nix::libc::SIGKILL);
                 job.pid
             };
             if let Some(pid) = pid {
@@ -520,6 +579,7 @@ impl BuiltinTools {
         }
 
         let id = self.jobs.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let generation = self.jobs.inner.generation.load(Ordering::SeqCst);
         let log_path = self
             .tmp_dir
             .join(format!("lofi-job-{id}.log"))
@@ -576,7 +636,13 @@ impl BuiltinTools {
 
         // Start the driver only after the acquisition marker is published, so
         // even an immediately exiting child cannot finish first.
-        tokio::spawn(run_job(self.jobs.clone(), handle, child, timeout_ms));
+        tokio::spawn(run_job(
+            Arc::downgrade(&self.jobs.inner),
+            handle,
+            child,
+            timeout_ms,
+            generation,
+        ));
 
         Ok(json!({
             "ok": true,
@@ -638,21 +704,18 @@ impl BuiltinTools {
             (job.state, job.log_path.clone())
         };
 
-        let bytes = match tokio::fs::read(&log_path).await {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let (bytes, next, total) = match read_log_page(&log_path, cursor, limit).await {
+            Ok(page) => page,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), 0, 0),
             Err(e) => return Err(Error::Io(e)),
         };
-        let total = bytes.len() as u64;
-        let start = (cursor as usize).min(bytes.len());
-        let end = (start + limit).min(bytes.len());
-        let mut chunk = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+        let mut chunk = String::from_utf8_lossy(&bytes).into_owned();
         self.bash_env.redact(&mut chunk);
         Ok(json!({
             "ok": true,
             "id": id.to_string(),
             "state": state.as_str(),
-            "cursor": end as u64,
+            "cursor": next,
             "totalBytes": total,
             "output": chunk,
             "done": state.is_terminal(),
@@ -770,6 +833,24 @@ impl BuiltinTools {
     }
 }
 
+async fn read_log_page(
+    path: &str,
+    cursor: u64,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, u64, u64)> {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let total = file.metadata().await?.len();
+    let start = cursor.min(total);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let available = usize::try_from(total - start).unwrap_or(usize::MAX);
+    let mut bytes = vec![0; limit.min(available)];
+    let read = file.read(&mut bytes).await?;
+    bytes.truncate(read);
+    Ok((bytes, start + read as u64, total))
+}
+
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
 /// terminal transition updates the job record, wakes `jobWait` listeners,
@@ -779,10 +860,11 @@ impl BuiltinTools {
 // execute_tools round) into the spawned task's lifetime, keeping the
 // engine-to-UI channel — and therefore the run — alive until the job exits.
 async fn run_job(
-    jobs: JobRegistry,
+    jobs: std::sync::Weak<Inner>,
     handle: Arc<JobHandle>,
     mut child: tokio::process::Child,
     timeout_ms: Option<u64>,
+    generation: u64,
 ) {
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
     let mut guard = PgrpKillGuard::new(child.id());
@@ -821,11 +903,16 @@ async fn run_job(
             }
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            outcome = Some((State::TimedOut, None, None));
+            if let Some(pid) = child.id() {
+                kill_pgrp(pid);
+            }
+            let _ = child.wait().await;
+            guard.disarm();
+            outcome = Some((State::TimedOut, None, Some(nix::libc::SIGKILL)));
             break;
         }
         if let Some(text) = progress_tick(&handle, &mut last_tick, &mut last_bytes) {
-            push_notice(&jobs, text);
+            push_notice(&jobs, generation, text);
         }
         tokio::time::sleep(JOB_POLL_INTERVAL).await;
     }
@@ -868,24 +955,34 @@ async fn run_job(
     }
     handle.done.notify_waiters();
     if let Some(text) = notice {
-        push_notice(&jobs, text);
+        push_notice(&jobs, generation, text);
     }
 }
 
 /// Publish a notice to every live subscriber, or buffer it for a future
 /// subscriber when the registry is headless (tests, pre-UI agent).
-fn push_notice(registry: &JobRegistry, text: String) {
-    let mut subs = registry
-        .inner
+fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, text: String) {
+    let Some(inner) = registry.upgrade() else {
+        return;
+    };
+    if inner.generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    let mut subs = inner
         .subscribers
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Reset increments the generation before it clears subscribers. Check
+    // again under the subscriber lock so a publisher that paused after its
+    // first check cannot enqueue an old-session notice after the clear.
+    if inner.generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
     // send() on an unbounded channel fails iff the receiver is dropped; prune
     // dead subscribers on publish so we never hold stale senders.
     subs.retain(|tx| tx.send(text.clone()).is_ok());
     if subs.is_empty() {
-        registry
-            .inner
+        inner
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -893,12 +990,6 @@ fn push_notice(registry: &JobRegistry, text: String) {
     }
 }
 
-/// Emit one periodic progress notice when it is due. A tick is due once
-/// `interval_ms` has elapsed since `last_tick`. With `changed` (the
-/// default) the tick only fires when the log grew since `last_bytes`, so a
-/// live-but-silent job produces no pings; either way the tick that fires
-/// (or is skipped for no change) resets the interval. Returns the notice
-/// text, or `None` when not due / disabled / unchanged.
 /// Truncate a command line to 60 characters, appending U+2026 when more
 /// follows. Multi-byte chars are kept whole; truncation is at a char
 /// boundary so the ellipsis never lands mid-codepoint.
@@ -1113,6 +1204,48 @@ mod tests {
             assert_eq!(handle.data.lock().unwrap().state, State::Cancelled);
             assert!(handle.cancel.load(Ordering::Relaxed));
         }
+    }
+
+    #[test]
+    fn reset_ends_the_old_scope_and_rejects_its_late_notices() {
+        let registry = JobRegistry::new();
+        let old_generation = registry.inner.generation.load(Ordering::SeqCst);
+        let mut old_receiver = registry.subscribe_notices();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let handle = handle_with(
+            NotifyOpts::terminal_only(),
+            log.path().to_string_lossy().into_owned(),
+        );
+        let id = handle.data.lock().unwrap().id;
+        registry
+            .inner
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(id, handle.clone());
+        registry
+            .inner
+            .pending
+            .lock()
+            .unwrap()
+            .push("buffered".into());
+
+        registry.reset();
+
+        assert!(registry.live_ids().is_empty());
+        assert!(registry.drain_notices().is_empty());
+        assert_eq!(handle.data.lock().unwrap().state, State::Cancelled);
+        assert_eq!(handle.data.lock().unwrap().signal, Some(nix::libc::SIGKILL));
+        assert!(handle.cancel.load(Ordering::Relaxed));
+        assert!(old_receiver.try_recv().is_err());
+
+        let weak = Arc::downgrade(&registry.inner);
+        push_notice(&weak, old_generation, "stale".into());
+        let current_generation = registry.inner.generation.load(Ordering::SeqCst);
+        let mut current_receiver = registry.subscribe_notices();
+        assert!(current_receiver.try_recv().is_err());
+        push_notice(&weak, current_generation, "current".into());
+        assert_eq!(current_receiver.try_recv().unwrap(), "current");
     }
 
     #[test]
