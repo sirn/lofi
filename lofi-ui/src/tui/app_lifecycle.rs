@@ -119,6 +119,7 @@ impl App {
             // Cloned session job registry. Set by the caller from the running
             // agent; `None` until the agent attaches.
             jobs: None,
+            jobs_receiver_stale: false,
             jobs_modal: None,
         }
     }

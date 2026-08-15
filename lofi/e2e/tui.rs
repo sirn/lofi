@@ -84,10 +84,13 @@ fn topmost_policy_confirmation_handles_input_before_tree_picker() {
     tui.wait_for("Roll back to a turn", WAIT);
     tui.wait_for("Permission Required", WAIT);
     tui.send(b"da");
-    tui.wait_for("overlap policy denied answer", WAIT);
-    tui.send(b"\x1b");
-
+    let started = std::time::Instant::now();
+    while server.request_count() < 3 && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(server.request_count(), 3);
+    tui.send(b"\x1b");
+    tui.wait_for("overlap policy denied answer", WAIT);
     assert!(!fixture.workspace.join("should-not-run").exists());
 }
 

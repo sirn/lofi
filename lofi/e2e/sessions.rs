@@ -667,6 +667,89 @@ fn new_continue_and_explicit_resume_select_the_requested_history() {
 }
 
 #[test]
+fn new_session_kills_jobs_and_drops_old_job_notices() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "new-session-job",
+            r#"return await lofi.jobSpawn({ cmd: "sleep 60" });"#,
+        ),
+        text_response("new session job started"),
+        text_response("new session clean answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start the old session job");
+    tui.wait_for("new session job started", WAIT);
+    let pid = spawned_pid(&fixture);
+    let mut job = ProcessGuard::new(pid);
+    assert!(process_is_alive(pid));
+
+    tui.submit("/new");
+    wait_for_process_exit(pid);
+    job.disarm();
+    tui.submit("new session prompt");
+    tui.wait_for("new session clean answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let new_session = &requests[2].body;
+    assert!(new_session.contains("new session prompt"));
+    assert!(!new_session.contains("start the old session job"));
+    assert!(!new_session.contains("sleep 60"));
+    assert!(!new_session.contains("cancelled:"));
+}
+
+#[test]
+fn resume_picker_kills_current_session_jobs_and_drops_their_notices() {
+    let server = MockServer::start(vec![
+        text_response("resume job saved answer"),
+        tool_response(
+            "resume-current-job",
+            r#"return await lofi.jobSpawn({ cmd: "echo $$ > resume-job.pid; exec sleep 60" });"#,
+        ),
+        text_response("resume current job started"),
+        text_response("resume job clean answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("resume job saved prompt");
+    tui.wait_for("resume job saved answer", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/new");
+    tui.submit("start the resume current job");
+    tui.wait_for("Permission Required", WAIT);
+    tui.send(b"a");
+    tui.wait_for("resume current job started", WAIT);
+    fixture.wait_for_event_count("turn_end", 2);
+    let pid: i32 = std::fs::read_to_string(fixture.workspace.join("resume-job.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut job = ProcessGuard::new(pid);
+    assert!(process_is_alive(pid));
+
+    tui.submit("/resume");
+    tui.wait_for("Resume a session", WAIT);
+    tui.send(b"\x1b[B\r");
+    wait_for_process_exit(pid);
+    job.disarm();
+    tui.submit("resume job final prompt");
+    tui.wait_for("resume job clean answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let resumed = &requests[3].body;
+    assert!(resumed.contains("resume job saved prompt"));
+    assert!(resumed.contains("resume job final prompt"));
+    assert!(!resumed.contains("start the resume current job"));
+    assert!(!resumed.contains("sleep 60"));
+    assert!(!resumed.contains("cancelled:"));
+}
+
+#[test]
 fn explicit_model_overrides_the_model_restored_from_the_session() {
     let server = MockServer::start(vec![
         text_response("model override saved answer"),
@@ -805,6 +888,63 @@ fn hard_context_pressure_compacts_and_silently_continues_the_tool_cycle() {
                 .is_some_and(|text| text.contains("This summary captures work done"))
     }));
     assert!(messages.iter().any(|message| message["role"] == "tool"));
+}
+
+#[test]
+fn queued_job_completion_survives_escape_cancellation_of_a_foreground_tool() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "race-tools",
+            r#"const job = await lofi.jobSpawn({ cmd: "while [ ! -f foreground-tool.pid ]; do sleep 0.02; done; sleep 0.2; printf queued-job-log-marker" });
+const foreground = await lofi.bash({ cmd: "echo $$ > foreground-tool.pid; exec sleep 3600" });
+return { job, foreground };"#,
+        ),
+        text_response("queued job notice handled after cancellation"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start a background job and then run a long foreground command");
+    tui.wait_for("Permission Required", WAIT);
+    tui.send(b"a");
+    let pid_path = fixture.workspace.join("foreground-tool.pid");
+    let started = std::time::Instant::now();
+    while !pid_path.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        pid_path.exists(),
+        "foreground tool did not start; requests: {}; output: {:?}",
+        server.request_count(),
+        tui.output()
+    );
+    let pid: i32 = std::fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut foreground = ProcessGuard::new(pid);
+    assert!(process_is_alive(pid));
+
+    // Wait until the background completion is visibly queued behind the
+    // foreground tool. Escape must cancel only the active run, not this
+    // already queued system notice.
+    tui.wait_for("completed:", WAIT);
+    tui.send(b"");
+    wait_for_process_exit(pid);
+    foreground.disarm();
+    tui.wait_for("queued job notice handled after cancellation", WAIT);
+    fixture.wait_for_event_count("turn_cancelled", 1);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains(" completed:"));
+    assert!(requests[1].body.contains("queued-job-log-marker"));
+    let events = fixture.events();
+    assert!(events.iter().any(|event| event["type"] == "turn_cancelled"));
+    assert_eq!(job_events(&events, "job_started").len(), 1);
+    assert_eq!(job_events(&events, "job_finished").len(), 1);
 }
 
 #[test]
