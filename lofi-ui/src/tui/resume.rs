@@ -21,7 +21,7 @@ pub(super) fn replay_indexed_session(
         .filter_map(|(p, &i)| {
             matches!(
                 index[i].kind,
-                store::IndexKind::UserPrompt | store::IndexKind::UserBash
+                store::IndexKind::UserPrompt | store::IndexKind::UserShell
             )
             .then_some(p)
         })
@@ -46,7 +46,7 @@ pub(super) fn replay_indexed_session(
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         let selected = &visible[start_pos..end_pos];
         let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
-        if index[visible[start_pos]].kind == store::IndexKind::UserBash {
+        if index[visible[start_pos]].kind == store::IndexKind::UserShell {
             let event = cursor.event_at(index[visible[start_pos]].offset)?;
             replay_selected_session_events(&[event], |ev| {
                 app.apply_file_backed_replay_event(ev);
