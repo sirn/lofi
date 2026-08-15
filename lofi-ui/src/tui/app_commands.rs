@@ -378,6 +378,7 @@ impl App {
     }
 
     pub(super) fn start_new_session(&mut self) {
+        self.reset_session_jobs();
         if let Err(error) = self.lifecycle.clear_history() {
             self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
         }
@@ -398,6 +399,17 @@ impl App {
         self.turn_cost = 0.0;
         self.turn_has_round_usage = false;
         self.bump_render_epoch();
+    }
+
+    fn reset_session_jobs(&mut self) {
+        if let Some(jobs) = &self.jobs {
+            jobs.reset();
+            self.jobs_receiver_stale = true;
+        }
+        self.jobs_modal = None;
+        self.prompt_queue
+            .retain(|queued| queued.kind == lofi_types::PromptKind::User);
+        self.startup_notices.clear();
     }
 
     pub(super) fn open_picker(&mut self) {
@@ -572,6 +584,7 @@ impl App {
                     });
                     return;
                 }
+                self.reset_session_jobs();
                 if self.turns.len() > 1 {
                     let n = self.turns.len();
                     for turn in &mut self.turns[..n - 1] {
