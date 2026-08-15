@@ -294,7 +294,7 @@ impl App {
             }
             _ => {}
         }
-        let starts_standalone_turn = matches!(&ev, AgentEvent::UserBash { .. });
+        let starts_standalone_turn = matches!(&ev, AgentEvent::UserShell { .. });
         if starts_standalone_turn {
             self.freeze_previous_file_backed_turn();
         }
