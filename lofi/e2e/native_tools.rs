@@ -155,6 +155,7 @@ fn every_background_job_api_reports_output_status_wait_notify_and_kill() {
             r#"
 const first = await lofi.jobSpawn({ cmd: "printf job-page-one; sleep 0.2; printf job-page-two", notify: false });
 const notify = await lofi.jobNotify({ id: first.id, enabled: true, intervalMs: 1, changed: false });
+const silenced = await lofi.jobNotify({ id: first.id, enabled: false });
 const early = await lofi.jobWait({ id: first.id, timeoutMs: 1 });
 const running = await lofi.jobStatus({ id: first.id });
 const done = await lofi.jobWait({ id: first.id, timeoutMs: 5000 });
@@ -166,8 +167,34 @@ const killedStatus = await lofi.jobStatus({ id: second.id });
 const killedAgain = await lofi.jobKill({ id: second.id, reason: "idempotent marker" });
 const timed = await lofi.jobSpawn({ cmd: "sleep 60", timeoutMs: 20, notify: false });
 const timedStatus = await lofi.jobWait({ id: timed.id, timeoutMs: 5000 });
-const missing = await lofi.jobStatus({ id: "999999" });
-return { notify, early, running, done, page1, page2, killed, killedStatus, killedAgain, timedStatus, missing };
+const failed = await lofi.jobSpawn({ cmd: "printf failed-job-marker; exit 23", notify: false });
+const failedStatus = await lofi.jobWait({ id: failed.id });
+const failedLog = await lofi.jobRead({ id: failed.id });
+const large = await lofi.jobSpawn({ cmd: "yes x | head -c 70000", notify: false });
+await lofi.jobWait({ id: large.id });
+const largePage = await lofi.jobRead({ id: large.id, limit: 999999 });
+const pastEnd = await lofi.jobRead({ id: large.id, cursor: 999999, limit: 1 });
+const concurrentA = await lofi.jobSpawn({ cmd: "sleep 0.05; printf concurrent-a", notify: false });
+const concurrentB = await lofi.jobSpawn({ cmd: "sleep 0.03; printf concurrent-b", notify: false });
+const concurrentC = await lofi.jobSpawn({ cmd: "sleep 0.01; printf concurrent-c", notify: false });
+const concurrentDoneA = await lofi.jobWait({ id: concurrentA.id });
+const concurrentDoneB = await lofi.jobWait({ id: concurrentB.id });
+const concurrentDoneC = await lofi.jobWait({ id: concurrentC.id });
+const missing = {
+  status: await lofi.jobStatus({ id: "999999" }),
+  read: await lofi.jobRead({ id: "999999" }),
+  wait: await lofi.jobWait({ id: "999999", timeoutMs: 1 }),
+  kill: await lofi.jobKill({ id: "999999" }),
+  notify: await lofi.jobNotify({ id: "999999" }),
+};
+return {
+  notify, silenced, early, running, done, page1, page2, killed, killedStatus, killedAgain,
+  timedStatus, failedStatus, failedLog,
+  largePage: { cursor: largePage.cursor, totalBytes: largePage.totalBytes, outputBytes: largePage.output.length },
+  pastEnd, concurrentIds: [concurrentA.id, concurrentB.id, concurrentC.id],
+  concurrentUnique: new Set([concurrentA.id, concurrentB.id, concurrentC.id]).size === 3,
+  concurrentStates: [concurrentDoneA.state, concurrentDoneB.state, concurrentDoneC.state], missing,
+};
 "#,
         ),
         text_response("job API final answer"),
@@ -190,6 +217,15 @@ return { notify, early, running, done, page1, page2, killed, killedStatus, kille
         "5000",
         "idempotent marker",
         "timed_out",
+        "failed-job-marker",
+        r#"\"exitCode\":23"#,
+        r#"\"signal\":9"#,
+        r#"\"cursor\":65536"#,
+        r#"\"totalBytes\":70000"#,
+        "concurrent-a",
+        "concurrent-b",
+        "concurrent-c",
+        r#"\"concurrentUnique\":true"#,
         "no such job",
     ] {
         assert!(body.contains(marker), "missing {marker}: {body}");
@@ -205,6 +241,39 @@ return { notify, early, running, done, page1, page2, killed, killedStatus, kille
     ] {
         assert!(transcript.contains(&format!(r#""name":"{tool}""#)));
     }
+}
+
+#[test]
+fn every_background_job_api_rejects_invalid_arguments() {
+    let server = MockServer::start(vec![
+        tool_response("invalid-job-spawn", "return await lofi.jobSpawn({});"),
+        tool_response(
+            "invalid-job-status",
+            r#"return await lofi.jobStatus({ id: "not-an-id" });"#,
+        ),
+        tool_response("invalid-job-read", "return await lofi.jobRead({});"),
+        tool_response(
+            "invalid-job-wait",
+            "return await lofi.jobWait({ id: null });",
+        ),
+        tool_response(
+            "invalid-job-kill",
+            "return await lofi.jobKill({ id: -1 });",
+        ),
+        tool_response("invalid-job-notify", "return await lofi.jobNotify({});"),
+        text_response("invalid job arguments final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("exercise invalid background job arguments");
+    tui.wait_for("invalid job arguments final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 7);
+    let body = &requests[6].body;
+    assert!(body.contains("jobSpawn: missing"));
+    assert_eq!(body.matches("job: missing or invalid").count(), 5);
 }
 
 #[test]
