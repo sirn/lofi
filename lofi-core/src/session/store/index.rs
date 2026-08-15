@@ -100,7 +100,7 @@ pub struct EventIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     UserPrompt,
-    UserBash,
+    UserShell,
     AssistantMessage,
     SystemMessage,
     /// A tool-result message (`role: tool`). Distinguished from `UserPrompt`
@@ -243,7 +243,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
             Some("system") => IndexKind::SystemMessage,
             _ => IndexKind::Other,
         },
-        "user_bash" => IndexKind::UserBash,
+        "user_shell" => IndexKind::UserShell,
         "turn_end" => IndexKind::TurnEnd,
         "turn_failed" => IndexKind::TurnFailed,
         "turn_cancelled" => IndexKind::TurnCancelled,
@@ -269,7 +269,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
             lofi_types::Role::Tool => IndexKind::ToolResult,
             lofi_types::Role::System => IndexKind::SystemMessage,
         },
-        SessionEventKind::UserBash { .. } => IndexKind::UserBash,
+        SessionEventKind::UserShell { .. } => IndexKind::UserShell,
         SessionEventKind::TurnEnd { .. } => IndexKind::TurnEnd,
         SessionEventKind::TurnFailed { .. } => IndexKind::TurnFailed,
         SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
