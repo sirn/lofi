@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 
 use lofi_error::{Error, Result};
 
-use super::bash_util::PgrpKillGuard;
+use super::bash_util::{wait_for_cancel, PgrpKillGuard};
 use super::BuiltinTools;
 
 /// Byte budget for a single `jobRead` page. Generous compared to the
@@ -741,7 +741,9 @@ impl BuiltinTools {
 
     /// Bounded wait for the job to reach a terminal state. Returns the
     /// final status, or the still-running status when `timeoutMs` elapses.
-    /// Waiting never cancels the job.
+    /// Waiting never cancels the job, but user cancellation (ESC/Ctrl-C)
+    /// breaks the wait early and returns the current state with
+    /// `cancelled: true`.
     ///
     /// # Errors
     /// Returns [`Error::Tool`] when `id` is missing or invalid.
@@ -768,16 +770,39 @@ impl BuiltinTools {
         // `enable` arms the notification even if the job finishes between
         // the fast path above and the await below.
         wait.as_mut().enable();
-        if let Some(ms) = timeout_ms {
-            let _ = tokio::time::timeout(Duration::from_millis(ms), wait).await;
+        let timed = async {
+            if let Some(ms) = timeout_ms {
+                let _ = tokio::time::timeout(Duration::from_millis(ms), wait).await;
+            } else {
+                wait.await;
+            }
+        };
+        tokio::pin!(timed);
+        // Race the wait against user cancellation, mirroring `bash`: while
+        // the guest awaits here, no QuickJS bytecode ticks, so the sandbox
+        // interrupt handler cannot observe `cancel`. A cancelled wait leaves
+        // the job running and returns the current state flagged `cancelled`.
+        let cancelled = if let Some(flag) = &self.cancel {
+            let cancel_wait = wait_for_cancel(flag);
+            tokio::pin!(cancel_wait);
+            tokio::select! {
+                biased;
+                () = &mut timed => false,
+                () = &mut cancel_wait => true,
+            }
         } else {
-            wait.await;
-        }
+            timed.await;
+            false
+        };
         let job = handle
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(job.to_json(&self.root))
+        let mut v = job.to_json(&self.root);
+        if cancelled {
+            v["cancelled"] = json!(true);
+        }
+        Ok(v)
     }
 
     /// Idempotent cancellation: kill the whole process group and mark the
@@ -1298,5 +1323,66 @@ mod tests {
         let job = handle.data.lock().unwrap();
         assert!(job.state.is_terminal());
         assert!(!job.notify.enabled);
+    }
+
+    fn tools_with_cancel(cancel: Arc<AtomicBool>) -> (tempfile::TempDir, BuiltinTools) {
+        let dir = tempfile::tempdir().unwrap();
+        let auto: crate::AutoModeFn =
+            Arc::new(|_| Box::pin(async { crate::AutoModeOutcome::Allow { reason: "t".into() } }));
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tools = BuiltinTools::with_skills_dir(
+            dir.path().to_path_buf(),
+            None,
+            tmp,
+            crate::BashEnv::default(),
+            crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
+            None,
+            Some(auto),
+            None,
+        )
+        .with_cancel(Some(cancel));
+        (dir, tools)
+    }
+
+    #[tokio::test]
+    async fn job_wait_settles_promptly_on_cancel() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel.clone());
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "sleep 30", "timeoutMs": 60_000 }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+
+        let waiter = tokio::spawn({
+            let tools = tools.clone();
+            async move { tools.job_wait(json!({ "id": id })).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.store(true, Ordering::Relaxed);
+        let settled = tokio::time::timeout(Duration::from_secs(5), waiter).await;
+        assert!(settled.is_ok(), "job_wait must settle promptly on cancel");
+        let res = settled.unwrap().unwrap();
+        assert_eq!(res["cancelled"], json!(true), "got: {res}");
+        assert_eq!(res["state"], json!("running"), "got: {res}");
+
+        // The wait was interrupted, not the job: it must still be alive and
+        // respond to an explicit kill.
+        let killed = tools.job_kill(json!({ "id": res["id"] })).await.unwrap();
+        assert_eq!(killed["killed"], json!(true), "got: {killed}");
+    }
+
+    #[tokio::test]
+    async fn job_wait_completes_normally_without_cancel() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools.job_spawn(json!({ "cmd": "true" })).await.unwrap();
+        let res = tools
+            .job_wait(json!({ "id": spawned["id"], "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(res["state"], json!("completed"), "got: {res}");
+        assert!(res.get("cancelled").is_none(), "got: {res}");
     }
 }
