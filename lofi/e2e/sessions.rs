@@ -791,7 +791,7 @@ fn saved_transcript_remains_available_when_no_model_is_configured() {
 
     std::fs::write(&fixture.config, "[providers]\n").unwrap();
     let mut resumed = fixture.spawn(&["--continue"]);
-    resumed.wait_for("No models configured.", WAIT);
+    resumed.wait_for_scrollback("No models configured.", WAIT);
     resumed.wait_for("no model saved answer", WAIT);
     resumed.clear_output();
     resumed.submit("prompt while resumed without a model");
