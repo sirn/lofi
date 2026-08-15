@@ -1,3 +1,4 @@
+use nix::sys::signal::Signal;
 use serde_json::Value;
 
 use crate::support::{
@@ -385,4 +386,34 @@ return { recall, result };"#,
     assert!(requests[1].body.contains("recall unavailable"));
     assert!(requests[1].body.contains("result unavailable"));
     assert!(fixture.session_files().is_empty());
+}
+
+#[test]
+fn sigterm_leaves_the_terminal_ready_for_the_next_process() {
+    let server = MockServer::start(vec![text_response("signal terminal answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("signal terminal prompt");
+    tui.wait_for("signal terminal answer", WAIT);
+    tui.signal(Signal::SIGTERM);
+    tui.wait_exit();
+
+    let next = fixture.output(&["--list-models"]);
+    assert!(next.status.success());
+    assert!(String::from_utf8_lossy(&next.stdout).contains("mock/chat"));
+}
+
+#[test]
+fn resize_reflows_the_transcript_without_losing_the_latest_answer() {
+    let server = MockServer::start(vec![text_response("resize reflow answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("resize reflow prompt");
+    tui.wait_for("resize reflow answer", WAIT);
+    tui.resize(24, 80);
+    tui.wait_for("resize reflow answer", WAIT);
+    tui.send(b"\x04");
+    tui.wait_exit();
 }
