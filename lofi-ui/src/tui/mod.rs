@@ -852,6 +852,10 @@ pub(crate) struct App {
     /// startup. `None` when no agent is configured. Backs the `/job` modal
     /// and the persistent running-jobs badge.
     jobs: Option<lofi_core::JobRegistry>,
+    /// Set when a session switch resets the shared registry. The run loop
+    /// replaces its receiver so notices already delivered for the old scope
+    /// cannot enter the new session.
+    jobs_receiver_stale: bool,
     jobs_modal: Option<JobsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
@@ -1433,6 +1437,13 @@ async fn run_loop(
                                 format!("switch model: {e}"),
                             ),
                         }
+                    }
+                    if app.jobs_receiver_stale {
+                        job_notice_rx = app
+                            .jobs
+                            .as_ref()
+                            .map(lofi_core::JobRegistry::subscribe_notices);
+                        app.jobs_receiver_stale = false;
                     }
                     // Slash commands (notably /tree reconcile) can push
                     // notices into prompt_queue while at rest. The queue's
