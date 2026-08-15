@@ -1,0 +1,5 @@
+{code,core,providers,ui}: add process-level regression coverage
+
+Exercise principal workflows through the real binary and a local model
+server. Fix lifecycle, retry, cancellation, skill metadata, recall, and
+popup-order defects exposed by the suite.
