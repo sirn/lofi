@@ -66,7 +66,7 @@ return {
     let mut tui = fixture.spawn(&[]);
 
     tui.submit("exercise every native file and discovery API");
-    tui.wait_for("native API final answer", WAIT);
+    tui.wait_for_scrollback("native API final answer", WAIT);
 
     assert_eq!(
         std::fs::read_to_string(fixture.workspace.join("data/source.txt")).unwrap(),
@@ -129,7 +129,7 @@ return { read, bash, full, timedBash, escape, ambiguous };
     let mut tui = fixture.spawn(&[]);
 
     tui.submit("exercise native tool boundaries");
-    tui.wait_for("native edge final answer", WAIT);
+    tui.wait_for_scrollback("native edge final answer", WAIT);
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
@@ -203,7 +203,7 @@ return {
     let mut tui = fixture.spawn(&[]);
 
     tui.submit("exercise every background job API");
-    tui.wait_for("job API final answer", WAIT);
+    tui.wait_for_scrollback("job API final answer", WAIT);
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
@@ -264,7 +264,7 @@ fn every_background_job_api_rejects_invalid_arguments() {
     let mut tui = fixture.spawn(&[]);
 
     tui.submit("exercise invalid background job arguments");
-    tui.wait_for("invalid job arguments final answer", WAIT);
+    tui.wait_for_scrollback("invalid job arguments final answer", WAIT);
 
     let requests = server.requests();
     assert_eq!(requests.len(), 7);
@@ -286,9 +286,14 @@ fn tui_shutdown_kills_a_live_background_job_process_group() {
     let mut tui = fixture.spawn(&[]);
 
     tui.submit("start a job before shutdown");
-    tui.wait_for("Permission Required", WAIT);
+    let started = std::time::Instant::now();
+    while server.request_count() < 1 && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(server.request_count(), 1);
+    tui.wait_for_scrollback("Permission Required", WAIT);
     tui.send(b"a");
-    tui.wait_for("shutdown job answer", WAIT);
+    tui.wait_for_scrollback("shutdown job answer", WAIT);
     let pid: i32 = std::fs::read_to_string(fixture.workspace.join("shutdown-job.pid"))
         .unwrap()
         .trim()
