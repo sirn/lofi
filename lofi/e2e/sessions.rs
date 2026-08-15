@@ -1195,3 +1195,62 @@ fn startup_collects_an_abandoned_temp_dir_and_preserves_a_locked_one() {
     assert!(live.exists());
     drop(lease);
 }
+#[test]
+fn compaction_failure_keeps_history_and_allows_a_retry() {
+    let server = MockServer::start(vec![
+        text_response("compaction failure baseline answer"),
+        text_response("compaction failure final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("compaction failure baseline prompt");
+    tui.wait_for("compaction failure baseline answer", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+    let path = fixture.session_files().into_iter().next().unwrap();
+    std::fs::remove_file(path).unwrap();
+
+    tui.submit("/compact");
+    tui.wait_for_scrollback("could not compact", WAIT);
+    tui.submit("compaction failure final prompt");
+    tui.wait_for("compaction failure final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1]
+        .body
+        .contains("compaction failure baseline prompt"));
+    assert!(requests[1]
+        .body
+        .contains("compaction failure baseline answer"));
+    assert!(requests[1].body.contains("compaction failure final prompt"));
+}
+
+#[test]
+fn repeated_hard_pressure_uses_a_cooldown_instead_of_a_compaction_loop() {
+    let server = MockServer::start(vec![
+        tool_response_with_usage(
+            "hard-loop-call",
+            r#"return { marker: "hard loop tool result" };"#,
+            60,
+        ),
+        text_response("hard loop recovered answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    fixture.enable_auto_compaction(50);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("hard loop prompt");
+    tui.wait_for("hard loop recovered answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("hard loop prompt"));
+    assert!(requests[1].body.contains("hard loop tool result"));
+    let compaction_count = fixture
+        .events()
+        .iter()
+        .filter(|event| event["type"] == "compaction")
+        .count();
+    assert!(compaction_count <= 1);
+}
