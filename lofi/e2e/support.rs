@@ -970,6 +970,7 @@ const TERMINAL_COLS: usize = 120;
 
 struct TerminalOutput {
     raw: Vec<u8>,
+    transcript: String,
     screen: TerminalScreen,
 }
 
@@ -977,17 +978,50 @@ impl TerminalOutput {
     fn new() -> Self {
         Self {
             raw: Vec::new(),
+            transcript: String::new(),
             screen: TerminalScreen::new(),
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
         self.raw.extend_from_slice(bytes);
+        let mut cleaned = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == 0x1b {
+                index += 1;
+                if index < bytes.len() && bytes[index] == b'[' {
+                    index += 1;
+                    while index < bytes.len() && !(0x40..=0x7e).contains(&bytes[index]) {
+                        index += 1;
+                    }
+                    index = index.saturating_add(1).min(bytes.len());
+                } else if index < bytes.len() && bytes[index] == b']' {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != 0x07 {
+                        if bytes[index] == 0x1b
+                            && index + 1 < bytes.len()
+                            && bytes[index + 1] == b'\\'
+                        {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    index = index.saturating_add(1).min(bytes.len());
+                }
+            } else {
+                cleaned.push(bytes[index]);
+                index += 1;
+            }
+        }
+        self.transcript.push_str(&String::from_utf8_lossy(&cleaned));
         self.screen.feed(bytes);
     }
 
     fn clear(&mut self) {
         self.raw.clear();
+        self.transcript.clear();
         self.screen = TerminalScreen::new();
     }
 }
@@ -1068,7 +1102,12 @@ impl TerminalScreen {
                 ParseState::Csi(sequence) => {
                     if (0x40..=0x7e).contains(&byte) {
                         let sequence = std::mem::take(sequence);
-                        self.apply_csi(&sequence, char::from(byte));
+                        // ANSI command bytes overlap printable digits (e.g.
+                        // '6' is XCH). Treat a digit final as style payload,
+                        // not as a cursor command.
+                        if byte.is_ascii_alphabetic() || matches!(byte, b'@' | b'`' | b'~') {
+                            self.apply_csi(&sequence, char::from(byte));
+                        }
                         self.state = ParseState::Ground;
                     } else {
                         sequence.push(char::from(byte));
@@ -1096,12 +1135,14 @@ impl TerminalScreen {
             self.col = 0;
             self.line_feed();
         }
-        self.cells[self.row][self.col] = ch;
+        if self.row < TERMINAL_ROWS && self.col < TERMINAL_COLS {
+            self.cells[self.row][self.col] = ch;
+        }
         let width = unicode_width::UnicodeWidthChar::width(ch)
             .unwrap_or(0)
             .max(1);
         for offset in 1..width {
-            if self.col + offset < TERMINAL_COLS {
+            if self.row < TERMINAL_ROWS && self.col + offset < TERMINAL_COLS {
                 self.cells[self.row][self.col + offset] = ' ';
             }
         }
@@ -1114,6 +1155,9 @@ impl TerminalScreen {
         } else {
             let line = self.cells.remove(0);
             self.history.push(line);
+            if self.history.len() > TERMINAL_ROWS * 4 {
+                self.history.remove(0);
+            }
             self.cells.push(vec![' '; TERMINAL_COLS]);
         }
     }
@@ -1151,9 +1195,9 @@ impl TerminalScreen {
             }
             'G' => self.col = param(0, 1).saturating_sub(1).min(TERMINAL_COLS - 1),
             'd' => self.row = param(0, 1).saturating_sub(1).min(TERMINAL_ROWS - 1),
-            'J' => self.erase_display(params.first().copied().unwrap_or(0)),
-            'K' => self.erase_line(params.first().copied().unwrap_or(0)),
-            'X' => {
+            'J' if !private => self.erase_display(params.first().copied().unwrap_or(0)),
+            'K' if !private => self.erase_line(params.first().copied().unwrap_or(0)),
+            'X' if !private => {
                 let end = (self.col + param(0, 1)).min(TERMINAL_COLS);
                 self.cells[self.row][self.col..end].fill(' ');
             }
@@ -1195,9 +1239,8 @@ impl TerminalScreen {
     }
 
     fn text(&self) -> String {
-        self.history
+        self.cells
             .iter()
-            .chain(&self.cells)
             .map(|row| row.iter().collect::<String>().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -1340,19 +1383,27 @@ impl Tui {
     }
 
     pub fn wait_for(&mut self, needle: &str, timeout: Duration) {
-        self.wait_for_any(&[needle], timeout);
+        self.wait_for_any_mode(&[needle], timeout, false);
     }
 
-    pub fn wait_for_any(&mut self, needles: &[&str], timeout: Duration) {
+    pub fn wait_for_scrollback(&mut self, needle: &str, timeout: Duration) {
+        self.wait_for_any_mode(&[needle], timeout, true);
+    }
+
+    fn wait_for_any_mode(&mut self, needles: &[&str], timeout: Duration, scrollback: bool) {
         let start = Instant::now();
         while start.elapsed() < timeout {
             let found = {
                 let output = self.output.lock().unwrap();
-                let screen = output.screen.text();
-                let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+                let text = if scrollback {
+                    output.transcript.clone()
+                } else {
+                    output.screen.text()
+                };
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 needles.iter().any(|needle| {
                     let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
-                    screen.contains(&needle)
+                    text.contains(&needle)
                 })
             };
             if found {
