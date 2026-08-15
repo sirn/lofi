@@ -391,6 +391,54 @@ data: [DONE]
     ))
 }
 
+pub fn parallel_responses_tool_response(calls: &[(&str, &str)]) -> MockResponse {
+    let mut events = String::new();
+    for (call_id, code) in calls {
+        let item_id = format!("item-{call_id}");
+        let arguments = json!({ "code": code }).to_string();
+        let added = json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": "exec",
+                "arguments": "",
+            },
+        });
+        let delta = json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": item_id,
+            "delta": arguments,
+        });
+        let done = json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": "exec",
+                "arguments": arguments,
+            },
+        });
+        for event in [added, delta, done] {
+            events.push_str(&format!(
+                "data: {event}
+
+"
+            ));
+        }
+    }
+    events.push_str(
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}
+
+data: [DONE]
+
+",
+    );
+    MockResponse::sse(events)
+}
+
 pub fn responses_tool_response(call_id: &str, code: &str) -> MockResponse {
     let item_id = format!("item-{call_id}");
     let arguments = json!({ "code": code }).to_string();
