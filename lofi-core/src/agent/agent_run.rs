@@ -276,6 +276,18 @@ impl Agent {
                     // Persist before inspecting the consumer so a completed
                     // round is on disk even if the UI already went away.
                     commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
+                    // An explicit interrupt wins races against both a normal
+                    // terminal response and queued-prompt preemption. A native
+                    // tool can observe cancellation, settle its process group,
+                    // and still return a structured result; without this
+                    // boundary check that cancelled turn is recorded as done.
+                    if cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    {
+                        cancelled = true;
+                        break;
+                    }
                     if finished {
                         finished_normally = true;
                         break;

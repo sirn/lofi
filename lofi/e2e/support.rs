@@ -965,10 +965,245 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+const TERMINAL_ROWS: usize = 40;
+const TERMINAL_COLS: usize = 120;
+
+struct TerminalOutput {
+    raw: Vec<u8>,
+    screen: TerminalScreen,
+}
+
+impl TerminalOutput {
+    fn new() -> Self {
+        Self {
+            raw: Vec::new(),
+            screen: TerminalScreen::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.raw.extend_from_slice(bytes);
+        self.screen.feed(bytes);
+    }
+
+    fn clear(&mut self) {
+        self.raw.clear();
+        self.screen = TerminalScreen::new();
+    }
+}
+
+enum ParseState {
+    Ground,
+    Escape,
+    Csi(String),
+    Osc(bool),
+}
+
+struct TerminalScreen {
+    cells: Vec<Vec<char>>,
+    row: usize,
+    col: usize,
+    saved: (usize, usize),
+    state: ParseState,
+    utf8: Vec<u8>,
+    utf8_remaining: usize,
+}
+
+impl TerminalScreen {
+    fn new() -> Self {
+        Self {
+            cells: vec![vec![' '; TERMINAL_COLS]; TERMINAL_ROWS],
+            row: 0,
+            col: 0,
+            saved: (0, 0),
+            state: ParseState::Ground,
+            utf8: Vec::new(),
+            utf8_remaining: 0,
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.utf8_remaining > 0 {
+                self.utf8.push(byte);
+                self.utf8_remaining -= 1;
+                if self.utf8_remaining == 0 {
+                    let text = String::from_utf8_lossy(&self.utf8).into_owned();
+                    for ch in text.chars() {
+                        self.put(ch);
+                    }
+                    self.utf8.clear();
+                }
+                continue;
+            }
+            match &mut self.state {
+                ParseState::Ground => match byte {
+                    0x1b => self.state = ParseState::Escape,
+                    b'\r' => self.col = 0,
+                    b'\n' => self.line_feed(),
+                    b'\t' => self.col = (((self.col / 8) + 1) * 8).min(TERMINAL_COLS - 1),
+                    0x08 => self.col = self.col.saturating_sub(1),
+                    0x20..=0x7e => self.put(char::from(byte)),
+                    0xc2..=0xdf => self.start_utf8(byte, 1),
+                    0xe0..=0xef => self.start_utf8(byte, 2),
+                    0xf0..=0xf4 => self.start_utf8(byte, 3),
+                    _ => {}
+                },
+                ParseState::Escape => match byte {
+                    b'[' => self.state = ParseState::Csi(String::new()),
+                    b']' => self.state = ParseState::Osc(false),
+                    b'7' => {
+                        self.saved = (self.row, self.col);
+                        self.state = ParseState::Ground;
+                    }
+                    b'8' => {
+                        (self.row, self.col) = self.saved;
+                        self.state = ParseState::Ground;
+                    }
+                    b'c' => *self = Self::new(),
+                    _ => self.state = ParseState::Ground,
+                },
+                ParseState::Csi(sequence) => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        let sequence = std::mem::take(sequence);
+                        self.apply_csi(&sequence, char::from(byte));
+                        self.state = ParseState::Ground;
+                    } else {
+                        sequence.push(char::from(byte));
+                    }
+                }
+                ParseState::Osc(saw_escape) => {
+                    if byte == 0x07 || (*saw_escape && byte == b'\\') {
+                        self.state = ParseState::Ground;
+                    } else {
+                        *saw_escape = byte == 0x1b;
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_utf8(&mut self, byte: u8, remaining: usize) {
+        self.utf8.clear();
+        self.utf8.push(byte);
+        self.utf8_remaining = remaining;
+    }
+
+    fn put(&mut self, ch: char) {
+        if self.col >= TERMINAL_COLS {
+            self.col = 0;
+            self.line_feed();
+        }
+        self.cells[self.row][self.col] = ch;
+        let width = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(0)
+            .max(1);
+        for offset in 1..width {
+            if self.col + offset < TERMINAL_COLS {
+                self.cells[self.row][self.col + offset] = ' ';
+            }
+        }
+        self.col += width;
+    }
+
+    fn line_feed(&mut self) {
+        if self.row + 1 < TERMINAL_ROWS {
+            self.row += 1;
+        } else {
+            self.cells.rotate_left(1);
+            self.cells[TERMINAL_ROWS - 1].fill(' ');
+        }
+    }
+
+    fn apply_csi(&mut self, sequence: &str, command: char) {
+        let private = sequence.starts_with('?');
+        let params = sequence
+            .trim_start_matches(['?', '>', '!'])
+            .split(';')
+            .map(|part| part.parse::<usize>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let param = |index: usize, default: usize| {
+            params
+                .get(index)
+                .copied()
+                .filter(|value| *value != 0)
+                .unwrap_or(default)
+        };
+        match command {
+            'H' | 'f' => {
+                self.row = param(0, 1).saturating_sub(1).min(TERMINAL_ROWS - 1);
+                self.col = param(1, 1).saturating_sub(1).min(TERMINAL_COLS - 1);
+            }
+            'A' => self.row = self.row.saturating_sub(param(0, 1)),
+            'B' => self.row = (self.row + param(0, 1)).min(TERMINAL_ROWS - 1),
+            'C' => self.col = (self.col + param(0, 1)).min(TERMINAL_COLS - 1),
+            'D' => self.col = self.col.saturating_sub(param(0, 1)),
+            'E' => {
+                self.row = (self.row + param(0, 1)).min(TERMINAL_ROWS - 1);
+                self.col = 0;
+            }
+            'F' => {
+                self.row = self.row.saturating_sub(param(0, 1));
+                self.col = 0;
+            }
+            'G' => self.col = param(0, 1).saturating_sub(1).min(TERMINAL_COLS - 1),
+            'd' => self.row = param(0, 1).saturating_sub(1).min(TERMINAL_ROWS - 1),
+            'J' => self.erase_display(params.first().copied().unwrap_or(0)),
+            'K' => self.erase_line(params.first().copied().unwrap_or(0)),
+            'X' => {
+                let end = (self.col + param(0, 1)).min(TERMINAL_COLS);
+                self.cells[self.row][self.col..end].fill(' ');
+            }
+            's' => self.saved = (self.row, self.col),
+            'u' => (self.row, self.col) = self.saved,
+            'h' if private && params.contains(&1049) => {
+                self.cells.iter_mut().for_each(|row| row.fill(' '));
+                self.row = 0;
+                self.col = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn erase_display(&mut self, mode: usize) {
+        match mode {
+            1 => {
+                for row in &mut self.cells[..self.row] {
+                    row.fill(' ');
+                }
+                self.cells[self.row][..=self.col].fill(' ');
+            }
+            2 | 3 => self.cells.iter_mut().for_each(|row| row.fill(' ')),
+            _ => {
+                self.cells[self.row][self.col..].fill(' ');
+                for row in &mut self.cells[self.row + 1..] {
+                    row.fill(' ');
+                }
+            }
+        }
+    }
+
+    fn erase_line(&mut self, mode: usize) {
+        match mode {
+            1 => self.cells[self.row][..=self.col].fill(' '),
+            2 => self.cells[self.row].fill(' '),
+            _ => self.cells[self.row][self.col..].fill(' '),
+        }
+    }
+
+    fn text(&self) -> String {
+        self.cells
+            .iter()
+            .map(|row| row.iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 pub struct Tui {
     child: Child,
     input: File,
-    output: Arc<Mutex<Vec<u8>>>,
+    output: Arc<Mutex<TerminalOutput>>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
@@ -1006,7 +1241,7 @@ impl Tui {
         command.envs(env.iter().copied());
         let child = command.spawn().unwrap();
         let mut reader_file = master.try_clone().unwrap();
-        let output = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(TerminalOutput::new()));
         let reader_output = Arc::clone(&output);
         let reader = thread::spawn(move || {
             let mut chunk = [0_u8; 8192];
@@ -1014,10 +1249,7 @@ impl Tui {
                 if read == 0 {
                     break;
                 }
-                reader_output
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(&chunk[..read]);
+                reader_output.lock().unwrap().push(&chunk[..read]);
             }
         });
         let mut tui = Self {
@@ -1068,7 +1300,7 @@ impl Tui {
     }
 
     pub fn output(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(&self.output.lock().unwrap().raw).into_owned()
     }
 
     pub fn wait_for(&mut self, needle: &str, timeout: Duration) {
@@ -1080,8 +1312,12 @@ impl Tui {
         while start.elapsed() < timeout {
             let found = {
                 let output = self.output.lock().unwrap();
-                let output = String::from_utf8_lossy(&output);
-                needles.iter().any(|needle| output.contains(needle))
+                let screen = output.screen.text();
+                let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+                needles.iter().any(|needle| {
+                    let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+                    screen.contains(&needle)
+                })
             };
             if found {
                 return;
@@ -1091,8 +1327,11 @@ impl Tui {
             }
             thread::sleep(Duration::from_millis(20));
         }
+        let screen = self.output.lock().unwrap().screen.text();
         panic!(
-            "timed out waiting for {needles:?}; terminal output:
+            "timed out waiting for {needles:?}; rendered screen:
+{screen}
+terminal output:
 {}",
             self.output()
         );
