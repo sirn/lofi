@@ -5137,10 +5137,9 @@ fn queue_badge_shows_preview_and_count() {
 }
 
 #[test]
-fn interrupt_run_does_not_restore_notices_to_input() {
-    // Regression: a Notice that arrived while a run was live was being
-    // restored into the editor on Ctrl+C, where the user could re-submit
-    // the system-injected text as if they had typed it.
+fn interrupt_run_restores_user_prompts_and_keeps_notices_queued() {
+    // A Notice that arrives while a run is live must not enter the editor,
+    // but it must survive cancellation for the next agent round.
     let mut a = app();
     a.prompt_queue.push(QueuedPrompt {
         text: "user follow-up".to_string(),
@@ -5153,7 +5152,9 @@ fn interrupt_run_does_not_restore_notices_to_input() {
     restore_queued_prompts(&mut a);
     assert_eq!(a.input, "user follow-up");
     assert!(!a.input.contains("job 1786"));
-    assert!(a.prompt_queue.is_empty());
+    assert_eq!(a.prompt_queue.len(), 1);
+    assert_eq!(a.prompt_queue[0].kind, lofi_types::PromptKind::Notice);
+    assert!(a.prompt_queue[0].text.contains("job 1786"));
 }
 
 #[test]
