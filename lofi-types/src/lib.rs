@@ -417,7 +417,7 @@ pub trait CompactionHook: Send + Sync {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventKind {
     Message(Message),
-    UserBash {
+    UserShell {
         command: String,
         output: String,
         exit_code: Option<i32>,
