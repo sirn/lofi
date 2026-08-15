@@ -15,7 +15,7 @@ pub enum AgentEvent {
         kind: lofi_types::PromptKind,
     },
     TurnContinue,
-    UserBash {
+    UserShell {
         command: String,
         output: String,
         exit_code: Option<i32>,
