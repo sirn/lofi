@@ -792,17 +792,21 @@ impl Fixture {
         command.output().unwrap()
     }
 
+    pub fn events_in(&self, path: &Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     pub fn events(&self) -> Vec<Value> {
         let path = self
             .session_files()
             .into_iter()
             .next()
             .expect("session transcript");
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
+        self.events_in(&path)
     }
 
     pub fn wait_for_event_count(&self, kind: &str, count: usize) {
@@ -1258,17 +1262,47 @@ impl Tui {
             output,
             reader: Some(reader),
         };
-        tui.wait_for_any(
-            &[
-                "mock/chat",
-                "mock/alt",
-                "responses/reasoning",
-                "anthropic/tools",
-                "google/tools",
-                "(no model)",
-            ],
-            WAIT,
-        );
+        let start = Instant::now();
+        loop {
+            let saw_query = tui.output().contains("\u{1b}]11;?\u{7}");
+            if saw_query {
+                tui.send(b"\x1b]11;rgb:0000/0000/0000\x07");
+                break;
+            }
+            if start.elapsed() >= WAIT {
+                panic!("timed out waiting for terminal background query");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let start = Instant::now();
+        loop {
+            let found = {
+                let output = tui.output();
+                [
+                    "mock/chat",
+                    "mock/alt",
+                    "responses/reasoning",
+                    "anthropic/tools",
+                    "google/tools",
+                    "(no model)",
+                ]
+                .iter()
+                .any(|needle| output.contains(needle))
+            };
+            if found {
+                break;
+            }
+            if start.elapsed() >= WAIT {
+                panic!(
+                    "timed out waiting for model label; terminal output:\n{}",
+                    tui.output()
+                );
+            }
+            if tui.child.try_wait().unwrap().is_some() {
+                panic!("lofi exited before startup: {}", tui.output());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
         tui
     }
 

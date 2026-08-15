@@ -979,3 +979,218 @@ fn background_job_completion_is_injected_as_a_notice_prompt() {
     assert_eq!(job_events(&events, "job_started").len(), 1);
     assert_eq!(job_events(&events, "job_finished").len(), 1);
 }
+
+#[test]
+fn malformed_final_event_is_ignored_and_the_prior_turn_still_resumes() {
+    let server = MockServer::start(vec![
+        text_response("corruption baseline answer"),
+        text_response("corruption recovery answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("corruption baseline prompt");
+    first.wait_for("corruption baseline answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+    let path = fixture.session_files().into_iter().next().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    use std::io::Write;
+    writeln!(file, r#"{{"id":"corrupt-tail","parent_id":"missing","type":"message","role":"user","blocks":[{{"type":"text","text":"corrupt final prompt"}}]"#)
+        .unwrap();
+    file.sync_all().unwrap();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("corruption recovery prompt");
+    resumed.wait_for("corruption recovery answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("corruption baseline prompt"));
+    assert!(requests[1].body.contains("corruption baseline answer"));
+    assert!(requests[1].body.contains("corruption recovery prompt"));
+    assert!(!requests[1].body.contains("corrupt final prompt"));
+}
+
+#[test]
+fn transcript_without_cursor_falls_back_to_the_latest_complete_turn() {
+    let server = MockServer::start(vec![
+        text_response("cursor baseline answer"),
+        text_response("cursor recovery answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("cursor baseline prompt");
+    first.wait_for("cursor baseline answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+    let path = fixture.session_files().into_iter().next().unwrap();
+    let without_cursor = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_none_or(|event| event["type"] != "cursor")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{without_cursor}\n")).unwrap();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("cursor recovery prompt");
+    resumed.wait_for("cursor recovery answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("cursor baseline prompt"));
+    assert!(requests[1].body.contains("cursor baseline answer"));
+    assert!(requests[1].body.contains("cursor recovery prompt"));
+}
+
+#[test]
+fn malformed_and_unsupported_transcripts_do_not_appear_in_session_listings() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let sessions = fixture.state.join("lofi").join("sessions");
+    let workspace_dir = sessions.join("malformed-fixture");
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    std::fs::write(workspace_dir.join("malformed.jsonl"), "{not-json}\n").unwrap();
+    std::fs::write(
+        workspace_dir.join("unsupported.jsonl"),
+        format!(
+            r#"{{"type":"meta","version":999,"created":0,"cwd":"{}","model":"mock/chat:medium"}}
+"#,
+            fixture.workspace.display()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.output(&["--list-sessions"]);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "(no sessions)\n");
+    assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn session_state_permissions_are_private_after_process_startup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = MockServer::start(vec![text_response("permissions answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("permissions prompt");
+    tui.wait_for("permissions answer", WAIT);
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    let path = fixture.session_files().into_iter().next().unwrap();
+    let workspace_dir = path.parent().unwrap();
+    let sessions = workspace_dir.parent().unwrap();
+    let state = sessions.parent().unwrap();
+    for dir in [state, sessions, workspace_dir] {
+        assert_eq!(
+            std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "{}",
+            dir.display()
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn startup_repairs_broad_state_permissions_and_keeps_session_content() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = MockServer::start(vec![
+        text_response("permissions baseline answer"),
+        text_response("permissions recovery answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("permissions baseline prompt");
+    first.wait_for("permissions baseline answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let path = fixture.session_files().into_iter().next().unwrap();
+    let workspace_dir = path.parent().unwrap();
+    let sessions = workspace_dir.parent().unwrap();
+    let state = sessions.parent().unwrap();
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(workspace_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("permissions recovery prompt");
+    resumed.wait_for("permissions recovery answer", WAIT);
+
+    for dir in [state, sessions, workspace_dir] {
+        assert_eq!(
+            std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "{}",
+            dir.display()
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("permissions baseline prompt"));
+    assert!(requests[1].body.contains("permissions recovery prompt"));
+}
+
+#[test]
+fn startup_collects_an_abandoned_temp_dir_and_preserves_a_locked_one() {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let workspace = fixture
+        .state
+        .join("lofi")
+        .join("tmp")
+        .join("temp-dir-lifecycle-fixture");
+    let abandoned = workspace.join("abandoned-session-output");
+    std::fs::create_dir_all(&abandoned).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(abandoned.join(".lease"))
+        .unwrap();
+    let live = workspace.join("live-session-output");
+    std::fs::create_dir_all(&live).unwrap();
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(live.join(".lease"))
+        .unwrap();
+    let lease = nix::fcntl::Flock::lock(lease, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)
+        .unwrap();
+
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    assert!(!abandoned.exists());
+    assert!(live.exists());
+    drop(lease);
+}
