@@ -427,7 +427,7 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
                     messages.push(message);
                 }
             }
-            SessionEventKind::UserBash {
+            SessionEventKind::UserShell {
                 command,
                 output,
                 exit_code,

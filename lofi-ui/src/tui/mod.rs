@@ -220,7 +220,7 @@ enum Block {
     Text(String),
     Thinking(ThinkingBlock),
     Tool(ToolCall),
-    UserBash {
+    UserShell {
         command: String,
         output: String,
         exit_code: Option<i32>,
@@ -978,7 +978,7 @@ struct RunHandle {
     /// queued prompt at the earliest opportunity — between rounds, not after
     /// the entire multi-round turn.
     preempt: Arc<AtomicBool>,
-    user_bash: Option<(String, bool)>,
+    user_shell: Option<(String, bool)>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1297,7 +1297,7 @@ async fn run_loop(
             } => {
                 match ev {
                     Some(e) => {
-                        if let AgentEvent::UserBash {
+                        if let AgentEvent::UserShell {
                             command, output, exit_code, signal, duration_ms,
                             truncated, cancelled, exclude_from_context,
                         } = e
@@ -1306,7 +1306,7 @@ async fn run_loop(
                                 command, output, exit_code, signal, duration_ms,
                                 truncated, cancelled,
                             );
-                            finish_user_bash(&mut app, result, exclude_from_context);
+                            finish_user_shell(&mut app, result, exclude_from_context);
                         } else {
                             app.apply_event(e);
                         }
@@ -1324,12 +1324,12 @@ async fn run_loop(
                     }
                     None => {
                         if let Some(r) = current_run.take() {
-                            let was_user_bash = r.user_bash.is_some();
+                            let was_user_shell = r.user_shell.is_some();
                             r.handle.abort();
                             app.run_finished();
-                            app.debug_sample(if was_user_bash { "user_bash_settled" } else { "agent_settled" });
+                            app.debug_sample(if was_user_shell { "user_shell_settled" } else { "agent_settled" });
                             if !app.should_quit {
-                                if was_user_bash {
+                                if was_user_shell {
                                     if let Some(queued) = app.prompt_queue.first().cloned() {
                                         app.prompt_queue.remove(0);
                                         spawn_prompt(
