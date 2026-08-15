@@ -1,8 +1,10 @@
+use std::fmt::Write;
+
 use crate::support::{
     anthropic_text_response, anthropic_tool_response, anthropic_usage_response,
     fragmented_tool_response, google_text_response, google_thinking_usage_response,
     google_tool_response, parallel_tool_response, responses_response, responses_tool_response,
-    text_response, transcript_text, Fixture, MockServer, WAIT,
+    text_response, transcript_text, Fixture, MockResponse, MockServer, WAIT,
 };
 
 #[test]
@@ -392,4 +394,170 @@ fn compaction_and_resume_keep_latest_tool_cycle_valid() {
         .contains("compact tool result"));
     let transcript = transcript_text(&fixture.events());
     assert!(transcript.contains(r#""type":"compaction""#));
+}
+
+fn parallel_responses_response(calls: &[(&str, &str)]) -> MockResponse {
+    let mut events = String::new();
+    for (index, (call_id, code)) in calls.iter().enumerate() {
+        let item_id = format!("item-{call_id}");
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": "exec",
+                "arguments": "",
+            },
+        });
+        let delta = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": item_id,
+            "delta": serde_json::json!({ "code": code }).to_string(),
+        });
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": "exec",
+                "arguments": serde_json::json!({ "code": code }).to_string(),
+            },
+        });
+        for event in [added, delta, done] {
+            write!(events, "data: {event}\n\n").unwrap();
+        }
+        if index == 0 {
+            events.push_str(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"interleaved\"}\n\n",
+            );
+        }
+    }
+    events.push_str(
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\ndata: [DONE]\n\n",
+    );
+    MockResponse::sse(events)
+}
+
+fn malformed_responses_tool_response(call_id: &str) -> MockResponse {
+    let item_id = format!("item-{call_id}");
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "id": item_id,
+            "call_id": call_id,
+            "name": "exec",
+            "arguments": "",
+        },
+    });
+    let delta = serde_json::json!({
+        "type": "response.function_call_arguments.delta",
+        "item_id": item_id,
+        "delta": "{not-json",
+    });
+    let done = serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "id": item_id,
+            "call_id": call_id,
+            "name": "exec",
+            "arguments": "{not-json",
+        },
+    });
+    MockResponse::sse(format!(
+        "data: {added}\n\ndata: {delta}\n\ndata: {done}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":5,\"output_tokens\":3}}}}}}\n\ndata: [DONE]\n\n"
+    ))
+}
+
+fn malformed_openai_tool_response(call_id: &str) -> MockResponse {
+    let event = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": "exec", "arguments": "{not-json" }
+                }]
+            }
+        }]
+    });
+    MockResponse::sse(format!("data: {event}\n\ndata: [DONE]\n\n"))
+}
+
+#[test]
+fn openai_responses_executes_interleaved_parallel_calls() {
+    let server = MockServer::start(vec![
+        parallel_responses_response(&[
+            (
+                "responses-parallel-a",
+                r#"return { marker: "responses parallel a" };"#,
+            ),
+            (
+                "responses-parallel-b",
+                r#"return { marker: "responses parallel b" };"#,
+            ),
+        ]),
+        responses_response(
+            "responses parallel thinking",
+            "responses parallel final answer",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning"]);
+
+    tui.submit("run interleaved responses calls");
+    tui.wait_for("responses parallel final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let input = second["input"].as_array().unwrap();
+    for (call_id, marker) in [
+        ("responses-parallel-a", "responses parallel a"),
+        ("responses-parallel-b", "responses parallel b"),
+    ] {
+        assert!(input
+            .iter()
+            .any(|item| item["type"] == "function_call" && item["call_id"] == call_id));
+        assert!(input.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == call_id
+                && item["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(marker))
+        }));
+    }
+}
+
+#[test]
+fn malformed_tool_arguments_return_an_error_to_each_provider() {
+    let server = MockServer::start(vec![
+        malformed_openai_tool_response("malformed-chat-call"),
+        text_response("malformed chat final answer"),
+        malformed_responses_tool_response("malformed-responses-call"),
+        responses_response(
+            "malformed responses thinking",
+            "malformed responses final answer",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    let mut chat = fixture.spawn(&[]);
+    chat.submit("run malformed chat arguments");
+    chat.wait_for("malformed chat final answer", WAIT);
+    let requests = server.requests();
+    assert!(requests[1].body.contains("malformed-chat-call"));
+    assert!(requests[1].body.contains("arguments"));
+
+    let mut responses = fixture.spawn(&["--model", "responses/reasoning"]);
+    responses.submit("run malformed responses arguments");
+    responses.wait_for("malformed responses final answer", WAIT);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].body.contains("malformed-responses-call"));
+    assert!(requests[3].body.contains("arguments"));
 }
