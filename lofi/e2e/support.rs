@@ -1443,6 +1443,36 @@ terminal output:
         self.child.kill().unwrap();
         let _ = self.child.wait();
     }
+
+    pub fn signal(&mut self, signal: Signal) {
+        kill(
+            Pid::from_raw(i32::try_from(self.child.id()).unwrap()),
+            signal,
+        )
+        .unwrap();
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        use std::os::fd::AsRawFd;
+
+        let size = Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // The workspace forbids unsafe by default; TIOCSWINSZ is the only way
+        // to deliver a real PTY resize event to the child.
+        #[allow(unsafe_code)]
+        let result = unsafe {
+            nix::libc::ioctl(
+                self.input.as_raw_fd(),
+                nix::libc::TIOCSWINSZ,
+                &raw const size,
+            )
+        };
+        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+    }
 }
 
 impl Drop for Tui {
