@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -422,11 +423,13 @@ pub fn parallel_responses_tool_response(calls: &[(&str, &str)]) -> MockResponse 
             },
         });
         for event in [added, delta, done] {
-            events.push_str(&format!(
+            write!(
+                events,
                 "data: {event}
 
 "
-            ));
+            )
+            .unwrap();
         }
     }
     events.push_str(
