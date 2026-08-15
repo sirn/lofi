@@ -792,17 +792,21 @@ impl Fixture {
         command.output().unwrap()
     }
 
+    pub fn events_in(&self, path: &Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     pub fn events(&self) -> Vec<Value> {
         let path = self
             .session_files()
             .into_iter()
             .next()
             .expect("session transcript");
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
+        self.events_in(&path)
     }
 
     pub fn wait_for_event_count(&self, kind: &str, count: usize) {
