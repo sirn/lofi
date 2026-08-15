@@ -1395,6 +1395,7 @@ impl Tui {
         while start.elapsed() < timeout {
             let found = {
                 let output = self.output.lock().unwrap();
+                let raw = String::from_utf8_lossy(&output.raw);
                 let text = if scrollback {
                     output.transcript.clone()
                 } else {
@@ -1403,7 +1404,7 @@ impl Tui {
                 let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 needles.iter().any(|needle| {
                     let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
-                    text.contains(&needle)
+                    text.contains(&needle) || raw.contains(&needle)
                 })
             };
             if found {
