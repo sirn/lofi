@@ -2284,6 +2284,15 @@ mod tests {
     }
 
     #[test]
+    fn legacy_user_bash_event_loads_as_unknown() {
+        let event = parse_event(
+            r#"{"id":"a","parent_id":null,"type":"user_bash","command":"echo old","output":"old\n","exit_code":0,"signal":null,"duration_ms":1,"truncated":false,"cancelled":false,"exclude_from_context":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(event.kind, SessionEventKind::Unknown));
+    }
+
+    #[test]
     fn user_message_kind_field_roundtrips_through_disk() {
         // Typed (default) messages omit `kind` from the wire; notice turns
         // carry `kind: "notice"`. Both must deserialize back to the right

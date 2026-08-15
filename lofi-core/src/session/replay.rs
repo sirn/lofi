@@ -233,7 +233,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 }
                 Role::System => {}
             },
-            SessionEventKind::UserBash {
+            SessionEventKind::UserShell {
                 command,
                 output,
                 exit_code,
@@ -242,7 +242,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 truncated,
                 cancelled,
                 exclude_from_context,
-            } => emit(AgentEvent::UserBash {
+            } => emit(AgentEvent::UserShell {
                 command: command.clone(),
                 output: output.clone(),
                 exit_code: *exit_code,
@@ -319,7 +319,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
 }
 
 /// The agent-visible message a session event contributes, if any: a chat
-/// `Message` passes through unchanged; a `UserBash` becomes its context-text
+/// `Message` passes through unchanged; a `UserShell` becomes its context-text
 /// user message; excluded bashes and everything else contribute none. Shared
 /// by message reconstruction (`messages_from_events`, `compact`) so the
 /// bash-to-context transform and exclusion rule live in one place.
@@ -332,7 +332,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
         // so the lifecycle rule is visible without scanning the `_` arm.
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
-        SessionEventKind::UserBash {
+        SessionEventKind::UserShell {
             command,
             output,
             exit_code,
@@ -407,7 +407,7 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
             SessionEventKind::TurnEnd { .. } => {
                 skipping = false;
             }
-            SessionEventKind::Message(_) | SessionEventKind::UserBash { .. } if !skipping => {
+            SessionEventKind::Message(_) | SessionEventKind::UserShell { .. } if !skipping => {
                 let Some(message) = agent_message_for_event(&events[i].kind) else {
                     continue;
                 };

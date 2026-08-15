@@ -140,7 +140,7 @@ impl SessionSink {
     ///
     /// # Errors
     /// Propagates session-file creation and transcript I/O failures.
-    pub fn record_user_bash(
+    pub fn record_user_shell(
         &mut self,
         result: &DirectShellResult,
         exclude_from_context: bool,
@@ -148,7 +148,7 @@ impl SessionSink {
         system_prompt: &str,
     ) -> Result<(u64, u64)> {
         let cursor = self.cursor_or_create(model, system_prompt)?;
-        cursor.record(super::recorder::SessionRecord::UserBash {
+        cursor.record(super::recorder::SessionRecord::UserShell {
             result,
             exclude_from_context,
         })
