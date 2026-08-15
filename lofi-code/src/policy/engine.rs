@@ -132,7 +132,12 @@ impl ResolvedPolicy {
                 if cmd.source == CommandSource::Direct {
                     saw_direct_unmatched = true;
                 }
-                if result == PolicyAction::Allow && !self.allow_by_default {
+                // A wrapper exists to expose its inner command for matching.
+                // Once the inner command has been extracted, the wrapper's own
+                // name is not another unmatched command that can veto it.
+                let is_wrapper = cmd.source == CommandSource::Direct
+                    && self.wrappers.contains_key(&cmd.name.to_ascii_lowercase());
+                if result == PolicyAction::Allow && !self.allow_by_default && !is_wrapper {
                     result = PolicyAction::Ask;
                     reason = format!("no policy match: {}", cmd.name);
                     matched = Some(cmd.full_text.clone());
