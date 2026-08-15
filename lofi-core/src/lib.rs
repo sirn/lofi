@@ -12,8 +12,8 @@ pub mod models;
 pub mod recall;
 pub mod retry;
 pub mod session;
+mod shell;
 pub mod state;
-mod user_bash;
 
 pub use agent::{
     build_agent, exec_input_code_and_label, exec_result_display, rebuild_agent, select_model,
@@ -29,4 +29,4 @@ pub use lofi_types::{CompactBlock, CompactionHook, SummarySection};
 pub use lofi_types::{Config, SessionEvent};
 pub use models::ModelRegistry;
 pub use retry::{is_retryable_error, RetryPolicy};
-pub use user_bash::{cancelled_user_bash, run_user_bash, UserBashResult};
+pub use shell::{cancelled_direct_shell, run_direct_shell_command, DirectShellResult};
