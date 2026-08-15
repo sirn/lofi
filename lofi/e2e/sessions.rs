@@ -4,9 +4,10 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, event_types, job_events, process_is_alive, responses_response,
-    spawned_pid, text_response, text_response_with_usage, tool_response, tool_response_with_usage,
-    transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
+    delayed_text_response, event_types, job_events, parallel_responses_tool_response,
+    parallel_tool_response, process_is_alive, responses_response, spawned_pid, text_response,
+    text_response_with_usage, tool_response, tool_response_with_usage, transcript_text,
+    wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -432,6 +433,166 @@ fn cancelled_tool_turn_replays_as_a_closed_cycle_after_restart() {
         .unwrap()
         .to_ascii_lowercase()
         .contains("cancel"));
+    assert!(event_types(&fixture.events()).contains(&"turn_cancelled"));
+}
+
+#[test]
+fn cancelled_parallel_tool_calls_replay_as_closed_cycles_after_restart() {
+    let server = MockServer::start(vec![
+        parallel_tool_response(&[
+            (
+                "cancelled-parallel-a",
+                r#"return { marker: "cancelled parallel first completed" };"#,
+            ),
+            (
+                "cancelled-parallel-b",
+                r#"return await lofi.bash({ cmd: "echo $$ > cancelled-parallel-b.pid; exec sleep 60" });"#,
+            ),
+        ]),
+        text_response("cancelled parallel recovery answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("cancelled parallel prompt");
+    first.wait_for("Permission Required", WAIT);
+    first.send(b"a");
+    let mut guards = Vec::new();
+    for name in ["cancelled-parallel-b.pid"] {
+        let path = fixture.workspace.join(name);
+        let started = std::time::Instant::now();
+        while !path.exists() && started.elapsed() < WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            path.exists(),
+            "tool process did not create {name}; terminal output:
+{}",
+            first.output()
+        );
+        let pid = std::fs::read_to_string(&path)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        guards.push(ProcessGuard::new(pid));
+    }
+    first.send(b"\x03");
+    first.wait_for("Cancelled", WAIT);
+    for guard in &mut guards {
+        wait_for_process_exit(guard.pid());
+        guard.disarm();
+    }
+    fixture.wait_for_event_count("turn_cancelled", 1);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("cancelled parallel recovery prompt");
+    resumed.wait_for("cancelled parallel recovery answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let recovered: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let messages = recovered["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .expect("cancelled assistant tool calls after resume");
+    assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+    for call_id in ["cancelled-parallel-a", "cancelled-parallel-b"] {
+        assert!(assistant["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|call| call["id"] == call_id));
+        let result = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .find(|message| message["tool_call_id"] == call_id)
+            .expect("tool result after resume");
+        let content = result["content"].as_str().unwrap();
+        if call_id == "cancelled-parallel-a" {
+            assert!(content.contains("cancelled parallel first completed"));
+        } else {
+            assert!(content.to_ascii_lowercase().contains("cancel"));
+        }
+    }
+    assert!(event_types(&fixture.events()).contains(&"turn_cancelled"));
+}
+
+#[test]
+fn cancelled_parallel_responses_calls_replay_as_closed_cycles_after_restart() {
+    let server = MockServer::start(vec![
+        parallel_responses_tool_response(&[
+            (
+                "cancelled-responses-a",
+                r#"return { marker: "cancelled responses first completed" };"#,
+            ),
+            (
+                "cancelled-responses-b",
+                r#"return await lofi.bash({ cmd: "echo $$ > cancelled-responses-b.pid; exec sleep 60" });"#,
+            ),
+        ]),
+        responses_response(
+            "cancelled responses recovery thinking",
+            "cancelled responses recovery answer",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&["--model", "responses/reasoning"]);
+
+    first.submit("cancelled responses prompt");
+    first.wait_for("Permission Required", WAIT);
+    first.send(b"a");
+    let mut guards = Vec::new();
+    for name in ["cancelled-responses-b.pid"] {
+        let path = fixture.workspace.join(name);
+        let started = std::time::Instant::now();
+        while !path.exists() && started.elapsed() < WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = std::fs::read_to_string(&path)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        guards.push(ProcessGuard::new(pid));
+    }
+    first.send(b"\x03");
+    first.wait_for("Cancelled", WAIT);
+    for guard in &mut guards {
+        wait_for_process_exit(guard.pid());
+        guard.disarm();
+    }
+    fixture.wait_for_event_count("turn_cancelled", 1);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("cancelled responses recovery prompt");
+    resumed.wait_for("cancelled responses recovery answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let recovered: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let input = recovered["input"].as_array().unwrap();
+    for call_id in ["cancelled-responses-a", "cancelled-responses-b"] {
+        assert!(input
+            .iter()
+            .any(|item| item["type"] == "function_call" && item["call_id"] == call_id));
+        let result = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .find(|item| item["call_id"] == call_id)
+            .expect("responses output after resume");
+        let output = result["output"].as_str().unwrap();
+        if call_id == "cancelled-responses-a" {
+            assert!(output.contains("cancelled responses first completed"));
+        } else {
+            assert!(output.to_ascii_lowercase().contains("cancel"));
+        }
+    }
     assert!(event_types(&fixture.events()).contains(&"turn_cancelled"));
 }
 
