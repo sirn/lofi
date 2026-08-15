@@ -113,7 +113,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                     stack.push(ToolLine { tool });
                 }
             }
-            Block::UserBash {
+            Block::UserShell {
                 command,
                 output,
                 exit_code,
@@ -122,7 +122,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 truncated,
                 cancelled,
                 exclude_from_context,
-            } => stack.push(UserBashLine {
+            } => stack.push(UserShellLine {
                 command,
                 output,
                 exit_code: *exit_code,
@@ -3109,7 +3109,7 @@ impl Component for ToolLine<'_> {
     }
 }
 
-struct UserBashLine<'a> {
+struct UserShellLine<'a> {
     command: &'a str,
     output: &'a str,
     exit_code: Option<i32>,
@@ -3120,7 +3120,7 @@ struct UserBashLine<'a> {
     exclude_from_context: bool,
 }
 
-impl Component for UserBashLine<'_> {
+impl Component for UserShellLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let failed =

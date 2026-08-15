@@ -323,7 +323,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::TurnStart { .. }
                 | AgentEvent::TurnContinue
                 | AgentEvent::Compaction { .. }
-                | AgentEvent::UserBash { .. } => Ok(()),
+                | AgentEvent::UserShell { .. } => Ok(()),
                 AgentEvent::ContextPressure { .. } => {
                     context_pressure = true;
                     let _ = stdout.write_all(b"\n");
