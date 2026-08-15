@@ -313,11 +313,27 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     // One reusable line buffer: borrowed parse keeps nothing, so UUID ids are
     // the only allocations (heap `Other` ids), and only when retained.
     let mut buf = Vec::with_capacity(4096);
-    while let Some((line_start, line_end, skel)) =
-        read_jsonl_borrowed::<EventSkeleton, _>(&mut reader, &mut buf).map_err(|error| {
-            Error::State(format!("parse index event in {}: {error}", path.display()))
-        })?
-    {
+    loop {
+        let event = read_jsonl_borrowed::<EventSkeleton, _>(&mut reader, &mut buf);
+        let Some((line_start, line_end, skel)) = (match event {
+            Ok(event) => event,
+            Err(error) => {
+                // A final partial line is the only tolerated malformed record.
+                // A process can die between write and newline; the committed
+                // prefix must remain resumable. Malformed complete lines remain
+                // errors so corruption cannot be silently reinterpreted.
+                let eof = reader.stream_position()? == reader.get_ref().metadata()?.len();
+                if eof && !buf.is_empty() {
+                    break;
+                }
+                return Err(Error::State(format!(
+                    "parse index event in {}: {error}",
+                    path.display()
+                )));
+            }
+        }) else {
+            break;
+        };
         let parent_id = skel.parent_id.map(IndexId::borrow);
         let kind = index_kind(skel.kind_type, skel.role);
         // Cursor records have no event id of their own; carry the selected
@@ -343,7 +359,7 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
     if let Some(cursor) = latest_cursor {
         indices.push(cursor);
     }
-    let pos = reader.stream_position()?;
+    let pos = indices.last().map_or(0, |event| event.end_offset);
     Ok((header.meta, indices, pos))
 }
 
