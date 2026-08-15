@@ -63,7 +63,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         });
         return;
     }
-    if let AgentEvent::UserBash {
+    if let AgentEvent::UserShell {
         command,
         output,
         exit_code,
@@ -77,7 +77,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         turns.push(Turn {
             prompt: String::new(),
             kind: lofi_types::PromptKind::User,
-            blocks: vec![Block::UserBash {
+            blocks: vec![Block::UserShell {
                 command,
                 output,
                 exit_code,
@@ -266,7 +266,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. }
-        | AgentEvent::UserBash { .. }
+        | AgentEvent::UserShell { .. }
         | AgentEvent::TurnContinue
         | AgentEvent::Notice(_)
         | AgentEvent::ContextPressure { .. } => {}
