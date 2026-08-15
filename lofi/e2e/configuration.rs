@@ -151,3 +151,161 @@ context_window = "context_length"
     assert!(String::from_utf8_lossy(&cached.stdout)
         .contains("discovery/remote-thinking-model — Remote Thinking Model"));
 }
+
+#[test]
+fn policy_explain_covers_custom_rules_wrappers_redirects_and_heredocs() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        r#"mode = "workspace_write"
+
+[[allow]]
+match = "fixture-tool"
+mode = "prefix"
+
+[[ask]]
+match = "fixture-ask --confirm"
+mode = "substring"
+
+[[deny]]
+match = "fixture-deny: --never"
+mode = "args"
+
+[[wrappers]]
+name = "fixture-wrap"
+kind = "shell_c"
+
+[redirects]
+action = "deny"
+safe_targets = ["/dev/null"]
+
+[heredocs]
+action = "deny"
+"#,
+    )
+    .unwrap();
+
+    for (command, action) in [
+        ("fixture-tool read value", "action: allow"),
+        ("printf before; fixture-ask --confirm now", "action: ask"),
+        ("fixture-deny one --never", "action: deny"),
+        ("fixture-wrap -c 'fixture-tool wrapped'", "action: allow"),
+        ("fixture-tool write > /dev/null", "action: allow"),
+        ("fixture-tool write > output.txt", "action: deny"),
+        ("fixture-tool read <<EOF", "action: deny"),
+        ("fixture-tool read &", "action: deny"),
+    ] {
+        let output = fixture.output(&["--policy-explain", command]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(action),
+            "command={command} stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn policy_modes_and_yolo_have_process_level_wire_behavior() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "readonly-call",
+            r#"return await lofi.bash({ cmd: "cargo build" });"#,
+        ),
+        text_response("readonly policy answer"),
+        tool_response(
+            "yolo-call",
+            r#"return await lofi.bash({ cmd: "printf yolo-ran > yolo.txt" });"#,
+        ),
+        text_response("yolo policy answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        "mode = \"read_only\"\n",
+    )
+    .unwrap();
+    let mut readonly = fixture.spawn(&[]);
+    readonly.submit("run a read-only policy command");
+    readonly.wait_for("readonly policy answer", WAIT);
+    assert!(!fixture.workspace.join("target").exists());
+    let requests = server.requests();
+    assert!(requests[1].body.contains("denied"));
+
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        "mode = \"workspace_write\"\nyolo = true\n",
+    )
+    .unwrap();
+    let mut yolo = fixture.spawn(&[]);
+    yolo.submit("run a yolo policy command");
+    yolo.wait_for("yolo policy answer", WAIT);
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("yolo.txt")).unwrap(),
+        "yolo-ran"
+    );
+    assert_eq!(server.request_count(), 4);
+}
+
+#[test]
+fn filesystem_secret_boundaries_hold_across_symlinks_and_chunked_output() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "boundary-call",
+            r#"const results = {};
+for (const [name, run] of Object.entries({
+  outside: () => lofi.read("../config.toml"),
+  linked: () => lofi.read("linked-secret.txt"),
+  huge: () => lofi.bash({
+    cmd: "printenv FIXTURE_SECRET; i=0; while [ $i -lt 1200 ]; do echo chunk-$i; i=$((i+1)); done; printenv FIXTURE_SECRET",
+  }),
+})) {
+  results[name] = await run().then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error: String(error) }),
+  );
+}
+return results;"#,
+        ),
+        text_response("boundary final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let env_file = fixture.config.parent().unwrap().join("boundary.env");
+    std::fs::write(&env_file, "FIXTURE_SECRET=fixture-secret-value\n").unwrap();
+    std::os::unix::fs::symlink(&env_file, fixture.workspace.join("linked-secret.txt")).unwrap();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!(
+            "[bash]\nstrip_env = true\nenv_file = {:?}\n\n{config}",
+            env_file.display().to_string()
+        ),
+    )
+    .unwrap();
+    fixture.set_truncation(1, 64);
+
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("exercise filesystem secret boundaries");
+    tui.wait_for("boundary final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    assert!(
+        body.matches("path escapes workspace").count() >= 2,
+        "{body}"
+    );
+    assert!(body.contains("[redacted]"), "{body}");
+    assert!(!requests[1].body.contains("fixture-secret-value"));
+    assert!(!fixture
+        .events()
+        .iter()
+        .any(|event| event.to_string().contains("fixture-secret-value")));
+}
