@@ -107,8 +107,8 @@ pub(super) fn handle_event(
                 return;
             }
             app.history_nav.push(prompt.clone());
-            if let Some((command, exclude_from_context)) = parse_user_bash(&prompt) {
-                spawn_user_bash(app, current_run, command, exclude_from_context);
+            if let Some((command, exclude_from_context)) = parse_user_shell(&prompt) {
+                spawn_user_shell(app, current_run, command, exclude_from_context);
                 return;
             }
             // Keep the completed turn intact until the engine's TurnStart
@@ -208,7 +208,7 @@ pub(super) fn handle_event(
     app.refresh_slash_complete();
 }
 
-fn parse_user_bash(prompt: &str) -> Option<(String, bool)> {
+fn parse_user_shell(prompt: &str) -> Option<(String, bool)> {
     if let Some(command) = prompt.strip_prefix("!!") {
         let command = command.trim_start();
         return (!command.is_empty()).then(|| (command.to_string(), true));
@@ -219,20 +219,20 @@ fn parse_user_bash(prompt: &str) -> Option<(String, bool)> {
 
 #[cfg(test)]
 mod direct_shell_tests {
-    use super::parse_user_bash;
+    use super::parse_user_shell;
 
     #[test]
     fn parses_context_modes() {
         assert_eq!(
-            parse_user_bash("!  printf ok"),
+            parse_user_shell("!  printf ok"),
             Some(("printf ok".to_string(), false))
         );
         assert_eq!(
-            parse_user_bash("!! printf ok"),
+            parse_user_shell("!! printf ok"),
             Some(("printf ok".to_string(), true))
         );
-        assert_eq!(parse_user_bash("!   "), None);
-        assert_eq!(parse_user_bash("ordinary prompt"), None);
+        assert_eq!(parse_user_shell("!   "), None);
+        assert_eq!(parse_user_shell("ordinary prompt"), None);
     }
 }
 
@@ -248,7 +248,7 @@ mod direct_shell_tests {
 /// Start a new run with a queued prompt (FIFO pop at turn end). Shares
 /// the session-file creation and turn-freezing logic with the Enter
 /// handler but skips UI-only concerns (history nav, slash completion).
-pub(super) fn finish_user_bash(
+pub(super) fn finish_user_shell(
     app: &mut App,
     result: lofi_core::DirectShellResult,
     exclude_from_context: bool,
@@ -268,7 +268,7 @@ pub(super) fn finish_user_bash(
     // finished result to the sink rather than assembling/appending an event.
     let run_model = app.run_model();
     let byte_range = app.session.sink_mut().and_then(|sink| {
-        sink.record_user_bash(
+        sink.record_user_shell(
             &result,
             exclude_from_context,
             &run_model,
@@ -277,7 +277,7 @@ pub(super) fn finish_user_bash(
         .ok()
     });
     app.session.refresh_cursor();
-    app.apply_event(AgentEvent::UserBash {
+    app.apply_event(AgentEvent::UserShell {
         command: result.command,
         output: result.output,
         exit_code: result.exit_code,
@@ -299,14 +299,14 @@ fn install_run(
     rx: Receiver<AgentEvent>,
     cancel: Arc<AtomicBool>,
     preempt: Arc<AtomicBool>,
-    user_bash: Option<(String, bool)>,
+    user_shell: Option<(String, bool)>,
 ) {
     *current_run = Some(RunHandle {
         handle,
         rx,
         cancel,
         preempt,
-        user_bash,
+        user_shell,
     });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
@@ -387,7 +387,7 @@ fn spawn_agent_run(
     install_run(app, current_run, handle, rx, cancel, preempt, None);
 }
 
-pub(super) fn spawn_user_bash(
+pub(super) fn spawn_user_shell(
     app: &mut App,
     current_run: &mut Option<RunHandle>,
     command: String,
@@ -413,7 +413,7 @@ pub(super) fn spawn_user_bash(
         ))
         .await
         {
-            Ok(result) => AgentEvent::UserBash {
+            Ok(result) => AgentEvent::UserShell {
                 command: result.command,
                 output: result.output,
                 exit_code: result.exit_code,
@@ -423,7 +423,7 @@ pub(super) fn spawn_user_bash(
                 cancelled: result.cancelled,
                 exclude_from_context,
             },
-            Err(error) => AgentEvent::UserBash {
+            Err(error) => AgentEvent::UserShell {
                 command: command_for_run,
                 output: error.to_string(),
                 exit_code: Some(1),
@@ -454,8 +454,8 @@ pub(super) fn spawn_prompt(
     prompt: String,
     kind: lofi_types::PromptKind,
 ) {
-    if let Some((command, exclude_from_context)) = parse_user_bash(&prompt) {
-        spawn_user_bash(app, current_run, command, exclude_from_context);
+    if let Some((command, exclude_from_context)) = parse_user_shell(&prompt) {
+        spawn_user_shell(app, current_run, command, exclude_from_context);
         return;
     }
     let Some(agent) = agent else {
@@ -517,25 +517,25 @@ fn interrupt_run(
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(r) = current_run.as_mut() {
-        if r.user_bash.is_none() {
+        if r.user_shell.is_none() {
             // Restore steering/follow-up messages to the editor when a
             // stream is aborted instead of submitting them automatically.
             restore_queued_prompts(app);
         }
-        let user_bash = r.user_bash.clone();
+        let user_shell = r.user_shell.clone();
         // Agent runs must settle cooperatively: the engine checkpoints each
         // completed round, flushes the partial current response, and writes a
         // TurnCancelled marker before its channel closes. Aborting the task
         // here skips that cleanup and makes cancelled output disappear.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some((command, exclude_from_context)) = user_bash {
+        if let Some((command, exclude_from_context)) = user_shell {
             let Some(r) = current_run.take() else {
                 return;
             };
             r.handle.abort();
             let result =
                 lofi_core::cancelled_direct_shell(command, app.run_elapsed().as_millis() as u64);
-            finish_user_bash(app, result, exclude_from_context);
+            finish_user_shell(app, result, exclude_from_context);
             app.run_finished();
             if let Some(queued) = app.prompt_queue.first().cloned() {
                 app.prompt_queue.remove(0);

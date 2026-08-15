@@ -317,7 +317,7 @@ fn ctrl_c_cancels_direct_shell_and_kills_its_process_group() {
     let events = fixture.events();
     let bash = events
         .iter()
-        .find(|event| event["type"] == "user_bash")
+        .find(|event| event["type"] == "user_shell")
         .unwrap();
     assert_eq!(bash["cancelled"], true);
     assert_eq!(server.request_count(), 0);
