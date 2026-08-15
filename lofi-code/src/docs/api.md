@@ -133,6 +133,10 @@ command runs `sh -c` from the workspace root in its own process group with
 the same shell policy, stripped environment, and output redaction as
 `lofi.bash`. Returns immediately.
 
+Prefer the default completion notification. Do not wait with `jobWait` or
+poll in a `bash` sleep loop unless the job result is required before the
+turn can continue.
+
 **Parameters:**
 - `cmd` (string, required) — the shell command.
 - `timeoutMs` (number, optional) — kill deadline in milliseconds. There is
