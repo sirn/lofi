@@ -155,6 +155,7 @@ fn every_background_job_api_reports_output_status_wait_notify_and_kill() {
             r#"
 const first = await lofi.jobSpawn({ cmd: "printf job-page-one; sleep 0.2; printf job-page-two", notify: false });
 const notify = await lofi.jobNotify({ id: first.id, enabled: true, intervalMs: 1, changed: false });
+const silenced = await lofi.jobNotify({ id: first.id, enabled: false });
 const early = await lofi.jobWait({ id: first.id, timeoutMs: 1 });
 const running = await lofi.jobStatus({ id: first.id });
 const done = await lofi.jobWait({ id: first.id, timeoutMs: 5000 });
@@ -166,8 +167,48 @@ const killedStatus = await lofi.jobStatus({ id: second.id });
 const killedAgain = await lofi.jobKill({ id: second.id, reason: "idempotent marker" });
 const timed = await lofi.jobSpawn({ cmd: "sleep 60", timeoutMs: 20, notify: false });
 const timedStatus = await lofi.jobWait({ id: timed.id, timeoutMs: 5000 });
-const missing = await lofi.jobStatus({ id: "999999" });
-return { notify, early, running, done, page1, page2, killed, killedStatus, killedAgain, timedStatus, missing };
+const failed = await lofi.jobSpawn({ cmd: "printf failed-job-marker; exit 23", notify: false });
+const failedStatus = await lofi.jobWait({ id: failed.id });
+const failedLog = await lofi.jobRead({ id: failed.id });
+const signaled = await lofi.jobSpawn({ cmd: "kill -TERM $$", notify: false });
+const signaledStatus = await lofi.jobWait({ id: signaled.id });
+const large = await lofi.jobSpawn({ cmd: "yes x | head -c 70000", notify: false });
+await lofi.jobWait({ id: large.id });
+const largePage = await lofi.jobRead({ id: large.id, limit: 999999 });
+const pastEnd = await lofi.jobRead({ id: large.id, cursor: 999999, limit: 1 });
+const concurrent = await Promise.all([
+  lofi.jobSpawn({ cmd: "sleep 0.05; printf concurrent-a", notify: false }),
+  lofi.jobSpawn({ cmd: "sleep 0.03; printf concurrent-b", notify: false }),
+  lofi.jobSpawn({ cmd: "sleep 0.01; printf concurrent-c", notify: false }),
+]);
+const concurrentDone = await Promise.all(concurrent.map(job => lofi.jobWait({ id: job.id })));
+const missing = {};
+for (const [name, call] of Object.entries({
+  status: () => lofi.jobStatus({ id: "999999" }),
+  read: () => lofi.jobRead({ id: "999999" }),
+  wait: () => lofi.jobWait({ id: "999999", timeoutMs: 1 }),
+  kill: () => lofi.jobKill({ id: "999999" }),
+  notify: () => lofi.jobNotify({ id: "999999" }),
+})) missing[name] = await call();
+const invalid = {};
+for (const [name, call] of Object.entries({
+  spawn: () => lofi.jobSpawn({}),
+  status: () => lofi.jobStatus({ id: "not-an-id" }),
+  read: () => lofi.jobRead({}),
+  wait: () => lofi.jobWait({ id: null }),
+  kill: () => lofi.jobKill({ id: -1 }),
+  notify: () => lofi.jobNotify({}),
+})) {
+  try { await call(); } catch (error) { invalid[name] = String(error); }
+}
+return {
+  notify, silenced, early, running, done, page1, page2, killed, killedStatus, killedAgain,
+  timedStatus, failedStatus, failedLog, signaledStatus,
+  largePage: { cursor: largePage.cursor, totalBytes: largePage.totalBytes, outputBytes: largePage.output.length },
+  pastEnd, concurrentIds: concurrent.map(job => job.id),
+  concurrentUnique: new Set(concurrent.map(job => job.id)).size === concurrent.length,
+  concurrentStates: concurrentDone.map(job => job.state), missing, invalid,
+};
 "#,
         ),
         text_response("job API final answer"),
@@ -190,7 +231,18 @@ return { notify, early, running, done, page1, page2, killed, killedStatus, kille
         "5000",
         "idempotent marker",
         "timed_out",
+        "failed-job-marker",
+        r#"\"exitCode\":23"#,
+        r#"\"signal\":15"#,
+        r#"\"cursor\":65536"#,
+        r#"\"totalBytes\":70000"#,
+        "concurrent-a",
+        "concurrent-b",
+        "concurrent-c",
+        r#"\"concurrentUnique\":true"#,
         "no such job",
+        "missing or invalid",
+        "jobSpawn: missing",
     ] {
         assert!(body.contains(marker), "missing {marker}: {body}");
     }

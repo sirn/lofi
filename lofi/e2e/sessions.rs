@@ -808,6 +808,63 @@ fn hard_context_pressure_compacts_and_silently_continues_the_tool_cycle() {
 }
 
 #[test]
+fn queued_job_completion_survives_escape_cancellation_of_a_foreground_tool() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "race-tools",
+            r#"const job = await lofi.jobSpawn({ cmd: "while [ ! -f foreground-tool.pid ]; do sleep 0.02; done; sleep 0.2; printf queued-job-log-marker" });
+const foreground = await lofi.bash({ cmd: "echo $$ > foreground-tool.pid; exec sleep 3600" });
+return { job, foreground };"#,
+        ),
+        text_response("queued job notice handled after cancellation"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start a background job and then run a long foreground command");
+    tui.wait_for("Permission Required", WAIT);
+    tui.send(b"a");
+    let pid_path = fixture.workspace.join("foreground-tool.pid");
+    let started = std::time::Instant::now();
+    while !pid_path.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        pid_path.exists(),
+        "foreground tool did not start; requests: {}; output: {:?}",
+        server.request_count(),
+        tui.output()
+    );
+    let pid: i32 = std::fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut foreground = ProcessGuard::new(pid);
+    assert!(process_is_alive(pid));
+
+    // Wait until the background completion is visibly queued behind the
+    // foreground tool. Escape must cancel only the active run, not this
+    // already queued system notice.
+    tui.wait_for("completed:", WAIT);
+    tui.send(b"");
+    wait_for_process_exit(pid);
+    foreground.disarm();
+    tui.wait_for("queued job notice handled after cancellation", WAIT);
+    fixture.wait_for_event_count("turn_cancelled", 1);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains(" completed:"));
+    assert!(requests[1].body.contains("queued-job-log-marker"));
+    let events = fixture.events();
+    assert!(events.iter().any(|event| event["type"] == "turn_cancelled"));
+    assert_eq!(job_events(&events, "job_started").len(), 1);
+    assert_eq!(job_events(&events, "job_finished").len(), 1);
+}
+
+#[test]
 fn background_job_completion_is_injected_as_a_notice_prompt() {
     let server = MockServer::start(vec![
         tool_response(
