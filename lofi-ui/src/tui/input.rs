@@ -218,7 +218,7 @@ fn parse_user_bash(prompt: &str) -> Option<(String, bool)> {
 }
 
 #[cfg(test)]
-mod user_bash_tests {
+mod direct_shell_tests {
     use super::parse_user_bash;
 
     #[test]
@@ -250,7 +250,7 @@ mod user_bash_tests {
 /// handler but skips UI-only concerns (history nav, slash completion).
 pub(super) fn finish_user_bash(
     app: &mut App,
-    result: lofi_core::UserBashResult,
+    result: lofi_core::DirectShellResult,
     exclude_from_context: bool,
 ) {
     if !exclude_from_context {
@@ -406,7 +406,7 @@ pub(super) fn spawn_user_bash(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_run = Arc::clone(&cancel);
     let handle = tokio::task::spawn_local(async move {
-        let event = match Box::pin(lofi_core::run_user_bash(
+        let event = match Box::pin(lofi_core::run_direct_shell_command(
             &cwd,
             command_for_run.clone(),
             cancel_for_run,
@@ -534,7 +534,7 @@ fn interrupt_run(
             };
             r.handle.abort();
             let result =
-                lofi_core::cancelled_user_bash(command, app.run_elapsed().as_millis() as u64);
+                lofi_core::cancelled_direct_shell(command, app.run_elapsed().as_millis() as u64);
             finish_user_bash(app, result, exclude_from_context);
             app.run_finished();
             if let Some(queued) = app.prompt_queue.first().cloned() {
