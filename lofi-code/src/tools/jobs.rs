@@ -1149,15 +1149,24 @@ impl BuiltinTools {
                 }
             }
             if let Some(pattern) = &pattern {
-                let mut tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
+                let tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
                 if tail.contains(pattern.as_str()) {
-                    self.bash_env.redact(&mut tail);
+                    let redact_overlap = self
+                        .bash_env
+                        .redact
+                        .iter()
+                        .map(String::len)
+                        .max()
+                        .unwrap_or(0);
+                    let mut returned_tail =
+                        read_log_tail(&log_path, PATTERN_TAIL_BYTES.saturating_add(redact_overlap));
+                    self.bash_env.redact(&mut returned_tail);
                     let mut v = json!({
                         "ok": true,
                         "id": id.to_string(),
                         "matched": pattern,
                     });
-                    v["tail"] = json!(tail);
+                    v["tail"] = json!(returned_tail);
                     return Ok(v);
                 }
             }
