@@ -1149,8 +1149,9 @@ impl BuiltinTools {
                 }
             }
             if let Some(pattern) = &pattern {
-                let tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
+                let mut tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
                 if tail.contains(pattern.as_str()) {
+                    self.bash_env.redact(&mut tail);
                     let mut v = json!({
                         "ok": true,
                         "id": id.to_string(),
@@ -2289,6 +2290,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(done["state"], json!("completed"), "got: {done}");
+    }
+
+    #[tokio::test]
+    async fn job_wait_for_input_redacts_the_returned_tail() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bash_env = crate::BashEnv {
+            redact: vec!["secret-value".to_string()],
+            ..crate::BashEnv::default()
+        };
+        let (_dir, tools) = tools_with_env(cancel, bash_env);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "printf 'token=secret-value'; sleep 30",
+                "tty": true,
+                "notify": false
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait_for_input(json!({
+                "id": id,
+                "pattern": "token=",
+                "timeoutMs": 5_000
+            }))
+            .await
+            .unwrap();
+        assert_eq!(waited["tail"], json!("token=[redacted]"));
+        tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 
     #[tokio::test]
