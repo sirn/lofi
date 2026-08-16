@@ -294,6 +294,7 @@ fn bind_job_tools<'js>(
         ("jobSpawn", |t, a| Box::pin(t.job_spawn(a))),
         ("jobStatus", |t, a| Box::pin(t.job_status(a))),
         ("jobRead", |t, a| Box::pin(t.job_read(a))),
+        ("jobScreen", |t, a| Box::pin(t.job_screen(a))),
         ("jobWait", |t, a| Box::pin(t.job_wait(a))),
         ("jobKill", |t, a| Box::pin(t.job_kill(a))),
         ("jobNotify", |t, a| Box::pin(t.job_notify(a))),
