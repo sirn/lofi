@@ -133,9 +133,8 @@ const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
 const NOTIFY_MAX_LINES: usize = 3;
-/// Byte budget for the `/job` log drill-in. The view keeps at most this
-/// many bytes of decoded log resident (a bounded tail window), so watching
-/// a runaway job's log never grows UI memory.
+/// Byte budget for the plain-job output viewer. PTY jobs use their bounded
+/// terminal screen instead.
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
@@ -150,7 +149,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
-    ("/job", "list background jobs, view logs, stop a job"),
+    ("/job", "list background jobs, view output, stop a job"),
     ("/new", "start a fresh session"),
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
@@ -557,30 +556,43 @@ impl ThemePickerState {
 
 /// State for the `/job` modal. The list is rebuilt from a fresh
 /// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
-/// the drill-in log view are kept here. The log view pages bounded windows
-/// from disk, so an unbounded job log never inflates memory.
+/// the drill-in output view are kept here. Plain-job logs page bounded
+/// windows from disk, so an unbounded log never inflates memory.
 struct JobsModalState {
     selected: usize,
-    /// Set while drilling into one job's log; `Esc` returns to the list.
-    viewing: Option<JobLogView>,
+    /// Set while drilling into one job's output; `Esc` returns to the list.
+    viewing: Option<JobOutputView>,
     /// Armed when the user picks kill: the next `y` confirms, anything else
     /// cancels. Holds the target job id so the confirm survives a re-render.
     confirm_kill: Option<u64>,
 }
 
-/// Drill-in log view for one job. Holds only the tail window currently on
-/// screen plus enough to page more; it never holds the whole log.
-struct JobLogView {
+/// Drill-in output view for one job. PTY jobs show their parsed terminal
+/// screen. Plain jobs retain a bounded, scrollable log tail.
+struct JobOutputView {
     id: u64,
-    /// Decoded lines currently held, oldest first. Bounded by
-    /// [`JOB_LOG_WINDOW_BYTES`].
-    lines: std::collections::VecDeque<String>,
-    /// Byte offset of the next unread chunk; the file cursor for appends.
-    cursor: u64,
-    /// Total log bytes at last refresh; compared to detect growth.
-    total: u64,
-    /// Scroll offset from the bottom (0 = follow the live tail).
-    scroll: usize,
+    content: JobViewContent,
+}
+
+enum JobViewContent {
+    Terminal(lofi_core::JobScreen),
+    Log {
+        lines: std::collections::VecDeque<String>,
+        cursor: u64,
+        total: u64,
+        scroll: usize,
+    },
+}
+
+impl JobViewContent {
+    fn empty_log() -> Self {
+        Self::Log {
+            lines: std::collections::VecDeque::new(),
+            cursor: 0,
+            total: 0,
+            scroll: 0,
+        }
+    }
 }
 
 impl Modal for ThinkingPickerState {
@@ -1520,6 +1532,13 @@ async fn run_loop(
                     dirty = true;
                 }
                 if app.retry.is_some() {
+                    dirty = true;
+                }
+                if app
+                    .jobs_modal
+                    .as_ref()
+                    .is_some_and(|modal| modal.viewing.is_some())
+                {
                     dirty = true;
                 }
                 if let Some(t) = app.yank_notify {
