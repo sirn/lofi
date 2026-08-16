@@ -7709,7 +7709,7 @@ fn jobs_terminal_view_clips_to_the_available_viewport() {
     let mut a = app();
     a.jobs_modal = Some(JobsModalState {
         selected: 0,
-        viewing: Some(JobLogView {
+        viewing: Some(JobOutputView {
             id: 7,
             content: JobViewContent::Terminal(lofi_core::JobScreen {
                 cols: 80,
