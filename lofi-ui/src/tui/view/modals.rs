@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::Theme;
+use crate::tui::{JobViewContent, Theme};
 
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
 
@@ -889,55 +889,77 @@ fn fmt_job_duration(ms: u64) -> String {
     }
 }
 
-/// `/job` modal. Two levels: the job list, and a drill-in log view. The list
-/// is rebuilt from a live snapshot each frame so statuses stay current; the
-/// log view pages a bounded tail window from disk.
+/// `/job` modal. PTY jobs show a parsed terminal screen. Plain jobs show a
+/// bounded log tail.
 pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::widgets::ListState;
     if app.jobs_modal.is_none() {
         return;
     }
-    // Refresh the drill-in log from disk each frame (no-op when not viewing
-    // or when the log did not grow).
-    app.refresh_job_log();
+    // Keep the open output view current while the modal is rendered.
+    app.refresh_job_output();
     let t = app.theme;
     let Some(modal) = app.jobs_modal.as_ref() else {
         return;
     };
 
-    // Drill-in log view.
+    // Drill-in output view.
     if let Some(view) = &modal.viewing {
-        let title = format!(" job {} log ", view.id);
-        let help = " ↑/↓ scroll  g top  G follow  esc back ";
-        let w = area.width.saturating_sub(4).clamp(40, 100);
-        let h = area.height.saturating_sub(4).clamp(8, 28);
-        let popup = centered_modal(area, w, h);
-        f.render_widget(Clear, popup);
-        let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-        let body_h = rows.content.height as usize;
-        let total = view.lines.len();
-        // scroll is an offset from the bottom (0 = follow the live tail).
-        let end = total.saturating_sub(view.scroll);
-        let start = end.saturating_sub(body_h);
-        let visible: Vec<Line> = view
-            .lines
-            .iter()
-            .skip(start)
-            .take(body_h)
-            .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
-            .collect();
-        f.render_widget(Paragraph::new(visible), rows.content);
-        if total > body_h {
-            let scroll_area = modal_scroll_area(rows.content);
-            prim::render_scrollbar(
-                f,
-                scroll_area.gutter,
-                start,
-                body_h,
-                total,
-                t.subtle,
-                t.muted,
-            );
+        match &view.content {
+            JobViewContent::Terminal(screen) => {
+                let title = format!(" job {} terminal ", view.id);
+                let popup = centered_modal(
+                    area,
+                    screen.cols.saturating_add(4),
+                    screen.rows.saturating_add(4),
+                );
+                f.render_widget(Clear, popup);
+                let rows = render_modal_frame(
+                    f,
+                    popup,
+                    t,
+                    modal_title(t, title),
+                    modal_help(t, " esc back "),
+                );
+                let visible = screen
+                    .lines
+                    .iter()
+                    .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))));
+                f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), rows.content);
+            }
+            JobViewContent::Log { lines, scroll, .. } => {
+                let title = format!(" job {} log ", view.id);
+                let help = " ↑/↓ scroll  g top  G follow  esc back ";
+                let w = area.width.saturating_sub(4).clamp(40, 100);
+                let h = area.height.saturating_sub(4).clamp(8, 28);
+                let popup = centered_modal(area, w, h);
+                f.render_widget(Clear, popup);
+                let rows =
+                    render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+                let body_h = rows.content.height as usize;
+                let total = lines.len();
+                let end = total.saturating_sub(*scroll);
+                let start = end.saturating_sub(body_h);
+                let visible: Vec<Line> = lines
+                    .iter()
+                    .skip(start)
+                    .take(body_h)
+                    .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))))
+                    .collect();
+                f.render_widget(Paragraph::new(visible), rows.content);
+                if total > body_h {
+                    let scroll_area = modal_scroll_area(rows.content);
+                    prim::render_scrollbar(
+                        f,
+                        scroll_area.gutter,
+                        start,
+                        body_h,
+                        total,
+                        t.subtle,
+                        t.muted,
+                    );
+                }
+            }
         }
         return;
     }
@@ -951,7 +973,7 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let help = if modal.confirm_kill.is_some() {
         " kill this job? y confirm  any other key cancels "
     } else {
-        " ↑/↓ navigate  enter log  x stop  esc close "
+        " ↑/↓ navigate  enter output  x stop  esc close "
     };
     let row_for = |j: &lofi_core::JobInfo| {
         let mut cmd = String::new();
