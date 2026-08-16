@@ -714,13 +714,14 @@ impl BuiltinTools {
         let mut child = command.spawn()?;
         let pid = child.id();
 
+        let started = Instant::now();
         let handle = Arc::new(JobHandle {
             data: Mutex::new(Job {
                 id,
                 cmd: cmd.clone(),
                 state: State::Running,
                 pid,
-                started: Instant::now(),
+                started,
                 ended: None,
                 exit_code: None,
                 signal: None,
@@ -732,7 +733,7 @@ impl BuiltinTools {
                 rows,
                 idle_ms,
                 idle: false,
-                last_output_at: None,
+                last_output_at: Some(started),
             }),
             done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
@@ -1493,9 +1494,23 @@ fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str) -> String {
 }
 
 fn read_log_tail(path: &str, max: usize) -> String {
-    let bytes = std::fs::read(path).unwrap_or_default();
-    let start = bytes.len().saturating_sub(max);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+    use std::io::{Read as _, Seek as _};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(total) = file.metadata().map(|metadata| metadata.len()) else {
+        return String::new();
+    };
+    let start = total.saturating_sub(max as u64);
+    if file.seek(std::io::SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity((total - start) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Collapse control characters to spaces and cap the visible length at a
