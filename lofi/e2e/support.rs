@@ -1448,7 +1448,7 @@ impl Tui {
                 let output = self.output.lock().unwrap();
                 let raw = String::from_utf8_lossy(&output.raw);
                 let text = if scrollback {
-                    output.transcript.clone()
+                    format!("{}\n{}", output.transcript, output.screen.text())
                 } else {
                     output.screen.text()
                 };

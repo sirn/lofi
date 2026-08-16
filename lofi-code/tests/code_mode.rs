@@ -600,6 +600,27 @@ async fn job_read_pages_output_over_a_cursor() {
 }
 
 #[tokio::test]
+async fn job_screen_returns_the_current_parsed_tty_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = lofi_code::tools::JobRegistry::new();
+    let src = r#"
+        const job = await lofi.jobSpawn({
+            cmd: "printf 'old\\033[2K\\rnew'",
+            tty: true,
+            cols: 12,
+            rows: 2,
+        });
+        await lofi.jobWait({ id: job.id });
+        return await lofi.jobScreen({ id: job.id });
+    "#;
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value["cols"], json!(12));
+    assert_eq!(res.value["rows"], json!(2));
+    assert_eq!(res.value["lines"], json!(["new", ""]));
+}
+
+#[tokio::test]
 async fn job_wait_with_timeout_returns_running() {
     let dir = tempfile::tempdir().unwrap();
     let mut cx = trusted_ctx(dir.path());
