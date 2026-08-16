@@ -1052,6 +1052,7 @@ impl BuiltinTools {
         let Some(handle) = self.jobs.get(id) else {
             return Ok(no_such_job(id));
         };
+        ensure_job_running(&handle)?;
         let cols = args
             .get("cols")
             .and_then(Value::as_u64)
@@ -1289,7 +1290,19 @@ fn key_press_bytes(key: &str) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
+fn ensure_job_running(handle: &JobHandle) -> Result<()> {
+    let job = handle
+        .data
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if job.state.is_terminal() {
+        return Err(Error::Tool("job is not running".into()));
+    }
+    Ok(())
+}
+
 fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<()> {
+    ensure_job_running(handle)?;
     let guard = handle
         .master
         .lock()
@@ -1636,6 +1649,11 @@ async fn run_job(
     if let Some(mut out) = log_out {
         let _ = out.flush();
     }
+    handle
+        .master
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let notice = {
         let mut job = handle
             .data
@@ -2159,6 +2177,24 @@ mod tests {
             log["output"].as_str().unwrap().contains("xterm-256color"),
             "log: {log}"
         );
+    }
+
+    #[tokio::test]
+    async fn tty_input_rejects_a_completed_job() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "true", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        tools.job_wait(json!({ "id": id })).await.unwrap();
+
+        let err = tools
+            .job_type(json!({ "id": id, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not running"), "got: {err}");
     }
 
     #[tokio::test]
