@@ -948,6 +948,48 @@ impl BuiltinTools {
         }))
     }
 
+    /// Read the latest visible screen of a PTY job after terminal control
+    /// sequences have been applied. Display styles stay in the UI snapshot;
+    /// the agent receives one redacted string per terminal row.
+    ///
+    /// # Errors
+    /// Returns [`Error::Tool`] when `id` is missing or invalid.
+    #[allow(clippy::unused_async)]
+    pub async fn job_screen(&self, args: Value) -> Result<Value> {
+        let id = parse_id(&args)?;
+        let Some(handle) = self.jobs.get(id) else {
+            return Ok(no_such_job(id));
+        };
+        let screen = handle
+            .screen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(screen) = screen else {
+            return Ok(json!({
+                "ok": false,
+                "id": id.to_string(),
+                "error": "job has no terminal screen",
+            }));
+        };
+        let lines: Vec<String> = screen
+            .lines
+            .iter()
+            .map(|line| {
+                let mut text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+                self.bash_env.redact(&mut text);
+                text.trim_end().to_string()
+            })
+            .collect();
+        Ok(json!({
+            "ok": true,
+            "id": id.to_string(),
+            "cols": screen.cols,
+            "rows": screen.rows,
+            "lines": lines,
+        }))
+    }
+
     /// Bounded wait for a job condition. With no condition, waits for the
     /// job to finish. `pattern` waits for text in the output tail, and
     /// `idleMs` waits for unchanged output. Waiting never cancels the job,
@@ -2359,8 +2401,40 @@ mod tests {
         assert!(styled.style.attributes.contains(JobAttributes::BOLD));
         assert!(styled.style.attributes.contains(JobAttributes::ITALIC));
         assert!(styled.style.attributes.contains(JobAttributes::UNDERLINE));
+        let visible = tools.job_screen(json!({ "id": id })).await.unwrap();
+        assert_eq!(visible["cols"], json!(24));
+        assert_eq!(visible["rows"], json!(3));
+        assert_eq!(visible["lines"][0], json!("parsed-marker"));
         assert!(tools.jobs.snapshot()[0].tty);
         tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_screen_redacts_approved_environment_values() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bash_env = crate::BashEnv {
+            redact: vec!["secret-value".to_string()],
+            ..crate::BashEnv::default()
+        };
+        let (_dir, tools) = tools_with_env(cancel, bash_env);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "printf 'token=secret-value'",
+                "tty": true,
+                "cols": 24,
+                "rows": 2,
+                "notify": false
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        tools
+            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+
+        let screen = tools.job_screen(json!({ "id": id })).await.unwrap();
+        assert_eq!(screen["lines"][0], json!("token=[redacted]"));
     }
 
     #[tokio::test]
