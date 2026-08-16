@@ -1016,8 +1016,8 @@ impl BuiltinTools {
         if text.len() > MAX_TTY_WRITE_BYTES {
             return Err(Error::Tool("jobType: text too long".into()));
         }
-        write_to_master(&handle, text.as_bytes())?;
-        Ok(json!({ "ok": true, "id": id.to_string(), "sent": text.len() }))
+        let sent = write_to_master(&handle, text.as_bytes())?;
+        Ok(json!({ "ok": true, "id": id.to_string(), "sent": sent }))
     }
 
     /// Send one named key press to a tty job. Uses the same key names as the
@@ -1037,7 +1037,10 @@ impl BuiltinTools {
             .ok_or_else(|| Error::Tool("jobKeyPress: missing 'key'".into()))?;
         let bytes = key_press_bytes(key)
             .ok_or_else(|| Error::Tool(format!("jobKeyPress: unknown key '{key}'")))?;
-        write_to_master(&handle, &bytes)?;
+        let sent = write_to_master(&handle, &bytes)?;
+        if sent != bytes.len() {
+            return Err(Error::Tool("jobKeyPress: partial PTY write".into()));
+        }
         Ok(json!({ "ok": true, "id": id.to_string(), "key": key }))
     }
 
@@ -1301,7 +1304,7 @@ fn ensure_job_running(handle: &JobHandle) -> Result<()> {
     Ok(())
 }
 
-fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<()> {
+fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<usize> {
     ensure_job_running(handle)?;
     let guard = handle
         .master
@@ -1313,15 +1316,18 @@ fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<()> {
     let mut written = 0;
     while written < bytes.len() {
         match nix::unistd::write(master.as_fd(), &bytes[written..]) {
-            Ok(0) => break,
+            Ok(0) => return Ok(written),
             Ok(n) => written += n,
             Err(e) if e == nix::errno::Errno::EAGAIN || e == nix::errno::Errno::EWOULDBLOCK => {
+                if written > 0 {
+                    return Ok(written);
+                }
                 return Err(Error::Tool("pty input buffer full; retry".into()));
             }
             Err(e) => return Err(Error::Io(std::io::Error::from(e))),
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 fn set_winsize(master: &OwnedFd, rows: u16, cols: u16) -> Result<()> {
