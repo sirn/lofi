@@ -182,11 +182,11 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
 }
 
 #[test]
-fn jobs_modal_lists_opens_logs_and_stops_a_running_job() {
+fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
     let server = MockServer::start(vec![
         tool_response(
             "modal-job-call",
-            r#"return await lofi.jobSpawn({ cmd: "printf modal-job-log-marker; sleep 60", notify: false });"#,
+            r#"return await lofi.jobSpawn({ cmd: "printf 'raw-marker\\033[2K\\rmodal-job-screen-marker'; sleep 60", tty: true, cols: 36, rows: 8, notify: false });"#,
         ),
         text_response("modal job answer marker"),
     ]);
@@ -202,7 +202,7 @@ fn jobs_modal_lists_opens_logs_and_stops_a_running_job() {
     tui.submit("/job");
     tui.wait_for("background jobs", WAIT);
     tui.send(b"\r");
-    tui.wait_for("modal-job-log-marker", WAIT);
+    tui.wait_for("modal-job-screen-marker", WAIT);
     tui.clear_output();
     tui.send(b"\x1b");
     tui.wait_for("x", WAIT);

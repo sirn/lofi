@@ -188,6 +188,77 @@ pub struct JobInfo {
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
     pub log_path: String,
+    pub tty: bool,
+}
+
+/// A terminal color captured independently of the UI renderer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobColor {
+    #[default]
+    Default,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+/// Text attributes captured for terminal cells.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobAttributes(u8);
+
+impl JobAttributes {
+    pub const BOLD: Self = Self(1 << 0);
+    pub const DIM: Self = Self(1 << 1);
+    pub const ITALIC: Self = Self(1 << 2);
+    pub const UNDERLINE: Self = Self(1 << 3);
+    pub const INVERSE: Self = Self(1 << 4);
+
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for JobAttributes {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for JobAttributes {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// Display attributes shared by one or more adjacent terminal cells.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobStyle {
+    pub foreground: JobColor,
+    pub background: JobColor,
+    pub attributes: JobAttributes,
+}
+
+/// Adjacent terminal cells with the same display attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobSpan {
+    pub text: String,
+    pub style: JobStyle,
+}
+
+/// One row of a parsed terminal screen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobScreenLine {
+    pub spans: Vec<JobSpan>,
+}
+
+/// The visible screen of a PTY job after terminal escape sequences and
+/// display attributes have been applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobScreen {
+    pub cols: u16,
+    pub rows: u16,
+    pub lines: Vec<JobScreenLine>,
 }
 
 struct JobHandle {
@@ -202,6 +273,9 @@ struct JobHandle {
     /// PTY master, cloned for the writer side (`jobType` / `jobKeyPress`).
     /// The driver holds its own clone for reads.
     master: Mutex<Option<OwnedFd>>,
+    /// Latest parsed PTY screen for the user-facing job viewer. Raw output
+    /// remains in the disk log for agent reads and diagnostics.
+    screen: Mutex<Option<JobScreen>>,
 }
 
 struct Inner {
@@ -328,6 +402,7 @@ impl JobRegistry {
                         .duration_since(j.started)
                         .as_millis() as u64,
                     log_path: j.log_path.clone(),
+                    tty: j.tty,
                 }
             })
             .collect();
@@ -462,6 +537,17 @@ impl JobRegistry {
         let n = f.read(&mut buf).ok()?;
         buf.truncate(n);
         Some((buf, start + n as u64, total))
+    }
+
+    /// Return the latest parsed terminal screen for a PTY job. A plain job
+    /// has no terminal screen and continues to use its line-based log.
+    #[must_use]
+    pub fn screen(&self, id: u64) -> Option<JobScreen> {
+        self.get(id)?
+            .screen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn get(&self, id: u64) -> Option<Arc<JobHandle>> {
@@ -736,6 +822,11 @@ impl BuiltinTools {
             cancel: std::sync::atomic::AtomicBool::new(false),
             on_release: Mutex::new(None),
             master: Mutex::new(handle_master),
+            screen: Mutex::new(tty.then(|| JobScreen {
+                cols,
+                rows,
+                lines: vec![JobScreenLine::default(); usize::from(rows)],
+            })),
         });
         {
             let mut jobs = self
@@ -1273,12 +1364,14 @@ fn drain_master(
     master: &OwnedFd,
     parser: &mut Option<vt100::Parser>,
     log_out: &mut Option<std::fs::File>,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let mut buf = [0u8; 8192];
+    let mut changed = false;
     loop {
         match nix::unistd::read(master.as_raw_fd(), &mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                changed = true;
                 if let Some(out) = log_out.as_mut() {
                     out.write_all(&buf[..n])?;
                 }
@@ -1293,7 +1386,92 @@ fn drain_master(
             Err(e) => return Err(std::io::Error::from(e)),
         }
     }
-    Ok(())
+    Ok(changed)
+}
+
+fn job_color(color: vt100::Color) -> JobColor {
+    match color {
+        vt100::Color::Default => JobColor::Default,
+        vt100::Color::Idx(index) => JobColor::Indexed(index),
+        vt100::Color::Rgb(red, green, blue) => JobColor::Rgb(red, green, blue),
+    }
+}
+
+fn job_style(cell: &vt100::Cell) -> JobStyle {
+    let mut attributes = JobAttributes::default();
+    if cell.bold() {
+        attributes |= JobAttributes::BOLD;
+    }
+    if cell.dim() {
+        attributes |= JobAttributes::DIM;
+    }
+    if cell.italic() {
+        attributes |= JobAttributes::ITALIC;
+    }
+    if cell.underline() {
+        attributes |= JobAttributes::UNDERLINE;
+    }
+    if cell.inverse() {
+        attributes |= JobAttributes::INVERSE;
+    }
+    JobStyle {
+        foreground: job_color(cell.fgcolor()),
+        background: job_color(cell.bgcolor()),
+        attributes,
+    }
+}
+
+fn publish_screen(handle: &JobHandle, parser: &vt100::Parser) {
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let lines = (0..rows)
+        .map(|row| {
+            let mut spans: Vec<JobSpan> = Vec::new();
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let style = job_style(cell);
+                let span = match spans.last_mut() {
+                    Some(span) if span.style == style => span,
+                    _ => {
+                        spans.push(JobSpan {
+                            text: String::new(),
+                            style,
+                        });
+                        let index = spans.len() - 1;
+                        &mut spans[index]
+                    }
+                };
+                if cell.has_contents() {
+                    span.text.push_str(cell.contents());
+                } else {
+                    span.text.push(' ');
+                }
+            }
+            JobScreenLine { spans }
+        })
+        .collect();
+    *handle
+        .screen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(JobScreen { cols, rows, lines });
+}
+
+fn drain_pty(
+    handle: &JobHandle,
+    master: &OwnedFd,
+    parser: &mut Option<vt100::Parser>,
+    log_out: &mut Option<std::fs::File>,
+) {
+    if drain_master(master, parser, log_out).unwrap_or(false) {
+        if let Some(parser) = parser {
+            publish_screen(handle, parser);
+        }
+    }
 }
 
 fn screen_changed(parser: &vt100::Parser, last: &mut Option<String>) -> bool {
@@ -1544,7 +1722,7 @@ async fn run_job(
             break;
         }
         if let Some(master) = &master {
-            let _ = drain_master(master, &mut parser, &mut log_out);
+            drain_pty(&handle, master, &mut parser, &mut log_out);
         }
         if let Some(text) = observe_idle(
             &handle,
@@ -1565,7 +1743,7 @@ async fn run_job(
     // exiting; drain them before the log handle closes so `jobRead` sees the
     // complete transcript.
     if let Some(master) = &master {
-        let _ = drain_master(master, &mut parser, &mut log_out);
+        drain_pty(&handle, master, &mut parser, &mut log_out);
     }
     if let Some(mut out) = log_out {
         let _ = out.flush();
@@ -1752,6 +1930,7 @@ mod tests {
             cancel: AtomicBool::new(false),
             on_release: Mutex::new(None),
             master: Mutex::new(None),
+            screen: Mutex::new(None),
         })
     }
 
@@ -2081,6 +2260,54 @@ mod tests {
             log["output"].as_str().unwrap().contains("got:hello"),
             "log: {log}"
         );
+    }
+
+    #[tokio::test]
+    async fn tty_job_exposes_its_parsed_terminal_screen() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "printf 'raw-marker\\033[2K\\r\\033[1;3;4;38;2;1;2;3;48;5;25mparsed-marker'; sleep 30",
+                "tty": true,
+                "cols": 24,
+                "rows": 3
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait(json!({
+                "id": id,
+                "pattern": "parsed-marker",
+                "timeoutMs": 5_000
+            }))
+            .await
+            .unwrap();
+        assert_eq!(waited["matched"], json!("parsed-marker"), "{waited}");
+
+        let screen = tools.jobs.screen(id.parse().unwrap()).unwrap();
+        assert_eq!((screen.cols, screen.rows), (24, 3));
+        assert_eq!(screen.lines.len(), 3);
+        let line: String = screen.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(line.contains("parsed-marker"), "{screen:?}");
+        assert!(!line.contains("raw-marker"), "{screen:?}");
+        let styled = screen.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text.contains("parsed-marker"))
+            .unwrap();
+        assert_eq!(styled.style.foreground, JobColor::Rgb(1, 2, 3));
+        assert_eq!(styled.style.background, JobColor::Indexed(25));
+        assert!(styled.style.attributes.contains(JobAttributes::BOLD));
+        assert!(styled.style.attributes.contains(JobAttributes::ITALIC));
+        assert!(styled.style.attributes.contains(JobAttributes::UNDERLINE));
+        assert!(tools.jobs.snapshot()[0].tty);
+        tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 
     #[tokio::test]
