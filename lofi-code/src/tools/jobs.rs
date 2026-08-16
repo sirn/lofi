@@ -684,8 +684,7 @@ impl BuiltinTools {
             command
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
-                .stderr(std::process::Stdio::from(stderr))
-                .env("TERM", "xterm-256color");
+                .stderr(std::process::Stdio::from(stderr));
             // Give the child its own session and controlling terminal so the
             // PTY line discipline turns a Ctrl+C byte into SIGINT and
             // `/dev/tty` works. Only async-signal-safe syscalls run here.
@@ -711,6 +710,9 @@ impl BuiltinTools {
                 .process_group(0);
         }
         self.bash_env.apply(&mut command);
+        if tty {
+            command.env("TERM", "xterm-256color");
+        }
         let mut child = command.spawn()?;
         let pid = child.id();
 
@@ -2008,6 +2010,13 @@ mod tests {
     }
 
     fn tools_with_cancel(cancel: Arc<AtomicBool>) -> (tempfile::TempDir, BuiltinTools) {
+        tools_with_env(cancel, crate::BashEnv::default())
+    }
+
+    fn tools_with_env(
+        cancel: Arc<AtomicBool>,
+        bash_env: crate::BashEnv,
+    ) -> (tempfile::TempDir, BuiltinTools) {
         let dir = tempfile::tempdir().unwrap();
         let auto: crate::AutoModeFn =
             Arc::new(|_| Box::pin(async { crate::AutoModeOutcome::Allow { reason: "t".into() } }));
@@ -2017,7 +2026,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             tmp,
-            crate::BashEnv::default(),
+            bash_env,
             crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
             None,
             Some(auto),
@@ -2116,6 +2125,38 @@ mod tests {
         let log = tools.job_read(json!({ "id": id })).await.unwrap();
         assert!(
             log["output"].as_str().unwrap().contains("got:hello"),
+            "log: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tty_job_sets_term_after_applying_the_stripped_environment() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bash_env = crate::BashEnv {
+            strip_env: true,
+            baseline: vec![
+                (
+                    "PATH".to_string(),
+                    std::env::var("PATH").unwrap_or_default(),
+                ),
+                ("TERM".to_string(), "dumb".to_string()),
+            ],
+            ..crate::BashEnv::default()
+        };
+        let (_dir, tools) = tools_with_env(cancel, bash_env);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "printf %s \"$TERM\"", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let done = tools
+            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(done["state"], json!("completed"), "got: {done}");
+        let log = tools.job_read(json!({ "id": id })).await.unwrap();
+        assert!(
+            log["output"].as_str().unwrap().contains("xterm-256color"),
             "log: {log}"
         );
     }
