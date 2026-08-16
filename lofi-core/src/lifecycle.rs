@@ -172,13 +172,26 @@ impl AgentLifecycle {
             live = ?jobs.live_ids(),
             "reconcile"
         );
+        // A job that completed on a pruned branch left its JobFinished
+        // marker behind.  Rollback to a point between start and finish
+        // cuts the marker off the lineage, but the process already
+        // exited — reporting it as stale is a false positive.
         let killed = jobs.kill_not_in(&lineage.started);
         let live = jobs.live_ids();
-        let stale = lineage
+        let stale: Vec<u64> = lineage
             .outstanding
             .into_iter()
             .filter(|id| !live.contains(id))
             .collect();
+        let stale = if stale.is_empty() {
+            stale
+        } else {
+            let finished_elsewhere = cursor.finished_job_ids_anywhere(&stale)?;
+            stale
+                .into_iter()
+                .filter(|id| !finished_elsewhere.contains(id))
+                .collect()
+        };
         Ok(LineageJobReconciliation { killed, stale })
     }
 
@@ -659,6 +672,34 @@ mod tests {
             .unwrap();
         assert!(reconciliation.killed.is_empty());
         assert!(reconciliation.stale.is_empty());
+    }
+
+    #[test]
+    fn reconciliation_ignores_jobs_finished_on_a_pruned_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let owner = cursor.record_job_started(42).unwrap();
+        cursor.record_job_finished(&owner, 42).unwrap();
+        // Roll back to the JobStarted event so the JobFinished marker lands on
+        // the pruned branch while JobStarted stays on the selected lineage.
+        cursor.restore_branch(Some(owner)).unwrap();
+
+        let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+        // An empty registry models the state after a prior branch switch
+        // already dropped the job, or a resumed process that never re-registered
+        // it. Without the finished-anywhere check this reports a false stale.
+        let jobs = lofi_code::tools::JobRegistry::new();
+        let snapshot = cursor.snapshot().unwrap();
+        let reconciliation = lifecycle
+            .reconcile_jobs_after_lineage_switch(&cursor, &snapshot.index, &jobs)
+            .unwrap();
+        assert!(reconciliation.killed.is_empty());
+        assert!(
+            reconciliation.stale.is_empty(),
+            "a job with a JobFinished marker elsewhere must not be stale: {:?}",
+            reconciliation.stale
+        );
     }
 
     #[test]

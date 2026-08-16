@@ -461,6 +461,38 @@ impl SessionCursor {
         Ok(events)
     }
 
+    /// Collect which of the given job ids have a `JobFinished` marker
+    /// anywhere in the transcript tree (not just the selected lineage).
+    /// Used by branch-switch reconciliation to avoid reporting a job as
+    /// stale when it already completed on a pruned branch.
+    /// # Errors
+    /// Propagates indexing and event parsing failures.
+    pub fn finished_job_ids_anywhere(
+        &self,
+        job_ids: &[u64],
+    ) -> Result<std::collections::HashSet<u64>> {
+        if job_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let _leaf = self.lock_leaf();
+        let (_meta, index, _size) = load_index(&self.path)?;
+        let offsets: Vec<u64> = index
+            .iter()
+            .filter(|entry| entry.kind == IndexKind::JobLifecycle)
+            .map(|entry| entry.offset)
+            .collect();
+        let mut finished = std::collections::HashSet::new();
+        for offset in offsets {
+            let event = load_event_at(&self.path, offset)?;
+            if let SessionEventKind::JobFinished { job_id } = event.kind {
+                if job_ids.contains(&job_id) {
+                    finished.insert(job_id);
+                }
+            }
+        }
+        Ok(finished)
+    }
+
     /// # Errors
     /// Propagates indexing and event parsing failures.
     pub fn load_events(&self) -> Result<Vec<SessionEvent>> {
