@@ -321,7 +321,7 @@ impl App {
         lines.push(info_kv(t, "/model", "switch the active model"));
         lines.push(info_kv(t, "/theme", "switch color scheme for this session"));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
-        lines.push(info_kv(t, "/job", "list background jobs, view logs, stop"));
+        lines.push(info_kv(t, "/job", "list background jobs, view output, stop"));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(Line::from(""));
@@ -655,7 +655,8 @@ impl App {
     }
 
     /// `/job`: open the background-jobs modal. Lists every session job with
-    /// live status; `Enter` drills into a job's log, `x` arms a kill confirm.
+    /// live status; `Enter` drills into a job's output, `x` arms a kill
+    /// confirm.
     /// No-op (with a notice) when no agent is configured.
     pub(super) fn open_jobs_modal(&mut self) {
         if self.jobs.is_none() {
@@ -676,40 +677,51 @@ impl App {
             .map_or_else(Vec::new, lofi_core::JobRegistry::snapshot)
     }
 
-    /// Pull new log bytes into the open drill-in view, if the log grew.
-    /// Bounded: the held window is capped at `JOB_LOG_WINDOW_BYTES`.
-    pub(super) fn refresh_job_log(&mut self) {
+    /// Refresh the open output view. PTY jobs copy their latest parsed screen;
+    /// plain jobs page a tail window capped at `JOB_LOG_WINDOW_BYTES`.
+    pub(super) fn refresh_job_output(&mut self) {
         let (Some(jobs), Some(modal)) = (&self.jobs, &mut self.jobs_modal) else {
             return;
         };
         let Some(view) = &mut modal.viewing else {
             return;
         };
-        let Some((bytes, next, total)) = jobs.read_log(view.id, view.cursor, 64 * 1024) else {
-            return;
-        };
-        if next == view.cursor {
-            return; // no growth
-        }
-        view.cursor = next;
-        view.total = total;
-        let text = String::from_utf8_lossy(&bytes);
-        for line in text.lines() {
-            view.lines.push_back(line.to_string());
-        }
-        // Trim the held window to the byte budget, dropping oldest lines.
-        let mut held: usize = view.lines.iter().map(|l| l.len() + 1).sum();
-        while held > JOB_LOG_WINDOW_BYTES {
-            if let Some(front) = view.lines.pop_front() {
-                held -= front.len() + 1;
-            } else {
-                break;
+        match &mut view.content {
+            JobViewContent::Terminal(screen) => {
+                if let Some(current) = jobs.screen(view.id) {
+                    *screen = current;
+                }
+            }
+            JobViewContent::Log {
+                lines,
+                cursor,
+                total,
+                ..
+            } => {
+                let Some((bytes, next, new_total)) = jobs.read_log(view.id, *cursor, 64 * 1024)
+                else {
+                    return;
+                };
+                if next == *cursor {
+                    return;
+                }
+                *cursor = next;
+                *total = new_total;
+                let text = String::from_utf8_lossy(&bytes);
+                lines.extend(text.lines().map(str::to_owned));
+                let mut held: usize = lines.iter().map(|line| line.len() + 1).sum();
+                while held > JOB_LOG_WINDOW_BYTES {
+                    let Some(front) = lines.pop_front() else {
+                        break;
+                    };
+                    held -= front.len() + 1;
+                }
             }
         }
     }
 
     /// Keys for the `/job` modal. Two levels: the job list, and the drill-in
-    /// log view. `x` on a running job arms a kill confirm (`y` confirms,
+    /// output view. `x` on a running job arms a kill confirm (`y` confirms,
     /// anything else cancels). Always returns true while the modal is open.
     fn handle_jobs_key(&mut self, k: &KeyEvent) -> bool {
         // Take the modal out so the body can call `&self`/`&mut self` helpers
@@ -730,20 +742,23 @@ impl App {
             return true;
         }
 
-        // Drill-in log view.
+        // Drill-in output view.
         if let Some(view) = &mut modal.viewing {
-            let max_scroll = view.lines.len().saturating_sub(1);
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => modal.viewing = None,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    view.scroll = (view.scroll + 1).min(max_scroll);
+            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                modal.viewing = None;
+            } else if let JobViewContent::Log { lines, scroll, .. } = &mut view.content {
+                let max_scroll = lines.len().saturating_sub(1);
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *scroll = (*scroll + 1).min(max_scroll);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *scroll = scroll.saturating_sub(1);
+                    }
+                    KeyCode::Char('g') => *scroll = max_scroll,
+                    KeyCode::Char('G') => *scroll = 0,
+                    _ => {}
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    view.scroll = view.scroll.saturating_sub(1);
-                }
-                KeyCode::Char('g') => view.scroll = max_scroll,
-                KeyCode::Char('G') => view.scroll = 0, // follow the live tail
-                _ => {}
             }
             self.jobs_modal = Some(modal);
             return true;
@@ -770,13 +785,16 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(id) = selected_id {
-                    modal.viewing = Some(JobLogView {
-                        id,
-                        lines: std::collections::VecDeque::new(),
-                        cursor: 0,
-                        total: 0,
-                        scroll: 0,
-                    });
+                    let content = if snapshot[modal.selected].tty {
+                        self.jobs
+                            .as_ref()
+                            .and_then(|jobs| jobs.screen(id))
+                            .map(JobViewContent::Terminal)
+                            .unwrap_or_else(JobViewContent::empty_log)
+                    } else {
+                        JobViewContent::empty_log()
+                    };
+                    modal.viewing = Some(JobOutputView { id, content });
                     open_log = true;
                 }
             }
@@ -787,7 +805,7 @@ impl App {
         }
         self.jobs_modal = Some(modal);
         if open_log {
-            self.refresh_job_log();
+            self.refresh_job_output();
         }
         true
     }
@@ -1322,300 +1340,3 @@ impl App {
     }
 
     /// Handle keys for the read-only information modal. Copy leaves the modal
-    /// open; dismiss and navigation keys are consumed instead of reaching the
-    /// prompt.
-    pub(super) fn handle_info_key(&mut self, k: &KeyEvent) -> bool {
-        if self.info.is_none() {
-            return false;
-        }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                self.info = None;
-            }
-            KeyCode::Char('y') => {
-                if let Some(info) = self.info.as_ref() {
-                    let text = info
-                        .lines
-                        .iter()
-                        .map(|l| {
-                            l.spans
-                                .iter()
-                                .map(|s| s.content.as_ref())
-                                .collect::<String>()
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.yank_text(&text);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_down();
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_up();
-                }
-            }
-            KeyCode::Char('n') if ctrl => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_down();
-                }
-            }
-            KeyCode::Char('p') if ctrl => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_up();
-                }
-            }
-            KeyCode::PageDown => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_page_down();
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(i) = self.info.as_mut() {
-                    i.scroll_page_up();
-                }
-            }
-            _ => {}
-        }
-        true
-    }
-
-    fn active_modal_slot(&self) -> Option<ModalSlot> {
-        if self.theme_picker.is_some() {
-            Some(ModalSlot::Theme)
-        } else if self.thinking_picker.is_some() {
-            Some(ModalSlot::Thinking)
-        } else if self.model_picker.is_some() {
-            Some(ModalSlot::Model)
-        } else if self.tree_picker.is_some() {
-            Some(ModalSlot::Tree)
-        } else if self.picker.is_some() {
-            Some(ModalSlot::Picker)
-        } else {
-            None
-        }
-    }
-
-    /// Unified key dispatch for list-style modal overlays (`/resume` and
-    /// `/tree`). `↑/↓` or `j`/`k` or `Ctrl+N`/`Ctrl+P` move the selection
-    /// (clamped); `Tab`/`Shift+Tab` cycle with wrap-around; `Enter`
-    /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
-    /// key (so the caller skips normal Input-mode processing).
-    pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
-        if self.jobs_modal.is_some() {
-            return self.handle_jobs_key(k);
-        }
-        let Some(slot) = self.active_modal_slot() else {
-            return false;
-        };
-        let len = self.active_modal_mut().map_or(0, |m| m.len());
-        // A progressive picker draws before it has rows. Escape still closes
-        // it, but Enter cannot confirm an absent selection.
-        if len == 0 && matches!(k.code, KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab) {
-            return true;
-        }
-        match k.code {
-            KeyCode::Enter => match slot {
-                ModalSlot::Picker => {
-                    if let Some(picker) = self.picker.take() {
-                        self.picker_confirm_inner(picker);
-                    }
-                }
-                ModalSlot::Tree => {
-                    if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(&picker);
-                    }
-                }
-                ModalSlot::Model => self.model_picker_confirm(),
-                ModalSlot::Thinking => self.thinking_picker_confirm(),
-                ModalSlot::Theme => self.theme_picker_confirm(),
-            },
-            // With a single entry, Tab/Shift+Tab confirm outright instead of
-            // cycling (a no-op) — same as pressing Enter.
-            KeyCode::Tab | KeyCode::BackTab if len == 1 => match slot {
-                ModalSlot::Picker => {
-                    if let Some(picker) = self.picker.take() {
-                        self.picker_confirm_inner(picker);
-                    }
-                }
-                ModalSlot::Tree => {
-                    if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(&picker);
-                    }
-                }
-                ModalSlot::Model => self.model_picker_confirm(),
-                ModalSlot::Thinking => self.thinking_picker_confirm(),
-                ModalSlot::Theme => self.theme_picker_confirm(),
-            },
-            KeyCode::Esc | KeyCode::Char('q') => match slot {
-                ModalSlot::Picker => {
-                    self.picker = None;
-                    self.picker_generation.fetch_add(1, Ordering::Relaxed);
-                }
-                ModalSlot::Tree => {
-                    self.tree_picker = None;
-                    self.release_tree_snapshot();
-                    self.tree_picker_pending.clear();
-                    self.picker_generation.fetch_add(1, Ordering::Relaxed);
-                    // The picker entries Vec buffer was cloned on the IO
-                    // thread before being sent here; dropping it on this
-                    // thread leaves the freed pages stranded in this arena.
-                    // Trim after drop so RSS returns to the pre-/tree level.
-                    lofi_core::malloc_trim::release_freed_memory();
-                }
-                ModalSlot::Model => self.model_picker = None,
-                ModalSlot::Thinking => self.thinking_picker = None,
-                ModalSlot::Theme => self.theme_picker = None,
-            },
-            _ => {}
-        }
-        if (matches!(slot, ModalSlot::Picker) && self.picker.is_none())
-            || (matches!(slot, ModalSlot::Tree) && self.tree_picker.is_none())
-            || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
-            || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
-            || (matches!(slot, ModalSlot::Theme) && self.theme_picker.is_none())
-        {
-            return true;
-        }
-        let Some(m) = self.active_modal_mut() else {
-            return true;
-        };
-        if len == 0 {
-            return true;
-        }
-        let s = m.selected();
-        match k.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                m.set_selected(if s > 0 { s - 1 } else { 0 });
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                m.set_selected(if s + 1 < len { s + 1 } else { s });
-            }
-            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                m.set_selected(if s + 1 < len { s + 1 } else { s });
-            }
-            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                m.set_selected(if s > 0 { s - 1 } else { 0 });
-            }
-            KeyCode::Tab => {
-                m.set_selected((s + 1) % len);
-            }
-            KeyCode::BackTab => {
-                m.set_selected(if s == 0 { len - 1 } else { s - 1 });
-            }
-            _ => {}
-        }
-        if self.tree_picker.is_some() {
-            self.request_tree_viewport();
-        }
-        true
-    }
-
-    pub(super) fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
-        if self.theme_picker.is_some() {
-            self.theme_picker.as_mut().map(|t| t as &mut dyn Modal)
-        } else if self.thinking_picker.is_some() {
-            self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
-        } else if self.model_picker.is_some() {
-            self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
-        } else if self.tree_picker.is_some() {
-            self.tree_picker.as_mut().map(|t| t as &mut dyn Modal)
-        } else {
-            self.picker.as_mut().map(|p| p as &mut dyn Modal)
-        }
-    }
-
-    pub(super) fn handle_popover_key(&mut self, k: &KeyEvent) -> bool {
-        if self.slash_complete.is_none() {
-            return false;
-        }
-        let len = self.slash_complete.as_ref().map_or(0, super::Popover::len);
-        match k.code {
-            KeyCode::Enter => {
-                self.slash_complete_accept();
-                return true;
-            }
-            // With a single candidate, Tab/Shift+Tab accept it outright
-            // instead of cycling (a no-op) — same as pressing Enter.
-            KeyCode::Tab | KeyCode::BackTab if len == 1 => {
-                self.slash_complete_accept();
-                return true;
-            }
-            KeyCode::Esc => {
-                self.slash_complete = None;
-                return true;
-            }
-            _ => {}
-        }
-        let Some(popover) = self.slash_complete.as_mut().map(|p| p as &mut dyn Popover) else {
-            return false;
-        };
-        if len == 0 {
-            return false;
-        }
-        let s = popover.selected();
-        match k.code {
-            KeyCode::Up => {
-                popover.set_selected(if s > 0 { s - 1 } else { 0 });
-            }
-            KeyCode::Down => {
-                popover.set_selected(if s + 1 < len { s + 1 } else { s });
-            }
-            KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                popover.set_selected(if s + 1 < len { s + 1 } else { s });
-            }
-            KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                popover.set_selected(if s > 0 { s - 1 } else { 0 });
-            }
-            KeyCode::Tab => {
-                popover.set_selected((s + 1) % len);
-            }
-            KeyCode::BackTab => {
-                popover.set_selected(if s == 0 { len - 1 } else { s - 1 });
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn tree_picker_confirm(&mut self) {
-        if let Some(picker) = self.tree_picker.take() {
-            self.tree_picker_confirm_inner(&picker);
-        }
-    }
-
-    fn rollback_indexed(
-        &mut self,
-        cursor: &store::SessionCursor,
-        index: &[store::EventIndex],
-        file_size: u64,
-    ) -> Result<()> {
-        self.restore_indexed_session(cursor, index, file_size)?;
-        // Rollback leaves no live run. Unlike resume, even the selected final
-        // turn is immutable and file-backed, so retaining its potentially huge
-        // blocks would recreate the RSS spike this path is meant to prevent.
-        for turn in &mut self.turns {
-            turn.blocks.clear();
-        }
-        self.bump_render_epoch();
-        self.pinned = true;
-        self.top_line = 0;
-        Ok(())
-    }
-
-    /// Post a transient slash-command notification on the rule line's left
-    /// edge. Replaces any prior notification. Use instead of pushing a chat
-    /// turn for short status/error feedback so the transcript stays clean.
-    pub(super) fn notify(&mut self, kind: NotifyKind, msg: impl Into<String>) {
-        self.notify = Some(Notify {
-            msg: msg.into(),
-            kind,
-            at: Instant::now(),
-        });
-    }
-}
