@@ -309,6 +309,405 @@ fn tui_shutdown_kills_a_live_background_job_process_group() {
 }
 
 #[test]
+fn interactive_job_accepts_typed_input_and_reports_idle() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "interactive-job-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "printf 'Name? '; read name; echo \"hello:$name\"", tty: true, notify: false });
+const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 500, timeoutMs: 5000 });
+const typed = await lofi.jobType({ id: s.id, text: "ada" });
+const entered = await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { tty: s.tty, idle: waiting.idle, typed: typed.sent, entered: entered.ok, state: done.state, output: log.output };
+"#,
+        ),
+        text_response("interactive job final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("answer an interactive background job");
+    tui.wait_for_scrollback("interactive job final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"tty\":true"#,
+        r#"\"idle\":true"#,
+        r#"\"typed\":3"#,
+        r#"\"entered\":true"#,
+        r#"\"state\":\"completed\""#,
+        "hello:ada",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+    let transcript = transcript_text(&fixture.events());
+    for tool in [
+        "jobSpawn",
+        "jobWaitForInput",
+        "jobType",
+        "jobKeyPress",
+        "jobWait",
+        "jobRead",
+    ] {
+        assert!(transcript.contains(&format!(r#""name":"{tool}""#)));
+    }
+}
+
+#[test]
+fn tty_job_answers_a_multi_prompt_flow_by_pattern() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "multi-prompt-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "printf 'A: '; read a; printf 'B: '; read b; echo sum:$a$b", tty: true, notify: false });
+const w1 = await lofi.jobWaitForInput({ id: s.id, pattern: "A:", timeoutMs: 5000 });
+const t1 = await lofi.jobType({ id: s.id, text: "one" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+const w2 = await lofi.jobWaitForInput({ id: s.id, pattern: "B:", timeoutMs: 5000 });
+const t2 = await lofi.jobType({ id: s.id, text: "two" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { w1: w1.matched, w2: w2.matched, t1: t1.sent, t2: t2.sent, state: done.state, output: log.output };
+"#,
+        ),
+        text_response("multi prompt final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("answer a multi prompt interactive job");
+    tui.wait_for_scrollback("multi prompt final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"w1\":\"A:\""#,
+        r#"\"w2\":\"B:\""#,
+        r#"\"t1\":3"#,
+        r#"\"t2\":3"#,
+        r#"\"state\":\"completed\""#,
+        "sum:onetwo",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn tty_job_key_presses_deliver_xterm_byte_sequences() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "key-bytes-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "stty -icanon -echo; echo READY; od -An -tx1 -N 5; echo", tty: true, notify: false });
+await lofi.jobWaitForInput({ id: s.id, pattern: "READY", timeoutMs: 5000 });
+await lofi.jobKeyPress({ id: s.id, key: "Backspace" });
+await lofi.jobKeyPress({ id: s.id, key: "Left" });
+await lofi.jobType({ id: s.id, text: "X" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { state: done.state, output: log.output };
+"#,
+        ),
+        text_response("key bytes final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("deliver xterm key byte sequences");
+    tui.wait_for_scrollback("key bytes final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [r#"\"state\":\"completed\""#, "7f 1b 5b 44 58"] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn tty_job_resize_is_observed_by_the_child() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "resize-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "stty size; read x; stty size; echo done", tty: true, cols: 80, rows: 24, notify: false });
+const first = await lofi.jobWaitForInput({ id: s.id, pattern: "24 80", timeoutMs: 5000 });
+const r = await lofi.jobResize({ id: s.id, cols: 100, rows: 30 });
+await lofi.jobType({ id: s.id, text: "x" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { matched: first.matched, resizedCols: r.cols, resizedRows: r.rows, state: done.state, output: log.output };
+"#,
+        ),
+        text_response("resize final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("resize an interactive job");
+    tui.wait_for_scrollback("resize final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"matched\":\"24 80\""#,
+        r#"\"resizedCols\":100"#,
+        r#"\"resizedRows\":30"#,
+        r#"\"state\":\"completed\""#,
+        "24 80",
+        "30 100",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+    let transcript = transcript_text(&fixture.events());
+    assert!(transcript.contains("\"name\":\"jobResize\""));
+}
+
+#[test]
+fn tty_job_ctrl_c_interrupts_a_running_program() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "ctrl-c-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, notify: false });
+const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 300, timeoutMs: 5000 });
+await lofi.jobKeyPress({ id: s.id, key: "Ctrl+C" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+return { idle: waiting.idle, state: done.state, signal: done.signal };
+"#,
+        ),
+        text_response("ctrl-c final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("interrupt an interactive job with ctrl-c");
+    tui.wait_for_scrollback("ctrl-c final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"idle\":true"#,
+        r#"\"state\":\"failed\""#,
+        r#"\"signal\":2"#,
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn tty_job_ctrl_d_closes_stdin_to_a_read_loop() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "ctrl-d-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "echo go; while IFS= read -r line; do echo line:$line; done; echo eof", tty: true, notify: false });
+await lofi.jobWaitForInput({ id: s.id, pattern: "go", timeoutMs: 5000 });
+await lofi.jobType({ id: s.id, text: "hello" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+await lofi.jobType({ id: s.id, text: "world" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+await lofi.jobKeyPress({ id: s.id, key: "Ctrl+D" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { state: done.state, output: log.output };
+"#,
+        ),
+        text_response("ctrl-d final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("close a read loop with ctrl-d");
+    tui.wait_for_scrollback("ctrl-d final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"state\":\"completed\""#,
+        "line:hello",
+        "line:world",
+        "eof",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn tty_job_has_term_dimensions_and_a_working_controlling_terminal() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "terminal-env-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "echo term=$TERM; stty size; read x < /dev/tty; echo tty:$x", tty: true, cols: 88, rows: 26, notify: false });
+await lofi.jobWaitForInput({ id: s.id, pattern: "26 88", timeoutMs: 5000 });
+await lofi.jobType({ id: s.id, text: "data" });
+await lofi.jobKeyPress({ id: s.id, key: "Enter" });
+const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+const log = await lofi.jobRead({ id: s.id });
+return { tty: s.tty, cols: s.cols, rows: s.rows, state: done.state, output: log.output };
+"#,
+        ),
+        text_response("terminal env final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("inspect a job terminal environment");
+    tui.wait_for_scrollback("terminal env final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"tty\":true"#,
+        r#"\"cols\":88"#,
+        r#"\"rows\":26"#,
+        r#"\"state\":\"completed\""#,
+        "term=xterm-256color",
+        "26 88",
+        "tty:data",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn plain_job_reports_idle_when_configured_via_job_notify() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "plain-idle-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "printf burst; sleep 60", notify: false });
+const n = await lofi.jobNotify({ id: s.id, idleMs: 500 });
+const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 600, timeoutMs: 5000 });
+const status = await lofi.jobStatus({ id: s.id });
+await lofi.jobKill({ id: s.id });
+return { notifyIdleMs: n.idleMs, waitingIdle: waiting.idle, statusIdle: status.idle, idleMs: status.idleMs, tty: status.tty };
+"#,
+        ),
+        text_response("plain idle final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("detect idle on a plain background job");
+    tui.wait_for_scrollback("plain idle final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"notifyIdleMs\":500"#,
+        r#"\"waitingIdle\":true"#,
+        r#"\"statusIdle\":true"#,
+        r#"\"idleMs\":500"#,
+        r#"\"tty\":false"#,
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn tty_job_clamps_spawn_dimensions_and_idle_threshold() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "clamp-call",
+            r#"
+const s = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, cols: 99999, rows: 0, idleMs: 1, notify: false });
+await lofi.jobKill({ id: s.id });
+return { tty: s.tty, cols: s.cols, rows: s.rows, idleMs: s.idleMs };
+"#,
+        ),
+        text_response("clamp final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("clamp interactive job dimensions");
+    tui.wait_for_scrollback("clamp final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        r#"\"tty\":true"#,
+        r#"\"cols\":1000"#,
+        r#"\"rows\":1"#,
+        r#"\"idleMs\":500"#,
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
+fn interactive_job_tools_reject_invalid_arguments() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "invalid-interactive-call",
+            r#"
+const tty = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, notify: false });
+const plain = await lofi.jobSpawn({ cmd: "sleep 60", notify: false });
+let typeNoId;
+try { await lofi.jobType({}); } catch (e) { typeNoId = String(e); }
+let typeNoText;
+try { await lofi.jobType({ id: tty.id }); } catch (e) { typeNoText = String(e); }
+let typeNonTty;
+try { await lofi.jobType({ id: plain.id, text: "x" }); } catch (e) { typeNonTty = String(e); }
+let keyUnknown;
+try { await lofi.jobKeyPress({ id: tty.id, key: "NotAKey" }); } catch (e) { keyUnknown = String(e); }
+let keyNonTty;
+try { await lofi.jobKeyPress({ id: plain.id, key: "Enter" }); } catch (e) { keyNonTty = String(e); }
+let resizeMissing;
+try { await lofi.jobResize({ id: tty.id }); } catch (e) { resizeMissing = String(e); }
+let resizeNonTty;
+try { await lofi.jobResize({ id: plain.id, cols: 80, rows: 24 }); } catch (e) { resizeNonTty = String(e); }
+let waitNoMode;
+try { await lofi.jobWaitForInput({ id: tty.id }); } catch (e) { waitNoMode = String(e); }
+const typeMissing = await lofi.jobType({ id: "999999", text: "x" });
+const keyMissing = await lofi.jobKeyPress({ id: "999999", key: "Enter" });
+const resizeMissingJob = await lofi.jobResize({ id: "999999", cols: 80, rows: 24 });
+const waitMissing = await lofi.jobWaitForInput({ id: "999999", pattern: "x" });
+await lofi.jobKill({ id: tty.id });
+await lofi.jobKill({ id: plain.id });
+return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, resizeMissing, resizeNonTty, waitNoMode, typeMissing, keyMissing, resizeMissingJob, waitMissing };
+"#,
+        ),
+        text_response("invalid interactive arguments final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("exercise invalid interactive job arguments");
+    tui.wait_for_scrollback("invalid interactive arguments final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let body = &requests[1].body;
+    for marker in [
+        "job: missing or invalid 'id'",
+        "jobType: missing 'text'",
+        "job is not a tty job",
+        "jobKeyPress: unknown key 'NotAKey'",
+        "jobResize: missing or invalid",
+        "pass 'pattern' or 'stableMs'",
+        "no such job: 999999",
+    ] {
+        assert!(body.contains(marker), "missing {marker}: {body}");
+    }
+}
+
+#[test]
 fn recall_and_result_recover_durable_session_content_by_query_and_event_id() {
     let server = MockServer::start(vec![
         tool_response(
