@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::Theme;
+use crate::tui::{JobViewContent, Theme};
 
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
 
@@ -905,39 +905,63 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Drill-in log view.
+    // Drill-in output view.
     if let Some(view) = &modal.viewing {
-        let title = format!(" job {} log ", view.id);
-        let help = " ↑/↓ scroll  g top  G follow  esc back ";
-        let w = area.width.saturating_sub(4).clamp(40, 100);
-        let h = area.height.saturating_sub(4).clamp(8, 28);
-        let popup = centered_modal(area, w, h);
-        f.render_widget(Clear, popup);
-        let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-        let body_h = rows.content.height as usize;
-        let total = view.lines.len();
-        // scroll is an offset from the bottom (0 = follow the live tail).
-        let end = total.saturating_sub(view.scroll);
-        let start = end.saturating_sub(body_h);
-        let visible: Vec<Line> = view
-            .lines
-            .iter()
-            .skip(start)
-            .take(body_h)
-            .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(t.fg))))
-            .collect();
-        f.render_widget(Paragraph::new(visible), rows.content);
-        if total > body_h {
-            let scroll_area = modal_scroll_area(rows.content);
-            prim::render_scrollbar(
-                f,
-                scroll_area.gutter,
-                start,
-                body_h,
-                total,
-                t.subtle,
-                t.muted,
-            );
+        match &view.content {
+            JobViewContent::Terminal(screen) => {
+                let title = format!(" job {} terminal ", view.id);
+                let popup = centered_modal(
+                    area,
+                    screen.cols.saturating_add(4),
+                    screen.rows.saturating_add(4),
+                );
+                f.render_widget(Clear, popup);
+                let rows = render_modal_frame(
+                    f,
+                    popup,
+                    t,
+                    modal_title(t, title),
+                    modal_help(t, " esc back "),
+                );
+                let visible = screen
+                    .lines
+                    .iter()
+                    .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))));
+                f.render_widget(Paragraph::new(visible.collect::<Vec<_>>()), rows.content);
+            }
+            JobViewContent::Log { lines, scroll, .. } => {
+                let title = format!(" job {} log ", view.id);
+                let help = " ↑/↓ scroll  g top  G follow  esc back ";
+                let w = area.width.saturating_sub(4).clamp(40, 100);
+                let h = area.height.saturating_sub(4).clamp(8, 28);
+                let popup = centered_modal(area, w, h);
+                f.render_widget(Clear, popup);
+                let rows =
+                    render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+                let body_h = rows.content.height as usize;
+                let total = lines.len();
+                let end = total.saturating_sub(*scroll);
+                let start = end.saturating_sub(body_h);
+                let visible: Vec<Line> = lines
+                    .iter()
+                    .skip(start)
+                    .take(body_h)
+                    .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))))
+                    .collect();
+                f.render_widget(Paragraph::new(visible), rows.content);
+                if total > body_h {
+                    let scroll_area = modal_scroll_area(rows.content);
+                    prim::render_scrollbar(
+                        f,
+                        scroll_area.gutter,
+                        start,
+                        body_h,
+                        total,
+                        t.subtle,
+                        t.muted,
+                    );
+                }
+            }
         }
         return;
     }

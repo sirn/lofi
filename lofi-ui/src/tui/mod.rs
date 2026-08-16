@@ -568,19 +568,26 @@ struct JobsModalState {
     confirm_kill: Option<u64>,
 }
 
-/// Drill-in log view for one job. Holds only the tail window currently on
-/// screen plus enough to page more; it never holds the whole log.
+/// Drill-in output view for one job. PTY jobs show their parsed terminal
+/// screen. Plain jobs retain a bounded, scrollable log tail.
 struct JobLogView {
     id: u64,
-    /// Decoded lines currently held, oldest first. Bounded by
-    /// [`JOB_LOG_WINDOW_BYTES`].
-    lines: std::collections::VecDeque<String>,
-    /// Byte offset of the next unread chunk; the file cursor for appends.
-    cursor: u64,
-    /// Total log bytes at last refresh; compared to detect growth.
-    total: u64,
-    /// Scroll offset from the bottom (0 = follow the live tail).
-    scroll: usize,
+    content: JobViewContent,
+}
+
+enum JobViewContent {
+    Terminal(lofi_core::JobScreen),
+    Log {
+        /// Decoded lines currently held, oldest first. Bounded by
+        /// [`JOB_LOG_WINDOW_BYTES`].
+        lines: std::collections::VecDeque<String>,
+        /// Byte offset of the next unread chunk; the file cursor for appends.
+        cursor: u64,
+        /// Total log bytes at last refresh; compared to detect growth.
+        total: u64,
+        /// Scroll offset from the bottom (0 = follow the live tail).
+        scroll: usize,
+    },
 }
 
 impl Modal for ThinkingPickerState {
@@ -1520,6 +1527,13 @@ async fn run_loop(
                     dirty = true;
                 }
                 if app.retry.is_some() {
+                    dirty = true;
+                }
+                if app
+                    .jobs_modal
+                    .as_ref()
+                    .is_some_and(|modal| modal.viewing.is_some())
+                {
                     dirty = true;
                 }
                 if let Some(t) = app.yank_notify {

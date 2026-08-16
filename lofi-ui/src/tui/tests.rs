@@ -7703,6 +7703,39 @@ fn jobs_modal_empty_list_no_underflow() {
 }
 
 #[test]
+fn jobs_terminal_view_clips_to_the_available_viewport() {
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.jobs_modal = Some(JobsModalState {
+        selected: 0,
+        viewing: Some(JobLogView {
+            id: 7,
+            content: JobViewContent::Terminal(lofi_core::JobScreen {
+                cols: 80,
+                rows: 30,
+                lines: (0..30).map(|row| format!("row-{row:02}")).collect(),
+            }),
+        }),
+        confirm_kill: None,
+    });
+    let mut term = Terminal::new(TestBackend::new(32, 12)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let screen = (0..12)
+        .map(|y| (0..32).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+
+    assert!(screen.contains("job 7 terminal"), "{screen}");
+    assert!(screen.contains("row-00"), "{screen}");
+    assert!(!screen.contains("row-20"), "{screen}");
+}
+
+#[test]
 fn theme_picker_opens_preselected_on_current_mode() {
     use lofi_types::ThemeMode;
     let mut a = app();
