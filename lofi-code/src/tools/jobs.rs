@@ -624,10 +624,6 @@ impl BuiltinTools {
             notify.enabled = true;
         }
 
-        // Terminal setup at spawn. `tty` opts into a pseudo-terminal; plain
-        // jobs keep the original pipe-to-log behaviour. Idle defaults on for
-        // tty jobs (where a prompt is silence) and off for plain jobs (where
-        // silence is normal compute).
         let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
         let cols = clamp_dim(args.get("cols").and_then(Value::as_u64), DEFAULT_TTY_COLS);
         let rows = clamp_dim(args.get("rows").and_then(Value::as_u64), DEFAULT_TTY_ROWS);
@@ -666,7 +662,6 @@ impl BuiltinTools {
         } else {
             None
         };
-        // One clone for the driver reader, one for the handle writer side.
         let (driver_master, handle_master) = match &pty {
             Some(pty) => (
                 Some(pty.master.try_clone().map_err(Error::Io)?),
@@ -1038,7 +1033,7 @@ impl BuiltinTools {
             .ok_or_else(|| Error::Tool("jobKeyPress: missing 'key'".into()))?;
         let bytes = key_press_bytes(key)
             .ok_or_else(|| Error::Tool(format!("jobKeyPress: unknown key '{key}'")))?;
-        let sent = write_to_master(&handle, &bytes)?;
+        let sent = write_to_master(&handle, bytes)?;
         if sent != bytes.len() {
             return Err(Error::Tool("jobKeyPress: partial PTY write".into()));
         }
@@ -1151,23 +1146,16 @@ impl BuiltinTools {
             if let Some(pattern) = &pattern {
                 let tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
                 if tail.contains(pattern.as_str()) {
-                    let redact_overlap = self
-                        .bash_env
-                        .redact
-                        .iter()
-                        .map(String::len)
-                        .max()
-                        .unwrap_or(0);
-                    let mut returned_tail =
-                        read_log_tail(&log_path, PATTERN_TAIL_BYTES.saturating_add(redact_overlap));
-                    self.bash_env.redact(&mut returned_tail);
-                    let mut v = json!({
+                    return Ok(json!({
                         "ok": true,
                         "id": id.to_string(),
                         "matched": pattern,
-                    });
-                    v["tail"] = json!(returned_tail);
-                    return Ok(v);
+                        "tail": read_redacted_log_tail(
+                            &log_path,
+                            PATTERN_TAIL_BYTES,
+                            &self.bash_env,
+                        ),
+                    }));
                 }
             }
             if let Some(stable_ms) = stable_ms {
@@ -1263,7 +1251,7 @@ fn set_nonblock(fd: std::os::fd::RawFd) -> std::io::Result<()> {
 }
 
 /// Map a named key to the byte sequence an xterm sends for it.
-fn key_press_bytes(key: &str) -> Option<Vec<u8>> {
+fn key_press_bytes(key: &str) -> Option<&'static [u8]> {
     let bytes: &[u8] = match key {
         "Enter" | "Return" => b"\r",
         "Tab" => b"\t",
@@ -1301,7 +1289,7 @@ fn key_press_bytes(key: &str) -> Option<Vec<u8>> {
         "F12" => b"\x1b[24~",
         _ => return None,
     };
-    Some(bytes.to_vec())
+    Some(bytes)
 }
 
 fn ensure_job_running(handle: &JobHandle) -> Result<()> {
@@ -1388,10 +1376,7 @@ fn drain_master(
     Ok(())
 }
 
-fn screen_changed(parser: Option<&vt100::Parser>, last: &mut Option<String>) -> bool {
-    let Some(parser) = parser else {
-        return false;
-    };
+fn screen_changed(parser: &vt100::Parser, last: &mut Option<String>) -> bool {
     let contents = parser.screen().contents();
     if last.as_deref() == Some(contents.as_str()) {
         return false;
@@ -1447,7 +1432,7 @@ fn update_activity(
     log_path: &str,
     tracker: &mut IdleTracker,
 ) -> bool {
-    let changed = if parser.is_some() {
+    let changed = if let Some(parser) = parser {
         screen_changed(parser, &mut tracker.last_screen)
     } else {
         let bytes = std::fs::metadata(log_path).map_or(0, |m| m.len());
@@ -1517,17 +1502,14 @@ fn observe_idle(
 }
 
 fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str, bash_env: &crate::BashEnv) -> String {
-    let mut tail = if let Some(parser) = parser {
+    if let Some(parser) = parser {
         let contents = parser.screen().contents();
-        contents.lines().last().unwrap_or("").trim_end().to_owned()
-    } else {
-        let redact_overlap = bash_env.redact.iter().map(String::len).max().unwrap_or(0);
-        read_log_tail(log_path, 200usize.saturating_add(redact_overlap))
-            .trim()
-            .to_owned()
-    };
-    bash_env.redact(&mut tail);
-    short_text(&tail, 80)
+        let mut tail = contents.lines().last().unwrap_or("").trim_end().to_owned();
+        bash_env.redact(&mut tail);
+        return short_text(&tail, 80);
+    }
+    let tail = read_redacted_log_tail(log_path, 200, bash_env);
+    short_text(tail.trim(), 80)
 }
 
 fn read_log_tail(path: &str, max: usize) -> String {
@@ -1548,6 +1530,13 @@ fn read_log_tail(path: &str, max: usize) -> String {
         return String::new();
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn read_redacted_log_tail(path: &str, max: usize, bash_env: &crate::BashEnv) -> String {
+    let redact_overlap = bash_env.redact.iter().map(String::len).max().unwrap_or(0);
+    let mut tail = read_log_tail(path, max.saturating_add(redact_overlap));
+    bash_env.redact(&mut tail);
+    tail
 }
 
 /// Collapse control characters to spaces and cap the visible length at a
@@ -2126,11 +2115,11 @@ mod tests {
 
     #[test]
     fn key_press_bytes_maps_named_keys() {
-        assert_eq!(key_press_bytes("Enter"), Some(b"\r".to_vec()));
-        assert_eq!(key_press_bytes("Tab"), Some(b"\t".to_vec()));
-        assert_eq!(key_press_bytes("Up"), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_press_bytes("Ctrl+C"), Some(b"\x03".to_vec()));
-        assert_eq!(key_press_bytes("F12"), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(key_press_bytes("Enter"), Some(b"\r".as_slice()));
+        assert_eq!(key_press_bytes("Tab"), Some(b"\t".as_slice()));
+        assert_eq!(key_press_bytes("Up"), Some(b"\x1b[A".as_slice()));
+        assert_eq!(key_press_bytes("Ctrl+C"), Some(b"\x03".as_slice()));
+        assert_eq!(key_press_bytes("F12"), Some(b"\x1b[24~".as_slice()));
         assert_eq!(key_press_bytes("NotAKey"), None);
     }
 
