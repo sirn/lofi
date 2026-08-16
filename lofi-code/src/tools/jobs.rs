@@ -774,6 +774,7 @@ impl BuiltinTools {
             timeout_ms,
             generation,
             driver_master,
+            self.bash_env.clone(),
         ));
 
         Ok(json!({
@@ -1468,6 +1469,7 @@ fn observe_idle(
     parser: Option<&vt100::Parser>,
     log_path: &str,
     tracker: &mut IdleTracker,
+    bash_env: &crate::BashEnv,
 ) -> Option<String> {
     if update_activity(handle, parser, log_path, tracker) {
         return None;
@@ -1495,7 +1497,7 @@ fn observe_idle(
     if !notify_enabled {
         return None;
     }
-    let tail = idle_tail(parser, log_path);
+    let tail = idle_tail(parser, log_path, bash_env);
     let id = handle
         .data
         .lock()
@@ -1504,14 +1506,18 @@ fn observe_idle(
     Some(format!("job {id} idle (no output for {idle_ms}ms): {tail}"))
 }
 
-fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str) -> String {
-    if let Some(parser) = parser {
+fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str, bash_env: &crate::BashEnv) -> String {
+    let mut tail = if let Some(parser) = parser {
         let contents = parser.screen().contents();
-        let last_line = contents.lines().last().unwrap_or("").trim_end();
-        return short_text(last_line, 80);
-    }
-    let tail = read_log_tail(log_path, 200);
-    short_text(tail.trim(), 80)
+        contents.lines().last().unwrap_or("").trim_end().to_owned()
+    } else {
+        let redact_overlap = bash_env.redact.iter().map(String::len).max().unwrap_or(0);
+        read_log_tail(log_path, 200usize.saturating_add(redact_overlap))
+            .trim()
+            .to_owned()
+    };
+    bash_env.redact(&mut tail);
+    short_text(&tail, 80)
 }
 
 fn read_log_tail(path: &str, max: usize) -> String {
@@ -1564,6 +1570,7 @@ async fn run_job(
     timeout_ms: Option<u64>,
     generation: u64,
     master: Option<OwnedFd>,
+    bash_env: crate::BashEnv,
 ) {
     let (tty, cols, rows, log_path) = {
         let job = handle
@@ -1637,7 +1644,13 @@ async fn run_job(
             let _ = drain_master(master, &mut parser, &mut log_out);
             sync_parser_size(&mut parser, &handle);
         }
-        if let Some(text) = observe_idle(&handle, parser.as_ref(), &log_path, &mut idle_tracker) {
+        if let Some(text) = observe_idle(
+            &handle,
+            parser.as_ref(),
+            &log_path,
+            &mut idle_tracker,
+            &bash_env,
+        ) {
             push_notice(&jobs, generation, text);
         }
         if let Some(text) = progress_tick(&handle, &mut last_tick, &mut last_bytes) {
@@ -2117,6 +2130,21 @@ mod tests {
         std::fs::write(file.path(), b"prefix-suffix").unwrap();
 
         assert_eq!(read_log_tail(file.path().to_str().unwrap(), 6), "suffix");
+    }
+
+    #[test]
+    fn idle_tail_redacts_approved_environment_values() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"token=secret-value").unwrap();
+        let bash_env = crate::BashEnv {
+            redact: vec!["secret-value".to_string()],
+            ..crate::BashEnv::default()
+        };
+
+        assert_eq!(
+            idle_tail(None, file.path().to_str().unwrap(), &bash_env),
+            "token=[redacted]"
+        );
     }
 
     #[tokio::test]
