@@ -7703,6 +7703,93 @@ fn jobs_modal_empty_list_no_underflow() {
 }
 
 #[test]
+fn jobs_terminal_view_clips_to_the_available_viewport() {
+    use ratatui::Terminal;
+
+    let mut a = app();
+    a.jobs_modal = Some(JobsModalState {
+        selected: 0,
+        viewing: Some(JobOutputView {
+            id: 7,
+            content: JobViewContent::Terminal(lofi_core::JobScreen {
+                cols: 80,
+                rows: 30,
+                lines: (0..30)
+                    .map(|row| lofi_core::JobScreenLine {
+                        spans: vec![lofi_core::JobSpan {
+                            text: format!("row-{row:02}"),
+                            style: lofi_core::JobStyle::default(),
+                        }],
+                    })
+                    .collect(),
+            }),
+        }),
+        confirm_kill: None,
+    });
+    let mut term = Terminal::new(TestBackend::new(32, 12)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let screen = (0..12)
+        .map(|y| (0..32).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+
+    assert!(screen.contains("job 7 terminal"), "{screen}");
+    assert!(screen.contains("row-00"), "{screen}");
+    assert!(!screen.contains("row-20"), "{screen}");
+}
+
+#[test]
+fn jobs_terminal_view_preserves_cell_colors_and_attributes() {
+    use ratatui::{style::Color, Terminal};
+
+    let mut a = app();
+    a.jobs_modal = Some(JobsModalState {
+        selected: 0,
+        viewing: Some(JobOutputView {
+            id: 8,
+            content: JobViewContent::Terminal(lofi_core::JobScreen {
+                cols: 1,
+                rows: 1,
+                lines: vec![lofi_core::JobScreenLine {
+                    spans: vec![lofi_core::JobSpan {
+                        text: "X".to_string(),
+                        style: lofi_core::JobStyle {
+                            foreground: lofi_core::JobColor::Rgb(1, 2, 3),
+                            background: lofi_core::JobColor::Indexed(25),
+                            attributes: lofi_core::JobAttributes::BOLD
+                                | lofi_core::JobAttributes::ITALIC
+                                | lofi_core::JobAttributes::UNDERLINE
+                                | lofi_core::JobAttributes::INVERSE,
+                        },
+                    }],
+                }],
+            }),
+        }),
+        confirm_kill: None,
+    });
+    let mut term = Terminal::new(TestBackend::new(24, 8)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let cell = term
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "X")
+        .unwrap();
+
+    assert_eq!(cell.fg, Color::Rgb(1, 2, 3));
+    assert_eq!(cell.bg, Color::Indexed(25));
+    assert!(cell.modifier.contains(Modifier::BOLD));
+    assert!(cell.modifier.contains(Modifier::ITALIC));
+    assert!(cell.modifier.contains(Modifier::UNDERLINED));
+    assert!(cell.modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
 fn theme_picker_opens_preselected_on_current_mode() {
     use lofi_types::ThemeMode;
     let mut a = app();
