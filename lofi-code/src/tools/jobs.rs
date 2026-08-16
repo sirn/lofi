@@ -714,13 +714,14 @@ impl BuiltinTools {
         let mut child = command.spawn()?;
         let pid = child.id();
 
+        let started = Instant::now();
         let handle = Arc::new(JobHandle {
             data: Mutex::new(Job {
                 id,
                 cmd: cmd.clone(),
                 state: State::Running,
                 pid,
-                started: Instant::now(),
+                started,
                 ended: None,
                 exit_code: None,
                 signal: None,
@@ -732,7 +733,7 @@ impl BuiltinTools {
                 rows,
                 idle_ms,
                 idle: false,
-                last_output_at: None,
+                last_output_at: Some(started),
             }),
             done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
@@ -1493,9 +1494,23 @@ fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str) -> String {
 }
 
 fn read_log_tail(path: &str, max: usize) -> String {
-    let bytes = std::fs::read(path).unwrap_or_default();
-    let start = bytes.len().saturating_sub(max);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+    use std::io::{Read as _, Seek as _};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(total) = file.metadata().map(|metadata| metadata.len()) else {
+        return String::new();
+    };
+    let start = total.saturating_sub(max as u64);
+    if file.seek(std::io::SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity((total - start) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Collapse control characters to spaces and cap the visible length at a
@@ -2063,6 +2078,14 @@ mod tests {
         assert_eq!(key_press_bytes("NotAKey"), None);
     }
 
+    #[test]
+    fn read_log_tail_reads_only_the_requested_suffix() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"prefix-suffix").unwrap();
+
+        assert_eq!(read_log_tail(file.path().to_str().unwrap(), 6), "suffix");
+    }
+
     #[tokio::test]
     async fn tty_job_accepts_typed_input_and_key_presses() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -2168,6 +2191,27 @@ mod tests {
         let id = spawned["id"].as_str().unwrap().to_owned();
         let waited = tools
             .job_wait_for_input(json!({ "id": id, "stableMs": 500, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(waited["idle"], json!(true), "got: {waited}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_wait_for_input_treats_no_output_as_stable() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "sleep 30",
+                "tty": true,
+                "notify": false
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait_for_input(json!({ "id": id, "stableMs": 500, "timeoutMs": 2_000 }))
             .await
             .unwrap();
         assert_eq!(waited["idle"], json!(true), "got: {waited}");
