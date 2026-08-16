@@ -315,7 +315,7 @@ fn interactive_job_accepts_typed_input_and_reports_idle() {
             "interactive-job-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'Name? '; read name; echo \"hello:$name\"", tty: true, notify: false });
-const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 500, timeoutMs: 5000 });
+const waiting = await lofi.jobWait({ id: s.id, idleMs: 500, timeoutMs: 5000 });
 const typed = await lofi.jobType({ id: s.id, text: "ada" });
 const entered = await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
@@ -345,14 +345,7 @@ return { tty: s.tty, idle: waiting.idle, typed: typed.sent, entered: entered.ok,
         assert!(body.contains(marker), "missing {marker}: {body}");
     }
     let transcript = transcript_text(&fixture.events());
-    for tool in [
-        "jobSpawn",
-        "jobWaitForInput",
-        "jobType",
-        "jobKeyPress",
-        "jobWait",
-        "jobRead",
-    ] {
+    for tool in ["jobSpawn", "jobType", "jobKeyPress", "jobWait", "jobRead"] {
         assert!(transcript.contains(&format!(r#""name":"{tool}""#)));
     }
 }
@@ -364,10 +357,10 @@ fn tty_job_answers_a_multi_prompt_flow_by_pattern() {
             "multi-prompt-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'A: '; read a; printf 'B: '; read b; echo sum:$a$b", tty: true, notify: false });
-const w1 = await lofi.jobWaitForInput({ id: s.id, pattern: "A:", timeoutMs: 5000 });
+const w1 = await lofi.jobWait({ id: s.id, pattern: "A:", timeoutMs: 5000 });
 const t1 = await lofi.jobType({ id: s.id, text: "one" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const w2 = await lofi.jobWaitForInput({ id: s.id, pattern: "B:", timeoutMs: 5000 });
+const w2 = await lofi.jobWait({ id: s.id, pattern: "B:", timeoutMs: 5000 });
 const t2 = await lofi.jobType({ id: s.id, text: "two" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
@@ -405,7 +398,7 @@ fn tty_job_key_presses_deliver_xterm_byte_sequences() {
             "key-bytes-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "stty -icanon -echo; echo READY; od -An -tx1 -N 5; echo", tty: true, notify: false });
-await lofi.jobWaitForInput({ id: s.id, pattern: "READY", timeoutMs: 5000 });
+await lofi.jobWait({ id: s.id, pattern: "READY", timeoutMs: 5000 });
 await lofi.jobKeyPress({ id: s.id, key: "Backspace" });
 await lofi.jobKeyPress({ id: s.id, key: "Left" });
 await lofi.jobType({ id: s.id, text: "X" });
@@ -431,54 +424,13 @@ return { state: done.state, output: log.output };
 }
 
 #[test]
-fn tty_job_resize_is_observed_by_the_child() {
-    let server = MockServer::start(vec![
-        tool_response(
-            "resize-call",
-            r#"
-const s = await lofi.jobSpawn({ cmd: "stty size; read x; stty size; echo done", tty: true, cols: 80, rows: 24, notify: false });
-const first = await lofi.jobWaitForInput({ id: s.id, pattern: "24 80", timeoutMs: 5000 });
-const r = await lofi.jobResize({ id: s.id, cols: 100, rows: 30 });
-await lofi.jobType({ id: s.id, text: "x" });
-await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
-const log = await lofi.jobRead({ id: s.id });
-return { matched: first.matched, resizedCols: r.cols, resizedRows: r.rows, state: done.state, output: log.output };
-"#,
-        ),
-        text_response("resize final answer"),
-    ]);
-    let fixture = Fixture::new(&server);
-    let mut tui = fixture.spawn(&[]);
-
-    tui.submit("resize an interactive job");
-    tui.wait_for_scrollback("resize final answer", WAIT);
-
-    let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let body = &requests[1].body;
-    for marker in [
-        r#"\"matched\":\"24 80\""#,
-        r#"\"resizedCols\":100"#,
-        r#"\"resizedRows\":30"#,
-        r#"\"state\":\"completed\""#,
-        "24 80",
-        "30 100",
-    ] {
-        assert!(body.contains(marker), "missing {marker}: {body}");
-    }
-    let transcript = transcript_text(&fixture.events());
-    assert!(transcript.contains("\"name\":\"jobResize\""));
-}
-
-#[test]
 fn tty_job_ctrl_c_interrupts_a_running_program() {
     let server = MockServer::start(vec![
         tool_response(
             "ctrl-c-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, notify: false });
-const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 300, timeoutMs: 5000 });
+const waiting = await lofi.jobWait({ id: s.id, idleMs: 300, timeoutMs: 5000 });
 await lofi.jobKeyPress({ id: s.id, key: "Ctrl+C" });
 const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
 return { idle: waiting.idle, state: done.state, signal: done.signal };
@@ -511,7 +463,7 @@ fn tty_job_ctrl_d_closes_stdin_to_a_read_loop() {
             "ctrl-d-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo go; while IFS= read -r line; do echo line:$line; done; echo eof", tty: true, notify: false });
-await lofi.jobWaitForInput({ id: s.id, pattern: "go", timeoutMs: 5000 });
+await lofi.jobWait({ id: s.id, pattern: "go", timeoutMs: 5000 });
 await lofi.jobType({ id: s.id, text: "hello" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 await lofi.jobType({ id: s.id, text: "world" });
@@ -550,7 +502,7 @@ fn tty_job_has_term_dimensions_and_a_working_controlling_terminal() {
             "terminal-env-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo term=$TERM; stty size; read x < /dev/tty; echo tty:$x", tty: true, cols: 88, rows: 26, notify: false });
-await lofi.jobWaitForInput({ id: s.id, pattern: "26 88", timeoutMs: 5000 });
+await lofi.jobWait({ id: s.id, pattern: "26 88", timeoutMs: 5000 });
 await lofi.jobType({ id: s.id, text: "data" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
@@ -590,7 +542,7 @@ fn plain_job_reports_idle_when_configured_via_job_notify() {
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf burst; sleep 60", notify: false });
 const n = await lofi.jobNotify({ id: s.id, idleMs: 500, enabled: false });
-const waiting = await lofi.jobWaitForInput({ id: s.id, stableMs: 600, timeoutMs: 5000 });
+const waiting = await lofi.jobWait({ id: s.id, idleMs: 600, timeoutMs: 5000 });
 const status = await lofi.jobStatus({ id: s.id });
 await lofi.jobKill({ id: s.id });
 return { notifyIdleMs: n.idleMs, waitingIdle: waiting.idle, statusIdle: status.idle, idleMs: status.idleMs, tty: status.tty };
@@ -668,19 +620,12 @@ let keyUnknown;
 try { await lofi.jobKeyPress({ id: tty.id, key: "NotAKey" }); } catch (e) { keyUnknown = String(e); }
 let keyNonTty;
 try { await lofi.jobKeyPress({ id: plain.id, key: "Enter" }); } catch (e) { keyNonTty = String(e); }
-let resizeMissing;
-try { await lofi.jobResize({ id: tty.id }); } catch (e) { resizeMissing = String(e); }
-let resizeNonTty;
-try { await lofi.jobResize({ id: plain.id, cols: 80, rows: 24 }); } catch (e) { resizeNonTty = String(e); }
-let waitNoMode;
-try { await lofi.jobWaitForInput({ id: tty.id }); } catch (e) { waitNoMode = String(e); }
 const typeMissing = await lofi.jobType({ id: "999999", text: "x" });
 const keyMissing = await lofi.jobKeyPress({ id: "999999", key: "Enter" });
-const resizeMissingJob = await lofi.jobResize({ id: "999999", cols: 80, rows: 24 });
-const waitMissing = await lofi.jobWaitForInput({ id: "999999", pattern: "x" });
+const waitMissing = await lofi.jobWait({ id: "999999", pattern: "x" });
 await lofi.jobKill({ id: tty.id });
 await lofi.jobKill({ id: plain.id });
-return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, resizeMissing, resizeNonTty, waitNoMode, typeMissing, keyMissing, resizeMissingJob, waitMissing };
+return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, typeMissing, keyMissing, waitMissing };
 "#,
         ),
         text_response("invalid interactive arguments final answer"),
@@ -699,8 +644,6 @@ return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, resizeMissing,
         "jobType: missing 'text'",
         "job is not a tty job",
         "jobKeyPress: unknown key 'NotAKey'",
-        "jobResize: missing or invalid",
-        "pass 'pattern' or 'stableMs'",
         "no such job: 999999",
     ] {
         assert!(body.contains(marker), "missing {marker}: {body}");

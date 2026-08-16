@@ -141,7 +141,7 @@ turn can continue.
 - `cmd` (string, required) — the shell command.
 - `tty` (boolean, optional, default `false`) — run the child on a
   pseudo-terminal instead of plain pipes. Interactive programs can then be
-  driven with `jobType`, `jobKeyPress`, and `jobResize`. The child gets its
+  driven with `jobType` and `jobKeyPress`. The child gets its
   own session and controlling terminal, so Ctrl+C reaches it as SIGINT and
   `/dev/tty` works.
 - `cols`, `rows` (number, optional, defaults `120`, `40`) — the PTY window
@@ -193,12 +193,17 @@ Incremental read of a job's merged stdout/stderr log.
 `cursor` is the next offset to pass. `output` is redacted. `done` is true
 once the job is terminal.
 
-## lofi.jobWait({ id, timeoutMs? })
+## lofi.jobWait({ id, pattern?, idleMs?, timeoutMs? })
 
-Bounded wait for a job to reach a terminal state. Waiting never cancels the
-job; it returns the still-running status when `timeoutMs` elapses.
+Bounded wait for a job condition. With no condition, wait for the job to
+finish. Pass `pattern` to return when the output tail contains that text, or
+`idleMs` to return after the output stays unchanged for that long.
+`timeoutMs` bounds the wait. Waiting never writes to or cancels the job.
 
-**Returns:** the same shape as `jobStatus`.
+**Returns:** `{ ok, id, matched, tail }` on a pattern match;
+`{ ok, id, idle }` after an idle period; the `jobStatus` shape when the job
+finishes; the current status with `timedOut: true` when a condition times out;
+or the current status with `cancelled: true` after user cancellation.
 
 ## lofi.jobKill({ id, reason? })
 
@@ -251,27 +256,6 @@ Send one named key to a tty job. `key` accepts the `tu` names: `Enter`,
 Errors with `ok: false` when the key is unknown or the job is not a tty job.
 
 **Returns:** `{ ok, id, key }`.
-
-## lofi.jobResize({ id, cols, rows })
-
-Resize a tty job's pseudo-terminal. Full-screen programs observe this as a
-real terminal resize and reflow. `cols` and `rows` are required and clamped
-to 1000.
-
-**Returns:** `{ ok, id, cols, rows }`.
-
-## lofi.jobWaitForInput({ id, pattern?, stableMs?, timeoutMs? })
-
-Bounded wait until a job is waiting for input. Pass `pattern` to return when
-the output tail contains that text, or `stableMs` to return once output has
-been unchanged for that long (the same signal the idle notice uses). Pass at
-least one; `timeoutMs` bounds the whole wait. Waiting never writes to the
-job.
-
-**Returns:** `{ ok, id, matched, tail }` on a pattern match;
-`{ ok, id, idle }` on a stability wait; `{ ok, id, timedOut }` on timeout;
-or the `jobStatus` shape if the job finished first. User cancellation
-returns `{ ok, id, cancelled }`.
 
 ## lofi.tmp_dir
 

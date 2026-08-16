@@ -59,7 +59,7 @@ const DEFAULT_TTY_ROWS: u16 = 40;
 const MAX_TTY_DIM: u16 = 1000;
 /// Upper bound for one `jobType` payload.
 const MAX_TTY_WRITE_BYTES: usize = 64 * 1024;
-/// Tail window searched by `jobWaitForInput` pattern matching.
+/// Tail window searched by `jobWait` pattern matching.
 const PATTERN_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,7 @@ struct Job {
     /// Whether the job's output has been still long enough to be idle.
     idle: bool,
     /// When output last changed. Always tracked while running; the basis for
-    /// both idle notices and `jobWaitForInput` stability waits.
+    /// both idle notices and `jobWait` idle waits.
     last_output_at: Option<Instant>,
 }
 
@@ -199,8 +199,8 @@ struct JobHandle {
     /// Completion belongs to the exec that acquired this job. Retaining the
     /// hook here prevents a later exec from replacing its transcript owner.
     on_release: Mutex<Option<crate::JobReleaseFn>>,
-    /// PTY master, cloned for the writer side (`jobType` / `jobKeyPress` /
-    /// `jobResize`). The driver holds its own clone for reads.
+    /// PTY master, cloned for the writer side (`jobType` / `jobKeyPress`).
+    /// The driver holds its own clone for reads.
     master: Mutex<Option<OwnedFd>>,
 }
 
@@ -854,11 +854,10 @@ impl BuiltinTools {
         }))
     }
 
-    /// Bounded wait for the job to reach a terminal state. Returns the
-    /// final status, or the still-running status when `timeoutMs` elapses.
-    /// Waiting never cancels the job, but user cancellation (ESC/Ctrl-C)
-    /// breaks the wait early and returns the current state with
-    /// `cancelled: true`.
+    /// Bounded wait for a job condition. With no condition, waits for the
+    /// job to finish. `pattern` waits for text in the output tail, and
+    /// `idleMs` waits for unchanged output. Waiting never cancels the job,
+    /// but user cancellation (ESC/Ctrl-C) breaks the wait early.
     ///
     /// # Errors
     /// Returns [`Error::Tool`] when `id` is missing or invalid.
@@ -868,6 +867,16 @@ impl BuiltinTools {
             return Ok(no_such_job(id));
         };
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+        let pattern = args
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let idle_ms = args.get("idleMs").and_then(Value::as_u64);
+        if pattern.is_some() || idle_ms.is_some() {
+            return self
+                .job_wait_for_condition(id, handle, pattern, idle_ms, timeout_ms)
+                .await;
+        }
 
         // Fast path: already terminal.
         {
@@ -1040,90 +1049,14 @@ impl BuiltinTools {
         Ok(json!({ "ok": true, "id": id.to_string(), "key": key }))
     }
 
-    /// Resize a tty job's pseudo-terminal. Full-screen programs observe this
-    /// as a real terminal resize and reflow.
-    /// # Errors
-    /// Returns [`Error::Tool`] when `id`/`cols`/`rows` is missing or invalid,
-    /// or [`Error::Io`] when the resize ioctl fails.
-    #[allow(clippy::unused_async)]
-    pub async fn job_resize(&self, args: Value) -> Result<Value> {
-        let id = parse_id(&args)?;
-        let Some(handle) = self.jobs.get(id) else {
-            return Ok(no_such_job(id));
-        };
-        ensure_job_running(&handle)?;
-        let cols = args
-            .get("cols")
-            .and_then(Value::as_u64)
-            .and_then(|n| u16::try_from(n).ok())
-            .filter(|n| *n > 0);
-        let rows = args
-            .get("rows")
-            .and_then(Value::as_u64)
-            .and_then(|n| u16::try_from(n).ok())
-            .filter(|n| *n > 0);
-        let (Some(cols), Some(rows)) = (cols, rows) else {
-            return Err(Error::Tool(
-                "jobResize: missing or invalid 'cols'/'rows'".into(),
-            ));
-        };
-        let cols = cols.min(MAX_TTY_DIM);
-        let rows = rows.min(MAX_TTY_DIM);
-        {
-            let guard = handle
-                .master
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(master) = guard.as_ref() else {
-                return Err(Error::Tool("job is not a tty job".into()));
-            };
-            set_winsize(master, rows, cols)?;
-        }
-        {
-            let mut job = handle
-                .data
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            job.cols = cols;
-            job.rows = rows;
-        }
-        Ok(json!({
-            "ok": true,
-            "id": id.to_string(),
-            "cols": cols,
-            "rows": rows,
-        }))
-    }
-
-    /// Bounded wait until a job is waiting for input. Two ways to wait:
-    ///
-    /// - `pattern` returns when the job's output tail contains the text.
-    /// - `stableMs` returns when the job's output has been unchanged for
-    ///   that long (the same signal the idle notice uses).
-    ///
-    /// Waiting never writes to the job. Pass at least one of `pattern` or
-    /// `stableMs`; `timeoutMs` bounds the whole wait. The result stays
-    /// `{ ok: true }` on timeout or user cancellation, with the reason
-    /// flagged, mirroring `jobWait`.
-    /// # Errors
-    /// Returns [`Error::Tool`] when `id` is missing or neither wait mode is
-    /// supplied.
-    pub async fn job_wait_for_input(&self, args: Value) -> Result<Value> {
-        let id = parse_id(&args)?;
-        let Some(handle) = self.jobs.get(id) else {
-            return Ok(no_such_job(id));
-        };
-        let pattern = args
-            .get("pattern")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let stable_ms = args.get("stableMs").and_then(Value::as_u64);
-        if pattern.is_none() && stable_ms.is_none() {
-            return Err(Error::Tool(
-                "jobWaitForInput: pass 'pattern' or 'stableMs'".into(),
-            ));
-        }
-        let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+    async fn job_wait_for_condition(
+        &self,
+        id: u64,
+        handle: Arc<JobHandle>,
+        pattern: Option<String>,
+        idle_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value> {
         let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let log_path = {
             let job = handle
@@ -1158,13 +1091,13 @@ impl BuiltinTools {
                     }));
                 }
             }
-            if let Some(stable_ms) = stable_ms {
+            if let Some(idle_ms) = idle_ms {
                 let last = handle
                     .data
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .last_output_at;
-                if last.is_some_and(|t| t.elapsed() >= Duration::from_millis(stable_ms)) {
+                if last.is_some_and(|t| t.elapsed() >= Duration::from_millis(idle_ms)) {
                     return Ok(json!({
                         "ok": true,
                         "id": id.to_string(),
@@ -1173,11 +1106,13 @@ impl BuiltinTools {
                 }
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
-                return Ok(json!({
-                    "ok": true,
-                    "id": id.to_string(),
-                    "timedOut": true,
-                }));
+                let job = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut result = job.to_json(&self.root);
+                result["timedOut"] = json!(true);
+                return Ok(result);
             }
             if let Some(flag) = &self.cancel {
                 let cancel_wait = wait_for_cancel(flag);
@@ -1186,11 +1121,13 @@ impl BuiltinTools {
                     biased;
                     () = tokio::time::sleep(JOB_POLL_INTERVAL) => {},
                     () = &mut cancel_wait => {
-                        return Ok(json!({
-                            "ok": true,
-                            "id": id.to_string(),
-                            "cancelled": true,
-                        }));
+                        let job = handle
+                            .data
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut result = job.to_json(&self.root);
+                        result["cancelled"] = json!(true);
+                        return Ok(result);
                     }
                 }
             } else {
@@ -1329,23 +1266,6 @@ fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<usize> {
     Ok(written)
 }
 
-fn set_winsize(master: &OwnedFd, rows: u16, cols: u16) -> Result<()> {
-    let size = nix::pty::Winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // TIOCSWINSZ is the only way to deliver a real PTY resize to the child.
-    #[allow(unsafe_code)]
-    let rc =
-        unsafe { nix::libc::ioctl(master.as_raw_fd(), nix::libc::TIOCSWINSZ, &raw const size) };
-    if rc == -1 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
 /// Drain whatever the PTY master has ready, appending raw bytes to the log
 /// and feeding the same bytes to the screen parser. Returns without blocking;
 /// EAGAIN/EWOULDBLOCK means no more data, EIO means the slave side closed.
@@ -1385,22 +1305,6 @@ fn screen_changed(parser: &vt100::Parser, last: &mut Option<String>) -> bool {
     true
 }
 
-fn sync_parser_size(parser: &mut Option<vt100::Parser>, handle: &JobHandle) {
-    let Some(parser) = parser else {
-        return;
-    };
-    let (cols, rows) = {
-        let job = handle
-            .data
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (job.cols, job.rows)
-    };
-    if parser.screen().size() != (rows, cols) {
-        parser.screen_mut().set_size(rows, cols);
-    }
-}
-
 /// Output-idle bookkeeping for one running job. Screen text is the change
 /// signal for a tty job (so cursor movement or redraws do not count as work);
 /// log byte count is the signal for a plain job.
@@ -1424,7 +1328,7 @@ impl IdleTracker {
 
 /// Update activity timestamps from the current output. Returns true when the
 /// output changed since the previous poll. `job.last_output_at` is always
-/// tracked so `jobWaitForInput` stability waits work even with idle notices
+/// tracked so `jobWait` idle waits work even with idle notices
 /// disabled.
 fn update_activity(
     handle: &JobHandle,
@@ -1579,7 +1483,7 @@ async fn run_job(
         (job.tty, job.cols, job.rows, job.log_path.clone())
     };
     // The screen parser is driver-local: the writer tools (`jobType` etc.)
-    // only need the master fd, and `jobWaitForInput` reads the shared log.
+    // only need the master fd, and `jobWait` reads the shared log.
     let mut parser = if tty {
         Some(vt100::Parser::new(rows, cols, 0))
     } else {
@@ -1641,7 +1545,6 @@ async fn run_job(
         }
         if let Some(master) = &master {
             let _ = drain_master(master, &mut parser, &mut log_out);
-            sync_parser_size(&mut parser, &handle);
         }
         if let Some(text) = observe_idle(
             &handle,
@@ -2266,7 +2169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_wait_for_input_matches_a_prompt_pattern() {
+    async fn job_wait_matches_a_prompt_pattern() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (_dir, tools) = tools_with_cancel(cancel);
         let spawned = tools
@@ -2275,7 +2178,7 @@ mod tests {
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
         let waited = tools
-            .job_wait_for_input(json!({ "id": id, "pattern": "READY", "timeoutMs": 5_000 }))
+            .job_wait(json!({ "id": id, "pattern": "READY", "timeoutMs": 5_000 }))
             .await
             .unwrap();
         assert_eq!(waited["matched"], json!("READY"), "got: {waited}");
@@ -2291,7 +2194,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_wait_for_input_redacts_the_returned_tail() {
+    async fn job_wait_redacts_the_returned_tail() {
         let cancel = Arc::new(AtomicBool::new(false));
         let bash_env = crate::BashEnv {
             redact: vec!["secret-value".to_string()],
@@ -2308,7 +2211,7 @@ mod tests {
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
         let waited = tools
-            .job_wait_for_input(json!({
+            .job_wait(json!({
                 "id": id,
                 "pattern": "token=",
                 "timeoutMs": 5_000
@@ -2320,7 +2223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_wait_for_input_returns_after_stable_silence() {
+    async fn job_wait_returns_after_idle_silence() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (_dir, tools) = tools_with_cancel(cancel);
         let spawned = tools
@@ -2329,7 +2232,7 @@ mod tests {
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
         let waited = tools
-            .job_wait_for_input(json!({ "id": id, "stableMs": 500, "timeoutMs": 5_000 }))
+            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 5_000 }))
             .await
             .unwrap();
         assert_eq!(waited["idle"], json!(true), "got: {waited}");
@@ -2337,7 +2240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_wait_for_input_treats_no_output_as_stable() {
+    async fn job_wait_treats_no_output_as_idle() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (_dir, tools) = tools_with_cancel(cancel);
         let spawned = tools
@@ -2350,7 +2253,7 @@ mod tests {
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
         let waited = tools
-            .job_wait_for_input(json!({ "id": id, "stableMs": 500, "timeoutMs": 2_000 }))
+            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 2_000 }))
             .await
             .unwrap();
         assert_eq!(waited["idle"], json!(true), "got: {waited}");
@@ -2358,28 +2261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_resize_updates_tty_status() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools
-            .job_spawn(json!({ "cmd": "sleep 30", "tty": true, "notify": false }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let resized = tools
-            .job_resize(json!({ "id": id, "cols": 100, "rows": 30 }))
-            .await
-            .unwrap();
-        assert_eq!(resized["cols"], json!(100));
-        assert_eq!(resized["rows"], json!(30));
-        let status = tools.job_status(json!({ "id": id })).await.unwrap();
-        assert_eq!(status["cols"], json!(100));
-        assert_eq!(status["rows"], json!(30));
-        tools.job_kill(json!({ "id": id })).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn job_wait_for_input_requires_a_wait_mode() {
+    async fn job_wait_condition_timeout_returns_current_status() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (_dir, tools) = tools_with_cancel(cancel);
         let spawned = tools
@@ -2387,11 +2269,13 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        let err = tools
-            .job_wait_for_input(json!({ "id": id }))
+        let result = tools
+            .job_wait(json!({ "id": id, "pattern": "never", "timeoutMs": 50 }))
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("pattern"), "got: {err}");
+            .unwrap();
+
+        assert_eq!(result["state"], json!("running"), "got: {result}");
+        assert_eq!(result["timedOut"], json!(true), "got: {result}");
         tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 }
