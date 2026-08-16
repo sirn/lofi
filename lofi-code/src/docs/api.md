@@ -126,7 +126,7 @@ notice names it — page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are
 present but their values are replaced with `[redacted]` in the output.
 
-## lofi.jobSpawn({ cmd, timeoutMs?, notify?, notifyIntervalMs? })
+## lofi.jobSpawn({ cmd, tty?, cols?, rows?, idleMs?, timeoutMs?, notify?, notifyIntervalMs? })
 
 Start a background shell command without blocking the current turn. The
 command runs `sh -c` from the workspace root in its own process group with
@@ -139,22 +139,34 @@ turn can continue.
 
 **Parameters:**
 - `cmd` (string, required) — the shell command.
+- `tty` (boolean, optional, default `false`) — run the child on a
+  pseudo-terminal instead of plain pipes. Interactive programs can then be
+  driven with `jobType`, `jobKeyPress`, and `jobResize`. The child gets its
+  own session and controlling terminal, so Ctrl+C reaches it as SIGINT and
+  `/dev/tty` works.
+- `cols`, `rows` (number, optional, defaults `120`, `40`) — the PTY window
+  size. Only meaningful when `tty: true`.
+- `idleMs` (number, optional) — output-idle threshold. Clamped to a 500 ms
+  floor. Defaults to 3000 for tty jobs; non-tty jobs default to no idle
+  detection because silence is normal compute. When the output is unchanged
+  for this long, the job becomes `idle` and queues one idle notice.
 - `timeoutMs` (number, optional) — kill deadline in milliseconds. There is
   no default: background jobs are the long-running builds and test runs
   that do not fit a synchronous tool call, so a job runs until it exits, is
   killed, or the session ends. Pass `timeoutMs` to cap it; on timeout the
   whole process group is killed and the job ends as `"timed_out"`.
-- `notify` (boolean, optional, default `true`) — master switch for both the
-  terminal notice and any periodic ticks. `false` silences the job entirely.
+- `notify` (boolean, optional, default `true`) — master switch for the
+  terminal, idle, and periodic notices. `false` silences the job entirely.
 - `notifyIntervalMs` (number, optional) — turn on periodic progress pings
   while the job runs. Clamped to a 5000 ms floor. Passing it implies
   `notify: true`; a separate `jobNotify` call is not needed.
 
 **Returns:** `{ ok, id, state, command, directory, pid, timeoutMs,
-logPath }`. `state` starts as `"running"`. `logPath` names the merged
-stdout/stderr log under `lofi.tmp_dir`; it is a read root, so `lofi.read` on
-it also works. The log grows unbounded for the life of the job and is
-removed with the session; page through it with `jobRead` rather than
+logPath, tty, cols, rows, idleMs }`. `state` starts as `"running"`.
+`logPath` names the merged stdout/stderr log under `lofi.tmp_dir`; it is a
+read root, so `lofi.read` on it also works. For a tty job the driver copies
+PTY output into this log. The log grows unbounded for the life of the job
+and is removed with the session; page through it with `jobRead` rather than
 reading it whole.
 
 ## lofi.jobStatus({ id })
@@ -162,9 +174,11 @@ reading it whole.
 Current state, timestamps, exit status, and limits for a job.
 
 **Returns:** `{ ok, id, state, command, directory, pid, exitCode, signal,
-durationMs, timeoutMs, logPath, notify, notifyIntervalMs, notifyChanged }`.
-`state` is `"running"`, `"completed"`, `"failed"`, `"cancelled"`, or
-`"timed_out"`. Unknown ids return `{ ok: false, error }`.
+durationMs, timeoutMs, logPath, notify, notifyIntervalMs, notifyChanged,
+tty, cols, rows, idle, idleMs, idleForMs }`. `state` is `"running"`,
+`"completed"`, `"failed"`, `"cancelled"`, or `"timed_out"`. `idle` is true
+once output has been unchanged for `idleMs`; `idleForMs` is how long it has
+been idle. Unknown ids return `{ ok: false, error }`.
 
 ## lofi.jobRead({ id, cursor?, limit? })
 
@@ -194,7 +208,7 @@ a no-op that returns its current status.
 
 **Returns:** the same shape as `jobStatus`, plus `reason`.
 
-## lofi.jobNotify({ id, enabled?, intervalMs?, changed? })
+## lofi.jobNotify({ id, enabled?, intervalMs?, changed?, idleMs? })
 
 Configure notifications for a job that did not opt in at spawn. Notices are
 one-line messages the agent injects at the next round boundary (and the UI
@@ -212,11 +226,52 @@ surfaces live).
 - `changed` (boolean, optional, default `true`) — when true, a periodic
   tick only emits if the log grew since the last tick, so a live-but-silent
   job stays quiet. `false` emits every tick while running.
+- `idleMs` (number, optional) — output-idle threshold. Clamped to a 500 ms
+  floor.
 
 The terminal transition always queues one notice when `enabled`, regardless
 of how `changed` treated the intermediate ticks.
 
-**Returns:** `{ ok, id, notify, intervalMs, changed }`.
+**Returns:** `{ ok, id, notify, intervalMs, changed, idleMs }`.
+
+## lofi.jobType({ id, text })
+
+Write literal bytes to a tty job's PTY input. Use this to answer a prompt;
+include a trailing newline or follow it with `jobKeyPress({ key: "Enter" })`.
+Errors with `ok: false` when the job is not a tty job.
+
+**Returns:** `{ ok, id, sent }`.
+
+## lofi.jobKeyPress({ id, key })
+
+Send one named key to a tty job. `key` accepts the `tu` names: `Enter`,
+`Return`, `Tab`, `Escape`, `Backspace`, `Delete`, `Insert`, `Up`, `Down`,
+`Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Space`, `Ctrl+C`,
+`Ctrl+D`, `Ctrl+Z`, `Ctrl+U`, `Ctrl+L`, `Ctrl+A`, `Ctrl+E`, and `F1`–`F12`.
+Errors with `ok: false` when the key is unknown or the job is not a tty job.
+
+**Returns:** `{ ok, id, key }`.
+
+## lofi.jobResize({ id, cols, rows })
+
+Resize a tty job's pseudo-terminal. Full-screen programs observe this as a
+real terminal resize and reflow. `cols` and `rows` are required and clamped
+to 1000.
+
+**Returns:** `{ ok, id, cols, rows }`.
+
+## lofi.jobWaitForInput({ id, pattern?, stableMs?, timeoutMs? })
+
+Bounded wait until a job is waiting for input. Pass `pattern` to return when
+the output tail contains that text, or `stableMs` to return once output has
+been unchanged for that long (the same signal the idle notice uses). Pass at
+least one; `timeoutMs` bounds the whole wait. Waiting never writes to the
+job.
+
+**Returns:** `{ ok, id, matched, tail }` on a pattern match;
+`{ ok, id, idle }` on a stability wait; `{ ok, id, timedOut }` on timeout;
+or the `jobStatus` shape if the job finished first. User cancellation
+returns `{ ok, id, cancelled }`.
 
 ## lofi.tmp_dir
 
