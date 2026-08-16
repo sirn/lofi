@@ -193,6 +193,19 @@ Incremental read of a job's merged stdout/stderr log.
 `cursor` is the next offset to pass. `output` is redacted. `done` is true
 once the job is terminal.
 
+## lofi.jobScreen({ id })
+
+Read the current visible screen of a tty job after terminal control sequences
+have been applied. Use this to observe a full-screen or interactive program
+before sending more input.
+
+**Parameters:**
+- `id` (string, required) — tty job id from `jobSpawn`.
+
+**Returns:** `{ ok, id, cols, rows, lines }`. `lines` contains one redacted
+string per terminal row with trailing blank cells removed. Plain jobs return
+`{ ok: false, id, error }` because they have no terminal screen.
+
 ## lofi.jobWait({ id, pattern?, idleMs?, timeoutMs? })
 
 Bounded wait for a job condition. With no condition, wait for the job to
