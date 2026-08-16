@@ -23,7 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures = "0.3"
 bytes = "1"
 async-trait = "0.1"
-nix = { version = "0.29", default-features = false, features = ["signal", "poll", "fs"] }
+nix = { version = "0.29", default-features = false, features = ["signal", "poll", "fs", "term"] }
 
 # Serialization.
 serde = { version = "=1.0.214", features = ["derive"] }
@@ -52,6 +52,7 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
+vt100 = "0.16"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
