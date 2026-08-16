@@ -321,7 +321,11 @@ impl App {
         lines.push(info_kv(t, "/model", "switch the active model"));
         lines.push(info_kv(t, "/theme", "switch color scheme for this session"));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
-        lines.push(info_kv(t, "/job", "list background jobs, view logs, stop"));
+        lines.push(info_kv(
+            t,
+            "/job",
+            "list background jobs, view output, stop",
+        ));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(Line::from(""));
@@ -655,7 +659,8 @@ impl App {
     }
 
     /// `/job`: open the background-jobs modal. Lists every session job with
-    /// live status; `Enter` drills into a job's log, `x` arms a kill confirm.
+    /// live status; `Enter` drills into a job's output, `x` arms a kill
+    /// confirm.
     /// No-op (with a notice) when no agent is configured.
     pub(super) fn open_jobs_modal(&mut self) {
         if self.jobs.is_none() {
@@ -676,40 +681,51 @@ impl App {
             .map_or_else(Vec::new, lofi_core::JobRegistry::snapshot)
     }
 
-    /// Pull new log bytes into the open drill-in view, if the log grew.
-    /// Bounded: the held window is capped at `JOB_LOG_WINDOW_BYTES`.
-    pub(super) fn refresh_job_log(&mut self) {
+    /// Refresh the open output view. PTY jobs copy their latest parsed screen;
+    /// plain jobs page a tail window capped at `JOB_LOG_WINDOW_BYTES`.
+    pub(super) fn refresh_job_output(&mut self) {
         let (Some(jobs), Some(modal)) = (&self.jobs, &mut self.jobs_modal) else {
             return;
         };
         let Some(view) = &mut modal.viewing else {
             return;
         };
-        let Some((bytes, next, total)) = jobs.read_log(view.id, view.cursor, 64 * 1024) else {
-            return;
-        };
-        if next == view.cursor {
-            return; // no growth
-        }
-        view.cursor = next;
-        view.total = total;
-        let text = String::from_utf8_lossy(&bytes);
-        for line in text.lines() {
-            view.lines.push_back(line.to_string());
-        }
-        // Trim the held window to the byte budget, dropping oldest lines.
-        let mut held: usize = view.lines.iter().map(|l| l.len() + 1).sum();
-        while held > JOB_LOG_WINDOW_BYTES {
-            if let Some(front) = view.lines.pop_front() {
-                held -= front.len() + 1;
-            } else {
-                break;
+        match &mut view.content {
+            JobViewContent::Terminal(screen) => {
+                if let Some(current) = jobs.screen(view.id) {
+                    *screen = current;
+                }
+            }
+            JobViewContent::Log {
+                lines,
+                cursor,
+                total,
+                ..
+            } => {
+                let Some((bytes, next, new_total)) = jobs.read_log(view.id, *cursor, 64 * 1024)
+                else {
+                    return;
+                };
+                if next == *cursor {
+                    return;
+                }
+                *cursor = next;
+                *total = new_total;
+                let text = String::from_utf8_lossy(&bytes);
+                lines.extend(text.lines().map(str::to_owned));
+                let mut held: usize = lines.iter().map(|line| line.len() + 1).sum();
+                while held > JOB_LOG_WINDOW_BYTES {
+                    let Some(front) = lines.pop_front() else {
+                        break;
+                    };
+                    held -= front.len() + 1;
+                }
             }
         }
     }
 
     /// Keys for the `/job` modal. Two levels: the job list, and the drill-in
-    /// log view. `x` on a running job arms a kill confirm (`y` confirms,
+    /// output view. `x` on a running job arms a kill confirm (`y` confirms,
     /// anything else cancels). Always returns true while the modal is open.
     fn handle_jobs_key(&mut self, k: &KeyEvent) -> bool {
         // Take the modal out so the body can call `&self`/`&mut self` helpers
@@ -730,20 +746,23 @@ impl App {
             return true;
         }
 
-        // Drill-in log view.
+        // Drill-in output view.
         if let Some(view) = &mut modal.viewing {
-            let max_scroll = view.lines.len().saturating_sub(1);
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => modal.viewing = None,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    view.scroll = (view.scroll + 1).min(max_scroll);
+            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                modal.viewing = None;
+            } else if let JobViewContent::Log { lines, scroll, .. } = &mut view.content {
+                let max_scroll = lines.len().saturating_sub(1);
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *scroll = (*scroll + 1).min(max_scroll);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *scroll = scroll.saturating_sub(1);
+                    }
+                    KeyCode::Char('g') => *scroll = max_scroll,
+                    KeyCode::Char('G') => *scroll = 0,
+                    _ => {}
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    view.scroll = view.scroll.saturating_sub(1);
-                }
-                KeyCode::Char('g') => view.scroll = max_scroll,
-                KeyCode::Char('G') => view.scroll = 0, // follow the live tail
-                _ => {}
             }
             self.jobs_modal = Some(modal);
             return true;
@@ -770,13 +789,15 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(id) = selected_id {
-                    modal.viewing = Some(JobLogView {
-                        id,
-                        lines: std::collections::VecDeque::new(),
-                        cursor: 0,
-                        total: 0,
-                        scroll: 0,
-                    });
+                    let content = if snapshot[modal.selected].tty {
+                        self.jobs
+                            .as_ref()
+                            .and_then(|jobs| jobs.screen(id))
+                            .map_or_else(JobViewContent::empty_log, JobViewContent::Terminal)
+                    } else {
+                        JobViewContent::empty_log()
+                    };
+                    modal.viewing = Some(JobOutputView { id, content });
                     open_log = true;
                 }
             }
@@ -787,7 +808,7 @@ impl App {
         }
         self.jobs_modal = Some(modal);
         if open_log {
-            self.refresh_job_log();
+            self.refresh_job_output();
         }
         true
     }
