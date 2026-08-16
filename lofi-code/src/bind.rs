@@ -297,6 +297,10 @@ fn bind_job_tools<'js>(
         ("jobWait", |t, a| Box::pin(t.job_wait(a))),
         ("jobKill", |t, a| Box::pin(t.job_kill(a))),
         ("jobNotify", |t, a| Box::pin(t.job_notify(a))),
+        ("jobType", |t, a| Box::pin(t.job_type(a))),
+        ("jobKeyPress", |t, a| Box::pin(t.job_key_press(a))),
+        ("jobResize", |t, a| Box::pin(t.job_resize(a))),
+        ("jobWaitForInput", |t, a| Box::pin(t.job_wait_for_input(a))),
     ];
     for &(name, method) in JOB_TOOLS {
         let t = tools.clone();
