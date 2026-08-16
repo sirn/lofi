@@ -1,18 +1,25 @@
 //! Background job registry: spawn a bounded shell command without blocking
-//! the current agent turn, then poll, page, wait, or cancel it by id.
+//! the current agent turn, then poll, page, wait, type into, or cancel it by
+//! id.
 //!
 //! A job runs `sh -c <cmd>` in the workspace root with the same stripped /
 //! redacted environment as `lofi.bash`, in its own process group so a kill
 //! tears down the whole tree. Stdout and stderr share one per-job log file
 //! under the session tmp dir (a read root, so `lofi.read(log_path)` also
-//! works); `jobRead` pages that file over a byte cursor. A terminal
-//! transition queues a completion notice that the host agent injects at
-//! the next round boundary and surfaces live as a `Notice`. Jobs are
-//! scoped to the owning session: the agent creates one registry and shares
-//! it with every exec, there is no cross-session visibility, and dropping
-//! the last registry clone kills any surviving process groups.
+//! works); `jobRead` pages that file over a byte cursor. An opt-in `tty`
+//! job runs on a pseudo-terminal instead: the driver copies the PTY master
+//! into the same log and tracks the rendered screen so interactive prompts
+//! can be answered with `jobType` / `jobKeyPress`. A terminal transition
+//! queues a completion notice that the host agent injects at the next round
+//! boundary and surfaces live as a `Notice`. Jobs are scoped to the owning
+//! session: the agent creates one registry and shares it with every exec,
+//! there is no cross-session visibility, and dropping the last registry
+//! clone kills any surviving process groups.
 
 use std::collections::HashMap;
+use std::io::Write as _;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -39,6 +46,21 @@ const DEFAULT_NOTIFY_INTERVAL_MS: u64 = 30_000;
 /// Floor for the progress-notice interval. Anything lower is clamped here
 /// so a chatty interval cannot flood the transcript.
 const MIN_NOTIFY_INTERVAL_MS: u64 = 5_000;
+/// Floor for the idle threshold. Anything lower is clamped here so a
+/// transient scheduling pause cannot look like an interactive prompt.
+const MIN_IDLE_MS: u64 = 500;
+/// Default idle threshold for `tty` jobs. Non-tty jobs are long-running
+/// compute where silence is expected, so idle is opt-in for them.
+const DEFAULT_TTY_IDLE_MS: u64 = 15_000;
+/// Default PTY size. Matches the agent-facing `tu` terminal default.
+const DEFAULT_TTY_COLS: u16 = 120;
+const DEFAULT_TTY_ROWS: u16 = 40;
+/// Upper bound for a single PTY resize dimension.
+const MAX_TTY_DIM: u16 = 1000;
+/// Upper bound for one `jobType` payload.
+const MAX_TTY_WRITE_BYTES: usize = 64 * 1024;
+/// Tail window searched by `jobWait` pattern matching.
+const PATTERN_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -79,6 +101,19 @@ struct Job {
     /// or the session ends.
     timeout_ms: Option<u64>,
     notify: NotifyOpts,
+    /// Whether the child runs on a pseudo-terminal.
+    tty: bool,
+    /// Current PTY window size. Only meaningful for `tty` jobs.
+    cols: u16,
+    rows: u16,
+    /// Output-idle threshold; `None` disables idle notices. Defaults on for
+    /// `tty` jobs, off for plain jobs.
+    idle_ms: Option<u64>,
+    /// Whether the job's output has been still long enough to be idle.
+    idle: bool,
+    /// When output last changed. Always tracked while running; the basis for
+    /// both idle notices and `jobWait` idle waits.
+    last_output_at: Option<Instant>,
 }
 
 /// Progress-notification settings for a job.
@@ -127,6 +162,15 @@ impl Job {
             "notify": self.notify.enabled,
             "notifyIntervalMs": self.notify.interval_ms,
             "notifyChanged": self.notify.changed,
+            "tty": self.tty,
+            "cols": self.cols,
+            "rows": self.rows,
+            "idle": self.idle,
+            "idleMs": self.idle_ms,
+            "idleForMs": self.idle.then(|| {
+                self.last_output_at
+                    .map_or(0, |t| t.elapsed().as_millis() as u64)
+            }),
         })
     }
 }
@@ -155,6 +199,9 @@ struct JobHandle {
     /// Completion belongs to the exec that acquired this job. Retaining the
     /// hook here prevents a later exec from replacing its transcript owner.
     on_release: Mutex<Option<crate::JobReleaseFn>>,
+    /// PTY master, cloned for the writer side (`jobType` / `jobKeyPress`).
+    /// The driver holds its own clone for reads.
+    master: Mutex<Option<OwnedFd>>,
 }
 
 struct Inner {
@@ -554,6 +601,7 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] when `cmd` is missing, or [`Error::Io`] when
     /// the log file or the process cannot be created.
+    #[allow(clippy::too_many_lines)]
     pub async fn job_spawn(&self, args: Value) -> Result<Value> {
         let cmd = args
             .get("cmd")
@@ -576,6 +624,17 @@ impl BuiltinTools {
             notify.enabled = true;
         }
 
+        let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
+        let cols = clamp_dim(args.get("cols").and_then(Value::as_u64), DEFAULT_TTY_COLS);
+        let rows = clamp_dim(args.get("rows").and_then(Value::as_u64), DEFAULT_TTY_ROWS);
+        let mut idle_ms = args
+            .get("idleMs")
+            .and_then(Value::as_u64)
+            .map(|ms| ms.max(MIN_IDLE_MS));
+        if tty && idle_ms.is_none() {
+            idle_ms = Some(DEFAULT_TTY_IDLE_MS);
+        }
+
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
         }
@@ -589,44 +648,94 @@ impl BuiltinTools {
             .into_owned();
         // Append mode so the shared stdout/stderr file interleaves both
         // streams at end-of-file with no offset race between the two fds.
+        // For a tty job the child writes to the PTY slave instead; the driver
+        // copies master bytes into this same file, so `jobRead` and
+        // `lofi.read(logPath)` keep working unchanged.
         let log_file = std::fs::OpenOptions::new()
             .append(true)
             .create_new(true)
             .open(&log_path)
             .map_err(Error::Io)?;
-        // One shared file for both streams: the shared offset keeps merged
-        // output in arrival order with no async plumbing in the driver.
-        let stderr_file = log_file.try_clone().map_err(Error::Io)?;
+
+        let pty = if tty {
+            Some(open_pty(cols, rows).map_err(Error::Io)?)
+        } else {
+            None
+        };
+        let (driver_master, handle_master) = match &pty {
+            Some(pty) => (
+                Some(pty.master.try_clone().map_err(Error::Io)?),
+                Some(pty.master.try_clone().map_err(Error::Io)?),
+            ),
+            None => (None, None),
+        };
 
         let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(&self.root)
-            .stdout(std::process::Stdio::from(log_file))
-            .stderr(std::process::Stdio::from(stderr_file))
-            .process_group(0);
+        command.arg("-c").arg(&cmd).current_dir(&self.root);
+        if let Some(pty) = &pty {
+            let stdin = pty.slave.try_clone().map_err(Error::Io)?;
+            let stdout = pty.slave.try_clone().map_err(Error::Io)?;
+            let stderr = pty.slave.try_clone().map_err(Error::Io)?;
+            command
+                .stdin(std::process::Stdio::from(stdin))
+                .stdout(std::process::Stdio::from(stdout))
+                .stderr(std::process::Stdio::from(stderr));
+            // Give the child its own session and controlling terminal so the
+            // PTY line discipline turns a Ctrl+C byte into SIGINT and
+            // `/dev/tty` works. Only async-signal-safe syscalls run here.
+            #[allow(unsafe_code)]
+            unsafe {
+                command.as_std_mut().pre_exec(|| {
+                    if nix::libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        } else {
+            // One shared file for both streams: the shared offset keeps
+            // merged output in arrival order with no async plumbing.
+            let stderr_file = log_file.try_clone().map_err(Error::Io)?;
+            command
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(stderr_file))
+                .process_group(0);
+        }
         self.bash_env.apply(&mut command);
+        if tty {
+            command.env("TERM", "xterm-256color");
+        }
         let mut child = command.spawn()?;
         let pid = child.id();
 
+        let started = Instant::now();
         let handle = Arc::new(JobHandle {
             data: Mutex::new(Job {
                 id,
                 cmd: cmd.clone(),
                 state: State::Running,
                 pid,
-                started: Instant::now(),
+                started,
                 ended: None,
                 exit_code: None,
                 signal: None,
                 log_path: log_path.clone(),
                 timeout_ms,
                 notify,
+                tty,
+                cols,
+                rows,
+                idle_ms,
+                idle: false,
+                last_output_at: Some(started),
             }),
             done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
             on_release: Mutex::new(None),
+            master: Mutex::new(handle_master),
         });
         {
             let mut jobs = self
@@ -659,6 +768,8 @@ impl BuiltinTools {
             child,
             timeout_ms,
             generation,
+            driver_master,
+            self.bash_env.clone(),
         ));
 
         Ok(json!({
@@ -670,6 +781,10 @@ impl BuiltinTools {
             "pid": pid,
             "timeoutMs": timeout_ms,
             "logPath": log_path,
+            "tty": tty,
+            "cols": cols,
+            "rows": rows,
+            "idleMs": idle_ms,
         }))
     }
 
@@ -739,11 +854,10 @@ impl BuiltinTools {
         }))
     }
 
-    /// Bounded wait for the job to reach a terminal state. Returns the
-    /// final status, or the still-running status when `timeoutMs` elapses.
-    /// Waiting never cancels the job, but user cancellation (ESC/Ctrl-C)
-    /// breaks the wait early and returns the current state with
-    /// `cancelled: true`.
+    /// Bounded wait for a job condition. With no condition, waits for the
+    /// job to finish. `pattern` waits for text in the output tail, and
+    /// `idleMs` waits for unchanged output. Waiting never cancels the job,
+    /// but user cancellation (ESC/Ctrl-C) breaks the wait early.
     ///
     /// # Errors
     /// Returns [`Error::Tool`] when `id` is missing or invalid.
@@ -753,6 +867,16 @@ impl BuiltinTools {
             return Ok(no_such_job(id));
         };
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+        let pattern = args
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let idle_ms = args.get("idleMs").and_then(Value::as_u64);
+        if pattern.is_some() || idle_ms.is_some() {
+            return self
+                .job_wait_for_condition(id, handle, pattern, idle_ms, timeout_ms)
+                .await;
+        }
 
         // Fast path: already terminal.
         {
@@ -865,13 +989,151 @@ impl BuiltinTools {
         if let Some(changed) = args.get("changed").and_then(Value::as_bool) {
             job.notify.changed = changed;
         }
+        if let Some(ms) = args.get("idleMs").and_then(Value::as_u64) {
+            job.idle_ms = Some(ms.max(MIN_IDLE_MS));
+        }
         Ok(json!({
             "ok": true,
             "id": id.to_string(),
             "notify": job.notify.enabled,
             "intervalMs": job.notify.interval_ms,
             "changed": job.notify.changed,
+            "idleMs": job.idle_ms,
         }))
+    }
+
+    /// Write literal bytes to a tty job's PTY input. The agent uses this to
+    /// answer a prompt; pair it with `jobKeyPress Enter` or include a
+    /// trailing newline in `text`.
+    /// # Errors
+    /// Returns [`Error::Tool`] when `id`/`text` is missing, the job is not a
+    /// tty job, or the PTY input buffer is full.
+    #[allow(clippy::unused_async)]
+    pub async fn job_type(&self, args: Value) -> Result<Value> {
+        let id = parse_id(&args)?;
+        let Some(handle) = self.jobs.get(id) else {
+            return Ok(no_such_job(id));
+        };
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("jobType: missing 'text'".into()))?;
+        if text.len() > MAX_TTY_WRITE_BYTES {
+            return Err(Error::Tool("jobType: text too long".into()));
+        }
+        let sent = write_to_master(&handle, text.as_bytes())?;
+        Ok(json!({ "ok": true, "id": id.to_string(), "sent": sent }))
+    }
+
+    /// Send one named key press to a tty job. Uses the same key names as the
+    /// agent-facing `tu` terminal.
+    /// # Errors
+    /// Returns [`Error::Tool`] when `id`/`key` is missing or the key is not
+    /// recognised.
+    #[allow(clippy::unused_async)]
+    pub async fn job_key_press(&self, args: Value) -> Result<Value> {
+        let id = parse_id(&args)?;
+        let Some(handle) = self.jobs.get(id) else {
+            return Ok(no_such_job(id));
+        };
+        let key = args
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Tool("jobKeyPress: missing 'key'".into()))?;
+        let bytes = key_press_bytes(key)
+            .ok_or_else(|| Error::Tool(format!("jobKeyPress: unknown key '{key}'")))?;
+        let sent = write_to_master(&handle, bytes)?;
+        if sent != bytes.len() {
+            return Err(Error::Tool("jobKeyPress: partial PTY write".into()));
+        }
+        Ok(json!({ "ok": true, "id": id.to_string(), "key": key }))
+    }
+
+    async fn job_wait_for_condition(
+        &self,
+        id: u64,
+        handle: Arc<JobHandle>,
+        pattern: Option<String>,
+        idle_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value> {
+        let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+        let log_path = {
+            let job = handle
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            job.log_path.clone()
+        };
+
+        loop {
+            {
+                let job = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if job.state.is_terminal() {
+                    return Ok(job.to_json(&self.root));
+                }
+            }
+            if let Some(pattern) = &pattern {
+                let tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
+                if tail.contains(pattern.as_str()) {
+                    return Ok(json!({
+                        "ok": true,
+                        "id": id.to_string(),
+                        "matched": pattern,
+                        "tail": read_redacted_log_tail(
+                            &log_path,
+                            PATTERN_TAIL_BYTES,
+                            &self.bash_env,
+                        ),
+                    }));
+                }
+            }
+            if let Some(idle_ms) = idle_ms {
+                let last = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_output_at;
+                if last.is_some_and(|t| t.elapsed() >= Duration::from_millis(idle_ms)) {
+                    return Ok(json!({
+                        "ok": true,
+                        "id": id.to_string(),
+                        "idle": true,
+                    }));
+                }
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                let job = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut result = job.to_json(&self.root);
+                result["timedOut"] = json!(true);
+                return Ok(result);
+            }
+            if let Some(flag) = &self.cancel {
+                let cancel_wait = wait_for_cancel(flag);
+                tokio::pin!(cancel_wait);
+                tokio::select! {
+                    biased;
+                    () = tokio::time::sleep(JOB_POLL_INTERVAL) => {},
+                    () = &mut cancel_wait => {
+                        let job = handle
+                            .data
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut result = job.to_json(&self.root);
+                        result["cancelled"] = json!(true);
+                        return Ok(result);
+                    }
+                }
+            } else {
+                tokio::time::sleep(JOB_POLL_INTERVAL).await;
+            }
+        }
     }
 }
 
@@ -893,6 +1155,308 @@ async fn read_log_page(
     Ok((bytes, start + read as u64, total))
 }
 
+/// Clamp an optional PTY dimension to a valid, bounded window size.
+/// Out-of-range values clamp to the allowed extremes rather than falling
+/// back to the default, so an oversized request still gets the largest
+/// supported terminal and `0` gets the smallest.
+fn clamp_dim(v: Option<u64>, default: u16) -> u16 {
+    v.map_or(default, |n| n.clamp(1, u64::from(MAX_TTY_DIM)) as u16)
+}
+
+/// Allocate a pseudo-terminal with the requested window size and put the
+/// master in non-blocking mode so the driver poll never blocks on a silent
+/// child.
+fn open_pty(cols: u16, rows: u16) -> std::io::Result<nix::pty::OpenptyResult> {
+    let winsize = nix::pty::Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&winsize), None::<&nix::sys::termios::Termios>)
+        .map_err(std::io::Error::from)?;
+    set_nonblock(pty.master.as_raw_fd())?;
+    Ok(pty)
+}
+
+fn set_nonblock(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags =
+        nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL).map_err(std::io::Error::from)?;
+    let flags = nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK;
+    nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_SETFL(flags)).map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+/// Map a named key to the byte sequence an xterm sends for it.
+fn key_press_bytes(key: &str) -> Option<&'static [u8]> {
+    let bytes: &[u8] = match key {
+        "Enter" | "Return" => b"\r",
+        "Tab" => b"\t",
+        "Escape" | "Esc" => b"\x1b",
+        "Backspace" => b"\x7f",
+        "Delete" => b"\x1b[3~",
+        "Insert" => b"\x1b[2~",
+        "Up" => b"\x1b[A",
+        "Down" => b"\x1b[B",
+        "Right" => b"\x1b[C",
+        "Left" => b"\x1b[D",
+        "Home" => b"\x1b[H",
+        "End" => b"\x1b[F",
+        "PageUp" => b"\x1b[5~",
+        "PageDown" => b"\x1b[6~",
+        "Space" => b" ",
+        "Ctrl+C" => b"\x03",
+        "Ctrl+D" => b"\x04",
+        "Ctrl+Z" => b"\x1a",
+        "Ctrl+U" => b"\x15",
+        "Ctrl+L" => b"\x0c",
+        "Ctrl+A" => b"\x01",
+        "Ctrl+E" => b"\x05",
+        "F1" => b"\x1bOP",
+        "F2" => b"\x1bOQ",
+        "F3" => b"\x1bOR",
+        "F4" => b"\x1bOS",
+        "F5" => b"\x1b[15~",
+        "F6" => b"\x1b[17~",
+        "F7" => b"\x1b[18~",
+        "F8" => b"\x1b[19~",
+        "F9" => b"\x1b[20~",
+        "F10" => b"\x1b[21~",
+        "F11" => b"\x1b[23~",
+        "F12" => b"\x1b[24~",
+        _ => return None,
+    };
+    Some(bytes)
+}
+
+fn ensure_job_running(handle: &JobHandle) -> Result<()> {
+    let job = handle
+        .data
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if job.state.is_terminal() {
+        return Err(Error::Tool("job is not running".into()));
+    }
+    Ok(())
+}
+
+fn write_to_master(handle: &JobHandle, bytes: &[u8]) -> Result<usize> {
+    ensure_job_running(handle)?;
+    let guard = handle
+        .master
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(master) = guard.as_ref() else {
+        return Err(Error::Tool("job is not a tty job".into()));
+    };
+    let mut written = 0;
+    while written < bytes.len() {
+        match nix::unistd::write(master.as_fd(), &bytes[written..]) {
+            Ok(0) => return Ok(written),
+            Ok(n) => written += n,
+            Err(e) if e == nix::errno::Errno::EAGAIN || e == nix::errno::Errno::EWOULDBLOCK => {
+                if written > 0 {
+                    return Ok(written);
+                }
+                return Err(Error::Tool("pty input buffer full; retry".into()));
+            }
+            Err(e) => return Err(Error::Io(std::io::Error::from(e))),
+        }
+    }
+    Ok(written)
+}
+
+/// Drain whatever the PTY master has ready, appending raw bytes to the log
+/// and feeding the same bytes to the screen parser. Returns without blocking;
+/// EAGAIN/EWOULDBLOCK means no more data, EIO means the slave side closed.
+fn drain_master(
+    master: &OwnedFd,
+    parser: &mut Option<vt100::Parser>,
+    log_out: &mut Option<std::fs::File>,
+) -> std::io::Result<()> {
+    let mut buf = [0u8; 8192];
+    loop {
+        match nix::unistd::read(master.as_raw_fd(), &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Some(out) = log_out.as_mut() {
+                    out.write_all(&buf[..n])?;
+                }
+                if let Some(parser) = parser.as_mut() {
+                    parser.process(&buf[..n]);
+                }
+            }
+            Err(e) if e == nix::errno::Errno::EAGAIN || e == nix::errno::Errno::EWOULDBLOCK => {
+                break;
+            }
+            Err(nix::errno::Errno::EIO) => break,
+            Err(e) => return Err(std::io::Error::from(e)),
+        }
+    }
+    Ok(())
+}
+
+fn screen_changed(parser: &vt100::Parser, last: &mut Option<String>) -> bool {
+    let contents = parser.screen().contents();
+    if last.as_deref() == Some(contents.as_str()) {
+        return false;
+    }
+    *last = Some(contents);
+    true
+}
+
+/// Output-idle bookkeeping for one running job. Screen text is the change
+/// signal for a tty job (so cursor movement or redraws do not count as work);
+/// log byte count is the signal for a plain job.
+struct IdleTracker {
+    last_bytes: u64,
+    last_screen: Option<String>,
+    last_output_at: Instant,
+    idle: bool,
+}
+
+impl IdleTracker {
+    fn new() -> Self {
+        Self {
+            last_bytes: 0,
+            last_screen: None,
+            last_output_at: Instant::now(),
+            idle: false,
+        }
+    }
+}
+
+/// Update activity timestamps from the current output. Returns true when the
+/// output changed since the previous poll. `job.last_output_at` is always
+/// tracked so `jobWait` idle waits work even with idle notices
+/// disabled.
+fn update_activity(
+    handle: &JobHandle,
+    parser: Option<&vt100::Parser>,
+    log_path: &str,
+    tracker: &mut IdleTracker,
+) -> bool {
+    let changed = if let Some(parser) = parser {
+        screen_changed(parser, &mut tracker.last_screen)
+    } else {
+        let bytes = std::fs::metadata(log_path).map_or(0, |m| m.len());
+        if bytes == tracker.last_bytes {
+            false
+        } else {
+            tracker.last_bytes = bytes;
+            true
+        }
+    };
+    if changed {
+        let now = Instant::now();
+        tracker.last_output_at = now;
+        tracker.idle = false;
+        let mut job = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        job.last_output_at = Some(now);
+        job.idle = false;
+    }
+    changed
+}
+
+/// Emit one edge-triggered idle notice when output has been still for the
+/// configured threshold. Returns `None` while active or before the threshold.
+fn observe_idle(
+    handle: &JobHandle,
+    parser: Option<&vt100::Parser>,
+    log_path: &str,
+    tracker: &mut IdleTracker,
+    bash_env: &crate::BashEnv,
+) -> Option<String> {
+    if update_activity(handle, parser, log_path, tracker) {
+        return None;
+    }
+    let (idle_ms, notify_enabled) = {
+        let job = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (job.idle_ms, job.notify.enabled)
+    };
+    let idle_ms = idle_ms?;
+    let now = Instant::now();
+    if tracker.idle || now.duration_since(tracker.last_output_at) < Duration::from_millis(idle_ms) {
+        return None;
+    }
+    tracker.idle = true;
+    {
+        let mut job = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        job.idle = true;
+    }
+    if !notify_enabled {
+        return None;
+    }
+    let tail = idle_tail(parser, log_path, bash_env);
+    let id = handle
+        .data
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .id;
+    Some(format!("job {id} idle (no output for {idle_ms}ms): {tail}"))
+}
+
+fn idle_tail(parser: Option<&vt100::Parser>, log_path: &str, bash_env: &crate::BashEnv) -> String {
+    if let Some(parser) = parser {
+        let contents = parser.screen().contents();
+        let mut tail = contents.lines().last().unwrap_or("").trim_end().to_owned();
+        bash_env.redact(&mut tail);
+        return short_text(&tail, 80);
+    }
+    let tail = read_redacted_log_tail(log_path, 200, bash_env);
+    short_text(tail.trim(), 80)
+}
+
+fn read_log_tail(path: &str, max: usize) -> String {
+    use std::io::{Read as _, Seek as _};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(total) = file.metadata().map(|metadata| metadata.len()) else {
+        return String::new();
+    };
+    let start = total.saturating_sub(max as u64);
+    if file.seek(std::io::SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity((total - start) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn read_redacted_log_tail(path: &str, max: usize, bash_env: &crate::BashEnv) -> String {
+    let redact_overlap = bash_env.redact.iter().map(String::len).max().unwrap_or(0);
+    let mut tail = read_log_tail(path, max.saturating_add(redact_overlap));
+    bash_env.redact(&mut tail);
+    tail
+}
+
+/// Collapse control characters to spaces and cap the visible length at a
+/// char boundary for one-line notices.
+fn short_text(s: &str, max: usize) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(max)
+        .collect();
+    if s.chars().count() > max {
+        out.push('\u{2026}');
+    }
+    out
+}
+
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
 /// terminal transition updates the job record, wakes `jobWait` listeners,
@@ -901,13 +1465,39 @@ async fn read_log_page(
 // the whole BuiltinTools would leak its tool callback (an UnboundedSender per
 // execute_tools round) into the spawned task's lifetime, keeping the
 // engine-to-UI channel — and therefore the run — alive until the job exits.
+#[allow(clippy::too_many_lines)]
 async fn run_job(
     jobs: std::sync::Weak<Inner>,
     handle: Arc<JobHandle>,
     mut child: tokio::process::Child,
     timeout_ms: Option<u64>,
     generation: u64,
+    master: Option<OwnedFd>,
+    bash_env: crate::BashEnv,
 ) {
+    let (tty, cols, rows, log_path) = {
+        let job = handle
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (job.tty, job.cols, job.rows, job.log_path.clone())
+    };
+    // The screen parser is driver-local: the writer tools (`jobType` etc.)
+    // only need the master fd, and `jobWait` reads the shared log.
+    let mut parser = if tty {
+        Some(vt100::Parser::new(rows, cols, 0))
+    } else {
+        None
+    };
+    let mut log_out = if tty {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .ok()
+    } else {
+        None
+    };
+    let mut idle_tracker = IdleTracker::new();
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
     let mut guard = PgrpKillGuard::new(child.id());
     // On any early return the guard SIGKILLs the process group; on a clean
@@ -953,12 +1543,38 @@ async fn run_job(
             outcome = Some((State::TimedOut, None, Some(nix::libc::SIGKILL)));
             break;
         }
+        if let Some(master) = &master {
+            let _ = drain_master(master, &mut parser, &mut log_out);
+        }
+        if let Some(text) = observe_idle(
+            &handle,
+            parser.as_ref(),
+            &log_path,
+            &mut idle_tracker,
+            &bash_env,
+        ) {
+            push_notice(&jobs, generation, text);
+        }
         if let Some(text) = progress_tick(&handle, &mut last_tick, &mut last_bytes) {
             push_notice(&jobs, generation, text);
         }
         tokio::time::sleep(JOB_POLL_INTERVAL).await;
     }
 
+    // The child may have written its final bytes into the PTY buffer before
+    // exiting; drain them before the log handle closes so `jobRead` sees the
+    // complete transcript.
+    if let Some(master) = &master {
+        let _ = drain_master(master, &mut parser, &mut log_out);
+    }
+    if let Some(mut out) = log_out {
+        let _ = out.flush();
+    }
+    handle
+        .master
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let notice = {
         let mut job = handle
             .data
@@ -1125,10 +1741,17 @@ mod tests {
                 log_path,
                 timeout_ms: None,
                 notify,
+                tty: false,
+                cols: DEFAULT_TTY_COLS,
+                rows: DEFAULT_TTY_ROWS,
+                idle_ms: None,
+                idle: false,
+                last_output_at: None,
             }),
             done: Notify::new(),
             cancel: AtomicBool::new(false),
             on_release: Mutex::new(None),
+            master: Mutex::new(None),
         })
     }
 
@@ -1326,6 +1949,13 @@ mod tests {
     }
 
     fn tools_with_cancel(cancel: Arc<AtomicBool>) -> (tempfile::TempDir, BuiltinTools) {
+        tools_with_env(cancel, crate::BashEnv::default())
+    }
+
+    fn tools_with_env(
+        cancel: Arc<AtomicBool>,
+        bash_env: crate::BashEnv,
+    ) -> (tempfile::TempDir, BuiltinTools) {
         let dir = tempfile::tempdir().unwrap();
         let auto: crate::AutoModeFn =
             Arc::new(|_| Box::pin(async { crate::AutoModeOutcome::Allow { reason: "t".into() } }));
@@ -1335,7 +1965,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             tmp,
-            crate::BashEnv::default(),
+            bash_env,
             crate::policy::defaults::resolve(&lofi_types::ShellPolicyConfig::default()),
             None,
             Some(auto),
@@ -1384,5 +2014,268 @@ mod tests {
             .unwrap();
         assert_eq!(res["state"], json!("completed"), "got: {res}");
         assert!(res.get("cancelled").is_none(), "got: {res}");
+    }
+
+    #[test]
+    fn key_press_bytes_maps_named_keys() {
+        assert_eq!(key_press_bytes("Enter"), Some(b"\r".as_slice()));
+        assert_eq!(key_press_bytes("Tab"), Some(b"\t".as_slice()));
+        assert_eq!(key_press_bytes("Up"), Some(b"\x1b[A".as_slice()));
+        assert_eq!(key_press_bytes("Ctrl+C"), Some(b"\x03".as_slice()));
+        assert_eq!(key_press_bytes("F12"), Some(b"\x1b[24~".as_slice()));
+        assert_eq!(key_press_bytes("NotAKey"), None);
+    }
+
+    #[test]
+    fn read_log_tail_reads_only_the_requested_suffix() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"prefix-suffix").unwrap();
+
+        assert_eq!(read_log_tail(file.path().to_str().unwrap(), 6), "suffix");
+    }
+
+    #[test]
+    fn idle_tail_redacts_approved_environment_values() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"token=secret-value").unwrap();
+        let bash_env = crate::BashEnv {
+            redact: vec!["secret-value".to_string()],
+            ..crate::BashEnv::default()
+        };
+
+        assert_eq!(
+            idle_tail(None, file.path().to_str().unwrap(), &bash_env),
+            "token=[redacted]"
+        );
+    }
+
+    #[tokio::test]
+    async fn tty_job_accepts_typed_input_and_key_presses() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "read x; echo \"got:$x\"", "tty": true }))
+            .await
+            .unwrap();
+        assert_eq!(spawned["tty"], json!(true));
+        let id = spawned["id"].as_str().unwrap().to_owned();
+
+        let typed = tools
+            .job_type(json!({ "id": id, "text": "hello" }))
+            .await
+            .unwrap();
+        assert_eq!(typed["sent"], json!(5));
+        let pressed = tools
+            .job_key_press(json!({ "id": id, "key": "Enter" }))
+            .await
+            .unwrap();
+        assert_eq!(pressed["ok"], json!(true));
+
+        let done = tools
+            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(done["state"], json!("completed"), "got: {done}");
+        let log = tools.job_read(json!({ "id": id })).await.unwrap();
+        assert!(
+            log["output"].as_str().unwrap().contains("got:hello"),
+            "log: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tty_job_sets_term_after_applying_the_stripped_environment() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bash_env = crate::BashEnv {
+            strip_env: true,
+            baseline: vec![
+                (
+                    "PATH".to_string(),
+                    std::env::var("PATH").unwrap_or_default(),
+                ),
+                ("TERM".to_string(), "dumb".to_string()),
+            ],
+            ..crate::BashEnv::default()
+        };
+        let (_dir, tools) = tools_with_env(cancel, bash_env);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "printf %s \"$TERM\"", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let done = tools
+            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(done["state"], json!("completed"), "got: {done}");
+        let log = tools.job_read(json!({ "id": id })).await.unwrap();
+        assert!(
+            log["output"].as_str().unwrap().contains("xterm-256color"),
+            "log: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tty_input_rejects_a_completed_job() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "true", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        tools.job_wait(json!({ "id": id })).await.unwrap();
+
+        let err = tools
+            .job_type(json!({ "id": id, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not running"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn job_type_rejects_a_non_tty_job() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "sleep 30", "notify": false }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let err = tools
+            .job_type(json!({ "id": id, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a tty job"), "got: {err}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tty_job_queues_one_idle_notice() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "printf 'Name? '; read x; echo \"got:$x\"", "tty": true, "idleMs": 500 }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        // One idle window plus a little scheduling slack.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let notices = tools.jobs.drain_notices();
+        let idle = notices.iter().find(|n| n.contains("idle"));
+        assert!(idle.is_some(), "notices: {notices:?}");
+        assert!(idle.unwrap().contains("Name?"), "notices: {notices:?}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_wait_matches_a_prompt_pattern() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "printf 'READY\n'; read x; echo \"got:$x\"", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait(json!({ "id": id, "pattern": "READY", "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(waited["matched"], json!("READY"), "got: {waited}");
+        tools
+            .job_type(json!({ "id": id, "text": "done\n" }))
+            .await
+            .unwrap();
+        let done = tools
+            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(done["state"], json!("completed"), "got: {done}");
+    }
+
+    #[tokio::test]
+    async fn job_wait_redacts_the_returned_tail() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bash_env = crate::BashEnv {
+            redact: vec!["secret-value".to_string()],
+            ..crate::BashEnv::default()
+        };
+        let (_dir, tools) = tools_with_env(cancel, bash_env);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "printf 'token=secret-value'; sleep 30",
+                "tty": true,
+                "notify": false
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait(json!({
+                "id": id,
+                "pattern": "token=",
+                "timeoutMs": 5_000
+            }))
+            .await
+            .unwrap();
+        assert_eq!(waited["tail"], json!("token=[redacted]"));
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_wait_returns_after_idle_silence() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "printf 'prompt'; read x; echo done", "tty": true }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 5_000 }))
+            .await
+            .unwrap();
+        assert_eq!(waited["idle"], json!(true), "got: {waited}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_wait_treats_no_output_as_idle() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({
+                "cmd": "sleep 30",
+                "tty": true,
+                "notify": false
+            }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let waited = tools
+            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 2_000 }))
+            .await
+            .unwrap();
+        assert_eq!(waited["idle"], json!(true), "got: {waited}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_wait_condition_timeout_returns_current_status() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_dir, tools) = tools_with_cancel(cancel);
+        let spawned = tools
+            .job_spawn(json!({ "cmd": "sleep 30", "notify": false }))
+            .await
+            .unwrap();
+        let id = spawned["id"].as_str().unwrap().to_owned();
+        let result = tools
+            .job_wait(json!({ "id": id, "pattern": "never", "timeoutMs": 50 }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["state"], json!("running"), "got: {result}");
+        assert_eq!(result["timedOut"], json!(true), "got: {result}");
+        tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 }
