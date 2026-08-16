@@ -174,11 +174,24 @@ impl AgentLifecycle {
         );
         let killed = jobs.kill_not_in(&lineage.started);
         let live = jobs.live_ids();
-        let stale = lineage
+        let stale: Vec<u64> = lineage
             .outstanding
             .into_iter()
             .filter(|id| !live.contains(id))
             .collect();
+        // A job that completed on a pruned branch left its JobFinished
+        // marker behind.  Rollback to a point between start and finish
+        // cuts the marker off the lineage, but the process already
+        // exited — reporting it as stale is a false positive.
+        let stale = if stale.is_empty() {
+            stale
+        } else {
+            let finished_elsewhere = cursor.finished_job_ids_anywhere(&stale)?;
+            stale
+                .into_iter()
+                .filter(|id| !finished_elsewhere.contains(id))
+                .collect()
+        };
         Ok(LineageJobReconciliation { killed, stale })
     }
 

@@ -49,6 +49,96 @@ fn completion_keeps_its_owner_across_later_execs() {
 }
 
 #[test]
+fn completed_job_is_not_reported_as_stale_after_rollback() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "spawn",
+            "return await lofi.jobSpawn({ cmd: \"sleep 0.5\", notify: false });",
+        ),
+        text_response("first answer settled"),
+        text_response("second answer after job"),
+        text_response("post-rollback answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("spawn a short job");
+    tui.wait_for("first answer settled", WAIT);
+    let mut job = ProcessGuard::new(spawned_pid(&fixture));
+    wait_for_process_exit(job.pid());
+    job.disarm();
+    // The driver records JobFinished asynchronously after the process exits.
+    fixture.wait_for_event_count("job_finished", 1);
+
+    tui.clear_output();
+    tui.submit("second prompt after job");
+    tui.wait_for("second answer after job", WAIT);
+
+    tui.clear_output();
+    tui.submit("/tree");
+    tui.wait_for("Roll back to a turn", WAIT);
+    tui.wait_for("first answer settled", WAIT);
+    // Land on "agent: first answer settled": after JobStarted, before
+    // JobFinished.  The finish marker ends up on the abandoned branch.
+    tui.send(b"\x1b[A\x1b[A\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // After rollback, the JobFinished marker is on the abandoned branch.
+    // The job already completed, so no process is live.  Submit a new
+    // prompt and check whether the stale-job notification was injected.
+    tui.submit("post rollback prompt");
+    tui.wait_for("post-rollback answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let post_rollback = &requests[3].body;
+
+    assert!(
+        !post_rollback.contains("second prompt after job"),
+        "rollback did not take effect; request still has second turn: {post_rollback}"
+    );
+    assert!(
+        !post_rollback.contains("their ids are stale"),
+        "completed job must not be reported as stale: {post_rollback}"
+    );
+}
+
+#[test]
+fn rollback_without_jobs_produces_no_stale_notification() {
+    let server = MockServer::start(vec![
+        text_response("first answer done"),
+        text_response("second answer done"),
+        text_response("post-rollback answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("first prompt");
+    tui.wait_for("first answer done", WAIT);
+    tui.clear_output();
+    tui.submit("second prompt");
+    tui.wait_for("second answer done", WAIT);
+
+    tui.clear_output();
+    tui.submit("/tree");
+    tui.wait_for("Roll back to a turn", WAIT);
+    tui.wait_for("first prompt", WAIT);
+    tui.send(b"\x1b[A\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    tui.submit("post rollback prompt");
+    tui.wait_for("post-rollback answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let post_rollback = &requests[2].body;
+    assert!(
+        !post_rollback.contains("their ids are stale"),
+        "no jobs running, must not report stale: {post_rollback}"
+    );
+}
+
+#[test]
 fn branch_switch_retains_then_releases_owned_job() {
     let server = MockServer::start(vec![
         tool_response(
