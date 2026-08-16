@@ -133,8 +133,9 @@ const NOTIFY_TTL: Duration = Duration::from_secs(5);
 /// Cap on the notification area height: a long transient message wraps
 /// across up to this many rows instead of truncating to one.
 const NOTIFY_MAX_LINES: usize = 3;
-/// Byte budget for the plain-job output viewer. PTY jobs use their bounded
-/// terminal screen instead.
+/// Byte budget for the `/job` log drill-in. The view keeps at most this
+/// many bytes of decoded log resident (a bounded tail window), so watching
+/// a runaway job's log never grows UI memory.
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
@@ -149,7 +150,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/debug", "toggle resource diagnostics"),
     ("/exit", "exit lofi"),
     ("/help", "show keybindings and commands"),
-    ("/job", "list background jobs, view output, stop a job"),
+    ("/job", "list background jobs, view logs, stop a job"),
     ("/new", "start a fresh session"),
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
@@ -556,48 +557,30 @@ impl ThemePickerState {
 
 /// State for the `/job` modal. The list is rebuilt from a fresh
 /// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
-/// the drill-in output view are kept here. Plain-job logs page bounded
-/// windows from disk, so an unbounded log never inflates memory.
+/// the drill-in log view are kept here. The log view pages bounded windows
+/// from disk, so an unbounded job log never inflates memory.
 struct JobsModalState {
     selected: usize,
-    /// Set while drilling into one job's output; `Esc` returns to the list.
-    viewing: Option<JobOutputView>,
+    /// Set while drilling into one job's log; `Esc` returns to the list.
+    viewing: Option<JobLogView>,
     /// Armed when the user picks kill: the next `y` confirms, anything else
     /// cancels. Holds the target job id so the confirm survives a re-render.
     confirm_kill: Option<u64>,
 }
 
-/// Drill-in output view for one job. PTY jobs show their parsed terminal
-/// screen. Plain jobs retain a bounded, scrollable log tail.
-struct JobOutputView {
+/// Drill-in log view for one job. Holds only the tail window currently on
+/// screen plus enough to page more; it never holds the whole log.
+struct JobLogView {
     id: u64,
-    content: JobViewContent,
-}
-
-enum JobViewContent {
-    Terminal(lofi_core::JobScreen),
-    Log {
-        /// Decoded lines currently held, oldest first. Bounded by
-        /// [`JOB_LOG_WINDOW_BYTES`].
-        lines: std::collections::VecDeque<String>,
-        /// Byte offset of the next unread chunk; the file cursor for appends.
-        cursor: u64,
-        /// Total log bytes at last refresh; compared to detect growth.
-        total: u64,
-        /// Scroll offset from the bottom (0 = follow the live tail).
-        scroll: usize,
-    },
-}
-
-impl JobViewContent {
-    fn empty_log() -> Self {
-        Self::Log {
-            lines: std::collections::VecDeque::new(),
-            cursor: 0,
-            total: 0,
-            scroll: 0,
-        }
-    }
+    /// Decoded lines currently held, oldest first. Bounded by
+    /// [`JOB_LOG_WINDOW_BYTES`].
+    lines: std::collections::VecDeque<String>,
+    /// Byte offset of the next unread chunk; the file cursor for appends.
+    cursor: u64,
+    /// Total log bytes at last refresh; compared to detect growth.
+    total: u64,
+    /// Scroll offset from the bottom (0 = follow the live tail).
+    scroll: usize,
 }
 
 impl Modal for ThinkingPickerState {
@@ -1497,3 +1480,126 @@ async fn run_loop(
                 if defer_redraw {
                     // Reflowing a large resumed transcript can take hundreds of
                     // milliseconds. Debounce the whole resize burst so one
+                    // expensive leading draw cannot block event consumption and
+                    // split a single drag into repeated one-event batches.
+                    let now = Instant::now();
+                    if resize.deadline.is_none() {
+                        resize.started = Some(now);
+                        resize.events = 0;
+                    }
+                    resize.events = resize.events.saturating_add(1);
+                    resize.last = Some(now);
+                    resize.deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    );
+                } else {
+                    // Explicit user input should never wait behind resize UI
+                    // policy. Treat it as the end of the current resize burst.
+                    resize.deadline = None;
+                    dirty = true;
+                }
+            }
+            () = async {
+                match resize.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                resize.deadline = None;
+                dirty = true;
+            }
+            _ = tick.tick() => {
+                if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
+                    dirty = true;
+                }
+                if app.run.is_some() {
+                    if let Some(s) = app.run.as_mut() {
+                        *s = s.wrapping_add(1);
+                    }
+                    dirty = true;
+                }
+                if app.retry.is_some() {
+                    dirty = true;
+                }
+                if let Some(t) = app.yank_notify {
+                    if t.elapsed() >= YANK_NOTIFY {
+                        app.yank_notify = None;
+                    }
+                    dirty = true;
+                }
+                if let Some(t) = app.ctrl_c_at {
+                    if t.elapsed() >= QUIT_DOUBLE_PRESS {
+                        app.ctrl_c_at = None;
+                    }
+                    dirty = true;
+                }
+                if let Some(n) = app.notify.as_ref() {
+                    if n.at.elapsed() >= NOTIFY_TTL {
+                        app.notify = None;
+                    }
+                    dirty = true;
+                }
+                // Drain pending resize height re-measure a little each tick
+                // so a width change on a long transcript never stalls a frame.
+                if app.remeasure_heights_step(16) {
+                    dirty = true;
+                }
+            }
+            notice = async {
+                match job_notice_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(text) = notice {
+                    let queued = QueuedPrompt {
+                        text,
+                        kind: lofi_types::PromptKind::Notice,
+                    };
+                    if let Some(r) = &current_run {
+                        app.prompt_queue.push(queued);
+                        r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else if agent.is_some() {
+                        spawn_prompt(
+                            &mut app,
+                            agent.as_ref(),
+                            &mut current_run,
+                            queued.text,
+                            queued.kind,
+                        );
+                    }
+                    dirty = true;
+                }
+            }
+            picker_load = picker_load_rx.recv() => {
+                if let Some(load) = picker_load {
+                    app.apply_picker_load(load);
+                    dirty = true;
+                }
+            }
+            req = confirm_rx.recv() => {
+                if let Some(req) = req {
+                    if req.active.load(std::sync::atomic::Ordering::Relaxed) {
+                        app.queue_confirmation(req);
+                        dirty = true;
+                    }
+                }
+            }
+        }
+
+        if app.should_quit {
+            if let Some(r) = current_run.take() {
+                settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await;
+            }
+            break;
+        }
+    }
+    if let Some(jobs) = &app.jobs {
+        jobs.shutdown();
+    }
+    if let Some(msg) = last_err {
+        return Err(Error::Io(std::io::Error::other(msg)));
+    }
+    Ok(())
+}
