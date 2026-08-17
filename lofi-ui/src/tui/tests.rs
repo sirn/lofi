@@ -4476,6 +4476,7 @@ fn thinking_timing_is_restored_from_transcript() {
             ContentBlock::Thinking {
                 text: "hm".to_string(),
                 signature: None,
+                redacted: false,
             },
             ContentBlock::Text {
                 text: "ok".to_string(),

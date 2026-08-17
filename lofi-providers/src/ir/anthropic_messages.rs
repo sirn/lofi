@@ -121,7 +121,17 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             "content": anthropic_tool_result_content(content, images),
             "is_error": is_error,
         }),
-        ContentBlock::Thinking { text, signature } => {
+        ContentBlock::Thinking {
+            text: _,
+            signature,
+            redacted: true,
+        } => json!({
+            "type": "redacted_thinking",
+            "data": signature.as_deref().unwrap_or(""),
+        }),
+        ContentBlock::Thinking {
+            text, signature, ..
+        } => {
             let mut obj = json!({"type": "thinking", "thinking": text});
             if let Some(sig) = signature {
                 obj["signature"] = json!(sig);
@@ -285,6 +295,17 @@ fn map_anthropic_event(
         "content_block_start" => {
             let block = data.get("content_block");
             if let Some(block) = block {
+                if block.get("type").and_then(Value::as_str) == Some("redacted_thinking") {
+                    // The chain-of-thought body was withheld by the server
+                    // (safety); the data blob still needs to round-trip back.
+                    if let Some(d) = block.get("data").and_then(Value::as_str) {
+                        if !d.is_empty() {
+                            out.push(StreamingEvent::ThinkingRedacted {
+                                data: d.to_string(),
+                            });
+                        }
+                    }
+                }
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let id = block
                         .get("id")
@@ -650,6 +671,7 @@ mod tests {
                 blocks: vec![lofi_types::ContentBlock::Thinking {
                     text: "reasoning".to_string(),
                     signature: Some("signature".to_string()),
+                    redacted: false,
                 }],
                 kind: PromptKind::default(),
             },
@@ -838,6 +860,72 @@ mod tests {
                     "media_type": "image/jpeg",
                     "data": "AQID",
                 },
+            })
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_block_start_emits_event_with_data() {
+        let mut state = AnthropicMapperState::default();
+        let chunk = json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "redacted_thinking",
+                "data": "opaque_blob_abc"
+            }
+        });
+        let out = map_anthropic_event(Some("content_block_start"), &chunk, &mut state).unwrap();
+        assert_eq!(
+            out,
+            vec![StreamingEvent::ThinkingRedacted {
+                data: "opaque_blob_abc".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_replays_as_redacted_block() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![lofi_types::ContentBlock::Thinking {
+                text: "[Reasoning redacted]".to_string(),
+                signature: Some("opaque_blob_abc".to_string()),
+                redacted: true,
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let msg = &req["messages"][0];
+        let block = &msg["content"][0];
+        assert_eq!(
+            block,
+            &json!({
+                "type": "redacted_thinking",
+                "data": "opaque_blob_abc"
+            })
+        );
+    }
+
+    #[test]
+    fn non_redacted_thinking_remains_a_signed_thinking_block() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![lofi_types::ContentBlock::Thinking {
+                text: "let me look".to_string(),
+                signature: Some("sig_abc".to_string()),
+                redacted: false,
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let block = &req["messages"][0]["content"][0];
+        assert_eq!(
+            block,
+            &json!({
+                "type": "thinking",
+                "thinking": "let me look",
+                "signature": "sig_abc"
             })
         );
     }
