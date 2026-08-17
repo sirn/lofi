@@ -121,7 +121,17 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             "content": anthropic_tool_result_content(content, images),
             "is_error": is_error,
         }),
-        ContentBlock::Thinking { text, signature } => {
+        ContentBlock::Thinking {
+            text: _,
+            signature,
+            redacted: true,
+        } => json!({
+            "type": "redacted_thinking",
+            "data": signature.as_deref().unwrap_or(""),
+        }),
+        ContentBlock::Thinking {
+            text, signature, ..
+        } => {
             let mut obj = json!({"type": "thinking", "thinking": text});
             if let Some(sig) = signature {
                 obj["signature"] = json!(sig);
@@ -285,6 +295,17 @@ fn map_anthropic_event(
         "content_block_start" => {
             let block = data.get("content_block");
             if let Some(block) = block {
+                if block.get("type").and_then(Value::as_str) == Some("redacted_thinking") {
+                    // The chain-of-thought body was withheld by the server
+                    // (safety); the data blob still needs to round-trip back.
+                    if let Some(d) = block.get("data").and_then(Value::as_str) {
+                        if !d.is_empty() {
+                            out.push(StreamingEvent::ThinkingRedacted {
+                                data: d.to_string(),
+                            });
+                        }
+                    }
+                }
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let id = block
                         .get("id")
@@ -650,6 +671,7 @@ mod tests {
                 blocks: vec![lofi_types::ContentBlock::Thinking {
                     text: "reasoning".to_string(),
                     signature: Some("signature".to_string()),
+                    redacted: false,
                 }],
                 kind: PromptKind::default(),
             },

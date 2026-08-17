@@ -275,10 +275,14 @@ pub enum ContentBlock {
     /// `signature` is provider-specific replay metadata: Anthropic's thinking
     /// signature, Responses `encrypted_content`, or — on chat-completions
     /// plaintext reasoning streams — the delta field name the trace arrived
-    /// under so the next request can replay it to the same key.
+    /// under so the next request can replay it to the same key. `redacted`
+    /// marks Anthropic redacted thinking: text is a placeholder, signature
+    /// is the opaque blob returned as `redacted_thinking.data`.
     Thinking {
         text: String,
         signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
     },
     /// Opaque metadata for the preceding provider part. Keeping it adjacent
     /// lets each provider IR restore the signature to the exact wire part.
@@ -344,6 +348,13 @@ fn is_default_prompt_kind(kind: &PromptKind) -> bool {
     *kind == PromptKind::User
 }
 
+// Same serde contract for boolean defaults: the predicate must take a
+// reference, so the body inverts.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PartSignatureFormat {
@@ -369,6 +380,12 @@ pub enum StreamingEvent {
     },
     ThinkingDelta(String),
     ThinkingSignature(String),
+    /// Anthropic `redacted_thinking`: the server withheld the chain-of-thought
+    /// body and returned an opaque blob instead. `data` is the value of
+    /// `content_block.data` and echoes back as `redacted_thinking` on later
+    /// turns. Emitted on `content_block_start`; no deltas follow for this
+    /// block.
+    ThinkingRedacted { data: String },
     /// Opaque signature attached to a streamed provider part. Tool-call
     /// signatures carry a target because compatible streams can deliver
     /// parallel call metadata after a different call became current.
@@ -1676,6 +1693,7 @@ mod tests {
         round_trip(&ContentBlock::Thinking {
             text: "hmm".to_string(),
             signature: None,
+            redacted: false,
         });
         round_trip(&ContentBlock::Image {
             bytes: vec![0xFF, 0xD8, 0xFF, 0xD9],

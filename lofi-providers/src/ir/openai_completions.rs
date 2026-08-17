@@ -82,6 +82,8 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
         if let ContentBlock::Thinking {
             text,
             signature: Some(field),
+            ..
+            redacted: false,
         } = block
         {
             // Trim-check on echo (Pi's rule): whitespace-only reasoning has
@@ -944,6 +946,7 @@ mod tests {
             blocks: vec![ContentBlock::Thinking {
                 text: "let me think".to_string(),
                 signature: Some("reasoning_content".to_string()),
+                redacted: false,
             }],
             kind: PromptKind::default(),
         }];
@@ -961,6 +964,7 @@ mod tests {
             blocks: vec![ContentBlock::Thinking {
                 text: "yep".to_string(),
                 signature: Some("reasoning".to_string()),
+                redacted: false,
             }],
             kind: PromptKind::default(),
         }];
@@ -978,10 +982,12 @@ mod tests {
                 ContentBlock::Thinking {
                     text: "secret plan".to_string(),
                     signature: Some("EogBCkYICxgCKkA...".to_string()),
+                    redacted: false,
                 },
                 ContentBlock::Thinking {
                     text: "unsigned".to_string(),
                     signature: None,
+                    redacted: false,
                 },
             ],
             kind: PromptKind::default(),
@@ -1001,6 +1007,7 @@ mod tests {
                 ContentBlock::Thinking {
                     text: "first".to_string(),
                     signature: Some("reasoning_content".to_string()),
+                    redacted: false,
                 },
                 ContentBlock::Text {
                     text: "answer".to_string(),
@@ -1008,6 +1015,7 @@ mod tests {
                 ContentBlock::Thinking {
                     text: "second".to_string(),
                     signature: Some("reasoning_content".to_string()),
+                    redacted: false,
                 },
             ],
             kind: PromptKind::default(),
@@ -1025,6 +1033,7 @@ mod tests {
             blocks: vec![ContentBlock::Thinking {
                 text: "  \n ".to_string(),
                 signature: Some("reasoning_content".to_string()),
+                redacted: false,
             }],
             kind: PromptKind::default(),
         }];
@@ -1039,6 +1048,7 @@ mod tests {
             blocks: vec![ContentBlock::Thinking {
                 text: "thinking".to_string(),
                 signature: Some("reasoning_text".to_string()),
+                redacted: false,
             }],
             kind: PromptKind::default(),
         }];
@@ -1053,6 +1063,7 @@ mod tests {
             blocks: vec![ContentBlock::Thinking {
                 text: String::new(),
                 signature: Some("reasoning_content".to_string()),
+                redacted: false,
             }],
             kind: PromptKind::default(),
         }];

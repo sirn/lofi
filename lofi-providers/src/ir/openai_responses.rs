@@ -62,6 +62,8 @@ pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
                         ContentBlock::Thinking {
                             text,
                             signature: Some(sig),
+                            ..
+                            redacted: false,
                         } if !sig.is_empty() => {
                             // Responses needs the encrypted blob on later
                             // turns when `store` is false. Plaintext-only
@@ -753,6 +755,7 @@ mod tests {
                 ContentBlock::Thinking {
                     text: "Need a tool.".to_string(),
                     signature: Some("enc_blob".to_string()),
+                    redacted: false,
                 },
                 ContentBlock::ToolUse {
                     id: "call_1".to_string(),
@@ -783,6 +786,7 @@ mod tests {
                 ContentBlock::Thinking {
                     text: "local only".to_string(),
                     signature: None,
+                    redacted: false,
                 },
                 ContentBlock::Text {
                     text: "done".to_string(),
