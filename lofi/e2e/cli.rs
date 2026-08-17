@@ -6,8 +6,8 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, text_response, thinking_response, tool_response, Fixture, MockResponse,
-    MockServer, WAIT,
+    delayed_text_response, text_response, thinking_response, thinking_tool_response, tool_response,
+    Fixture, MockServer, WAIT,
 };
 
 #[test]
@@ -371,14 +371,7 @@ fn reasoning_content_is_replayed_to_chat_completions_providers() {
     // DeepSeek-style thinking must replay as assistant["reasoning_content"]
     // on the round 2 request.
     let server = MockServer::start(vec![
-        MockResponse::sse(
-            concat!(
-                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private rope\"}}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"rt\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{\\\"code\\\": \\\"return 1;\\\"}\"}}]}}]}\n\n",
-                "data: [DONE]\n\n"
-            )
-            .to_string(),
-        ),
+        thinking_tool_response("private rope", "rt", "return 1;"),
         text_response("done"),
     ]);
     let fixture = Fixture::new(&server);
