@@ -130,9 +130,9 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
     if !reasoning_details.is_empty() {
         msg["reasoning_details"] = json!(reasoning_details);
     }
-    // Multiple blocks interleaved with text chat the server takes only one
-    // reasoning field, so join the thinking texts under the first-seen field
-    // name (Pi's behavior). A single block short-circuits to its own text.
+    // The wire form carries one reasoning channel per assistant message, so
+    // thinking blocks (one per round of tool-use / text interleave) are
+    // joined with "\n" under the field the server first used (mirrors Pi).
     if let Some(&(field, _)) = reasoning.first() {
         let joined = reasoning
             .iter()
