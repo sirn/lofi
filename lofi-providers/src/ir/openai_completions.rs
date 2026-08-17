@@ -10,10 +10,12 @@ use super::ProtocolIr;
 use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
-// Field names that carry chain-of-thought on chat-completions streams. The same
-// list drives capture (the first non-empty field wins per message) and replay
-// (assistant messages re-emit thinking text under the recorded name), so both
-// sites reference this single source.
+// Field names that carry chain-of-thought on chat-completions streams:
+// DeepSeek and Qwen use `reasoning_content`, GLM/Zhipu uses `thinking`,
+// others use `reasoning`. The same list drives capture (the first
+// non-empty field wins per message) and replay (assistant messages re-emit
+// thinking text under the recorded name), so both sites reference this
+// single source.
 const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "thinking", "reasoning"];
 
 fn collect_text(blocks: &[ContentBlock]) -> String {
