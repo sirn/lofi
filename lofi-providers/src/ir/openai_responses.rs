@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lofi_types::{ContentBlock, Message, Model, Role, StreamingEvent, ThinkingLevel, Usage};
+use lofi_types::{
+    ContentBlock, Message, Model, Role, ServiceTier, StreamingEvent, ThinkingLevel, Usage,
+};
 use serde_json::{json, Value};
 
 use super::ProtocolIr;
@@ -211,6 +213,9 @@ fn build_openai_responses_request(
     }
     if let Some(effort) = openai_effort(&model.thinking) {
         req["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+    }
+    if model.service_tier != ServiceTier::Auto {
+        req["service_tier"] = json!(model.service_tier.as_str());
     }
     req
 }
@@ -440,6 +445,7 @@ mod tests {
             api: lofi_types::Api::OpenAiResponses,
             reasoning: false,
             thinking: lofi_types::ThinkingLevel::Off,
+            service_tier: lofi_types::ServiceTier::Auto,
             supports_image: false,
             context_window: None,
             max_tokens: None,
