@@ -14,6 +14,7 @@ fn app() -> App {
     App::new(
         "openai/gpt-4o".to_string(),
         ThinkingLevel::Medium,
+        ServiceTier::Auto,
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
@@ -84,6 +85,7 @@ fn compact_thresholds_use_the_models_actual_small_context_window() {
     let a = App::new(
         "openai/gpt-4o".to_string(),
         ThinkingLevel::Medium,
+        ServiceTier::Auto,
         100_000,
         config,
         String::new(),
@@ -4408,6 +4410,7 @@ fn footer_shows_model_and_thinking() {
     let a = App::new(
         "openai/gpt-5.6-sol".to_string(),
         ThinkingLevel::XHigh,
+        ServiceTier::Auto,
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
@@ -4427,6 +4430,7 @@ fn footer_hides_thinking_when_off() {
     let a = App::new(
         "openai/gpt-4o".to_string(),
         ThinkingLevel::Off,
+        ServiceTier::Auto,
         0,
         lofi_types::CompactionConfig::default(),
         String::new(),
@@ -5020,6 +5024,7 @@ fn footer_and_header_show_cost_and_usage() {
     let mut a = App::new(
         "proxy/deepseek-v4-flash".to_string(),
         ThinkingLevel::Off,
+        ServiceTier::Auto,
         200_000,
         lofi_types::CompactionConfig::default(),
         String::new(),
@@ -5944,6 +5949,7 @@ fn model_picker_open_preselects_current() {
             id: "claude".into(),
             name: "Claude".into(),
             thinking_levels: vec![ThinkingLevel::Medium],
+            service_tiers: vec![],
             supports_image: false,
             context_window: Some(200_000),
         },
@@ -5952,6 +5958,7 @@ fn model_picker_open_preselects_current() {
             id: "gpt-4o".into(),
             name: String::new(),
             thinking_levels: vec![],
+            service_tiers: vec![],
             supports_image: false,
             context_window: Some(128_000),
         },
@@ -5981,6 +5988,7 @@ fn model_picker_confirm_sets_pending_switch() {
             id: "claude".into(),
             name: "Claude".into(),
             thinking_levels: vec![],
+            service_tiers: vec![],
             supports_image: false,
             context_window: None,
         },
@@ -5989,6 +5997,7 @@ fn model_picker_confirm_sets_pending_switch() {
             id: "gpt-4o".into(),
             name: String::new(),
             thinking_levels: vec![],
+            service_tiers: vec![],
             supports_image: false,
             context_window: None,
         },
@@ -6011,6 +6020,7 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
         api: lofi_types::Api::AnthropicMessages,
         reasoning: true,
         thinking: ThinkingLevel::XHigh,
+        service_tier: ServiceTier::Auto,
         supports_image: true,
         context_window: Some(200_000),
         max_tokens: None,
@@ -6021,7 +6031,7 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
         cache_write_price: None,
         per_request_price: None,
     };
-    a.apply_model_switch(&model, ThinkingLevel::XHigh);
+    a.apply_model_switch(&model, ThinkingLevel::XHigh, ServiceTier::Auto);
     assert_eq!(a.model_label, "anthropic/claude");
     assert_eq!(a.thinking_label.as_deref(), Some(":xhigh"));
     assert_eq!(a.ctx_limit, 200_000);
@@ -6039,6 +6049,7 @@ fn apply_model_switch_with_no_context_window_uses_default() {
         api: lofi_types::Api::OpenAiResponses,
         reasoning: false,
         thinking: ThinkingLevel::Off,
+        service_tier: ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
@@ -6049,7 +6060,7 @@ fn apply_model_switch_with_no_context_window_uses_default() {
         cache_write_price: None,
         per_request_price: None,
     };
-    a.apply_model_switch(&model, ThinkingLevel::Off);
+    a.apply_model_switch(&model, ThinkingLevel::Off, ServiceTier::Auto);
     assert_eq!(a.ctx_limit, DEFAULT_CTX_LIMIT);
 }
 
@@ -6061,6 +6072,7 @@ fn thinking_picker_open_preselects_current() {
         id: "gpt-4o".into(),
         name: String::new(),
         thinking_levels: vec![ThinkingLevel::Medium, ThinkingLevel::High],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6086,6 +6098,7 @@ fn thinking_picker_open_no_levels_notifies() {
         id: "gpt-4o".into(),
         name: String::new(),
         thinking_levels: vec![],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6102,6 +6115,7 @@ fn thinking_picker_confirm_sets_pending_switch() {
         id: "gpt-4o".into(),
         name: String::new(),
         thinking_levels: vec![ThinkingLevel::Medium, ThinkingLevel::High],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6123,6 +6137,7 @@ fn resume_model_switch_when_model_differs() {
         id: "claude".into(),
         name: String::new(),
         thinking_levels: vec![],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6150,6 +6165,7 @@ fn resume_model_switch_none_when_same_model() {
         id: "gpt-4o".into(),
         name: String::new(),
         thinking_levels: vec![],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6186,6 +6202,7 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
         id: "y".into(),
         name: String::new(),
         thinking_levels: vec![],
+        service_tiers: vec![],
         supports_image: false,
         context_window: None,
     }];
@@ -6882,6 +6899,7 @@ fn resumed_compaction_restores_summarized_message_count() {
     let mut a = App::new(
         "openai/gpt-4o".to_string(),
         ThinkingLevel::Medium,
+        ServiceTier::Auto,
         0,
         config,
         String::new(),

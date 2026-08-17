@@ -189,6 +189,9 @@ impl App {
         if let Some(tl) = &self.thinking_label {
             label.push_str(tl);
         }
+        if let Some(st) = &self.service_label {
+            label.push_str(st);
+        }
         Line::from(vec![Span::styled(label, Style::new().fg(self.theme.muted))])
     }
 }

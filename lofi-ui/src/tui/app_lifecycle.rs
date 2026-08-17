@@ -7,12 +7,15 @@ impl App {
     pub(super) fn new(
         model_label: String,
         thinking: ThinkingLevel,
+        service_tier: ServiceTier,
         ctx_limit: u64,
         compaction: lofi_types::CompactionConfig,
         system_prompt: String,
     ) -> Self {
         let thinking_label =
             (thinking != ThinkingLevel::Off).then(|| format!(":{}", thinking.as_str()));
+        let service_label = (service_tier != ServiceTier::Auto)
+            .then(|| format!("@{}", service_tier.as_str()));
         Self {
             turns: Vec::new(),
             input: String::new(),
@@ -32,6 +35,8 @@ impl App {
             model_label,
             thinking_label,
             thinking,
+            service_label,
+            service_tier,
             status_usage: None,
             ctx_limit: if ctx_limit > 0 {
                 ctx_limit
@@ -72,6 +77,7 @@ impl App {
             picker_generation: Arc::new(AtomicU64::new(0)),
             model_picker: None,
             thinking_picker: None,
+            service_picker: None,
             theme_picker: None,
             model_choices: Vec::new(),
             pending_model_switch: None,
@@ -126,9 +132,10 @@ impl App {
 
     pub(super) fn session_model(&self) -> String {
         format!(
-            "{}{}",
+            "{}{}{}",
             self.model_label,
-            self.thinking_label.as_deref().unwrap_or("")
+            self.thinking_label.as_deref().unwrap_or(""),
+            self.service_label.as_deref().unwrap_or("")
         )
     }
 
@@ -746,6 +753,7 @@ impl App {
             provider: provider.to_string(),
             id: id.to_string(),
             thinking: self.thinking.clone(),
+            service_tier: self.service_tier.clone(),
         }
     }
 
