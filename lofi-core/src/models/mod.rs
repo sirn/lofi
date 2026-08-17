@@ -158,24 +158,20 @@ impl ModelRegistry {
         let mut out: Vec<lofi_types::ModelChoice> = self
             .available()
             .into_iter()
-            .map(|m| lofi_types::ModelChoice {
-                thinking_levels: self
+            .map(|m| {
+                let mc = self
                     .providers
                     .get(&m.provider)
-                    .and_then(|p| p.models.get(&m.id))
-                    .map(|mc| mc.thinking_levels.clone())
-                    .unwrap_or_default(),
-                service_tiers: self
-                    .providers
-                    .get(&m.provider)
-                    .and_then(|p| p.models.get(&m.id))
-                    .map(|mc| mc.service_tiers.clone())
-                    .unwrap_or_default(),
-                supports_image: m.supports_image,
-                provider: m.provider,
-                id: m.id,
-                name: m.name,
-                context_window: m.context_window,
+                    .and_then(|p| p.models.get(&m.id));
+                lofi_types::ModelChoice {
+                    thinking_levels: mc.map(|mc| mc.thinking_levels.clone()).unwrap_or_default(),
+                    service_tiers: mc.map(|mc| mc.service_tiers.clone()).unwrap_or_default(),
+                    supports_image: m.supports_image,
+                    provider: m.provider,
+                    id: m.id,
+                    name: m.name,
+                    context_window: m.context_window,
+                }
             })
             .collect();
         out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));

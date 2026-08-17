@@ -1337,13 +1337,15 @@ fn select_model_rejects_unknown_level() {
     assert!(matches!(err, Error::Config(_)));
 }
 
-
 #[test]
 fn select_model_explicit_tier_suffix() {
     let (cfg, reg) = build(one_provider(provider(
         Api::OpenAiCompletions,
         Some("sk-test"),
-        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]))]),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]),
+        )]),
         None,
     )));
     let (m, level) = select_model(&reg, &cfg, Some("openai/gpt-4o:high@flex")).unwrap();
@@ -1389,13 +1391,21 @@ fn select_model_tier_falls_back_to_model_default() {
 }
 
 #[test]
-fn select_model_rejects_unknown_tier() {
+fn select_model_custom_tier_uses_declared_list() {
     let (cfg, reg) = build(one_provider(provider(
         Api::OpenAiCompletions,
         Some("sk-test"),
-        models(&[("gpt-4o", mc())]),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Custom("vip".into())]),
+        )]),
         None,
     )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o@vip")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Custom("vip".into()));
+
+    // An undeclared custom value is rejected, so a typo never quietly sends
+    // the provider default.
     let err = select_model(&reg, &cfg, Some("openai/gpt-4o@bogus")).unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 }

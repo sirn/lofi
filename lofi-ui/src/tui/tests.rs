@@ -6129,7 +6129,6 @@ fn thinking_picker_confirm_sets_pending_switch() {
     assert!(a.thinking_picker.is_none());
 }
 
-
 #[test]
 fn service_picker_open_lists_auto_plus_declared() {
     let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium

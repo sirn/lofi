@@ -14,8 +14,8 @@ impl App {
     ) -> Self {
         let thinking_label =
             (thinking != ThinkingLevel::Off).then(|| format!(":{}", thinking.as_str()));
-        let service_label = (service_tier != ServiceTier::Auto)
-            .then(|| format!("@{}", service_tier.as_str()));
+        let service_label =
+            (service_tier != ServiceTier::Auto).then(|| format!("@{}", service_tier.as_str()));
         Self {
             turns: Vec::new(),
             input: String::new(),
