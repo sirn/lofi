@@ -1746,7 +1746,9 @@ mod tests {
             .unwrap();
         let header = std::fs::read_to_string(&path).unwrap();
         assert!(
-            header.contains("\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\"}"),
+            header.contains(
+                "\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\",\"service_tier\":\"auto\"}"
+            ),
             "header model must be a raw object: {header}"
         );
         assert!(
@@ -1769,7 +1771,7 @@ mod tests {
         let turn_end_line = body.lines().last().unwrap();
         assert!(
             turn_end_line.contains(
-                "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\"}"
+                "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\",\"service_tier\":\"auto\"}"
             ),
             "turn-end model must be a raw object: {turn_end_line}"
         );

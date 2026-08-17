@@ -236,6 +236,7 @@ pub(crate) struct ModelQuery {
     provider: String,
     model: String,
     level: Option<ThinkingLevel>,
+    tier: Option<ServiceTier>,
 }
 
 /// The provider qualifier is mandatory: bare ids are rejected so a prompt
@@ -243,7 +244,28 @@ pub(crate) struct ModelQuery {
 /// `:off`/`:low`/`:medium`/`:high`/`:xhigh` suffix; an unrecognized suffix is
 /// an error rather than silently ignored.
 pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
-    let (qual, level) = match query.rsplit_once(':') {
+    // Optional trailing `@tier` (e.g. `provider/id:high@flex`). Split it
+    // before the thinking level so a level suffix is never confused with a
+    // tier. An unrecognized value becomes a provider-defined Custom tier;
+    // resolve_service_tier still rejects tiers the model does not declare.
+    let (qual, tier) = match query.rsplit_once('@') {
+        Some((head, tail)) => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                (query, None)
+            } else {
+                (
+                    head,
+                    Some(
+                        ServiceTier::parse(tail)
+                            .unwrap_or_else(|| ServiceTier::Custom(tail.to_string())),
+                    ),
+                )
+            }
+        }
+        None => (query, None),
+    };
+    let (qual, level) = match qual.rsplit_once(':') {
         Some((head, tail)) if !tail.is_empty() => match ThinkingLevel::parse(tail) {
             Some(l) => (head, Some(l)),
             None => {
@@ -252,11 +274,11 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
                 )));
             }
         },
-        _ => (query, None),
+        _ => (qual, None),
     };
     let (provider, model) = qual.split_once('/').ok_or_else(|| {
         Error::Config(format!(
-            "model `{query}` must be qualified as `provider/model[:level]`"
+            "model `{query}` must be qualified as `provider/model[:level][@tier]`"
         ))
     })?;
     if provider.is_empty() || model.is_empty() {
@@ -266,6 +288,7 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
         provider: provider.to_string(),
         model: model.to_string(),
         level,
+        tier,
     })
 }
 
@@ -282,12 +305,12 @@ pub fn select_model(
     model_query: Option<&str>,
 ) -> Result<(Model, ThinkingLevel)> {
     let available = registry.available();
-    let (provider_name, model_id, explicit_level) = if let Some(q) = model_query {
+    let (provider_name, model_id, explicit_level, explicit_tier) = if let Some(q) = model_query {
         let mq = parse_model_query(q)?;
-        (mq.provider, mq.model, mq.level)
+        (mq.provider, mq.model, mq.level, mq.tier)
     } else if let Some(default) = config.default_model.as_deref() {
         let mq = parse_model_query(default)?;
-        (mq.provider, mq.model, mq.level)
+        (mq.provider, mq.model, mq.level, mq.tier)
     } else if let Some(provider) = config.default_provider.as_deref() {
         let m = available
             .iter()
@@ -298,12 +321,12 @@ pub fn select_model(
                     registry.list_models_print()
                 ))
             })?;
-        (m.provider.clone(), m.id.clone(), None)
+        (m.provider.clone(), m.id.clone(), None, None)
     } else {
         let m = available
             .first()
             .ok_or_else(|| Error::NoModels(NO_MODELS_HINT.to_string()))?;
-        (m.provider.clone(), m.id.clone(), None)
+        (m.provider.clone(), m.id.clone(), None, None)
     };
 
     let model = registry
@@ -343,6 +366,9 @@ pub fn select_model(
         pcfg,
         config.agent.thinking_level.clone(),
     )?;
+    let tier = resolve_service_tier(explicit_tier, mc, pcfg, config.agent.service_tier.clone())?;
+    let mut model = model;
+    model.service_tier = tier.clone();
     Ok((model, level))
 }
 
@@ -378,6 +404,44 @@ pub(crate) fn resolve_thinking_level(
             .collect();
         return Err(Error::Config(format!(
             "thinking level `{}` not supported by this model; allowed: {}",
+            desired.as_str(),
+            allowed.join(", ")
+        )));
+    }
+    Ok(desired)
+}
+
+pub(crate) fn resolve_service_tier(
+    explicit: Option<ServiceTier>,
+    mc: &lofi_types::ModelConfig,
+    pcfg: &lofi_types::ProviderConfig,
+    agent: Option<ServiceTier>,
+) -> Result<ServiceTier> {
+    let was_explicit = explicit.is_some();
+    let desired = explicit
+        .or_else(|| mc.service_tier.clone())
+        .or_else(|| pcfg.service_tier.clone())
+        .or(agent)
+        .unwrap_or(ServiceTier::Auto);
+    if desired == ServiceTier::Auto {
+        return Ok(ServiceTier::Auto);
+    }
+    if mc.service_tiers.is_empty() {
+        // Like thinking levels, an undeclared list means the model declares
+        // no service tiers, so an explicit non-auto tier is rejected rather
+        // than silently forwarded to a provider that may not understand it.
+        if was_explicit {
+            return Err(Error::Config(format!(
+                "model does not support service tiers (no service_tiers declared); cannot use `{}`",
+                desired.as_str()
+            )));
+        }
+        return Ok(ServiceTier::Auto);
+    }
+    if !mc.service_tiers.contains(&desired) {
+        let allowed: Vec<&str> = mc.service_tiers.iter().map(ServiceTier::as_str).collect();
+        return Err(Error::Config(format!(
+            "service tier `{}` not supported by this model; allowed: {}",
             desired.as_str(),
             allowed.join(", ")
         )));

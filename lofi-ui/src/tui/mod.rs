@@ -54,7 +54,7 @@ use crossterm::terminal::{
 };
 use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
-    ContentBlock, Message, PromptKind, Role, RunModel, SessionEvent, SessionEventKind,
+    ContentBlock, Message, PromptKind, Role, RunModel, ServiceTier, SessionEvent, SessionEventKind,
     ThinkingLevel, Usage,
 };
 use ratatui::backend::CrosstermBackend;
@@ -156,6 +156,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show session info"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
+    ("/service", "switch the service tier"),
     ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
     ("/verbose", "toggle tool detail"),
@@ -541,6 +542,11 @@ struct ThinkingPickerState {
     selected: usize,
 }
 
+struct ServicePickerState {
+    tiers: Vec<ServiceTier>,
+    selected: usize,
+}
+
 struct ThemePickerState {
     modes: [lofi_types::ThemeMode; 3],
     selected: usize,
@@ -598,6 +604,18 @@ impl JobViewContent {
 impl Modal for ThinkingPickerState {
     fn len(&self) -> usize {
         self.levels.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
+impl Modal for ServicePickerState {
+    fn len(&self) -> usize {
+        self.tiers.len()
     }
     fn selected(&self) -> usize {
         self.selected
@@ -820,6 +838,8 @@ pub(crate) struct App {
     model_label: String,
     thinking_label: Option<String>,
     thinking: ThinkingLevel,
+    service_label: Option<String>,
+    service_tier: ServiceTier,
     status_usage: Option<Usage>,
     total_in: u64,
     total_out: u64,
@@ -859,6 +879,7 @@ pub(crate) struct App {
     picker_generation: Arc<AtomicU64>,
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
+    service_picker: Option<ServicePickerState>,
     theme_picker: Option<ThemePickerState>,
     /// The session's background-job registry, cloned from the agent at
     /// startup. `None` when no agent is configured. Backs the `/job` modal
@@ -1090,6 +1111,7 @@ pub(crate) async fn run(
     agent: Option<Agent>,
     model_label: String,
     thinking: ThinkingLevel,
+    service_tier: ServiceTier,
     ui_theme: lofi_types::ThemeMode,
     session: SessionConfig,
     no_models_hint: Option<String>,
@@ -1158,6 +1180,7 @@ pub(crate) async fn run(
                 ui_theme,
                 model_label,
                 thinking,
+                service_tier,
                 session,
                 no_models_hint,
                 ctx_limit,
@@ -1179,6 +1202,7 @@ async fn run_loop(
     theme_mode: lofi_types::ThemeMode,
     model_label: String,
     thinking: ThinkingLevel,
+    service_tier: ServiceTier,
     session: SessionConfig,
     no_models_hint: Option<String>,
     ctx_limit: u64,
@@ -1196,7 +1220,14 @@ async fn run_loop(
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
-    let mut app = App::new(model_label, thinking, ctx_limit, compaction, system_prompt);
+    let mut app = App::new(
+        model_label,
+        thinking,
+        service_tier,
+        ctx_limit,
+        compaction,
+        system_prompt,
+    );
     app.theme = theme;
     app.theme_mode = theme_mode;
     app.model_choices = model_choices;
@@ -1441,8 +1472,9 @@ async fn run_loop(
                             |s| s.rebuild(agent.as_ref(), &q),
                         ) {
                             Ok((new_agent, model, level)) => {
+                                let tier = model.service_tier.clone();
                                 agent = Some(new_agent);
-                                app.apply_model_switch(&model, level);
+                                app.apply_model_switch(&model, level, tier);
                             }
                             Err(e) => app.notify(
                                 NotifyKind::Error,

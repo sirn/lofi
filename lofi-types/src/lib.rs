@@ -153,6 +153,64 @@ impl<'de> Deserialize<'de> for ThinkingLevel {
     }
 }
 
+/// Provider service tier for a request (e.g. `OpenAI`'s `flex` or `priority`).
+/// `Auto` omits the field so the provider uses its default. `Custom` retains
+/// provider-defined tiers verbatim for forward compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum ServiceTier {
+    #[default]
+    Auto,
+    Flex,
+    Priority,
+    /// Provider-defined tier retained verbatim for forward compatibility.
+    Custom(String),
+}
+
+impl ServiceTier {
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "flex" => Some(Self::Flex),
+            "priority" => Some(Self::Priority),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl Serialize for ServiceTier {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceTier {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            Err(serde::de::Error::custom("service tier cannot be empty"))
+        } else {
+            Ok(Self::parse(&value).unwrap_or(Self::Custom(value)))
+        }
+    }
+}
+
 /// Where a turn's prompt came from. Typed input is the default; anything
 /// else is an app-injected notice (background-job completions now, more
 /// automation later). Consumers use it to style externally-triggered turns
@@ -537,6 +595,7 @@ pub struct ModelChoice {
     pub id: String,
     pub name: String,
     pub thinking_levels: Vec<ThinkingLevel>,
+    pub service_tiers: Vec<ServiceTier>,
     pub supports_image: bool,
     pub context_window: Option<u64>,
 }
@@ -552,6 +611,8 @@ pub struct Model {
     pub reasoning: bool,
     #[serde(default)]
     pub thinking: ThinkingLevel,
+    #[serde(default)]
+    pub service_tier: ServiceTier,
     #[serde(default)]
     pub supports_image: bool,
     #[serde(default)]
@@ -591,19 +652,44 @@ pub struct RunModel {
     pub id: String,
     #[serde(default)]
     pub thinking: ThinkingLevel,
+    #[serde(default)]
+    pub service_tier: ServiceTier,
 }
 
 impl RunModel {
+    /// A model query that round-trips through `parse_model_query`: unlike
+    /// `label` it always emits the thinking level so a restored `off` level
+    /// is not silently replaced by the model's default.
+    #[must_use]
+    pub fn query(&self) -> String {
+        format!(
+            "{}/{}:{}{}",
+            self.provider,
+            self.id,
+            self.thinking.as_str(),
+            if self.service_tier == ServiceTier::Auto {
+                String::new()
+            } else {
+                format!("@{}", self.service_tier.as_str())
+            }
+        )
+    }
+
     #[must_use]
     pub fn label(&self) -> String {
         format!(
-            "{}/{}{}",
+            "{}/{}{}{}",
             self.provider,
             self.id,
             if self.thinking == ThinkingLevel::Off {
                 String::new()
             } else {
                 format!(":{}", self.thinking.as_str())
+            },
+            if self.service_tier == ServiceTier::Auto {
+                String::new()
+            } else {
+                format!("@{}", self.service_tier.as_str())
             }
         )
     }
@@ -614,26 +700,45 @@ impl RunModel {
             Some((p, r)) => (p.to_string(), r),
             None => (String::new(), s),
         };
-        let (id, thinking) = if let Some((i, lvl)) = rest.split_once(" · ") {
+        // Optional trailing `@tier`, mirroring core's model query: any
+        // non-empty tail is a tier (unknown values stay provider-defined
+        // Custom tiers so labels round-trip).
+        let (core, tier) = match rest.rsplit_once('@') {
+            Some((head, tail)) => {
+                let tail = tail.trim();
+                if tail.is_empty() {
+                    (rest.to_string(), ServiceTier::Auto)
+                } else {
+                    (
+                        head.to_string(),
+                        ServiceTier::parse(tail)
+                            .unwrap_or_else(|| ServiceTier::Custom(tail.to_string())),
+                    )
+                }
+            }
+            None => (rest.to_string(), ServiceTier::Auto),
+        };
+        let (id, thinking) = if let Some((i, lvl)) = core.split_once(" · ") {
             (
                 i.to_string(),
                 ThinkingLevel::parse(lvl.trim()).unwrap_or_default(),
             )
-        } else if let Some((i, lvl)) = rest.rsplit_once(':') {
+        } else if let Some((i, lvl)) = core.rsplit_once(':') {
             // Only treat the suffix as a thinking level when it parses;
             // otherwise the colon is part of the model id (core's model
             // query allows colons in ids) and must be preserved.
             match ThinkingLevel::parse(lvl.trim()) {
                 Some(t) => (i.to_string(), t),
-                None => (rest.to_string(), ThinkingLevel::Off),
+                None => (core.clone(), ThinkingLevel::Off),
             }
         } else {
-            (rest.to_string(), ThinkingLevel::Off)
+            (core.clone(), ThinkingLevel::Off)
         };
         Self {
             provider,
             id,
             thinking,
+            service_tier: tier,
         }
     }
 }
@@ -664,6 +769,8 @@ impl<'de> serde::Deserialize<'de> for RunModel {
                 id: String,
                 #[serde(default)]
                 thinking: ThinkingLevel,
+                #[serde(default)]
+                service_tier: ServiceTier,
             },
             Str(String),
         }
@@ -672,10 +779,12 @@ impl<'de> serde::Deserialize<'de> for RunModel {
                 provider,
                 id,
                 thinking,
+                service_tier,
             } => Self {
                 provider,
                 id,
                 thinking,
+                service_tier,
             },
             Repr::Str(s) => Self::parse(&s),
         })
@@ -701,6 +810,10 @@ pub struct ModelConfig {
     pub thinking_levels: Vec<ThinkingLevel>,
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
+    #[serde(default)]
+    pub service_tiers: Vec<ServiceTier>,
+    #[serde(default)]
+    pub service_tier: Option<ServiceTier>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -808,6 +921,10 @@ pub struct AutoModelsConfig {
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
     #[serde(default)]
+    pub service_tiers: Vec<ServiceTier>,
+    #[serde(default)]
+    pub service_tier: Option<ServiceTier>,
+    #[serde(default)]
     pub ttl_seconds: Option<u64>,
 }
 
@@ -876,6 +993,10 @@ pub struct ProviderConfig {
     pub thinking_level: Option<ThinkingLevel>,
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
+    #[serde(default)]
+    pub service_tier: Option<ServiceTier>,
+    #[serde(default)]
+    pub service_tiers: Vec<ServiceTier>,
 }
 
 impl ProviderConfig {
@@ -923,6 +1044,10 @@ pub struct AgentConfig {
     pub thinking_level: Option<ThinkingLevel>,
     #[serde(default)]
     pub thinking_levels: Vec<ThinkingLevel>,
+    #[serde(default)]
+    pub service_tier: Option<ServiceTier>,
+    #[serde(default)]
+    pub service_tiers: Vec<ServiceTier>,
 }
 
 /// The optional `[compaction.auto]` **soft caps** are speculative: a run may
@@ -1450,6 +1575,70 @@ mod tests {
     }
 
     #[test]
+    fn run_model_label_includes_service_tier() {
+        let m = RunModel {
+            provider: "openai".into(),
+            id: "gpt-5.6-sol".into(),
+            thinking: ThinkingLevel::High,
+            service_tier: ServiceTier::Flex,
+        };
+        assert_eq!(m.label(), "openai/gpt-5.6-sol:high@flex");
+
+        let auto = RunModel {
+            service_tier: ServiceTier::Auto,
+            ..m.clone()
+        };
+        assert_eq!(auto.label(), "openai/gpt-5.6-sol:high");
+
+        let off = RunModel {
+            thinking: ThinkingLevel::Off,
+            service_tier: ServiceTier::Priority,
+            ..m.clone()
+        };
+        assert_eq!(off.label(), "openai/gpt-5.6-sol@priority");
+    }
+
+    #[test]
+    fn run_model_parse_round_trips_service_tier() {
+        for label in [
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-sol:high",
+            "openai/gpt-5.6-sol:high@flex",
+            "openai/gpt-5.6-sol@priority",
+        ] {
+            let parsed: RunModel = label.into();
+            assert_eq!(parsed.label(), label, "round trip failed for {label}");
+        }
+    }
+
+    #[test]
+    fn run_model_custom_tier_round_trips() {
+        let parsed: RunModel = "openai/gpt-5.6-sol:high@vip".into();
+        assert_eq!(parsed.id, "gpt-5.6-sol");
+        assert_eq!(parsed.thinking, ThinkingLevel::High);
+        assert_eq!(parsed.service_tier, ServiceTier::Custom("vip".into()));
+        assert_eq!(parsed.label(), "openai/gpt-5.6-sol:high@vip");
+    }
+
+    #[test]
+    fn service_tier_parse_and_round_trip() {
+        for (s, tier) in [
+            ("auto", ServiceTier::Auto),
+            ("flex", ServiceTier::Flex),
+            ("priority", ServiceTier::Priority),
+        ] {
+            assert_eq!(ServiceTier::parse(s), Some(tier.clone()));
+            assert_eq!(tier.as_str(), s);
+        }
+        assert_eq!(ServiceTier::parse("bogus"), None);
+        let custom = ServiceTier::Custom("vip".into());
+        assert_eq!(custom.as_str(), "vip");
+        round_trip(&custom);
+        let json = serde_json::to_string(&custom).unwrap();
+        assert_eq!(json, "\"vip\"");
+    }
+
+    #[test]
     fn api_serde_snake_case() {
         let json = serde_json::to_string(&Api::AnthropicMessages).unwrap();
         assert_eq!(json, "\"anthropic_messages\"");
@@ -1635,6 +1824,8 @@ mod tests {
                             max_tokens: None,
                             thinking_levels: Vec::new(),
                             thinking_level: None,
+                            service_tiers: Vec::new(),
+                            service_tier: None,
                             base_url: None,
                             input_price: None,
                             output_price: None,
@@ -1649,6 +1840,8 @@ mod tests {
                 no_auth: false,
                 thinking_level: None,
                 thinking_levels: Vec::new(),
+                service_tier: None,
+                service_tiers: Vec::new(),
             },
         );
         let cfg = Config {
