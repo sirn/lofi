@@ -381,4 +381,29 @@ mod tests {
         };
         assert_eq!(input, &Value::Null);
     }
+
+    #[test]
+    fn chat_completions_reasoning_field_lands_on_thinking_signature() {
+        // What the chat-completions mapper produces for a DeepSeek-style
+        // stream: ThinkingSignature carrying the field name, then deltas.
+        let events = [
+            StreamingEvent::ThinkingSignature("reasoning_content".to_string()),
+            StreamingEvent::ThinkingDelta("hmm".to_string()),
+            StreamingEvent::ThinkingDelta(" yes".to_string()),
+            StreamingEvent::TextDelta("answer".to_string()),
+        ];
+        let m = assemble_message(&events);
+        assert_eq!(m.blocks.len(), 2);
+        match &m.blocks[0] {
+            ContentBlock::Thinking { text, signature } => {
+                assert_eq!(text, "hmm yes");
+                assert_eq!(signature.as_deref(), Some("reasoning_content"));
+            }
+            b => panic!("expected Thinking, got {b:?}"),
+        }
+        match &m.blocks[1] {
+            ContentBlock::Text { text } => assert_eq!(text, "answer"),
+            b => panic!("expected Text, got {b:?}"),
+        }
+    }
 }
