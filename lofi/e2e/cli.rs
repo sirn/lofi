@@ -20,6 +20,7 @@ fn help_version_and_dispatch_precedence_are_stable() {
     let help = String::from_utf8_lossy(&help.stdout);
     for flag in [
         "--print",
+        "--env",
         "--list-models",
         "--continue",
         "--resume",
@@ -237,4 +238,130 @@ fn invalid_resume_id_fails_before_starting_the_tui() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing-session-id"));
     assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn env_flag_injects_into_config_resolution_and_bash() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "env-bash",
+            r#"return await lofi.bash({ cmd: "printf %s \"$EXAMPLE_API_KEY\"" });"#,
+        ),
+        text_response("env flag answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    // Add a provider whose base_url and key come only from $VAR, so an
+    // --env injection is required to reach the mock server.
+    std::fs::write(
+        &fixture.config,
+        format!(
+            r#"{config}
+[providers.envtest]
+base_url = "$EXAMPLE_BASE_URL"
+api_key = "$EXAMPLE_API_KEY"
+
+[providers.envtest.models.env]
+name = "Env Model"
+context_window = 100000
+thinking_level = "medium"
+thinking_levels = ["low", "medium", "high"]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        "mode = \"unrestricted\"\n",
+    )
+    .unwrap();
+
+    let output = fixture.output(&[
+        "-e",
+        "EXAMPLE_API_KEY=env-secret-key",
+        "-e",
+        &format!("EXAMPLE_BASE_URL={}", server.url()),
+        "--model",
+        "envtest/env",
+        "--print",
+        "use injected env",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("env flag answer"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    // The base_url resolved from --env pointed at the mock server, and the
+    // key was sent as a bearer token.
+    assert!(requests[0]
+        .headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer env-secret-key"));
+    // The bash child saw the injected key, redacted from the transcript.
+    let body = &requests[1].body;
+    assert!(body.contains("[redacted]"));
+    assert!(!body.contains("env-secret-key"));
+}
+
+#[test]
+fn env_flag_bare_name_forwards_parent_and_missing_errors() {
+    let server = MockServer::start(vec![text_response("bare env answer")]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!(
+            r#"{config}
+[providers.envbare]
+base_url = "$EXAMPLE_BASE_URL"
+api_key = "$EXAMPLE_API_KEY"
+no_auth = false
+
+[providers.envbare.models.env]
+name = "Env Bare"
+context_window = 100000
+"#
+        ),
+    )
+    .unwrap();
+
+    // A bare NAME forwards the parent shell's value.
+    let output = fixture.output_with_env(
+        &[
+            "-e",
+            "EXAMPLE_API_KEY",
+            "-e",
+            "EXAMPLE_BASE_URL",
+            "--model",
+            "envbare/env",
+            "--print",
+            "bare env",
+        ],
+        &[
+            ("EXAMPLE_API_KEY", "bare-secret"),
+            ("EXAMPLE_BASE_URL", &server.url()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("bare env answer"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer bare-secret"));
+
+    // A bare NAME that is unset in the parent is a config error before any
+    // provider request.
+    let missing = fixture.output(&["-e", "LOFI_E2E_DEFINITELY_UNSET", "--list-models"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("LOFI_E2E_DEFINITELY_UNSET"));
 }

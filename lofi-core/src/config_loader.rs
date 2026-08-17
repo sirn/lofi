@@ -126,6 +126,60 @@ fn is_env_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// Parse a NAME[=VALUE] env spec from --env. A bare NAME forwards the
+/// parent shell's value; NAME=VALUE sets it explicitly. Returns the pair
+/// ready to be applied to the process environment.
+/// # Errors
+/// `Error::Config` when a bare NAME is not set in the parent environment.
+pub fn parse_env_spec(spec: &str) -> Result<(String, String)> {
+    let Some((name, value)) = spec.split_once('=') else {
+        let value =
+            std::env::var(spec).map_err(|_| Error::Config(format!("env var not set: {spec}")))?;
+        return Ok((spec.to_string(), value));
+    };
+    if name.is_empty() {
+        return Err(Error::Config(format!("invalid env spec: {spec}")));
+    }
+    Ok((name.to_string(), value.to_string()))
+}
+
+/// Apply --env specs to the process environment, returning a guard that
+/// restores the prior values on drop. The specs are applied lazily (before
+/// config resolution) so env-based config values and the agent's bash
+/// environment all observe them.
+#[must_use]
+pub fn apply_env_specs(specs: &[(String, String)]) -> EnvRestoreGuard {
+    let mut guard = EnvRestoreGuard::default();
+    for (name, value) in specs {
+        guard.capture(name);
+        std::env::set_var(name, value);
+    }
+    guard
+}
+
+/// Restores env vars mutated by `apply_env_specs` on drop.
+#[derive(Default)]
+pub struct EnvRestoreGuard {
+    prev: Vec<(String, Option<String>)>,
+}
+
+impl EnvRestoreGuard {
+    fn capture(&mut self, name: &str) {
+        self.prev.push((name.to_string(), std::env::var(name).ok()));
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (name, prev) in self.prev.drain(..).rev() {
+            match prev {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
 /// Default timeout for a `!cmd` credential helper (30s). A hung helper
 /// must not block startup indefinitely.
 const CRED_CMD_TIMEOUT_MS: u64 = 30_000;
@@ -243,6 +297,14 @@ pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
             provider.api_key = resolve_value(&key).await.ok().filter(|s| !s.is_empty());
         } else if let Some(name) = provider.env_name.as_ref() {
             provider.api_key = std::env::var(name).ok().filter(|s| !s.is_empty());
+        }
+        if let Some(base) = provider.base_url.take() {
+            provider.base_url = resolve_value(&base).await.ok().filter(|s| !s.is_empty());
+        }
+        for model in provider.models.values_mut() {
+            if let Some(base) = model.base_url.take() {
+                model.base_url = resolve_value(&base).await.ok().filter(|s| !s.is_empty());
+            }
         }
         if let Some(headers) = provider.headers.take() {
             let mut resolved = HashMap::with_capacity(headers.len());
@@ -548,5 +610,75 @@ mod tests {
             p,
             std::path::PathBuf::from(home).join(".config/lofi/config.toml")
         );
+    }
+
+    #[test]
+    fn parse_env_spec_explicit_value() {
+        assert_eq!(
+            parse_env_spec("EXAMPLE_API_KEY=abc").unwrap(),
+            ("EXAMPLE_API_KEY".to_string(), "abc".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_env_spec_value_with_equals() {
+        assert_eq!(
+            parse_env_spec("EXAMPLE_BASE_URL=http://a=b/c").unwrap(),
+            ("EXAMPLE_BASE_URL".to_string(), "http://a=b/c".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_env_spec_bare_forwards_parent() {
+        let _g = env_lock();
+        let _v = capture_env("LOFI_TEST_PARSE_BARE");
+        std::env::set_var("LOFI_TEST_PARSE_BARE", "parent-value");
+        assert_eq!(
+            parse_env_spec("LOFI_TEST_PARSE_BARE").unwrap(),
+            (
+                "LOFI_TEST_PARSE_BARE".to_string(),
+                "parent-value".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_env_spec_bare_missing_errors() {
+        let _g = env_lock();
+        let _v = capture_env("LOFI_TEST_PARSE_MISSING");
+        std::env::remove_var("LOFI_TEST_PARSE_MISSING");
+        assert!(parse_env_spec("LOFI_TEST_PARSE_MISSING").is_err());
+    }
+
+    #[test]
+    fn parse_env_spec_empty_name_errors() {
+        assert!(parse_env_spec("=value").is_err());
+    }
+
+    #[test]
+    fn apply_env_specs_sets_and_restores() {
+        let _g = env_lock();
+        let _v = capture_env("LOFI_TEST_APPLY");
+        std::env::remove_var("LOFI_TEST_APPLY");
+        {
+            let guard = apply_env_specs(&[("LOFI_TEST_APPLY".to_string(), "set".to_string())]);
+            assert_eq!(std::env::var("LOFI_TEST_APPLY").unwrap(), "set");
+            drop(guard);
+        }
+        assert!(std::env::var("LOFI_TEST_APPLY").is_err());
+    }
+
+    #[test]
+    fn apply_env_specs_restores_prior_value() {
+        let _g = env_lock();
+        let _v = capture_env("LOFI_TEST_APPLY_PRIOR");
+        std::env::set_var("LOFI_TEST_APPLY_PRIOR", "prior");
+        {
+            let guard =
+                apply_env_specs(&[("LOFI_TEST_APPLY_PRIOR".to_string(), "new".to_string())]);
+            assert_eq!(std::env::var("LOFI_TEST_APPLY_PRIOR").unwrap(), "new");
+            drop(guard);
+        }
+        assert_eq!(std::env::var("LOFI_TEST_APPLY_PRIOR").unwrap(), "prior");
     }
 }

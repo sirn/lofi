@@ -51,6 +51,14 @@ x-literal = "$$5"
 
 Alternatively, `env_name` names an API-key environment variable. Unlike an an explicit `api_key = "$VAR"`, a value that cannot be resolved leaves the provider unavailable. Header values that cannot be resolved are omitted.
 
+`base_url` (per provider or per model) and `env_name` also resolve the same `$VAR` / `!command` forms, so an endpoint or key can be supplied by an environment variable rather than edited into the config.
+
+To inject values for a single invocation without touching the config, use `-e`/`--env` (repeatable). A bare `NAME` forwards the parent shell's value; `NAME=VALUE` sets it explicitly. These variables are available to `$VAR`/env_name resolution and to `lofi.bash` child processes during that run. For example:
+
+```sh
+lofi -e EXAMPLE_API_KEY -e EXAMPLE_BASE_URL="https://api.example.com"
+```
+
 ## Model selection
 
 ### `default_provider`
