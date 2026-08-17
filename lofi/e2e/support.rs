@@ -682,6 +682,32 @@ data: [DONE]
     ))
 }
 
+pub fn thinking_tool_response(thinking: &str, call_id: &str, code: &str) -> MockResponse {
+    let thinking = json!({ "choices": [{ "delta": { "reasoning_content": thinking } }] });
+    let arguments = json!({ "code": code }).to_string();
+    let tool = json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": "exec", "arguments": arguments }
+                }]
+            }
+        }]
+    });
+    MockResponse::sse(format!(
+        "data: {thinking}
+
+data: {tool}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
     let thinking = json!({
         "type": "response.reasoning_summary_text.delta",
