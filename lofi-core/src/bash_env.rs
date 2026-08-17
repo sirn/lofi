@@ -5,36 +5,43 @@ const BASELINE_NAMES: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "LANG", "TMPDIR",
 ];
 
+// --env pairs are injected into the child environment and redacted from
+// captured output regardless of strip_env, so a per-instance credential
+// passed on the command line behaves like a pass_env entry.
 #[must_use]
-pub fn resolve_bash_env(cfg: &BashConfig) -> BashEnv {
-    let mut env = BashEnv {
+pub fn resolve_bash_env(cfg: &BashConfig, env: &[(String, String)]) -> BashEnv {
+    let mut env_res = BashEnv {
         strip_env: cfg.strip_env,
         baseline: Vec::new(),
         extras: Vec::new(),
         redact: Vec::new(),
     };
     if cfg.strip_env {
-        env.baseline = baseline_from_parent();
+        env_res.baseline = baseline_from_parent();
     }
     for name in &cfg.pass_env {
         if let Ok(val) = std::env::var(name) {
-            env.extras.push((name.clone(), val.clone()));
-            env.redact.push(val);
+            env_res.extras.push((name.clone(), val.clone()));
+            env_res.redact.push(val);
         }
+    }
+    for (name, val) in env {
+        env_res.extras.push((name.clone(), val.clone()));
+        env_res.redact.push(val.clone());
     }
     if let Some(path) = &cfg.env_file {
         let expanded = expand_tilde(path);
         if let Ok(text) = std::fs::read_to_string(&expanded) {
             for (k, v) in parse_env_file(&text) {
-                env.extras.push((k, v.clone()));
-                env.redact.push(v);
+                env_res.extras.push((k, v.clone()));
+                env_res.redact.push(v);
             }
         }
     }
-    env.redact.sort_by_key(|v| std::cmp::Reverse(v.len()));
-    env.redact.dedup();
-    env.redact.retain(|v| !v.is_empty());
-    env
+    env_res.redact.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    env_res.redact.dedup();
+    env_res.redact.retain(|v| !v.is_empty());
+    env_res
 }
 
 fn baseline_from_parent() -> Vec<(String, String)> {
@@ -122,5 +129,20 @@ mod tests {
         assert_eq!(map.get("KEY"), Some(&"v"));
         assert!(!map.contains_key("NOSIGN"));
         assert!(!map.contains_key("comment"));
+    }
+
+    #[test]
+    fn env_pairs_are_injected_and_redacted() {
+        let cfg = BashConfig {
+            strip_env: true,
+            pass_env: Vec::new(),
+            env_file: None,
+        };
+        let env = resolve_bash_env(&cfg, &[("EXAMPLE_KEY".to_string(), "secret".to_string())]);
+        assert!(env
+            .extras
+            .iter()
+            .any(|(k, v)| k == "EXAMPLE_KEY" && v == "secret"));
+        assert!(env.redact.contains(&"secret".to_string()));
     }
 }

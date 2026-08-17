@@ -15,6 +15,8 @@ use lofi_core::ModelRegistry;
 struct Cli {
     #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
+    #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+    env: Vec<String>,
     #[arg(long)]
     list_models: bool,
     #[arg(long)]
@@ -86,6 +88,9 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
     if let Some(m) = &cli.model {
         opts = opts.with_model(m);
     }
+    if !cli.env.is_empty() {
+        opts = opts.with_envs(cli.env.iter().map(String::as_str));
+    }
     opts
 }
 
@@ -102,6 +107,9 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
     }
     if cli.no_session {
         opts = opts.with_no_session();
+    }
+    if !cli.env.is_empty() {
+        opts = opts.with_envs(cli.env.iter().map(String::as_str));
     }
     opts
 }

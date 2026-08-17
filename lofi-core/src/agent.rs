@@ -196,11 +196,12 @@ impl Agent {
         max_output_tokens: Option<u64>,
         reserved_context_tokens: u64,
         bash: &BashConfig,
+        env: &[(String, String)],
         truncate: lofi_types::TruncateConfig,
         image: lofi_types::ImageConfig,
         shell_policy_config: &lofi_types::ShellPolicyConfig,
     ) -> Self {
-        let bash_env = crate::bash_env::resolve_bash_env(bash);
+        let bash_env = crate::bash_env::resolve_bash_env(bash, env);
         let truncate = lofi_code::TruncatedCap {
             max_lines: truncate.max_lines,
             max_bytes: truncate.max_bytes,
