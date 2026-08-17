@@ -130,25 +130,16 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
     if !reasoning_details.is_empty() {
         msg["reasoning_details"] = json!(reasoning_details);
     }
-    match reasoning.len() {
-        0 => {}
-        1 => {
-            #[allow(clippy::indexing_slicing)]
-            let (field, t) = reasoning[0];
-            msg[field] = json!(t);
-        }
-        _ => {
-            // Multiple blocks interleaved text/thinking; server takes one
-            // field, so join under the first-seen field name (Pi's behavior).
-            #[allow(clippy::indexing_slicing)]
-            let field = reasoning[0].0;
-            let joined = reasoning
-                .iter()
-                .map(|(_, t)| *t)
-                .collect::<Vec<_>>()
-                .join("\n");
-            msg[field] = json!(joined);
-        }
+    // Multiple blocks interleaved with text chat the server takes only one
+    // reasoning field, so join the thinking texts under the first-seen field
+    // name (Pi's behavior). A single block short-circuits to its own text.
+    if let Some(&(field, _)) = reasoning.first() {
+        let joined = reasoning
+            .iter()
+            .map(|(_, t)| *t)
+            .collect::<Vec<_>>()
+            .join("\n");
+        msg[field] = json!(joined);
     }
     out.push(msg);
 }
