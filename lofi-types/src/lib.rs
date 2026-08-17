@@ -275,10 +275,14 @@ pub enum ContentBlock {
     /// `signature` is provider-specific replay metadata: Anthropic's thinking
     /// signature, Responses `encrypted_content`, or — on chat-completions
     /// plaintext reasoning streams — the delta field name the trace arrived
-    /// under so the next request can replay it to the same key.
+    /// under so the next request can replay it to the same key. `redacted`
+    /// marks Anthropic redacted thinking: text is a placeholder, signature
+    /// is the opaque blob returned as `redacted_thinking.data`.
     Thinking {
         text: String,
         signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
     },
     /// Opaque metadata for the preceding provider part. Keeping it adjacent
     /// lets each provider IR restore the signature to the exact wire part.
@@ -342,6 +346,13 @@ pub struct Message {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_prompt_kind(kind: &PromptKind) -> bool {
     *kind == PromptKind::User
+}
+
+// Same serde contract for boolean defaults: the predicate must take a
+// reference, so the body inverts.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
