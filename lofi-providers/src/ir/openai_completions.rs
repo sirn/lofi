@@ -10,13 +10,18 @@ use super::ProtocolIr;
 use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
-// Field names that carry chain-of-thought on chat-completions streams:
-// DeepSeek and Qwen use `reasoning_content`, GLM/Zhipu uses `thinking`,
-// others use `reasoning`. The same list drives capture (the first
-// non-empty field wins per message) and replay (assistant messages re-emit
-// thinking text under the recorded name), so both sites reference this
-// single source.
-const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "thinking", "reasoning"];
+// Field names that carry chain-of-thought on chat-completions streams.
+// DeepSeek/Qwen use `reasoning_content`, GLM/Zhipu uses `thinking`, other
+// vendors use `reasoning` or `reasoning_text`. The same list drives
+// capture (the first non-empty field wins per message) and replay
+// (assistant messages re-emit thinking text under the recorded name), so
+// both sites reference this single source.
+const REASONING_FIELDS: [&str; 4] = [
+    "reasoning_content",
+    "thinking",
+    "reasoning",
+    "reasoning_text",
+];
 
 fn collect_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
@@ -79,7 +84,9 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
             signature: Some(field),
         } = block
         {
-            if REASONING_FIELDS.contains(&field.as_str()) && !text.is_empty() {
+            // Trim-check on echo (Pi's rule): whitespace-only reasoning has
+            // no semantic content the model needs back.
+            if REASONING_FIELDS.contains(&field.as_str()) && !text.trim().is_empty() {
                 reasoning.push((field.as_str(), text.as_str()));
             }
         }
@@ -891,7 +898,7 @@ mod tests {
 
     #[test]
     fn alternate_reasoning_fields_also_recorded() {
-        for field in ["thinking", "reasoning"] {
+        for field in ["thinking", "reasoning", "reasoning_text"] {
             let mut state = ChatMapperState::default();
             let chunk = json!({"choices":[{"delta":{field:"hmm"}}]});
             let out = map_openai_chat_event(&chunk, &mut state).unwrap();
@@ -1007,6 +1014,36 @@ mod tests {
         }];
         let req = build_openai_chat_request(&model(), &msgs, &[]);
         assert_eq!(req["messages"][0]["reasoning_content"], "first\nsecond");
+    }
+
+    #[test]
+    fn whitespace_only_thinking_is_not_replayed() {
+        // Pi trims the thinking text before deciding whether to emit. A
+        // whitespace-only trace would just be noise on the wire.
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "  \n ".to_string(),
+                signature: Some("reasoning_content".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert!(req["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_text_field_replayed_verbatim() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "thinking".to_string(),
+                signature: Some("reasoning_text".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["reasoning_text"], "thinking");
     }
 
     #[test]
