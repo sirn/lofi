@@ -4,9 +4,9 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::support::{
-    anthropic_text_response, anthropic_tool_response, google_text_response, google_tool_response,
-    responses_response, responses_tool_response, text_response, tool_response, Fixture,
-    MockResponse, MockServer,
+    anthropic_redacted_thinking_tool_response, anthropic_text_response, anthropic_tool_response,
+    google_text_response, google_tool_response, responses_response, responses_tool_response,
+    text_response, tool_response, Fixture, MockResponse, MockServer,
 };
 
 fn chat_body(text: &str) -> String {
@@ -303,6 +303,45 @@ fn image_tool_results_use_each_provider_native_wire_format() {
     assert!(anthropic.to_string().contains("\"source\":{\"data\":"));
     let google: serde_json::Value = serde_json::from_str(&requests[7].body).unwrap();
     assert!(google.to_string().contains("inlineData"));
+}
+
+#[test]
+fn anthropic_redacted_thinking_round_trips_a_signed_omission() {
+    // Round 1 emits a redacted thinking block followed by a tool call. Round
+    // 2 must replay the opaque blob back as a redacted_thinking block so the
+    // server can verify the safety-system decision.
+    let server = MockServer::start(vec![
+        anthropic_redacted_thinking_tool_response("e2e-redacted-blob", "call_x", "return 1;"),
+        anthropic_text_response("done"),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    let output = fixture.output(&[
+        "--model",
+        "anthropic/tools",
+        "--print",
+        "redact and continue",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let messages = second["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("second turn must include the prior assistant message");
+    let blocks = assistant["content"].as_array().unwrap();
+    let redacted = blocks
+        .iter()
+        .find(|b| b["type"] == "redacted_thinking")
+        .expect("redacted_thinking must round-trip as itself");
+    assert_eq!(redacted["data"], "e2e-redacted-blob");
 }
 
 fn one_pixel_png() -> Vec<u8> {

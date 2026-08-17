@@ -36,6 +36,7 @@ enum Slot {
         text: String,
         sig: Option<String>,
         part_sig: Option<PartSig>,
+        redacted: bool,
     },
     Tool(usize),
 }
@@ -58,6 +59,7 @@ impl MessageAssembler {
                     text: d,
                     sig: None,
                     part_sig: None,
+                    redacted: false,
                 }),
             },
             StreamingEvent::ThinkingSignature(s) => {
@@ -73,8 +75,17 @@ impl MessageAssembler {
                         text: String::new(),
                         sig: Some(s),
                         part_sig: None,
+                        redacted: false,
                     });
                 }
+            }
+            StreamingEvent::ThinkingRedacted { data } => {
+                self.order.push(Slot::Thinking {
+                    text: "[Reasoning redacted]".to_string(),
+                    sig: Some(data),
+                    part_sig: None,
+                    redacted: true,
+                });
             }
             StreamingEvent::PartSignature {
                 provider,
@@ -151,10 +162,12 @@ impl MessageAssembler {
                     text,
                     sig,
                     part_sig,
+                    redacted,
                 } => {
                     blocks.push(ContentBlock::Thinking {
                         text,
                         signature: sig,
+                        redacted,
                     });
                     if let Some(sig) = part_sig {
                         blocks.push(ContentBlock::PartSignature {
@@ -351,8 +364,9 @@ mod tests {
         let m = assemble_message(&events);
         assert!(matches!(
             &m.blocks[0],
-            ContentBlock::Thinking { text, signature }
-                if text == "plan" && signature.as_deref() == Some("enc_blob")
+            ContentBlock::Thinking {
+                text, signature, ..
+            } if text == "plan" && signature.as_deref() == Some("enc_blob")
         ));
     }
 
@@ -365,6 +379,7 @@ mod tests {
             ContentBlock::Thinking {
                 text: String::new(),
                 signature: Some("enc_blob".to_string()),
+                redacted: false,
             }
         );
     }
@@ -395,7 +410,9 @@ mod tests {
         let m = assemble_message(&events);
         assert_eq!(m.blocks.len(), 2);
         match &m.blocks[0] {
-            ContentBlock::Thinking { text, signature } => {
+            ContentBlock::Thinking {
+                text, signature, ..
+            } => {
                 assert_eq!(text, "hmm yes");
                 assert_eq!(signature.as_deref(), Some("reasoning_content"));
             }

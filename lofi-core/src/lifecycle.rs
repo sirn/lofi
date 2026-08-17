@@ -489,9 +489,9 @@ fn message_heap_bytes(message: &Message) -> usize {
 fn content_heap_bytes(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text } => text.capacity(),
-        ContentBlock::Thinking { text, signature } => {
-            text.capacity() + signature.as_ref().map_or(0, String::capacity)
-        }
+        ContentBlock::Thinking {
+            text, signature, ..
+        } => text.capacity() + signature.as_ref().map_or(0, String::capacity),
         ContentBlock::ToolUse { id, name, input } => {
             id.capacity() + name.capacity() + json_heap_bytes(input)
         }

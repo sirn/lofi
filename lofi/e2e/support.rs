@@ -579,6 +579,31 @@ pub fn anthropic_usage_response(thinking: &str, signature: &str, text: &str) -> 
     ))
 }
 
+pub fn anthropic_redacted_thinking_tool_response(
+    data: &str,
+    call_id: &str,
+    code: &str,
+) -> MockResponse {
+    let start_redacted = json!({
+        "index": 0,
+        "content_block": { "type": "redacted_thinking", "data": data },
+    });
+    let stop_redacted = json!({ "index": 0 });
+    let start_tool = json!({
+        "index": 1,
+        "content_block": { "type": "tool_use", "id": call_id, "name": "exec" },
+    });
+    let arguments = json!({ "code": code }).to_string();
+    let delta_tool = json!({
+        "index": 1,
+        "delta": { "type": "input_json_delta", "partial_json": arguments },
+    });
+    let stop_tool = json!({ "index": 1 });
+    MockResponse::sse(format!(
+        "event: content_block_start\ndata: {start_redacted}\n\nevent: content_block_stop\ndata: {stop_redacted}\n\nevent: content_block_start\ndata: {start_tool}\n\nevent: content_block_delta\ndata: {delta_tool}\n\nevent: content_block_stop\ndata: {stop_tool}\n\nevent: message_stop\ndata: {{}}\n\n"
+    ))
+}
+
 pub fn google_tool_response(call_id: &str, code: &str) -> MockResponse {
     let event = json!({
         "candidates": [{
