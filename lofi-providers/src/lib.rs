@@ -399,6 +399,8 @@ mod tests {
             no_auth: false,
             thinking_level: None,
             thinking_levels: Vec::new(),
+            service_tier: None,
+            service_tiers: Vec::new(),
         }
     }
 

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use lofi_types::{
-    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, StreamingEvent, ThinkingLevel,
-    Usage,
+    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, ServiceTier, StreamingEvent,
+    ThinkingLevel, Usage,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -372,6 +372,7 @@ impl Agent {
             provider: self.model.provider.clone(),
             id: self.model.id.clone(),
             thinking: self.model.thinking.clone(),
+            service_tier: self.model.service_tier.clone(),
         }
     }
 
