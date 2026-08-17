@@ -54,8 +54,8 @@ use crossterm::terminal::{
 };
 use lofi_core::session::store::{self, SessionEntry};
 use lofi_types::{
-    ContentBlock, Message, PromptKind, Role, RunModel, ServiceTier, SessionEvent,
-    SessionEventKind, ThinkingLevel, Usage,
+    ContentBlock, Message, PromptKind, Role, RunModel, ServiceTier, SessionEvent, SessionEventKind,
+    ThinkingLevel, Usage,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;

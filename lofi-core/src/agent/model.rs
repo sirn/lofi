@@ -246,18 +246,24 @@ pub(crate) struct ModelQuery {
 pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
     // Optional trailing `@tier` (e.g. `provider/id:high@flex`). Split it
     // before the thinking level so a level suffix is never confused with a
-    // tier. An unrecognized suffix is an error rather than silently ignored,
-    // so a typo never quietly sends the provider default.
+    // tier. An unrecognized value becomes a provider-defined Custom tier;
+    // resolve_service_tier still rejects tiers the model does not declare.
     let (qual, tier) = match query.rsplit_once('@') {
-        Some((head, tail)) if !tail.is_empty() => match ServiceTier::parse(tail) {
-            Some(t) => (head, Some(t)),
-            None => {
-                return Err(Error::Config(format!(
-                    "unknown service tier `{tail}` in `{query}` (expected auto|flex|priority)"
-                )));
+        Some((head, tail)) => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                (query, None)
+            } else {
+                (
+                    head,
+                    Some(
+                        ServiceTier::parse(tail)
+                            .unwrap_or_else(|| ServiceTier::Custom(tail.to_string())),
+                    ),
+                )
             }
-        },
-        _ => (query, None),
+        }
+        None => (query, None),
     };
     let (qual, level) = match qual.rsplit_once(':') {
         Some((head, tail)) if !tail.is_empty() => match ThinkingLevel::parse(tail) {
@@ -360,12 +366,7 @@ pub fn select_model(
         pcfg,
         config.agent.thinking_level.clone(),
     )?;
-    let tier = resolve_service_tier(
-        explicit_tier,
-        mc,
-        pcfg,
-        config.agent.service_tier.clone(),
-    )?;
+    let tier = resolve_service_tier(explicit_tier, mc, pcfg, config.agent.service_tier.clone())?;
     let mut model = model;
     model.service_tier = tier.clone();
     Ok((model, level))
@@ -438,11 +439,7 @@ pub(crate) fn resolve_service_tier(
         return Ok(ServiceTier::Auto);
     }
     if !mc.service_tiers.contains(&desired) {
-        let allowed: Vec<&str> = mc
-            .service_tiers
-            .iter()
-            .map(ServiceTier::as_str)
-            .collect();
+        let allowed: Vec<&str> = mc.service_tiers.iter().map(ServiceTier::as_str).collect();
         return Err(Error::Config(format!(
             "service tier `{}` not supported by this model; allowed: {}",
             desired.as_str(),

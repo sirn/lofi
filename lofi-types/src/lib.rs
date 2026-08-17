@@ -682,14 +682,22 @@ impl RunModel {
             Some((p, r)) => (p.to_string(), r),
             None => (String::new(), s),
         };
-        // Optional trailing `@tier`: only treated as a service tier when it
-        // parses; otherwise the at-sign is part of the model id and must be
-        // preserved (core's model query allows at-signs in ids).
+        // Optional trailing `@tier`, mirroring core's model query: any
+        // non-empty tail is a tier (unknown values stay provider-defined
+        // Custom tiers so labels round-trip).
         let (core, tier) = match rest.rsplit_once('@') {
-            Some((head, tail)) => match ServiceTier::parse(tail.trim()) {
-                Some(t) => (head.to_string(), t),
-                None => (rest.to_string(), ServiceTier::Auto),
-            },
+            Some((head, tail)) => {
+                let tail = tail.trim();
+                if tail.is_empty() {
+                    (rest.to_string(), ServiceTier::Auto)
+                } else {
+                    (
+                        head.to_string(),
+                        ServiceTier::parse(tail)
+                            .unwrap_or_else(|| ServiceTier::Custom(tail.to_string())),
+                    )
+                }
+            }
             None => (rest.to_string(), ServiceTier::Auto),
         };
         let (id, thinking) = if let Some((i, lvl)) = core.split_once(" · ") {
@@ -1548,7 +1556,6 @@ mod tests {
         assert_eq!(Api::OpenAiCompletions.label(), "OpenAI Chat Completions");
     }
 
-
     #[test]
     fn run_model_label_includes_service_tier() {
         let m = RunModel {
@@ -1587,14 +1594,12 @@ mod tests {
     }
 
     #[test]
-    fn run_model_at_sign_in_id_is_preserved_when_no_tier() {
-        // A model id legitimately containing "@" is preserved when the suffix
-        // does not parse as a service tier.
-        let parsed: RunModel = "proxy/model@1".into();
-        assert_eq!(parsed.provider, "proxy");
-        assert_eq!(parsed.id, "model@1");
-        assert_eq!(parsed.service_tier, ServiceTier::Auto);
-        assert_eq!(parsed.label(), "proxy/model@1");
+    fn run_model_custom_tier_round_trips() {
+        let parsed: RunModel = "openai/gpt-5.6-sol:high@vip".into();
+        assert_eq!(parsed.id, "gpt-5.6-sol");
+        assert_eq!(parsed.thinking, ThinkingLevel::High);
+        assert_eq!(parsed.service_tier, ServiceTier::Custom("vip".into()));
+        assert_eq!(parsed.label(), "openai/gpt-5.6-sol:high@vip");
     }
 
     #[test]
