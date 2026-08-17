@@ -15,6 +15,7 @@ pub struct InteractiveOptions {
     pub root: PathBuf,
     pub config_path: Option<PathBuf>,
     pub model: Option<String>,
+    pub env: Vec<String>,
     pub continue_last: bool,
     pub resume: Option<String>,
     pub no_session: bool,
@@ -27,6 +28,7 @@ impl InteractiveOptions {
             root: root.into(),
             config_path: None,
             model: None,
+            env: Vec::new(),
             continue_last: false,
             resume: None,
             no_session: false,
@@ -42,6 +44,12 @@ impl InteractiveOptions {
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_envs<'a>(mut self, envs: impl IntoIterator<Item = &'a str>) -> Self {
+        self.env = envs.into_iter().map(str::to_string).collect();
         self
     }
 
@@ -70,6 +78,7 @@ pub struct PrintOptions {
     pub root: PathBuf,
     pub config_path: Option<PathBuf>,
     pub model: Option<String>,
+    pub env: Vec<String>,
 }
 
 impl PrintOptions {
@@ -80,6 +89,7 @@ impl PrintOptions {
             root: root.into(),
             config_path: None,
             model: None,
+            env: Vec::new(),
         }
     }
 
@@ -94,6 +104,12 @@ impl PrintOptions {
         self.model = Some(model.into());
         self
     }
+
+    #[must_use]
+    pub fn with_envs<'a>(mut self, envs: impl IntoIterator<Item = &'a str>) -> Self {
+        self.env = envs.into_iter().map(str::to_string).collect();
+        self
+    }
 }
 
 /// A missing-models outcome is *not* fatal: the TUI still launches so the
@@ -105,6 +121,7 @@ impl PrintOptions {
 /// session. Model-resolution failures that reduce to "no active model" are
 /// swallowed into the no-model TUI mode described above.
 pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
+    let env = env_pairs(&opts.env)?;
     let session = resolve_session(&opts)?;
 
     // Restore the model+thinking the user last ran with unless --model was
@@ -126,7 +143,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                 let root = opts.root.clone();
                 let compaction = config.compaction.clone();
                 let ui_theme = config.ui.theme;
-                let switcher = tui::ModelSwitcher::new(registry, config, root);
+                let switcher = tui::ModelSwitcher::new(registry, config, root, env);
                 (
                     Some(agent),
                     format!("{}/{}", model.provider, model.id),
@@ -190,6 +207,18 @@ enum StartupAgent {
     NoModel(String),
 }
 
+/// Parse the `-e`/`--env` specs into (name, value) pairs, resolving bare
+/// names against the parent environment. A bare name that is unset, or an
+/// empty name, is a config error surfaced before model resolution starts.
+/// # Errors
+/// Returns `Error::Config` from `config_loader::parse_env_spec`.
+fn env_pairs(specs: &[String]) -> Result<Vec<(String, String)>> {
+    specs
+        .iter()
+        .map(|spec| lofi_core::config_loader::parse_env_spec(spec))
+        .collect()
+}
+
 /// Build the startup agent. `--model` takes precedence over a restored
 /// session model; with neither, `build_agent` falls back to the config
 /// default. If the restored model can no longer be resolved (removed from
@@ -202,14 +231,22 @@ async fn resolve_startup_agent(
     opts: &InteractiveOptions,
     restored: Option<&str>,
 ) -> Result<StartupAgent> {
+    let env = env_pairs(&opts.env)?;
     let requested = opts.model.as_deref().or(restored);
-    match build_agent(opts.config_path.as_deref(), requested, opts.root.as_path()).await {
+    match build_agent(
+        opts.config_path.as_deref(),
+        requested,
+        opts.root.as_path(),
+        &env,
+    )
+    .await
+    {
         Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
         // The restored model is gone from the registry (config changed since
         // the session ran, or its provider lost its API key): fall back to
         // the default so the transcript is still readable instead of aborting.
         Err(_) if restored.is_some() => {
-            match build_agent(opts.config_path.as_deref(), None, opts.root.as_path()).await {
+            match build_agent(opts.config_path.as_deref(), None, opts.root.as_path(), &env).await {
                 Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
                 Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
                 Err(e) => Err(e),
@@ -275,11 +312,14 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 /// Propagates [`Error`] from config load, model resolution, provider
 /// construction, or the agent run. The binary caller is responsible for
 /// translating the returned error into a nonzero exit code.
+#[allow(clippy::too_many_lines)]
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
+    let env = env_pairs(&opts.env)?;
     let (agent, _model, _thinking, _config, _registry) = build_agent(
         opts.config_path.as_deref(),
         opts.model.as_deref(),
         opts.root.as_path(),
+        &env,
     )
     .await?;
 

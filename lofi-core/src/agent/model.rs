@@ -17,6 +17,7 @@ pub async fn build_agent(
     config_path: Option<&std::path::Path>,
     model: Option<&str>,
     root: &std::path::Path,
+    env: &[(String, String)],
 ) -> Result<(
     Agent,
     Model,
@@ -24,6 +25,11 @@ pub async fn build_agent(
     lofi_types::Config,
     ModelRegistry,
 )> {
+    // --env specs are applied to the process environment for the duration of
+    // config resolution so $VAR / env_name / !cmd values see them. The guard
+    // is held for the whole build (registration/open also read provider
+    // config) and restores prior values on drop.
+    let _env_guard = crate::config_loader::apply_env_specs(env);
     let config_path = match config_path {
         Some(p) => p.to_path_buf(),
         None => crate::config_loader::user_config_path()?,
@@ -38,7 +44,7 @@ pub async fn build_agent(
         }
     };
 
-    let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root)?;
+    let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root, env)?;
     let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
     let agent = agent.with_skills_dir(skills_dir);
@@ -199,6 +205,7 @@ pub fn rebuild_agent(
     config: &lofi_types::Config,
     model: Option<&str>,
     root: &std::path::Path,
+    env: &[(String, String)],
 ) -> Result<(Agent, Model, ThinkingLevel)> {
     let (mut model_obj, level) = select_model(registry, config, model)?;
     model_obj.thinking = level.clone();
@@ -222,6 +229,7 @@ pub fn rebuild_agent(
             None,
             config.compaction.reserved_context_tokens,
             &config.bash,
+            env,
             config.truncate,
             config.image,
             &config.shell_policy,

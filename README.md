@@ -134,6 +134,7 @@ See [Development](docs/development.md#end-to-end-tests) for the full check comma
 | `--list-models` | Print `provider/id — name` lines and exit. |
 | `--list-sessions` | Print saved sessions for this workspace and exit. |
 | `--model <SPEC>` | Select the model as `provider/model[:level]`. |
+| `-e`, `--env <NAME[=VALUE]>` | Set an environment variable for this instance (repeatable). A bare `NAME` forwards the parent shell's value. |
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
 | `--no-session` | Do not persist a transcript. |

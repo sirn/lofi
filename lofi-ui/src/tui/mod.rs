@@ -87,6 +87,7 @@ pub(crate) struct ModelSwitcher {
     registry: lofi_core::ModelRegistry,
     config: lofi_types::Config,
     root: PathBuf,
+    env: Vec<(String, String)>,
     choices: Vec<lofi_types::ModelChoice>,
 }
 
@@ -95,12 +96,14 @@ impl ModelSwitcher {
         registry: lofi_core::ModelRegistry,
         config: lofi_types::Config,
         root: PathBuf,
+        env: Vec<(String, String)>,
     ) -> Self {
         let choices = registry.choices();
         Self {
             registry,
             config,
             root,
+            env,
             choices,
         }
     }
@@ -120,6 +123,7 @@ impl ModelSwitcher {
             &self.config,
             Some(query),
             &self.root,
+            &self.env,
         )
     }
 }

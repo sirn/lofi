@@ -15,6 +15,8 @@ use lofi_core::ModelRegistry;
 struct Cli {
     #[arg(short = 'p', long, value_name = "PROMPT")]
     print: Option<String>,
+    #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+    env: Vec<String>,
     #[arg(long)]
     list_models: bool,
     #[arg(long)]
@@ -40,6 +42,18 @@ struct Cli {
 pub async fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let root = std::env::current_dir().context("determine working directory")?;
+
+    // Apply --env specs to the process environment up front so every mode
+    // (informational commands, print, interactive) observes them, and a bare
+    // NAME that is unset in the parent errors before any work begins. The
+    // guard is held for the whole process and restores prior values on exit.
+    let env_pairs = cli
+        .env
+        .iter()
+        .map(|spec| lofi_core::config_loader::parse_env_spec(spec))
+        .collect::<Result<Vec<_>, lofi_error::Error>>()
+        .map_err(anyhow::Error::new)?;
+    let _env_guard = lofi_core::config_loader::apply_env_specs(&env_pairs);
 
     if cli.list_models {
         list_models().await?;
@@ -86,6 +100,9 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
     if let Some(m) = &cli.model {
         opts = opts.with_model(m);
     }
+    if !cli.env.is_empty() {
+        opts = opts.with_envs(cli.env.iter().map(String::as_str));
+    }
     opts
 }
 
@@ -102,6 +119,9 @@ fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOpt
     }
     if cli.no_session {
         opts = opts.with_no_session();
+    }
+    if !cli.env.is_empty() {
+        opts = opts.with_envs(cli.env.iter().map(String::as_str));
     }
     opts
 }
