@@ -10,6 +10,19 @@ use super::ProtocolIr;
 use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
+// Field names that carry chain-of-thought on chat-completions streams.
+// DeepSeek/Qwen use `reasoning_content`, GLM/Zhipu uses `thinking`, other
+// vendors use `reasoning` or `reasoning_text`. The same list drives
+// capture (the first non-empty field wins per message) and replay
+// (assistant messages re-emit thinking text under the recorded name), so
+// both sites reference this single source.
+const REASONING_FIELDS: [&str; 4] = [
+    "reasoning_content",
+    "thinking",
+    "reasoning",
+    "reasoning_text",
+];
+
 fn collect_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for b in blocks {
@@ -60,7 +73,23 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
     let text = collect_text(&m.blocks);
     let mut tool_calls = Vec::new();
     let mut reasoning_details = Vec::new();
+    let mut reasoning: Vec<(&str, &str)> = Vec::new();
     for (index, block) in m.blocks.iter().enumerate() {
+        // A Thinking block whose signature is one of the field names the
+        // mapper records is plaintext chain-of-thought (chat-completions).
+        // Real blobs (Anthropic signature, Responses encrypted_content)
+        // never equal one of these keys, so this match cannot misfire.
+        if let ContentBlock::Thinking {
+            text,
+            signature: Some(field),
+        } = block
+        {
+            // Trim-check on echo (Pi's rule): whitespace-only reasoning has
+            // no semantic content the model needs back.
+            if REASONING_FIELDS.contains(&field.as_str()) && !text.trim().is_empty() {
+                reasoning.push((field.as_str(), text.as_str()));
+            }
+        }
         if let ContentBlock::ToolUse { id, name, input } = block {
             let args = serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
             let mut tool_call = json!({
@@ -107,6 +136,17 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
     }
     if !reasoning_details.is_empty() {
         msg["reasoning_details"] = json!(reasoning_details);
+    }
+    // The wire form carries one reasoning channel per assistant message, so
+    // thinking blocks (one per round of tool-use / text interleave) are
+    // joined with "\n" under the field the server first used (mirrors Pi).
+    if let Some(&(field, _)) = reasoning.first() {
+        let joined = reasoning
+            .iter()
+            .map(|(_, t)| *t)
+            .collect::<Vec<_>>()
+            .join("\n");
+        msg[field] = json!(joined);
     }
     out.push(msg);
 }
@@ -258,6 +298,9 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 pub(crate) struct ChatMapperState {
     index_to_id: std::collections::HashMap<u64, String>,
     pending_signature_by_index: std::collections::HashMap<u64, (String, String)>,
+    // The delta key the server used to stream its chain-of-thought for the
+    // current block (see the reasoning-delta branch in map_openai_chat_event).
+    reasoning_field: Option<String>,
     provider: String,
     model: String,
 }
@@ -314,18 +357,22 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
         return Ok(out);
     };
 
-    // OpenAI-compatible reasoning models stream chain-of-thought under
-    // varying field names: `reasoning_content` (DeepSeek, Qwen),
-    // `thinking` (GLM/Zhipu), or `reasoning` (others).
-    let reasoning = delta
-        .get("reasoning_content")
-        .or_else(|| delta.get("thinking"))
-        .or_else(|| delta.get("reasoning"))
-        .and_then(Value::as_str);
-    if let Some(reasoning) = reasoning {
-        if !reasoning.is_empty() {
-            out.push(StreamingEvent::ThinkingDelta(reasoning.to_string()));
+    // The field the server actually used is also its replay field — record
+    // it once so the next request can put the thinking text back under the
+    // same name, the way DeepSeek's multi-round tool-calling contract requires.
+    for field in REASONING_FIELDS {
+        let Some(reasoning) = delta.get(field).and_then(Value::as_str) else {
+            continue;
+        };
+        if reasoning.is_empty() {
+            break;
         }
+        if state.reasoning_field.is_none() {
+            state.reasoning_field = Some(field.to_string());
+            out.push(StreamingEvent::ThinkingSignature(field.to_string()));
+        }
+        out.push(StreamingEvent::ThinkingDelta(reasoning.to_string()));
+        break;
     }
 
     if let Some(content) = delta.get("content").and_then(Value::as_str) {
@@ -824,5 +871,192 @@ mod tests {
         }];
         let req = build_openai_chat_request(&model(), &msgs, &[]);
         assert_eq!(req["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn reasoning_delta_records_its_field_exactly_once() {
+        let mut state = ChatMapperState::default();
+        let first = json!({"choices":[{"delta":{"reasoning_content":"hmm,"}}]});
+        let second = json!({"choices":[{"delta":{"reasoning_content":" yes"}}]});
+
+        let out1 = map_openai_chat_event(&first, &mut state).unwrap();
+        let out2 = map_openai_chat_event(&second, &mut state).unwrap();
+
+        // First chunk: field marker, then the delta. The marker is not
+        // repeated on later chunks — it lives on the message once.
+        assert_eq!(
+            out1[0],
+            StreamingEvent::ThinkingSignature("reasoning_content".to_string())
+        );
+        assert_eq!(out1[1], StreamingEvent::ThinkingDelta("hmm,".to_string()));
+        assert_eq!(out1.len(), 2);
+        assert_eq!(
+            out2,
+            vec![StreamingEvent::ThinkingDelta(" yes".to_string())]
+        );
+    }
+
+    #[test]
+    fn alternate_reasoning_fields_also_recorded() {
+        for field in ["thinking", "reasoning", "reasoning_text"] {
+            let mut state = ChatMapperState::default();
+            let chunk = json!({"choices":[{"delta":{field:"hmm"}}]});
+            let out = map_openai_chat_event(&chunk, &mut state).unwrap();
+            assert_eq!(
+                out,
+                vec![
+                    StreamingEvent::ThinkingSignature(field.to_string()),
+                    StreamingEvent::ThinkingDelta("hmm".to_string())
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_reasoning_string_emits_nothing() {
+        let mut state = ChatMapperState::default();
+        let chunk = json!({"choices":[{"delta":{"reasoning_content":""}}]});
+        let out = map_openai_chat_event(&chunk, &mut state).unwrap();
+        assert!(out.is_empty());
+        assert!(state.reasoning_field.is_none());
+    }
+
+    #[test]
+    fn thinking_field_takes_precedence_over_later_fields() {
+        // Servers sometimes return both reasoning_content and reasoning; the
+        // first non-empty wins, mirroring Pi.
+        let mut state = ChatMapperState::default();
+        let chunk = json!({"choices":[{"delta":{"thinking":"a","reasoning":"b"}}]});
+        let out = map_openai_chat_event(&chunk, &mut state).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                StreamingEvent::ThinkingSignature("thinking".to_string()),
+                StreamingEvent::ThinkingDelta("a".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_replayed_under_recorded_field() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "let me think".to_string(),
+                signature: Some("reasoning_content".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        let msg = &req["messages"][0];
+        assert_eq!(msg["reasoning_content"], "let me think");
+        assert!(msg.get("reasoning").is_none());
+        assert!(msg.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn thinking_replayed_under_alternate_field() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "yep".to_string(),
+                signature: Some("reasoning".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["reasoning"], "yep");
+    }
+
+    #[test]
+    fn thinking_with_unrecognised_signature_is_not_replayed() {
+        // Anthropic-style signatures (any string not in the whitelist) and
+        // signature-less blocks stay local.
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Thinking {
+                    text: "secret plan".to_string(),
+                    signature: Some("EogBCkYICxgCKkA...".to_string()),
+                },
+                ContentBlock::Thinking {
+                    text: "unsigned".to_string(),
+                    signature: None,
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        let msg = &req["messages"][0];
+        assert!(msg.get("reasoning_content").is_none());
+        assert!(msg.get("reasoning").is_none());
+        assert!(msg.get("thinking").is_none());
+    }
+
+    #[test]
+    fn multiple_thinking_blocks_joined_under_first_field() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Thinking {
+                    text: "first".to_string(),
+                    signature: Some("reasoning_content".to_string()),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+                ContentBlock::Thinking {
+                    text: "second".to_string(),
+                    signature: Some("reasoning_content".to_string()),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["reasoning_content"], "first\nsecond");
+    }
+
+    #[test]
+    fn whitespace_only_thinking_is_not_replayed() {
+        // Pi trims the thinking text before deciding whether to emit. A
+        // whitespace-only trace would just be noise on the wire.
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "  \n ".to_string(),
+                signature: Some("reasoning_content".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert!(req["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_text_field_replayed_verbatim() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: "thinking".to_string(),
+                signature: Some("reasoning_text".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["reasoning_text"], "thinking");
+    }
+
+    #[test]
+    fn empty_thinking_text_is_not_replayed() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Thinking {
+                text: String::new(),
+                signature: Some("reasoning_content".to_string()),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_openai_chat_request(&model(), &msgs, &[]);
+        assert!(req["messages"][0].get("reasoning_content").is_none());
     }
 }
