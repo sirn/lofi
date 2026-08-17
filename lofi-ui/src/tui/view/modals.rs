@@ -628,6 +628,69 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+pub(super) fn render_service_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::ListState;
+    let Some(picker) = &app.service_picker else {
+        return;
+    };
+    let t = app.theme;
+    let total = picker.tiers.len();
+    let title = " Service tier ";
+    let help = " ↑/↓ navigate  enter apply  esc close ";
+    let row_for = |tier: &lofi_types::ServiceTier| tier.as_str().to_string();
+    let content_w = picker
+        .tiers
+        .iter()
+        .map(|t| prim::width(&row_for(t)))
+        .max()
+        .unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = total.min(20);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+    let need_sb = total > rows.content.height as usize;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
+    let items: Vec<ListItem> = picker
+        .tiers
+        .iter()
+        .map(|tier| {
+            let is_active = *tier == app.service_tier;
+            ListItem::new(Span::styled(
+                row_for(tier),
+                if is_active {
+                    active_style
+                } else {
+                    inactive_style
+                },
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(focus_style(t));
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            state.offset(),
+            rows.content.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
+    }
+}
+
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.tree_picker else {

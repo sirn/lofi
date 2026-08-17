@@ -8,6 +8,7 @@ enum ModalSlot {
     Tree,
     Model,
     Thinking,
+    Service,
     Theme,
 }
 
@@ -180,6 +181,10 @@ impl App {
                 self.open_thinking_picker();
                 true
             }
+            "/service" => {
+                self.open_service_picker();
+                true
+            }
             "/theme" => {
                 self.open_theme_picker();
                 true
@@ -321,6 +326,7 @@ impl App {
         lines.push(info_kv(t, "/model", "switch the active model"));
         lines.push(info_kv(t, "/theme", "switch color scheme for this session"));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
+        lines.push(info_kv(t, "/service", "switch the service tier"));
         lines.push(info_kv(
             t,
             "/job",
@@ -845,6 +851,57 @@ impl App {
         out
     }
 
+    /// `/service`: open the service-tier picker for the current model.
+    /// Offers `auto` plus the model's declared `service_tiers` (deduped),
+    /// pre-selected at the current tier. Shows a notice instead of opening
+    /// when the current model declares no service tiers beyond `auto`.
+    pub(super) fn open_service_picker(&mut self) {
+        let tiers = self.current_service_choices();
+        if tiers.len() <= 1 {
+            self.notify(
+                NotifyKind::Info,
+                "current model does not declare service tiers",
+            );
+            return;
+        }
+        let selected = tiers.iter().position(|t| t == &self.service_tier).unwrap_or(0);
+        self.service_picker = Some(ServicePickerState { tiers, selected });
+    }
+
+    fn current_service_choices(&self) -> Vec<ServiceTier> {
+        let mut out = vec![ServiceTier::Auto];
+        if let Some(c) = self
+            .model_choices
+            .iter()
+            .find(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
+        {
+            for tier in &c.service_tiers {
+                if tier != &ServiceTier::Auto && !out.contains(tier) {
+                    out.push(tier.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn service_picker_confirm(&mut self) {
+        if let Some(picker) = self.service_picker.take() {
+            if let Some(tier) = picker.tiers.get(picker.selected) {
+                let tier_suffix = if tier == &ServiceTier::Auto {
+                    String::new()
+                } else {
+                    format!("@{}", tier.as_str())
+                };
+                self.pending_model_switch = Some(format!(
+                    "{}:{}{}",
+                    self.model_label,
+                    self.thinking.as_str(),
+                    tier_suffix
+                ));
+            }
+        }
+    }
+
     /// `/theme`: open the color-scheme picker (Auto / Light / Dark),
     /// pre-selected on the currently active mode.
     pub(super) fn open_theme_picker(&mut self) {
@@ -908,10 +965,17 @@ impl App {
         }
     }
 
-    pub(super) fn apply_model_switch(&mut self, model: &lofi_types::Model, level: ThinkingLevel) {
+    pub(super) fn apply_model_switch(
+        &mut self,
+        model: &lofi_types::Model,
+        level: ThinkingLevel,
+        tier: ServiceTier,
+    ) {
         self.model_label = format!("{}/{}", model.provider, model.id);
         self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
         self.thinking = level;
+        self.service_label = (tier != ServiceTier::Auto).then(|| format!("@{}", tier.as_str()));
+        self.service_tier = tier;
         self.ctx_limit = model
             .context_window
             .filter(|&l| l > 0)
@@ -920,10 +984,11 @@ impl App {
         self.notify(
             NotifyKind::Info,
             format!(
-                "switched to {}/{}{}",
+                "switched to {}/{}{}{}",
                 model.provider,
                 model.id,
-                self.thinking_label.as_deref().unwrap_or("")
+                self.thinking_label.as_deref().unwrap_or(""),
+                self.service_label.as_deref().unwrap_or("")
             ),
         );
         self.bump_render_epoch();
@@ -1241,6 +1306,7 @@ impl App {
             || self.tree_picker.is_some()
             || self.model_picker.is_some()
             || self.thinking_picker.is_some()
+            || self.service_picker.is_some()
             || self.theme_picker.is_some()
             || self.jobs_modal.is_some()
             || !self.pending_confirms.is_empty()
@@ -1408,6 +1474,8 @@ impl App {
     fn active_modal_slot(&self) -> Option<ModalSlot> {
         if self.theme_picker.is_some() {
             Some(ModalSlot::Theme)
+        } else if self.service_picker.is_some() {
+            Some(ModalSlot::Service)
         } else if self.thinking_picker.is_some() {
             Some(ModalSlot::Thinking)
         } else if self.model_picker.is_some() {
@@ -1426,6 +1494,7 @@ impl App {
     /// (clamped); `Tab`/`Shift+Tab` cycle with wrap-around; `Enter`
     /// confirms; `Esc`/`q` cancels. Returns `true` if a modal handled the
     /// key (so the caller skips normal Input-mode processing).
+    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         if self.jobs_modal.is_some() {
             return self.handle_jobs_key(k);
@@ -1453,6 +1522,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Service => self.service_picker_confirm(),
                 ModalSlot::Theme => self.theme_picker_confirm(),
             },
             // With a single entry, Tab/Shift+Tab confirm outright instead of
@@ -1470,6 +1540,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Service => self.service_picker_confirm(),
                 ModalSlot::Theme => self.theme_picker_confirm(),
             },
             KeyCode::Esc | KeyCode::Char('q') => match slot {
@@ -1490,6 +1561,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,
+                ModalSlot::Service => self.service_picker = None,
                 ModalSlot::Theme => self.theme_picker = None,
             },
             _ => {}
@@ -1498,6 +1570,7 @@ impl App {
             || (matches!(slot, ModalSlot::Tree) && self.tree_picker.is_none())
             || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
             || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
+            || (matches!(slot, ModalSlot::Service) && self.service_picker.is_none())
             || (matches!(slot, ModalSlot::Theme) && self.theme_picker.is_none())
         {
             return true;
@@ -1539,6 +1612,8 @@ impl App {
     pub(super) fn active_modal_mut(&mut self) -> Option<&mut dyn Modal> {
         if self.theme_picker.is_some() {
             self.theme_picker.as_mut().map(|t| t as &mut dyn Modal)
+        } else if self.service_picker.is_some() {
+            self.service_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else if self.thinking_picker.is_some() {
             self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else if self.model_picker.is_some() {

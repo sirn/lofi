@@ -32,6 +32,7 @@ fn model_for(api: Api, base_url: &str) -> Model {
         api,
         reasoning: false,
         thinking: lofi_types::ThinkingLevel::Off,
+        service_tier: lofi_types::ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
@@ -59,6 +60,8 @@ fn cfg(api: Api, base_url: String) -> ProviderConfig {
         no_auth: false,
         thinking_level: None,
         thinking_levels: Vec::new(),
+        service_tier: None,
+        service_tiers: Vec::new(),
     }
 }
 

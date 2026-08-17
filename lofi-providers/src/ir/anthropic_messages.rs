@@ -439,6 +439,7 @@ mod tests {
             api: lofi_types::Api::AnthropicMessages,
             reasoning: false,
             thinking: lofi_types::ThinkingLevel::Off,
+            service_tier: lofi_types::ServiceTier::Auto,
             supports_image: false,
             context_window: None,
             max_tokens: Some(1024),

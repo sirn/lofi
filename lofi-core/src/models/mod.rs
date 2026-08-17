@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use lofi_types::{Config, Model, ModelConfig, ProviderConfig, ThinkingLevel};
+use lofi_types::{Config, Model, ModelConfig, ProviderConfig, ServiceTier, ThinkingLevel};
 
 use lofi_error::Result;
 
@@ -165,6 +165,12 @@ impl ModelRegistry {
                     .and_then(|p| p.models.get(&m.id))
                     .map(|mc| mc.thinking_levels.clone())
                     .unwrap_or_default(),
+                service_tiers: self
+                    .providers
+                    .get(&m.provider)
+                    .and_then(|p| p.models.get(&m.id))
+                    .map(|mc| mc.service_tiers.clone())
+                    .unwrap_or_default(),
                 supports_image: m.supports_image,
                 provider: m.provider,
                 id: m.id,
@@ -270,6 +276,7 @@ fn model_from_config(name: &str, id: &str, pcfg: &ProviderConfig, mc: &ModelConf
         api,
         reasoning: mc.reasoning.unwrap_or(false),
         thinking: ThinkingLevel::default(),
+        service_tier: ServiceTier::default(),
         supports_image: mc.supports_image.unwrap_or(false),
         context_window: mc.context_window,
         max_tokens: mc.max_tokens,
@@ -332,6 +339,8 @@ mod tests {
             no_auth: false,
             thinking_level: None,
             thinking_levels: Vec::new(),
+            service_tier: None,
+            service_tiers: Vec::new(),
         }
     }
 
@@ -347,6 +356,8 @@ mod tests {
                 max_tokens: None,
                 thinking_levels: Vec::new(),
                 thinking_level: None,
+                service_tiers: Vec::new(),
+                service_tier: None,
                 base_url: None,
                 input_price: None,
                 output_price: None,
@@ -629,6 +640,8 @@ mod tests {
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![ThinkingLevel::Medium],
             thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
             ttl_seconds: None,
         };
         let models = parse_auto_models(&p, &am, &payload);
@@ -671,6 +684,8 @@ mod tests {
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
             ttl_seconds: None,
         };
         let models = parse_auto_models(&p, &am, &payload);
@@ -700,6 +715,8 @@ mod tests {
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
             ttl_seconds: None,
         };
         let models = parse_auto_models(&p, &am, &payload);
@@ -736,6 +753,8 @@ mod tests {
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
             ttl_seconds: None,
         };
         let models = parse_auto_models(&p, &am, &payload);
@@ -779,6 +798,8 @@ mod tests {
             field_mappings: FieldMappings::default(),
             thinking_levels: vec![],
             thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
             ttl_seconds: Some(0),
         });
         providers.insert("anthropic".to_string(), p);

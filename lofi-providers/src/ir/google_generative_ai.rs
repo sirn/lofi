@@ -484,7 +484,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use lofi_types::{Api, PromptKind};
+    use lofi_types::{Api, PromptKind, ServiceTier};
 
     fn model(id: &str) -> Model {
         Model {
@@ -494,6 +494,7 @@ mod tests {
             api: Api::GoogleGenerativeAi,
             reasoning: true,
             thinking: ThinkingLevel::High,
+            service_tier: ServiceTier::Auto,
             supports_image: true,
             context_window: None,
             max_tokens: Some(8192),
