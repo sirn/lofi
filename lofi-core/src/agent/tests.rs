@@ -120,6 +120,7 @@ fn model() -> Model {
         api: Api::OpenAiCompletions,
         reasoning: false,
         thinking: lofi_types::ThinkingLevel::Off,
+        service_tier: lofi_types::ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
@@ -1180,6 +1181,8 @@ fn mc() -> ModelConfig {
             ThinkingLevel::XHigh,
         ],
         thinking_level: None,
+        service_tiers: Vec::new(),
+        service_tier: None,
         base_url: None,
         input_price: None,
         output_price: None,
@@ -1237,6 +1240,8 @@ fn provider(
         no_auth: false,
         thinking_level,
         thinking_levels: Vec::new(),
+        service_tier: None,
+        service_tiers: Vec::new(),
     }
 }
 
