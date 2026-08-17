@@ -198,6 +198,7 @@ mod tests {
         ContentBlock::Thinking {
             text: t.to_string(),
             signature: None,
+            redacted: false,
         }
     }
     fn exec_call(id: &str, code: &str) -> ContentBlock {
