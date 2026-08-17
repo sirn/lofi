@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use lofi_core::{build_agent, AgentEvent};
 use lofi_error::{Error, Result};
-use lofi_types::ThinkingLevel;
+use lofi_types::{ServiceTier, ThinkingLevel};
 
 mod cli;
 pub mod tui;
@@ -117,9 +117,9 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .is_none()
         .then(|| session.last_run_model())
         .flatten()
-        .map(|m| format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str()));
+        .map(|m| m.query());
 
-    let (agent, label, thinking, hint, ctx_limit, compaction, ui_theme, switcher) =
+    let (agent, label, thinking, service_tier, hint, ctx_limit, compaction, ui_theme, switcher) =
         match resolve_startup_agent(&opts, restored.as_deref()).await? {
             StartupAgent::Ready(built) => {
                 let (agent, model, thinking, config, registry) = *built;
@@ -131,6 +131,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                     Some(agent),
                     format!("{}/{}", model.provider, model.id),
                     thinking,
+                    model.service_tier.clone(),
                     None,
                     model.context_window.unwrap_or(0),
                     compaction,
@@ -142,6 +143,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                 None,
                 "(no model)".to_string(),
                 ThinkingLevel::Off,
+                ServiceTier::Auto,
                 Some(hint),
                 0,
                 lofi_types::CompactionConfig::default(),
@@ -160,6 +162,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         agent,
         label,
         thinking,
+        service_tier,
         ui_theme,
         session,
         hint,

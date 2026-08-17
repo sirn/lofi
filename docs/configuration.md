@@ -93,6 +93,27 @@ thinking_level = "high"
 
 A command-line suffix such as `--model openai/o3:high` selects the level for that run. Default precedence is model, provider, then `[agent]`; the command line overrides all three. Non-`off` levels must appear in the model `thinking_levels` list.
 
+## Service tiers
+
+Service tiers are per-request routing hints forwarded to the provider. They are useful with OpenAI's own plans and with proxies that expose multiple service classes. Supported values are `auto`, `flex`, `priority`, and any provider-defined value (custom values serialize verbatim). `auto` omits the field so the provider uses its default.
+
+The default tier can be selected globally, per provider, or per model, mirroring thinking levels:
+
+```toml
+[agent]
+service_tier = "flex"
+
+[providers.openai]
+api_type = "openai-responses"
+api_key = "$OPENAI_API_KEY"
+service_tier = "priority"
+
+[providers.openai.models]
+"gpt-5.6-sol" = { service_tier = "flex", service_tiers = ["flex", "priority"] }
+```
+
+A command-line suffix such as `--model openai/gpt-5.6-sol:high@flex` selects the tier for that run (the `@tier` suffix is optional and combines with the `:level` suffix). Default precedence is model, provider, then `[agent]`; the command line overrides all three. Non-`auto` tiers must appear in the model `service_tiers` list.
+
 ## Providers
 
 Each `[providers.<name>]` table defines authentication, protocol routing, and its available models.
@@ -109,6 +130,8 @@ Each `[providers.<name>]` table defines authentication, protocol routing, and it
 | `no_auth` | boolean | `false` | Make the provider available without authentication headers. |
 | `thinking_level` | string | inherited | Provider-level thinking default. |
 | `thinking_levels` | string array | empty | Provider capability metadata. Declare supported levels on each static model. |
+| `service_tier` | string | inherited | Provider-level service-tier default. |
+| `service_tiers` | string array | empty | Provider capability metadata. Declare supported tiers on each static model. |
 | `pricing_convention` | string | `per_token` | Remote pricing is `per_token` or `per_million`. |
 
 Supported protocols are:
@@ -190,6 +213,8 @@ output_price = 10.00
 | `max_tokens` | integer | Maximum output tokens. |
 | `thinking_level` | string | Default thinking level. |
 | `thinking_levels` | string array | Supported thinking levels. |
+| `service_tier` | string | Default service tier. |
+| `service_tiers` | string array | Supported service tiers. |
 | `base_url` | string | Full per-model endpoint URL override. |
 | `input_price` | number | USD per million input tokens. |
 | `output_price` | number | USD per million output tokens. |
@@ -310,6 +335,8 @@ max_tokens = "top_provider.max_completion_tokens"
 | `api_type_field` | string | none | Field containing the remote protocol name. |
 | `thinking_level` | string | none | Default for discovered models. |
 | `thinking_levels` | string array | empty | Levels exposed by discovered models. |
+| `service_tier` | string | none | Default for discovered models. |
+| `service_tiers` | string array | empty | Tiers exposed by discovered models. |
 
 When `api_type_field` is set, its remote value is translated through `api_type_mappings`. An absent mapping falls back to the provider's default `api_type`.
 

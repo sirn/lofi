@@ -173,6 +173,47 @@ fn premature_stream_end_retries_for_every_provider_protocol() {
 }
 
 #[test]
+fn service_tier_is_forwarded_for_openai_protocols() {
+    // mock (openai-completions) defaults to flex per config; responses
+    // (openai-responses) defaults to priority. Both must land on the wire and
+    // @tier must override the configured default for one run.
+    let server = MockServer::start(vec![
+        MockResponse::sse(chat_body("chat flex")),
+        MockResponse::sse(responses_body("responses override")),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    let out = fixture.output(&["--model", "mock/chat", "--print", "p"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("chat flex"));
+
+    // The @flex suffix overrides the configured priority default.
+    let out = fixture.output(&["--model", "responses/reasoning@flex", "--print", "p"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("responses override"));
+
+    let requests = server.requests();
+    let chat_body = &requests[0].body;
+    let responses_body = &requests[1].body;
+    assert!(
+        chat_body.contains("\"service_tier\":\"flex\""),
+        "mock/chat body: {chat_body}"
+    );
+    assert!(
+        responses_body.contains("\"service_tier\":\"flex\""),
+        "responses body: {responses_body}"
+    );
+}
+
+#[test]
 fn provider_reported_stream_errors_fail_without_silent_partial_answers() {
     let chat = json!({ "error": { "message": "chat stream rejected" } });
     let responses = json!({

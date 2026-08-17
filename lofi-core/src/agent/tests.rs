@@ -120,6 +120,7 @@ fn model() -> Model {
         api: Api::OpenAiCompletions,
         reasoning: false,
         thinking: lofi_types::ThinkingLevel::Off,
+        service_tier: lofi_types::ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
@@ -1180,6 +1181,8 @@ fn mc() -> ModelConfig {
             ThinkingLevel::XHigh,
         ],
         thinking_level: None,
+        service_tiers: Vec::new(),
+        service_tier: None,
         base_url: None,
         input_price: None,
         output_price: None,
@@ -1198,6 +1201,19 @@ fn mc_levels(levels: &[ThinkingLevel]) -> ModelConfig {
 fn mc_default(level: ThinkingLevel) -> ModelConfig {
     let mut m = mc();
     m.thinking_level = Some(level);
+    m
+}
+
+fn mc_tiers(tiers: &[ServiceTier]) -> ModelConfig {
+    let mut m = mc();
+    m.service_tiers = tiers.to_vec();
+    m
+}
+
+fn mc_tier(tier: ServiceTier) -> ModelConfig {
+    let mut m = mc();
+    m.service_tier = Some(tier.clone());
+    m.service_tiers = vec![tier];
     m
 }
 
@@ -1237,6 +1253,8 @@ fn provider(
         no_auth: false,
         thinking_level,
         thinking_levels: Vec::new(),
+        service_tier: None,
+        service_tiers: Vec::new(),
     }
 }
 
@@ -1317,6 +1335,115 @@ fn select_model_rejects_unknown_level() {
     )));
     let err = select_model(&reg, &cfg, Some("openai/gpt-4o:bogus")).unwrap_err();
     assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_explicit_tier_suffix() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]),
+        )]),
+        None,
+    )));
+    let (m, level) = select_model(&reg, &cfg, Some("openai/gpt-4o:high@flex")).unwrap();
+    assert_eq!(m.id, "gpt-4o");
+    assert_eq!(level, ThinkingLevel::High);
+    assert_eq!(m.service_tier, ServiceTier::Flex);
+}
+
+#[test]
+fn select_model_explicit_tier_without_level() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Priority]))]),
+        None,
+    )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o@priority")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Priority);
+}
+
+#[test]
+fn select_model_tier_defaults_auto_from_model_list() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Flex]))]),
+        None,
+    )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Auto);
+}
+
+#[test]
+fn select_model_tier_falls_back_to_model_default() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tier(ServiceTier::Priority))]),
+        None,
+    )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Priority);
+}
+
+#[test]
+fn select_model_custom_tier_uses_declared_list() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Custom("vip".into())]),
+        )]),
+        None,
+    )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o@vip")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Custom("vip".into()));
+
+    // An undeclared custom value is rejected, so a typo never quietly sends
+    // the provider default.
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o@bogus")).unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_rejects_tier_not_declared() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Flex]))]),
+        None,
+    )));
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o@priority")).unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_rejects_explicit_tier_when_none_declared() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    )));
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o:high@flex")).unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_auto_tier_always_allowed_even_without_declared_list() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    )));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o:high@auto")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Auto);
 }
 
 #[test]
@@ -1564,6 +1691,7 @@ fn add_usage_bills_cache_tokens_at_their_own_rate() {
         api: Api::OpenAiCompletions,
         reasoning: false,
         thinking: ThinkingLevel::Off,
+        service_tier: ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
@@ -1596,6 +1724,7 @@ fn add_usage_falls_back_to_input_rate_when_cache_prices_unset() {
         api: Api::OpenAiCompletions,
         reasoning: false,
         thinking: ThinkingLevel::Off,
+        service_tier: ServiceTier::Auto,
         supports_image: false,
         context_window: None,
         max_tokens: None,
