@@ -10,6 +10,12 @@ use super::ProtocolIr;
 use crate::ToolSchema;
 use lofi_error::{Error, Result};
 
+// Field names that carry chain-of-thought on chat-completions streams. The same
+// list drives capture (the first non-empty field wins per message) and replay
+// (assistant messages re-emit thinking text under the recorded name), so both
+// sites reference this single source.
+const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "thinking", "reasoning"];
+
 fn collect_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for b in blocks {
@@ -71,11 +77,7 @@ fn push_assistant(model: &Model, m: &Message, out: &mut Vec<Value>) {
             signature: Some(field),
         } = block
         {
-            if matches!(
-                field.as_str(),
-                "reasoning_content" | "thinking" | "reasoning"
-            ) && !text.is_empty()
-            {
+            if REASONING_FIELDS.contains(&field.as_str()) && !text.is_empty() {
                 reasoning.push((field.as_str(), text.as_str()));
             }
         }
@@ -355,13 +357,10 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
         return Ok(out);
     };
 
-    // OpenAI-compatible reasoning models stream chain-of-thought under
-    // varying field names: `reasoning_content` (DeepSeek, Qwen),
-    // `thinking` (GLM/Zhipu), or `reasoning` (others). The field the server
-    // actually used is also its replay field — record it once so the next
-    // request can put the thinking text back under the same name, the way
-    // DeepSeek's multi-round tool-calling contract requires.
-    for field in ["reasoning_content", "thinking", "reasoning"] {
+    // The field the server actually used is also its replay field — record
+    // it once so the next request can put the thinking text back under the
+    // same name, the way DeepSeek's multi-round tool-calling contract requires.
+    for field in REASONING_FIELDS {
         let Some(reasoning) = delta.get(field).and_then(Value::as_str) else {
             continue;
         };
