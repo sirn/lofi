@@ -6,8 +6,8 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, text_response, thinking_response, tool_response, Fixture, MockServer,
-    WAIT,
+    delayed_text_response, text_response, thinking_response, tool_response, Fixture, MockResponse,
+    MockServer, WAIT,
 };
 
 #[test]
@@ -364,4 +364,43 @@ context_window = 100000
     let missing = fixture.output(&["-e", "LOFI_E2E_DEFINITELY_UNSET", "--list-models"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("LOFI_E2E_DEFINITELY_UNSET"));
+}
+#[test]
+fn reasoning_content_is_replayed_to_chat_completions_providers() {
+    // Round 1 streams thinking + tool call. Round 2 ends with text. The
+    // DeepSeek-style thinking must replay as assistant["reasoning_content"]
+    // on the round 2 request.
+    let server = MockServer::start(vec![
+        MockResponse::sse(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private rope\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"rt\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{\\\"code\\\": \\\"return 1;\\\"}\"}}]}}]}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_string(),
+        ),
+        text_response("done"),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    let output = fixture.output(&["--print", "trigger tool"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0].body.contains("reasoning_content"),
+        "first turn must not invent reasoning_content, body: {}",
+        requests[0].body
+    );
+    let second = &requests[1].body;
+    assert!(
+        second.contains("reasoning_content"),
+        "second turn must replay reasoning_content, body: {second}"
+    );
+    assert!(second.contains("private rope"));
 }
