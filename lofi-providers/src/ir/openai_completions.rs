@@ -1,7 +1,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use lofi_types::{
-    ContentBlock, Message, Model, PartSignatureFormat, Role, StreamingEvent, ThinkingLevel, Usage,
+    ContentBlock, Message, Model, PartSignatureFormat, Role, ServiceTier, StreamingEvent,
+    ThinkingLevel, Usage,
 };
 use serde_json::{json, Value};
 
@@ -235,6 +236,9 @@ fn build_openai_chat_request(model: &Model, messages: &[Message], tools: &[ToolS
         // reasoning-capable models. `off` omits it entirely so the model's
         // default behavior applies.
         req["reasoning_effort"] = json!(effort);
+    }
+    if model.service_tier != ServiceTier::Auto {
+        req["service_tier"] = json!(model.service_tier.as_str());
     }
     req
 }
@@ -490,6 +494,7 @@ mod tests {
             api: lofi_types::Api::OpenAiCompletions,
             reasoning: false,
             thinking: lofi_types::ThinkingLevel::Off,
+            service_tier: lofi_types::ServiceTier::Auto,
             supports_image: false,
             context_window: None,
             max_tokens: None,
@@ -523,6 +528,23 @@ mod tests {
         }
         assert!(build_openai_chat_request(&model(), &[], &[])
             .get("reasoning_effort")
+            .is_none());
+    }
+
+    #[test]
+    fn request_forwards_service_tier_but_omits_auto() {
+        for tier in [
+            ServiceTier::Flex,
+            ServiceTier::Priority,
+            ServiceTier::Custom("vip-2025".to_string()),
+        ] {
+            let mut model = model();
+            model.service_tier = tier.clone();
+            let req = build_openai_chat_request(&model, &[], &[]);
+            assert_eq!(req["service_tier"], tier.as_str());
+        }
+        assert!(build_openai_chat_request(&model(), &[], &[])
+            .get("service_tier")
             .is_none());
     }
 

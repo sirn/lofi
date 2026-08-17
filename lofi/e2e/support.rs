@@ -943,6 +943,8 @@ reasoning = true
 supports_image = true
 thinking_level = "medium"
 thinking_levels = ["low", "medium", "high", "xhigh"]
+service_tier = "flex"
+service_tiers = ["flex", "priority"]
 
 [providers.mock.models.alt]
 name = "B Alternate"
@@ -962,6 +964,8 @@ context_window = 100000
 reasoning = true
 thinking_level = "medium"
 thinking_levels = ["low", "medium", "high", "xhigh"]
+service_tier = "priority"
+service_tiers = ["flex", "priority"]
 
 [providers.anthropic]
 base_url = "{base_url}"
