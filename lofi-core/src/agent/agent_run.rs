@@ -797,6 +797,7 @@ impl Agent {
                                 | StreamingEvent::ThinkingDelta(s)
                                 | StreamingEvent::ThinkingSignature(s)
                                 | StreamingEvent::Error(s) => s.len(),
+                                StreamingEvent::ThinkingRedacted { data } => data.len(),
                                 StreamingEvent::PartSignature {
                                     provider,
                                     model,
