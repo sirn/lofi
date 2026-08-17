@@ -1548,7 +1548,6 @@ mod tests {
         assert_eq!(Api::OpenAiCompletions.label(), "OpenAI Chat Completions");
     }
 
-
     #[test]
     fn run_model_label_includes_service_tier() {
         let m = RunModel {

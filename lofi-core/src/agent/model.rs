@@ -360,12 +360,7 @@ pub fn select_model(
         pcfg,
         config.agent.thinking_level.clone(),
     )?;
-    let tier = resolve_service_tier(
-        explicit_tier,
-        mc,
-        pcfg,
-        config.agent.service_tier.clone(),
-    )?;
+    let tier = resolve_service_tier(explicit_tier, mc, pcfg, config.agent.service_tier.clone())?;
     let mut model = model;
     model.service_tier = tier.clone();
     Ok((model, level))
@@ -438,11 +433,7 @@ pub(crate) fn resolve_service_tier(
         return Ok(ServiceTier::Auto);
     }
     if !mc.service_tiers.contains(&desired) {
-        let allowed: Vec<&str> = mc
-            .service_tiers
-            .iter()
-            .map(ServiceTier::as_str)
-            .collect();
+        let allowed: Vec<&str> = mc.service_tiers.iter().map(ServiceTier::as_str).collect();
         return Err(Error::Config(format!(
             "service tier `{}` not supported by this model; allowed: {}",
             desired.as_str(),

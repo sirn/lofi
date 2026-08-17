@@ -864,7 +864,10 @@ impl App {
             );
             return;
         }
-        let selected = tiers.iter().position(|t| t == &self.service_tier).unwrap_or(0);
+        let selected = tiers
+            .iter()
+            .position(|t| t == &self.service_tier)
+            .unwrap_or(0);
         self.service_picker = Some(ServicePickerState { tiers, selected });
     }
 

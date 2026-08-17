@@ -184,12 +184,20 @@ fn service_tier_is_forwarded_for_openai_protocols() {
     let fixture = Fixture::new(&server);
 
     let out = fixture.output(&["--model", "mock/chat", "--print", "p"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("chat flex"));
 
     // The @flex suffix overrides the configured priority default.
     let out = fixture.output(&["--model", "responses/reasoning@flex", "--print", "p"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("responses override"));
 
     let requests = server.requests();
@@ -204,7 +212,6 @@ fn service_tier_is_forwarded_for_openai_protocols() {
         "responses body: {responses_body}"
     );
 }
-
 
 #[test]
 fn provider_reported_stream_errors_fail_without_silent_partial_answers() {
