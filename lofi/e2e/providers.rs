@@ -205,7 +205,7 @@ fn service_tier_is_forwarded_for_openai_protocols() {
     let responses_body = &requests[1].body;
     assert!(
         chat_body.contains("\"service_tier\":\"flex\""),
-        "mock/completions body: {chat_body}"
+        "mock/chat body: {chat_body}"
     );
     assert!(
         responses_body.contains("\"service_tier\":\"flex\""),

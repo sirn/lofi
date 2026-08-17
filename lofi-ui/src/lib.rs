@@ -117,14 +117,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .is_none()
         .then(|| session.last_run_model())
         .flatten()
-        .map(|m| {
-            let tier = if m.service_tier == ServiceTier::Auto {
-                String::new()
-            } else {
-                format!("@{}", m.service_tier.as_str())
-            };
-            format!("{}/{}:{}{}", m.provider, m.id, m.thinking.as_str(), tier)
-        });
+        .map(|m| m.query());
 
     let (agent, label, thinking, service_tier, hint, ctx_limit, compaction, ui_theme, switcher) =
         match resolve_startup_agent(&opts, restored.as_deref()).await? {
