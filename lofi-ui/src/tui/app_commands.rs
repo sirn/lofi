@@ -860,7 +860,7 @@ impl App {
         if tiers.len() <= 1 {
             self.notify(
                 NotifyKind::Info,
-                "current model does not declare service tiers",
+                "current model does not support service tiers",
             );
             return;
         }
