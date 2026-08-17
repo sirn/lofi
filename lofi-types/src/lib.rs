@@ -272,8 +272,10 @@ pub enum ContentBlock {
         images: Vec<ToolResultImage>,
     },
     /// Chain-of-thought / reasoning trace (where the API exposes it).
-    /// `signature` is the opaque replay blob: Anthropic's thinking signature
-    /// or Responses `encrypted_content`.
+    /// `signature` is provider-specific replay metadata: Anthropic's thinking
+    /// signature, Responses `encrypted_content`, or — on chat-completions
+    /// plaintext reasoning streams — the delta field name the trace arrived
+    /// under so the next request can replay it to the same key.
     Thinking {
         text: String,
         signature: Option<String>,
