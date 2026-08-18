@@ -398,8 +398,31 @@ pub enum StreamingEvent {
         target: Option<String>,
         signature: String,
     },
-    Done(Usage),
+    Done {
+        usage: Usage,
+        /// Why the provider stopped generating, when it reported one.
+        /// `None` for providers or frames that carry no stop metadata.
+        #[serde(default)]
+        stop_reason: Option<StopReason>,
+    },
     Error(String),
+}
+
+/// Provider-reported reason generation stopped, normalized across APIs.
+/// Anthropic `stop_reason`, `OpenAI` `finish_reason`/`status`, and Google
+/// `finishReason` all map onto these variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The model finished on its own (`end_turn`, `stop`, `STOP`).
+    EndTurn,
+    /// Output was cut off by a token limit (`max_tokens`, `length`,
+    /// `MAX_TOKENS`, Responses `incomplete` with `max_output_tokens`).
+    MaxTokens,
+    /// Generation stopped to run tools (`tool_use`, `tool_calls`).
+    ToolUse,
+    /// Any other provider-specific reason, kept opaque.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1804,11 +1827,18 @@ mod tests {
             id: "t1".to_string(),
             name: "exec".to_string(),
         });
-        round_trip(&StreamingEvent::Done(Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Usage::default()
-        }));
+        round_trip(&StreamingEvent::Done {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Usage::default()
+            },
+            stop_reason: Some(StopReason::EndTurn),
+        });
+        round_trip(&StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        });
         round_trip(&StreamingEvent::Error("boom".to_string()));
     }
 

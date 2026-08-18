@@ -319,7 +319,14 @@ fn map_event(data: &Value, state: &mut GoogleMapperState) -> Result<Vec<Streamin
             "STOP" | "MAX_TOKENS" => {
                 if !state.done {
                     state.done = true;
-                    out.push(StreamingEvent::Done(state.usage));
+                    out.push(StreamingEvent::Done {
+                        usage: state.usage,
+                        stop_reason: Some(if reason == "MAX_TOKENS" {
+                            lofi_types::StopReason::MaxTokens
+                        } else {
+                            lofi_types::StopReason::EndTurn
+                        }),
+                    });
                 }
             }
             other => {
@@ -594,18 +601,43 @@ mod tests {
         assert_eq!(part["thoughtSignature"], signature);
         assert!(matches!(
             events.last(),
-            Some(StreamingEvent::Done(Usage {
-                input_tokens: 7,
-                output_tokens: 9,
-                cache_read_tokens: 3,
+            Some(StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens: 7,
+                    output_tokens: 9,
+                    cache_read_tokens: 3,
+                    ..
+                },
                 ..
-            }))
+            })
         ));
 
         let request = build_request(&model("gemini-3.7-pro"), &[message], &[]);
         assert!(request["contents"][0]["parts"][0]
             .get("thoughtSignature")
             .is_none());
+    }
+
+    #[test]
+    fn maps_finish_reason_into_done() {
+        for (raw, expected) in [
+            ("STOP", lofi_types::StopReason::EndTurn),
+            ("MAX_TOKENS", lofi_types::StopReason::MaxTokens),
+        ] {
+            let mut state = GoogleGenerativeAiIr::new_state(&model("gemini-3.7-flash"));
+            let events = map_event(
+                &json!({
+                    "candidates": [{"content": {"parts": [{"text": "x"}]}, "finishReason": raw}]
+                }),
+                &mut state,
+            )
+            .unwrap();
+            let done = events.into_iter().last().unwrap();
+            let StreamingEvent::Done { stop_reason, .. } = done else {
+                panic!("expected Done");
+            };
+            assert_eq!(stop_reason, Some(expected), "finishReason {raw}");
+        }
     }
 
     #[test]

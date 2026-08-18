@@ -25,9 +25,10 @@ impl Provider for RecordingProvider {
         _tools: &[ToolSchema],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        Ok(Box::pin(stream::iter([Ok(StreamingEvent::Done(
-            Usage::default(),
-        ))])))
+        Ok(Box::pin(stream::iter([Ok(StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        })])))
     }
 }
 
@@ -87,7 +88,10 @@ impl Provider for TerminalThenPendingProvider {
         Ok(Box::pin(
             stream::iter([
                 Ok(StreamingEvent::TextDelta("done".to_string())),
-                Ok(StreamingEvent::Done(Usage::default())),
+                Ok(StreamingEvent::Done {
+                    usage: Usage::default(),
+                    stop_reason: None,
+                }),
             ])
             .chain(stream::pending()),
         ))
@@ -343,7 +347,10 @@ async fn run_once_text_only_finishes() {
     let agent = agent_with(
         vec![vec![
             StreamingEvent::TextDelta("hello".to_string()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ]],
         dir.path(),
     );
@@ -374,11 +381,17 @@ async fn run_once_tool_call_executes_and_appends_result() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let round2 = vec![
         StreamingEvent::TextDelta("done".to_string()),
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = agent_with(vec![round1, round2], dir.path());
     let mut messages = vec![user_msg("go")];
@@ -489,7 +502,10 @@ async fn settled_messages_remain_on_disk_after_consumer_drops() {
     let agent = agent_with(
         vec![vec![
             StreamingEvent::TextDelta("kept".into()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ]],
         dir.path(),
     );
@@ -567,7 +583,10 @@ async fn completed_final_round_is_on_disk_before_turn_end() {
     let agent = agent_with(
         vec![vec![
             StreamingEvent::TextDelta("final answer".into()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ]],
         dir.path(),
     );
@@ -645,7 +664,10 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = Agent {
         provider: Arc::new(PendingAfterRoundProvider {
@@ -698,7 +720,10 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = Agent {
         provider: Arc::new(CompletedRoundThenPartialProvider {
@@ -796,10 +821,13 @@ async fn run_continuation_force_stops_at_hard_cap() {
             StreamingEvent::ToolUseEnd {
                 id: "t1".to_string(),
             },
-            StreamingEvent::Done(Usage {
-                input_tokens,
-                ..Usage::default()
-            }),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens,
+                    ..Usage::default()
+                },
+                stop_reason: None,
+            },
         ]
     };
     let agent = Agent {
@@ -868,7 +896,10 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
     let provider = Arc::new(MockProvider {
         rounds: std::sync::Mutex::new(vec![vec![
             StreamingEvent::TextDelta("unreachable".to_string()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ]]),
     });
     let agent = Agent {
@@ -969,7 +1000,10 @@ async fn run_once_tool_error_marks_result_error() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = agent_with(vec![round1], dir.path());
     let mut messages = vec![user_msg("go")];
@@ -988,7 +1022,10 @@ async fn run_retries_transient_provider_errors() {
     let round1 = vec![StreamingEvent::Error("HTTP 429 Too Many Requests".into())];
     let round2 = vec![
         StreamingEvent::TextDelta("recovered".into()),
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent =
         agent_with(vec![round1, round2], dir.path()).with_retry(crate::retry::RetryPolicy {
@@ -1056,11 +1093,17 @@ async fn successful_provider_round_resets_retry_attempt_count() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let final_round = vec![
         StreamingEvent::TextDelta("recovered again".into()),
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = agent_with(
         vec![
@@ -1115,7 +1158,10 @@ async fn run_does_not_retry_non_transient_errors() {
     let round1 = vec![StreamingEvent::Error("401 Unauthorized".into())];
     let round2 = vec![
         StreamingEvent::TextDelta("should-not-happen".into()),
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent =
         agent_with(vec![round1, round2], dir.path()).with_retry(crate::retry::RetryPolicy {
@@ -1146,7 +1192,10 @@ async fn run_exits_when_receiver_dropped() {
     let agent = agent_with(
         vec![vec![
             StreamingEvent::TextDelta("hi".to_string()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ]],
         dir.path(),
     );
@@ -1806,11 +1855,17 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
         StreamingEvent::ToolUseEnd {
             id: "t1".to_string(),
         },
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let round2 = vec![
         StreamingEvent::TextDelta("done".to_string()),
-        StreamingEvent::Done(Usage::default()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
     ];
     let agent = agent_with(vec![round1, round2], dir.path());
     let mut messages = vec![Message {
