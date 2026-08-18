@@ -1392,7 +1392,7 @@ impl App {
                 self.confirm_selected = 1 - self.confirm_selected.min(1);
                 None
             }
-            KeyCode::Enter => Some(self.confirm_selected == 0),
+
             KeyCode::Char('a' | 'A' | 'y' | 'Y') => Some(true),
             KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => Some(false),
             KeyCode::Char('c') if ctrl => Some(false),
