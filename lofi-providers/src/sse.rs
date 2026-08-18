@@ -348,7 +348,7 @@ fn enqueue_block<M: SseMapper>(state: &mut SseState<M>, block: &str) {
                 let defer_done = state.mapper.defer_done_until_transport_end();
                 let mut terminal = false;
                 for event in events {
-                    if matches!(event, StreamingEvent::Done(_)) {
+                    if matches!(event, StreamingEvent::Done { .. }) {
                         if defer_done {
                             state.pending_done = Some(event);
                         } else {
@@ -537,7 +537,10 @@ mod tests {
     impl SseMapper for DoneMapper {
         fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
             if event.data == "done" {
-                Ok(vec![StreamingEvent::Done(lofi_types::Usage::default())])
+                Ok(vec![StreamingEvent::Done {
+                    usage: lofi_types::Usage::default(),
+                    stop_reason: None,
+                }])
             } else {
                 Ok(Vec::new())
             }
@@ -550,7 +553,10 @@ mod tests {
     impl SseMapper for DeferredDoneMapper {
         fn map(&mut self, event: SseEvent) -> Result<Vec<StreamingEvent>> {
             if event.data == "done" {
-                Ok(vec![StreamingEvent::Done(lofi_types::Usage::default())])
+                Ok(vec![StreamingEvent::Done {
+                    usage: lofi_types::Usage::default(),
+                    stop_reason: None,
+                }])
             } else {
                 Ok(Vec::new())
             }
@@ -594,7 +600,7 @@ mod tests {
 
         assert!(sentinel_polled.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+        assert!(matches!(events[0], Ok(StreamingEvent::Done { .. })));
     }
 
     #[tokio::test]
@@ -617,7 +623,7 @@ mod tests {
             .await;
 
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+        assert!(matches!(events[0], Ok(StreamingEvent::Done { .. })));
     }
 
     #[tokio::test]
@@ -643,7 +649,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], Ok(StreamingEvent::Done(_))));
+        assert!(matches!(events[0], Ok(StreamingEvent::Done { .. })));
     }
 
     #[tokio::test]

@@ -179,7 +179,7 @@ async fn collect_text(
         };
         match ev {
             Ok(lofi_types::StreamingEvent::TextDelta(d)) => text.push_str(&d),
-            Ok(lofi_types::StreamingEvent::Done(_)) => break,
+            Ok(lofi_types::StreamingEvent::Done { .. }) => break,
             Ok(lofi_types::StreamingEvent::Error(msg)) => {
                 return Err(Error::Provider(msg));
             }
