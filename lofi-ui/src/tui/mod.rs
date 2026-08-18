@@ -1353,7 +1353,7 @@ async fn run_loop(
                             truncated, cancelled, exclude_from_context,
                         } = e
                         {
-                            let result = lofi_core::DirectShellResult::from_session(
+                            let result = lofi_core::UserShellResult::from_session(
                                 command, output, exit_code, signal, duration_ms,
                                 truncated, cancelled,
                             );

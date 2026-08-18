@@ -7,7 +7,7 @@ use crate::support::{
 };
 
 #[test]
-fn direct_shell_context_marker_controls_the_next_model_request() {
+fn user_shell_context_marker_controls_the_next_model_request() {
     let server = MockServer::start(vec![text_response("shell context answer marker")]);
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
@@ -319,13 +319,13 @@ fn escape_clears_input_and_ctrl_d_exits() {
 }
 
 #[test]
-fn ctrl_c_cancels_direct_shell_and_kills_its_process_group() {
+fn ctrl_c_cancels_user_shell_and_kills_its_process_group() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
 
-    tui.submit("!echo $$ > direct-shell.pid; exec sleep 60");
-    let pid_path = fixture.workspace.join("direct-shell.pid");
+    tui.submit("!echo $$ > user-shell.pid; exec sleep 60");
+    let pid_path = fixture.workspace.join("user-shell.pid");
     let started = std::time::Instant::now();
     while !pid_path.exists() && started.elapsed() < WAIT {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -353,7 +353,7 @@ fn ctrl_c_cancels_direct_shell_and_kills_its_process_group() {
 }
 
 #[test]
-fn direct_shell_records_exit_signal_and_large_output_without_blocking_shutdown() {
+fn user_shell_records_exit_signal_and_large_output_without_blocking_shutdown() {
     let server = MockServer::start(vec![text_response("shell edge context answer")]);
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
@@ -394,7 +394,7 @@ fn direct_shell_records_exit_signal_and_large_output_without_blocking_shutdown()
 }
 
 #[test]
-fn direct_shell_reading_stdin_does_not_swallow_typed_keys() {
+fn user_shell_reading_stdin_does_not_swallow_typed_keys() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
