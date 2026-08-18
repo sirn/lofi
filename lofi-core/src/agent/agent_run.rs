@@ -52,7 +52,7 @@ impl Agent {
                 .run_once_inner(&mut messages, Some(&tx), None, RoundOpts::default())
                 .await
             {
-                Ok(f) => f,
+                Ok(outcome) => outcome.finished,
                 // A gone receiver is a graceful cancellation, not a provider
                 // error: stop the run cleanly instead of surfacing it.
                 Err(Error::Cancelled) => return Ok(()),
@@ -237,6 +237,9 @@ impl Agent {
         // The image-omit notice fires once per turn (on the first round),
         // not once per tool round.
         let mut omit_notice_sent = false;
+        // Auto-continuation on a truncated round fires at most once per turn
+        // so a model that keeps hitting the cap cannot loop unattended.
+        let mut truncation_continued = false;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -272,7 +275,8 @@ impl Agent {
                 retry_attempt = 0;
             }
             match round {
-                Ok(finished) => {
+                Ok(outcome) => {
+                    let finished = outcome.finished;
                     // Persist before inspecting the consumer so a completed
                     // round is on disk even if the UI already went away.
                     commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
@@ -289,6 +293,36 @@ impl Agent {
                         break;
                     }
                     if finished {
+                        // Unambiguous truncation: the provider cut the model
+                        // off at the token cap mid-answer, so the stop was
+                        // not a deliberate end of turn. Nudge the model once
+                        // to continue, in the same turn. The notice persists
+                        // (like a job notice) so the model still sees the
+                        // nudge after resume/compaction; it replays as a
+                        // notice-kind turn, never as user input.
+                        if !truncation_continued
+                            && outcome.stop_reason == Some(lofi_types::StopReason::MaxTokens)
+                        {
+                            truncation_continued = true;
+                            messages.push(Message {
+                                role: Role::User,
+                                blocks: vec![ContentBlock::Text {
+                                    text: TRUNCATION_CONTINUATION_PROMPT.to_string(),
+                                }],
+                                kind: lofi_types::PromptKind::Notice,
+                            });
+                            if !emit(
+                                Some(&tx),
+                                AgentEvent::Notice(
+                                    "response hit the token limit; continuing the turn".into(),
+                                ),
+                            )
+                            .await
+                            {
+                                detached = true;
+                            }
+                            continue;
+                        }
                         finished_normally = true;
                         break;
                     }
@@ -553,10 +587,17 @@ impl Agent {
     /// # Errors
     /// Propagates [`Error`] from provider streaming or timeouts.
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
-        self.run_once_inner(messages, None, None, RoundOpts::default())
-            .await
+        Ok(self
+            .run_once_inner(messages, None, None, RoundOpts::default())
+            .await?
+            .finished)
     }
 
+    /// Returns a [`RoundOutcome`]: `finished` is true when the model
+    /// requested no tool uses, and `stop_reason` carries the provider's
+    /// reason for ending generation so the caller can tell a deliberate
+    /// end-of-turn from a truncation.
+    ///
     /// Events are emitted via an awaited [`Sender::send`] so a slow receiver
     /// applies backpressure without dropping events; the outer
     /// [`run`](Self::run) loop checks `tx.is_closed()` to exit when the
@@ -572,7 +613,7 @@ impl Agent {
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
         opts: RoundOpts<'_>,
-    ) -> Result<bool> {
+    ) -> Result<RoundOutcome> {
         let RoundOpts {
             recall,
             result,
@@ -662,6 +703,7 @@ impl Agent {
         // the round is terminal (no tool calls), so `Done` remains a true
         // end-of-run signal rather than firing before tool execution.
         let mut round_usage: Option<Usage> = None;
+        let mut round_stop_reason: Option<lofi_types::StopReason> = None;
         let mut round_bytes = 0usize;
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
@@ -764,8 +806,9 @@ impl Agent {
                                         }
                                     }
                                 }
-                                StreamingEvent::Done { usage, .. } => {
+                                StreamingEvent::Done { usage, stop_reason } => {
                                     round_usage = Some(*usage);
+                                    round_stop_reason = *stop_reason;
                                     if let Some(s) = stats.as_deref_mut() {
                                         s.add_usage(*usage, &self.model);
                                         if !emit(
@@ -892,7 +935,10 @@ impl Agent {
         };
 
         if tool_uses.is_empty() {
-            return Ok(true);
+            return Ok(RoundOutcome {
+                finished: true,
+                stop_reason: round_stop_reason,
+            });
         }
 
         let tool_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
@@ -929,7 +975,10 @@ impl Agent {
             blocks: results,
             kind: lofi_types::PromptKind::User,
         });
-        Ok(false)
+        Ok(RoundOutcome {
+            finished: false,
+            stop_reason: round_stop_reason,
+        })
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -1234,6 +1283,13 @@ async fn commit_progress(
         }
     }
     Ok(())
+}
+
+/// Result of a single provider round: whether the turn is finished (no
+/// tool uses requested) and why the provider stopped generating.
+struct RoundOutcome {
+    finished: bool,
+    stop_reason: Option<lofi_types::StopReason>,
 }
 
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block
