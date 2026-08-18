@@ -833,6 +833,17 @@ mod tests {
     }
 
     #[test]
+    fn finish_reason_on_content_frame_is_retained_until_done() {
+        let mut state = ChatMapperState::default();
+        let chunk = json!({"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]});
+        let out = map_openai_chat_event(&chunk, &mut state).unwrap();
+        assert!(out
+            .iter()
+            .all(|e| !matches!(e, StreamingEvent::Done { .. })));
+        assert_eq!(state.finish_reason, Some(lofi_types::StopReason::MaxTokens));
+    }
+
+    #[test]
     fn returns_none_for_bare_finish_reason() {
         let chunk = json!({"choices":[{"delta":{},"finish_reason":"stop"}]});
         assert_eq!(
