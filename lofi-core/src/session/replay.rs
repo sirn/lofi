@@ -276,6 +276,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 elapsed_ms,
                 cost,
                 usage,
+                stop_reason,
                 ..
             } => {
                 emit(AgentEvent::TurnEnd {
@@ -283,6 +284,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     elapsed_ms: *elapsed_ms,
                     cost: *cost,
                     usage: *usage,
+                    stop_reason: *stop_reason,
                 });
             }
             SessionEventKind::TurnFailed {

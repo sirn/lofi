@@ -38,6 +38,7 @@ pub struct TurnSummary {
     pub elapsed_ms: u64,
     pub cost: f64,
     pub usage: Usage,
+    pub stop_reason: Option<lofi_types::StopReason>,
     pub tool_elapsed: Vec<(String, u64)>,
     pub thinking_elapsed: Vec<u64>,
     pub native_tools: Vec<NativeToolRecord>,
@@ -264,6 +265,7 @@ impl SessionRecorder {
                 elapsed_ms: summary.elapsed_ms,
                 cost: summary.cost,
                 usage: summary.usage,
+                stop_reason: summary.stop_reason,
             }),
             TurnOutcome::Failed(error) => Some(SessionEventKind::TurnFailed {
                 model: self.model.clone(),
@@ -377,6 +379,7 @@ mod tests {
                 result: "file".into(),
                 is_error: false,
             }],
+            stop_reason: None,
         }
     }
 
@@ -616,6 +619,7 @@ mod tests {
             tool_elapsed: vec![],
             thinking_elapsed: vec![],
             native_tools: vec![],
+            stop_reason: None,
         };
         let range = rec.flush(&[], &TurnOutcome::Detached, &empty).unwrap();
         assert!(range.is_none());
@@ -667,6 +671,7 @@ mod tests {
                 tool_elapsed: vec![],
                 thinking_elapsed: vec![],
                 native_tools: vec![],
+                stop_reason: None,
             },
         )
         .unwrap();
@@ -685,6 +690,7 @@ mod tests {
                 tool_elapsed: vec![],
                 thinking_elapsed: vec![],
                 native_tools: vec![],
+                stop_reason: None,
             },
         )
         .unwrap();
