@@ -136,16 +136,19 @@ impl BuiltinTools {
         approved
     }
 
-    /// Build the host-level `sh -c` invocation: stdout/stderr piped, own
-    /// process group so the whole tree can be killed on timeout/cancel, env
-    /// resolved from the `bash` config (minimal baseline by default; specific
-    /// vars opted back in via `pass_env`/`env_file`).
+    /// Build the host-level `sh -c` invocation: stdin null (the TUI reader
+    /// thread owns the terminal stdin; inheriting it lets the tool win the
+    /// read race and swallow typed keys), stdout/stderr piped, own process
+    /// group so the whole tree can be killed on timeout/cancel, env resolved
+    /// from the `bash` config (minimal baseline by default; specific vars
+    /// opted back in via `pass_env`/`env_file`).
     fn command_for(&self, cmd: &str) -> Command {
         let mut command = Command::new("sh");
         command
             .arg("-c")
             .arg(cmd)
             .current_dir(&self.root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
