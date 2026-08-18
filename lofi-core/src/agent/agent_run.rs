@@ -593,9 +593,10 @@ impl Agent {
             .finished)
     }
 
-    /// The boolean is `finished` (no tool uses requested). `RoundOutcome`
-    /// additionally carries the provider stop reason so the caller can tell
-    /// a deliberate end-of-turn from a truncation.
+    /// Returns a [`RoundOutcome`]: `finished` is true when the model
+    /// requested no tool uses, and `stop_reason` carries the provider's
+    /// reason for ending generation so the caller can tell a deliberate
+    /// end-of-turn from a truncation.
     ///
     /// Events are emitted via an awaited [`Sender::send`] so a slow receiver
     /// applies backpressure without dropping events; the outer
