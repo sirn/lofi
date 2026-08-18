@@ -551,6 +551,31 @@ data: {{}}
     ))
 }
 
+/// Token-limit truncation, Anthropic shape: text, then `message_delta`
+/// carrying `stop_reason: "max_tokens"` so the harness auto-continues.
+pub fn anthropic_truncated_text_response(text: &str) -> MockResponse {
+    let delta = json!({
+        "index": 0,
+        "delta": { "type": "text_delta", "text": text },
+    });
+    let usage = json!({
+        "delta": { "stop_reason": "max_tokens" },
+        "usage": { "output_tokens": 3 },
+    });
+    MockResponse::sse(format!(
+        "event: content_block_delta
+data: {delta}
+
+event: message_delta
+data: {usage}
+
+event: message_stop
+data: {{}}
+
+"
+    ))
+}
+
 pub fn anthropic_usage_response(thinking: &str, signature: &str, text: &str) -> MockResponse {
     let start = json!({
         "message": {
@@ -684,6 +709,26 @@ pub fn delayed_text_response(text: &str, delay: Duration) -> MockResponse {
     MockResponse::delayed_sse(format!("data: {event}\n\ndata: [DONE]\n\n"), delay)
 }
 
+/// A response cut off at the token limit: text, then a terminal frame with
+/// `finish_reason: "length"` so the harness auto-continues the turn. The
+/// usage frame is what makes the mapper emit `Done` (EOF alone does not).
+pub fn truncated_text_response(text: &str) -> MockResponse {
+    let event = json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "length" }] });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn text_response_with_usage(text: &str, input_tokens: u64) -> MockResponse {
     let text = json!({ "choices": [{ "delta": { "content": text } }] });
     let usage = json!({
@@ -774,7 +819,9 @@ data: [DONE]
     ))
 }
 
-pub fn truncated_responses_response(text: &str) -> MockResponse {
+/// A stream severed at EOF mid-response with no terminal event; distinct
+/// from a token-limit truncation, which the provider reports explicitly.
+pub fn eof_cut_responses_response(text: &str) -> MockResponse {
     let text = json!({ "type": "response.output_text.delta", "delta": text });
     MockResponse::sse(format!(
         "data: {text}
