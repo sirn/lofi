@@ -310,6 +310,7 @@ fn install_run(
     });
     app.run = Some(0);
     app.run_start = Some(Instant::now());
+    app.run_model_label = Some(app.session_model());
     app.pinned = true;
 }
 
