@@ -3,14 +3,14 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use lofi_code::direct_shell::{run_direct_shell, DirectShellOutput};
+use lofi_code::user_shell::{run_user_shell, UserShellOutput};
 use lofi_error::Result;
 
 const CONTEXT_MAX_BYTES: usize = 16 * 1024;
 const CONTEXT_MAX_LINES: usize = 40;
 
 #[derive(Debug, Clone)]
-pub struct DirectShellResult {
+pub struct UserShellResult {
     pub command: String,
     pub output: String,
     pub exit_code: Option<i32>,
@@ -20,7 +20,7 @@ pub struct DirectShellResult {
     pub cancelled: bool,
 }
 
-impl DirectShellResult {
+impl UserShellResult {
     #[must_use]
     pub fn from_session(
         command: String,
@@ -75,8 +75,8 @@ impl DirectShellResult {
 }
 
 #[must_use]
-pub fn cancelled_direct_shell(command: String, duration_ms: u64) -> DirectShellResult {
-    DirectShellResult {
+pub fn cancelled_user_shell(command: String, duration_ms: u64) -> UserShellResult {
+    UserShellResult {
         command,
         output: String::new(),
         exit_code: None,
@@ -92,20 +92,20 @@ pub fn cancelled_direct_shell(command: String, duration_ms: u64) -> DirectShellR
 ///
 /// # Errors
 /// Returns an error if process execution fails.
-pub async fn run_direct_shell_command(
+pub async fn run_user_shell_command(
     root: &Path,
     command: String,
     cancel: Arc<AtomicBool>,
-) -> Result<DirectShellResult> {
-    let DirectShellOutput {
+) -> Result<UserShellResult> {
+    let UserShellOutput {
         output,
         exit_code,
         signal,
         duration_ms,
         truncated,
         cancelled,
-    } = Box::pin(run_direct_shell(root, &command, cancel)).await?;
-    Ok(DirectShellResult {
+    } = Box::pin(run_user_shell(root, &command, cancel)).await?;
+    Ok(UserShellResult {
         command,
         output,
         exit_code,

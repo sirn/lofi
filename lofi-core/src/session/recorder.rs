@@ -10,7 +10,7 @@ use std::{collections::HashSet, path::Path};
 use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind, Usage};
 
 use crate::session::store::{self, CompactionCounts};
-use crate::shell::DirectShellResult;
+use crate::shell::UserShellResult;
 use lofi_error::Result;
 
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ pub enum SessionRecord<'a> {
         prompt: &'a str,
     },
     UserShell {
-        result: &'a DirectShellResult,
+        result: &'a UserShellResult,
         exclude_from_context: bool,
     },
     Compaction {
@@ -722,7 +722,7 @@ mod tests {
         cursor
             .record(SessionRecord::System { prompt: "sys" })
             .unwrap();
-        let bash = DirectShellResult {
+        let bash = UserShellResult {
             command: "pwd".into(),
             output: "/".into(),
             exit_code: Some(0),
