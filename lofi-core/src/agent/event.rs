@@ -76,6 +76,9 @@ pub enum AgentEvent {
         elapsed_ms: u64,
         cost: f64,
         usage: Usage,
+        /// Provider-reported stop reason of the turn's final round. Mirrors
+        /// the value persisted in the transcript's `TurnEnd` marker.
+        stop_reason: Option<lofi_types::StopReason>,
     },
     TurnFailed {
         model: RunModel,

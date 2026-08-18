@@ -72,6 +72,11 @@ const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
 const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 
 const PER_EVENT_OVERHEAD: usize = 64;
+/// User-role notice appended once per turn when the provider reports a
+/// token-limit stop, nudging the model to pick up where it was cut off.
+const TRUNCATION_CONTINUATION_PROMPT: &str =
+    "Your previous response was cut off at the token limit. Continue where you left off.";
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -84,6 +89,9 @@ struct TurnStats {
     native_tools: Vec<NativeToolRecord>,
     cost: f64,
     usage: Usage,
+    // Stop reason of the latest finished round; the final round's value is
+    // what the turn summary and the durable TurnEnd marker carry.
+    stop_reason: Option<lofi_types::StopReason>,
 }
 
 impl TurnStats {
@@ -96,6 +104,7 @@ impl TurnStats {
             native_tools: Vec::new(),
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         }
     }
 
@@ -154,6 +163,7 @@ impl TurnStats {
                 .map(|d| d.as_millis() as u64)
                 .collect(),
             native_tools: self.native_tools.clone(),
+            stop_reason: self.stop_reason,
         }
     }
 }

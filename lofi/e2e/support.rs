@@ -366,6 +366,32 @@ data: [DONE]
     ))
 }
 
+/// A tool call cut off mid-arguments at the token limit: partial JSON,
+/// `finish_reason: "length"`, then usage so the mapper emits `Done`.
+pub fn truncated_tool_response(call_id: &str, partial_arguments: &str) -> MockResponse {
+    let event = json!({
+        "choices": [{ "delta": { "tool_calls": [{
+            "index": 0,
+            "id": call_id,
+            "type": "function",
+            "function": { "name": "exec", "arguments": partial_arguments }
+        }] }, "finish_reason": "length" }]
+    });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn parallel_tool_response(calls: &[(&str, &str)]) -> MockResponse {
     let calls: Vec<Value> = calls
         .iter()
@@ -551,6 +577,31 @@ data: {{}}
     ))
 }
 
+/// Token-limit truncation, Anthropic shape: text, then `message_delta`
+/// carrying `stop_reason: "max_tokens"` so the harness auto-continues.
+pub fn anthropic_truncated_text_response(text: &str) -> MockResponse {
+    let delta = json!({
+        "index": 0,
+        "delta": { "type": "text_delta", "text": text },
+    });
+    let usage = json!({
+        "delta": { "stop_reason": "max_tokens" },
+        "usage": { "output_tokens": 3 },
+    });
+    MockResponse::sse(format!(
+        "event: content_block_delta
+data: {delta}
+
+event: message_delta
+data: {usage}
+
+event: message_stop
+data: {{}}
+
+"
+    ))
+}
+
 pub fn anthropic_usage_response(thinking: &str, signature: &str, text: &str) -> MockResponse {
     let start = json!({
         "message": {
@@ -679,9 +730,48 @@ data: [DONE]
     ))
 }
 
+/// A clean end of turn, real-provider shape: text with `finish_reason:
+/// "stop"`, then a usage-only frame so the mapper emits `Done(EndTurn)`.
+pub fn stop_text_response(text: &str) -> MockResponse {
+    let event = json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "stop" }] });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn delayed_text_response(text: &str, delay: Duration) -> MockResponse {
     let event = json!({ "choices": [{ "delta": { "content": text } }] });
     MockResponse::delayed_sse(format!("data: {event}\n\ndata: [DONE]\n\n"), delay)
+}
+
+/// A response cut off at the token limit: text, then a terminal frame with
+/// `finish_reason: "length"` so the harness auto-continues the turn. The
+/// usage frame is what makes the mapper emit `Done` (EOF alone does not).
+pub fn truncated_text_response(text: &str) -> MockResponse {
+    let event = json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "length" }] });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
 }
 
 pub fn text_response_with_usage(text: &str, input_tokens: u64) -> MockResponse {
@@ -774,7 +864,36 @@ data: [DONE]
     ))
 }
 
+/// Token-limit truncation, Responses shape: text, then a completed event
+/// with `incomplete_details.reason: max_output_tokens` so the harness
+/// auto-continues the turn.
 pub fn truncated_responses_response(text: &str) -> MockResponse {
+    let text = json!({ "type": "response.output_text.delta", "delta": text });
+    let done = json!({
+        "type": "response.completed",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 5,
+            }
+        }
+    });
+    MockResponse::sse(format!(
+        "data: {text}
+
+data: {done}
+
+data: [DONE]
+
+"
+    ))
+}
+
+/// A stream severed at EOF mid-response with no terminal event; distinct
+/// from a token-limit truncation, which the provider reports explicitly.
+pub fn eof_cut_responses_response(text: &str) -> MockResponse {
     let text = json!({ "type": "response.output_text.delta", "delta": text });
     MockResponse::sse(format!(
         "data: {text}
