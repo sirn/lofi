@@ -330,6 +330,34 @@ fn bind_job_tools<'js>(
             )?,
         )?;
     }
+    // jobList takes no arguments; bind outside the uniform-args table so
+    // calling it with zero args does not fail arity checks.
+    let t = tools.clone();
+    lofi.set(
+        "jobList",
+        Function::new(
+            ctx.clone(),
+            Async(move |_: Opt<Value>| {
+                let t = t.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "jobList".into(),
+                        args: String::new(),
+                    });
+                    let res = t.job_list(serde_json::Value::Null).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
     Ok(())
 }
 
