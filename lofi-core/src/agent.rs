@@ -76,6 +76,7 @@ const PER_EVENT_OVERHEAD: usize = 64;
 /// token-limit stop, nudging the model to pick up where it was cut off.
 const TRUNCATION_CONTINUATION_PROMPT: &str =
     "Your previous response was cut off at the token limit. Continue where you left off.";
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
