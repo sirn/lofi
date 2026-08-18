@@ -42,6 +42,10 @@ pub async fn run_direct_shell(
         .arg("-c")
         .arg(command_text)
         .current_dir(root)
+        // The TUI reader thread owns the terminal stdin. Inheriting it here
+        // lets the shell win the read race and swallow typed keys; a null
+        // stdin gives the shell EOF instead.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);

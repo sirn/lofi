@@ -799,9 +799,13 @@ impl BuiltinTools {
             }
         } else {
             // One shared file for both streams: the shared offset keeps
-            // merged output in arrival order with no async plumbing.
+            // merged output in arrival order with no async plumbing. Stdin
+            // is null: the TUI reader thread owns the terminal stdin, and
+            // inheriting it lets the job win the read race and swallow
+            // typed keys.
             let stderr_file = log_file.try_clone().map_err(Error::Io)?;
             command
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::from(log_file))
                 .stderr(std::process::Stdio::from(stderr_file))
                 .process_group(0);
