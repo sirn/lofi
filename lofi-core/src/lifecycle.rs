@@ -450,7 +450,7 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
                 cancelled,
                 exclude_from_context: false,
             } if !skipping_failed_turn => {
-                let result = crate::DirectShellResult::from_session(
+                let result = crate::UserShellResult::from_session(
                     command,
                     output,
                     exit_code,
