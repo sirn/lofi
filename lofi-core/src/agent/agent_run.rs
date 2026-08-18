@@ -687,7 +687,7 @@ impl Agent {
                     Ok(None) => break,
                     Ok(Some(ev)) => match ev {
                         Ok(e) => {
-                            let terminal = matches!(e, StreamingEvent::Done(_));
+                            let terminal = matches!(e, StreamingEvent::Done { .. });
                             let is_thinking_ev = matches!(
                                 e,
                                 StreamingEvent::ThinkingDelta(_)
@@ -764,7 +764,7 @@ impl Agent {
                                         }
                                     }
                                 }
-                                StreamingEvent::Done(usage) => {
+                                StreamingEvent::Done { usage, .. } => {
                                     round_usage = Some(*usage);
                                     if let Some(s) = stats.as_deref_mut() {
                                         s.add_usage(*usage, &self.model);
@@ -822,7 +822,7 @@ impl Agent {
                                     id.len() + delta.len()
                                 }
                                 StreamingEvent::ToolUseEnd { id } => id.len(),
-                                StreamingEvent::Done(_) => 0,
+                                StreamingEvent::Done { .. } => 0,
                             });
                             if round_bytes > MAX_ROUND_BYTES {
                                 return Err(Error::Provider(format!(
