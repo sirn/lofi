@@ -1764,6 +1764,7 @@ mod tests {
                 elapsed_ms: 5,
                 cost: 0.0,
                 usage: Usage::default(),
+                stop_reason: None,
             },
         }];
         append_events(&path, &mut batch, None).unwrap();
@@ -2105,6 +2106,7 @@ mod tests {
                         output_tokens: 20,
                         ..Usage::default()
                     },
+                    stop_reason: None,
                 },
             },
         ];
@@ -2116,7 +2118,7 @@ mod tests {
             matches!(&events[1].kind, SessionEventKind::ToolTiming { tool_call_id, elapsed_ms: 5 } if tool_call_id == "t1")
         );
         assert!(
-            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage }
+            matches!(&events[2].kind, SessionEventKind::TurnEnd { model, elapsed_ms: 1234, cost, usage, .. }
             if model.label() == "p/m:medium" && (*cost - 0.01).abs() < 1e-9 && usage.input_tokens == 10)
         );
     }
@@ -2165,6 +2167,7 @@ mod tests {
                     elapsed_ms: 1,
                     cost: 0.0,
                     usage: Usage::default(),
+                    stop_reason: None,
                 },
             },
         ];
@@ -2229,6 +2232,7 @@ mod tests {
                     elapsed_ms: 1,
                     cost: 0.0,
                     usage: Usage::default(),
+                    stop_reason: None,
                 },
             },
         ];
@@ -2246,6 +2250,7 @@ mod tests {
                     elapsed_ms: 1,
                     cost: 0.0,
                     usage: Usage::default(),
+                    stop_reason: None,
                 },
             },
         ];
