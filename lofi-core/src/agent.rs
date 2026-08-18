@@ -72,6 +72,11 @@ const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
 const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 
 const PER_EVENT_OVERHEAD: usize = 64;
+/// User-role notice appended once per turn when the provider reports a
+/// token-limit stop, nudging the model to pick up where it was cut off.
+const TRUNCATION_CONTINUATION_PROMPT: &str =
+    "Your previous response was cut off at the token limit. Continue where you left off.";
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
