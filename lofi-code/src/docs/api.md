@@ -180,6 +180,14 @@ tty, cols, rows, idle, idleMs, idleForMs }`. `state` is `"running"`,
 once output has been unchanged for `idleMs`; `idleForMs` is how long it has
 been idle. Unknown ids return `{ ok: false, error }`.
 
+## lofi.jobList()
+
+List every job this session spawned, newest first. Session-scoped: jobs
+from other sessions are not visible.
+
+**Returns:** `{ ok, jobs }` where each entry is the same shape as
+`jobStatus`. The list is empty when no jobs have been spawned.
+
 ## lofi.jobRead({ id, cursor?, limit? })
 
 Incremental read of a job's merged stdout/stderr log.
