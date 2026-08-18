@@ -563,23 +563,16 @@ impl JobRegistry {
 
     /// Snapshot every job in the registry, newest id first.
     fn list(&self) -> Vec<Arc<JobHandle>> {
-        let mut handles: Vec<Arc<JobHandle>> = self
+        let mut entries: Vec<(u64, Arc<JobHandle>)> = self
             .inner
             .jobs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .cloned()
+            .iter()
+            .map(|(id, h)| (*id, h.clone()))
             .collect();
-        handles.sort_by_key(|h| {
-            std::cmp::Reverse(
-                h.data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .id,
-            )
-        });
-        handles
+        entries.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+        entries.into_iter().map(|(_, h)| h).collect()
     }
 
     /// Sigkill every still-running job's process group. Hosts call this
@@ -928,7 +921,8 @@ impl BuiltinTools {
     // Async for symmetry with the other job tools (and a uniform binding
     // shape), though the body is synchronous; the sandbox binding awaits it.
     /// # Errors
-    /// Never fails; the result is `{ ok: true, jobs: [...] }`.
+    /// Infallible in practice; the `Result` shape is for binding uniformity
+    /// and the payload is always `{ ok: true, jobs: [...] }`.
     #[allow(clippy::unused_async)]
     pub async fn job_list(&self, _args: Value) -> Result<Value> {
         let entries: Vec<Value> = self
