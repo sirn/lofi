@@ -464,7 +464,7 @@ fn prompt_is_durable_when_the_process_stops_during_the_provider_request() {
 }
 
 #[test]
-fn direct_shell_output_creates_a_session_and_survives_restart() {
+fn user_shell_output_creates_a_session_and_survives_restart() {
     let server = MockServer::start(vec![text_response("shell resume answer")]);
     let fixture = Fixture::new(&server);
     let mut first = fixture.spawn(&[]);

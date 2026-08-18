@@ -9,7 +9,7 @@ use lofi_error::Result;
 use lofi_types::RunModel;
 
 use super::store::{self, SessionCursor, SessionStore};
-use crate::shell::DirectShellResult;
+use crate::shell::UserShellResult;
 
 #[derive(Debug)]
 pub struct SessionSink {
@@ -142,7 +142,7 @@ impl SessionSink {
     /// Propagates session-file creation and transcript I/O failures.
     pub fn record_user_shell(
         &mut self,
-        result: &DirectShellResult,
+        result: &UserShellResult,
         exclude_from_context: bool,
         model: &RunModel,
         system_prompt: &str,

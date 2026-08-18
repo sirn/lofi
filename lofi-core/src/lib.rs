@@ -31,4 +31,4 @@ pub use lofi_types::{CompactBlock, CompactionHook, SummarySection};
 pub use lofi_types::{Config, SessionEvent};
 pub use models::ModelRegistry;
 pub use retry::{is_retryable_error, RetryPolicy};
-pub use shell::{cancelled_direct_shell, run_direct_shell_command, DirectShellResult};
+pub use shell::{cancelled_user_shell, run_user_shell_command, UserShellResult};

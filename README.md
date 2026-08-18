@@ -44,7 +44,7 @@ This component owns process bootstrap and runtime initialization.
 
 #### [`lofi-core`](lofi-core/) — orchestration, state, and persistence
 
-This component owns agent execution, sessions, compaction, configuration, model selection, images, recall, and direct shell input.
+This component owns agent execution, sessions, compaction, configuration, model selection, images, recall, and user shell input.
 
 | Area | Status | Covered by E2E | Remaining E2E gaps |
 | --- | --- | --- | --- |
@@ -52,7 +52,7 @@ This component owns agent execution, sessions, compaction, configuration, model 
 | Session branches and job ownership | **Full** | Rollback, active-branch persistence, sibling exclusion, old-branch retention, job ownership across later calls, off-lineage job cleanup, and stale jobs after process restart. | None known for the supported public lifecycle. |
 | System prompt assembly | **Full** | Global, project, and nested `AGENTS.md`; outermost-first order; workspace skill override; namespaced skills; lazy metadata-only skill indexing; de-duplication; project-root detection; and stable replay after resume. | No principal workflow gaps. Invalid or oversized skill files, scan limits, empty files, and uncommon project-root markers remain lower-level cases. |
 | Agent failure and recovery | **Full** | Transient retry, authentication failure without retry, configured retry exhaustion, premature-stream retry, cancellation during a retry delay, tool failure recovery, failure after a completed tool round, running-tool cancellation, and durable prompts before provider response. | No principal workflow gaps. Idle timeout and dropped-consumer cases remain lower-level tests. |
-| Direct shell input | **Full** | `!` and `!!` context control, transcript persistence and restart replay, non-zero exit, signal death, bounded large output, cancellation, process-group cleanup, and TUI shutdown while a command is running. | No principal workflow gaps. Direct shell commands intentionally use the caller environment; configured secret stripping and redaction apply to model-run shell tools. |
+| User shell input | **Full** | `!` and `!!` context control, transcript persistence and restart replay, non-zero exit, signal death, bounded large output, cancellation, process-group cleanup, and TUI shutdown while a command is running. | No principal workflow gaps. User shell commands intentionally use the caller environment; configured secret stripping and redaction apply to model-run shell tools. |
 | Compaction | **Partial** | Manual, automatic soft-threshold, hard-pressure continuation, repeated-pressure cooldown, failed compaction recovery, resume, branch selection, and preservation of the latest tool cycle. | Add tiered retention settings, compact-all, image removal, and summary budget limits. |
 | Recall and result recovery | **Partial** | TUI query recall, native recall by query, exact tool-result recovery by event id, and explicit unavailability with `--no-session`. | Add all scope and pagination modes, compacted and off-branch content, missing ids, and truncated values. |
 | Model discovery and selection | **Partial** | Static models, remote field and API mapping, online discovery, offline cache fallback, explicit models, picker changes, missing models, and resume overrides. | Add authenticated discovery, cache expiry and corruption, static/discovered merge precedence, default provider and model selection, custom endpoint paths, and ambiguous model queries. |
@@ -158,7 +158,7 @@ Model-generated shell commands run on the host through `sh -c`; QuickJS isolatio
 
 ### Shell commands
 
-Prefix input with `!` to run it directly through `sh -c` in the workspace. The captured output is included in subsequent model context; use `!!` instead to run it without adding it to context. Direct shell commands have no wall-clock timeout, are persisted in session transcripts, and can be cancelled with `Ctrl+C`.
+Prefix input with `!` to run it directly through `sh -c` in the workspace. The captured output is included in subsequent model context; use `!!` instead to run it without adding it to context. User shell commands have no wall-clock timeout, are persisted in session transcripts, and can be cancelled with `Ctrl+C`.
 
 ### Slash commands
 
