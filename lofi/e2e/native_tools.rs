@@ -180,6 +180,7 @@ const concurrentC = await lofi.jobSpawn({ cmd: "sleep 0.01; printf concurrent-c"
 const concurrentDoneA = await lofi.jobWait({ id: concurrentA.id });
 const concurrentDoneB = await lofi.jobWait({ id: concurrentB.id });
 const concurrentDoneC = await lofi.jobWait({ id: concurrentC.id });
+const list = await lofi.jobList();
 const missing = {
   status: await lofi.jobStatus({ id: "999999" }),
   read: await lofi.jobRead({ id: "999999" }),
@@ -193,7 +194,12 @@ return {
   largePage: { cursor: largePage.cursor, totalBytes: largePage.totalBytes, outputBytes: largePage.output.length },
   pastEnd, concurrentIds: [concurrentA.id, concurrentB.id, concurrentC.id],
   concurrentUnique: new Set([concurrentA.id, concurrentB.id, concurrentC.id]).size === 3,
-  concurrentStates: [concurrentDoneA.state, concurrentDoneB.state, concurrentDoneC.state], missing,
+  concurrentStates: [concurrentDoneA.state, concurrentDoneB.state, concurrentDoneC.state],
+  listCount: list.jobs.length,
+  listNewestIsConcurrentC: list.jobs[0].id === concurrentC.id,
+  listHasAllSpawned: [first.id, second.id, timed.id, failed.id, large.id, concurrentA.id, concurrentB.id, concurrentC.id]
+    .every((id) => list.jobs.some((j) => j.id === id)),
+  missing,
 };
 "#,
         ),
@@ -226,6 +232,9 @@ return {
         "concurrent-b",
         "concurrent-c",
         r#"\"concurrentUnique\":true"#,
+        r#"\"listCount\":8"#,
+        r#"\"listNewestIsConcurrentC\":true"#,
+        r#"\"listHasAllSpawned\":true"#,
         "no such job",
     ] {
         assert!(body.contains(marker), "missing {marker}: {body}");
@@ -236,6 +245,7 @@ return {
         "jobNotify",
         "jobWait",
         "jobStatus",
+        "jobList",
         "jobRead",
         "jobKill",
     ] {

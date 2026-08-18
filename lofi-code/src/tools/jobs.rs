@@ -561,6 +561,27 @@ impl JobRegistry {
             .cloned()
     }
 
+    /// Snapshot every job in the registry, newest id first.
+    fn list(&self) -> Vec<Arc<JobHandle>> {
+        let mut handles: Vec<Arc<JobHandle>> = self
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        handles.sort_by_key(|h| {
+            std::cmp::Reverse(
+                h.data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .id,
+            )
+        });
+        handles
+    }
+
     /// Sigkill every still-running job's process group. Hosts call this
     /// during graceful shutdown; [`Drop`] is the final fallback when the
     /// owning session releases its last registry clone.
@@ -899,6 +920,30 @@ impl BuiltinTools {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(job.to_json(&self.root))
+    }
+
+    /// List every job this session spawned, newest first. Each entry is the
+    /// same shape as `jobStatus`. Session-scoped: jobs from other sessions
+    /// are not visible.
+    // Async for symmetry with the other job tools (and a uniform binding
+    // shape), though the body is synchronous; the sandbox binding awaits it.
+    /// # Errors
+    /// Never fails; the result is `{ ok: true, jobs: [...] }`.
+    #[allow(clippy::unused_async)]
+    pub async fn job_list(&self, _args: Value) -> Result<Value> {
+        let entries: Vec<Value> = self
+            .jobs
+            .list()
+            .into_iter()
+            .map(|handle| {
+                let job = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                job.to_json(&self.root)
+            })
+            .collect();
+        Ok(json!({ "ok": true, "jobs": entries }))
     }
 
     /// Incremental read of the job's merged stdout/stderr log. `cursor` is
@@ -2211,6 +2256,40 @@ mod tests {
         )
         .with_cancel(Some(cancel));
         (dir, tools)
+    }
+
+    #[tokio::test]
+    async fn job_list_returns_spawned_jobs_newest_first() {
+        let (_dir, tools) = tools_with_cancel(Arc::new(AtomicBool::new(false)));
+        let first = tools
+            .job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 }))
+            .await
+            .unwrap();
+        let second = tools
+            .job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 }))
+            .await
+            .unwrap();
+        let listed = tools.job_list(json!({})).await.unwrap();
+        assert_eq!(listed["ok"], json!(true));
+        let jobs = listed["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 2, "got: {listed}");
+        let first_id = first["id"].as_str().unwrap();
+        let second_id = second["id"].as_str().unwrap();
+        assert_eq!(jobs[0]["id"].as_str().unwrap(), second_id);
+        assert_eq!(jobs[1]["id"].as_str().unwrap(), first_id);
+        // Entry shape mirrors jobStatus.
+        for entry in jobs {
+            for key in [
+                "state",
+                "command",
+                "directory",
+                "durationMs",
+                "logPath",
+                "tty",
+            ] {
+                assert!(entry.get(key).is_some(), "missing {key} in {entry}");
+            }
+        }
     }
 
     #[tokio::test]
