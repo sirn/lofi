@@ -823,13 +823,19 @@ mod tests {
         map_anthropic_event(Some("message_delta"), &delta, &mut state).unwrap();
         let stop = json!({});
         let out = map_anthropic_event(Some("message_stop"), &stop, &mut state).unwrap();
-        let StreamingEvent::Done { usage: u, .. } = out.into_iter().next().unwrap() else {
+        let StreamingEvent::Done {
+            usage: u,
+            stop_reason,
+        } = out.into_iter().next().unwrap()
+        else {
             panic!("expected Done");
         };
         assert_eq!(u.input_tokens, 4);
         assert_eq!(u.output_tokens, 9);
         assert_eq!(u.cache_read_tokens, 1);
         assert_eq!(u.cache_write_tokens, 2);
+        // No delta carried a stop_reason, so Done reports none.
+        assert_eq!(stop_reason, None);
     }
 
     #[test]
