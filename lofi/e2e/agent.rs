@@ -1,7 +1,6 @@
 use crate::support::{
-    event_types, responses_response, text_response, tool_response, transcript_text,
-    truncated_responses_response, wait_for_process_exit, Fixture, MockResponse, MockServer,
-    ProcessGuard, WAIT,
+    eof_cut_responses_response, event_types, responses_response, text_response, tool_response,
+    transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -260,7 +259,7 @@ fn openai_responses_omits_reasoning_request_when_thinking_is_off() {
 #[test]
 fn truncated_responses_stream_retries_without_persisting_partial_output() {
     let server = MockServer::start(vec![
-        truncated_responses_response("discarded partial marker"),
+        eof_cut_responses_response("discarded partial marker"),
         responses_response("retry reasoning marker", "complete response marker"),
     ]);
     let fixture = Fixture::new(&server);
