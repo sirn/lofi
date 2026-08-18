@@ -271,6 +271,7 @@ fn anthropic_effort(level: &ThinkingLevel) -> Option<&str> {
 pub(crate) struct AnthropicMapperState {
     index_to_id: HashMap<u64, String>,
     usage: Option<Usage>,
+    stop_reason: Option<lofi_types::StopReason>,
     pub(crate) saw_stop: bool,
 }
 
@@ -342,10 +343,25 @@ fn map_anthropic_event(
         }
         "message_delta" => {
             merge_message_delta_usage(data, state);
+            if let Some(reason) = data
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+            {
+                state.stop_reason = Some(match reason {
+                    "end_turn" => lofi_types::StopReason::EndTurn,
+                    "max_tokens" => lofi_types::StopReason::MaxTokens,
+                    "tool_use" => lofi_types::StopReason::ToolUse,
+                    _ => lofi_types::StopReason::Other,
+                });
+            }
         }
         "message_stop" => {
             state.saw_stop = true;
-            out.push(StreamingEvent::Done(state.usage.unwrap_or_default()));
+            out.push(StreamingEvent::Done {
+                usage: state.usage.unwrap_or_default(),
+                stop_reason: state.stop_reason,
+            });
         }
         "error" => {
             return Err(Error::Provider(format!("provider stream error: {data}")));
@@ -807,13 +823,38 @@ mod tests {
         map_anthropic_event(Some("message_delta"), &delta, &mut state).unwrap();
         let stop = json!({});
         let out = map_anthropic_event(Some("message_stop"), &stop, &mut state).unwrap();
-        let StreamingEvent::Done(u) = out.into_iter().next().unwrap() else {
+        let StreamingEvent::Done {
+            usage: u,
+            stop_reason,
+        } = out.into_iter().next().unwrap()
+        else {
             panic!("expected Done");
         };
         assert_eq!(u.input_tokens, 4);
         assert_eq!(u.output_tokens, 9);
         assert_eq!(u.cache_read_tokens, 1);
         assert_eq!(u.cache_write_tokens, 2);
+        // No delta carried a stop_reason, so Done reports none.
+        assert_eq!(stop_reason, None);
+    }
+
+    #[test]
+    fn maps_stop_reason_into_done() {
+        for (raw, expected) in [
+            ("end_turn", lofi_types::StopReason::EndTurn),
+            ("max_tokens", lofi_types::StopReason::MaxTokens),
+            ("tool_use", lofi_types::StopReason::ToolUse),
+            ("stop_sequence", lofi_types::StopReason::Other),
+        ] {
+            let mut state = AnthropicMapperState::default();
+            let delta = json!({"delta":{"stop_reason":raw},"usage":{"output_tokens":1}});
+            map_anthropic_event(Some("message_delta"), &delta, &mut state).unwrap();
+            let out = map_anthropic_event(Some("message_stop"), &json!({}), &mut state).unwrap();
+            let StreamingEvent::Done { stop_reason, .. } = out.into_iter().next().unwrap() else {
+                panic!("expected Done");
+            };
+            assert_eq!(stop_reason, Some(expected), "stop_reason {raw}");
+        }
     }
 
     #[test]
