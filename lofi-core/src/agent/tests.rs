@@ -643,6 +643,274 @@ async fn completed_final_round_is_on_disk_before_turn_end() {
 }
 
 #[tokio::test]
+async fn max_tokens_stop_continues_the_turn_once() {
+    let dir = tempdir().unwrap();
+    let truncated = vec![
+        StreamingEvent::TextDelta("partial".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("rest of the answer".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![truncated, final_round], dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let notices: Vec<&Message> = messages
+        .iter()
+        .filter(|m| m.role == Role::User && m.kind == lofi_types::PromptKind::Notice)
+        .collect();
+    assert_eq!(notices.len(), 1, "exactly one continuation notice");
+    match &notices[0].blocks[0] {
+        ContentBlock::Text { text } => {
+            assert!(text.contains("token limit"), "nudge text: {text}");
+        }
+        other => panic!("unexpected block {other:?}"),
+    }
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .count(),
+        2
+    );
+    let mut saw_notice = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(&ev, AgentEvent::Notice(n) if n.contains("token limit")) {
+            saw_notice = true;
+        }
+    }
+    assert!(saw_notice, "live notice emitted");
+}
+
+#[tokio::test]
+async fn max_tokens_continuation_budget_is_one_per_turn() {
+    let dir = tempdir().unwrap();
+    let truncated = || {
+        vec![
+            StreamingEvent::TextDelta("partial".into()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: Some(lofi_types::StopReason::MaxTokens),
+            },
+        ]
+    };
+    let agent = agent_with(vec![truncated(), truncated()], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Two truncated rounds, but only one continuation notice: the budget
+    // caps the loop so a model stuck at the cap still ends the turn.
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.kind == lofi_types::PromptKind::Notice)
+            .count(),
+        1
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn clean_end_turn_does_not_continue() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::TextDelta("final answer".into()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: Some(lofi_types::StopReason::EndTurn),
+            },
+        ]],
+        dir.path(),
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.kind != lofi_types::PromptKind::Notice),
+        "clean end_turn must not trigger a continuation"
+    );
+    assert_eq!(messages.len(), 3);
+}
+
+#[tokio::test]
+async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let truncated = vec![
+        StreamingEvent::TextDelta("partial".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("rest".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![truncated, final_round], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let events = cursor.load_tree_events().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::Message(message)
+            if message.kind == lofi_types::PromptKind::Notice
+    )));
+    // Replay starts a notice-kind turn for it, never a user turn.
+    let mut kinds = Vec::new();
+    crate::session::replay::replay_selected_session_events(&events, |ev| {
+        if let AgentEvent::TurnStart { kind, .. } = ev {
+            kinds.push(kind);
+        }
+    });
+    assert_eq!(
+        kinds,
+        vec![lofi_types::PromptKind::User, lofi_types::PromptKind::Notice]
+    );
+}
+
+#[tokio::test]
+async fn cancel_preempts_the_truncation_continuation() {
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+    let first_round = vec![
+        StreamingEvent::TextDelta("partial".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let agent = Agent {
+        provider: Arc::new(PendingAfterRoundProvider {
+            first: std::sync::Mutex::new(Some(first_round)),
+        }),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    {
+        let run = agent.run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            Some(&cursor),
+            false,
+            Some(cancel.clone()),
+            None,
+        );
+        tokio::pin!(run);
+
+        // Interrupt once the truncation notice went out, while the
+        // continuation round is still streaming.
+        loop {
+            let event = tokio::select! {
+                result = run.as_mut() => panic!("run settled before cancellation: {result:?}"),
+                event = rx.recv() => event.unwrap_or_else(|| panic!("run event channel closed")),
+            };
+            if matches!(event, AgentEvent::Notice(ref text) if text.contains("token limit")) {
+                break;
+            }
+        }
+        cancel.store(true, Ordering::Relaxed);
+        run.as_mut().await.unwrap();
+    }
+
+    // The interrupt wins over the continuation: the turn records as
+    // cancelled. The nudge still lands in the transcript, matching the
+    // existing policy that cancelled turns stay durable and in context.
+    let events = cursor.load_events().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, SessionEventKind::TurnCancelled { .. })));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::Message(message) if message.kind == lofi_types::PromptKind::Notice
+    )));
+}
+
+#[tokio::test]
 async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
