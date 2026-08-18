@@ -1511,6 +1511,16 @@ impl Tui {
         self.output.lock().unwrap().clear();
     }
 
+    pub fn screen_row(&self, needle: &str) -> Option<String> {
+        let output = self.output.lock().unwrap();
+        output
+            .screen
+            .text()
+            .lines()
+            .find(|line| line.contains(needle))
+            .map(str::to_string)
+    }
+
     pub fn output(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().unwrap().raw).into_owned()
     }

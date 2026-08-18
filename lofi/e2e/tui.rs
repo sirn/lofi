@@ -120,6 +120,35 @@ fn model_and_thinking_pickers_change_the_next_request() {
 }
 
 #[test]
+fn mid_run_model_switch_keeps_the_working_line_model() {
+    let server = MockServer::start(vec![delayed_text_response(
+        "mid-run answer marker",
+        std::time::Duration::from_secs(2),
+    )]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("mid-run switch marker");
+    tui.wait_for("Working for", WAIT);
+    tui.submit("/model");
+    tui.wait_for("Switch model", WAIT);
+    tui.send(b"\x1b[A\r");
+    tui.wait_for("switched to mock/alt", WAIT);
+
+    let working = tui.screen_row("Working for").expect("working row");
+    assert!(
+        working.contains("mock/chat"),
+        "working line must keep the run model: {working}"
+    );
+    assert!(
+        !working.contains("alt"),
+        "working line must not show the newly set model: {working}"
+    );
+
+    tui.wait_for("mid-run answer marker", WAIT);
+}
+
+#[test]
 fn no_model_mode_launches_and_rejects_prompts_without_a_request() {
     let fixture = Fixture::without_models();
     let mut tui = fixture.spawn(&[]);
