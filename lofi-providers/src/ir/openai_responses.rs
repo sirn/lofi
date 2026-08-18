@@ -259,6 +259,26 @@ pub(crate) struct ResponsesMapperState {
 /// # Errors
 /// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
 /// or `error` events so a provider-reported failure fails the round trip.
+fn map_response_completed(v: &Value) -> StreamingEvent {
+    let response = v.get("response").unwrap_or(v);
+    let usage = response.get("usage").or_else(|| v.get("usage"));
+    // A completed response that still ended early carries the reason
+    // in incomplete_details (e.g. max_output_tokens).
+    let stop_reason = match response
+        .get("incomplete_details")
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
+    {
+        Some("max_output_tokens" | "max_tool_calls") => Some(lofi_types::StopReason::MaxTokens),
+        Some(_) => Some(lofi_types::StopReason::Other),
+        None => Some(lofi_types::StopReason::EndTurn),
+    };
+    StreamingEvent::Done {
+        usage: usage.map(usage_from_openai_responses).unwrap_or_default(),
+        stop_reason,
+    }
+}
+
 fn map_openai_responses_event(
     v: &Value,
     state: &mut ResponsesMapperState,
@@ -343,13 +363,7 @@ fn map_openai_responses_event(
         }
         "response.completed" => {
             state.saw_completed = true;
-            let usage = v
-                .get("response")
-                .and_then(|r| r.get("usage"))
-                .or_else(|| v.get("usage"));
-            out.push(StreamingEvent::Done(
-                usage.map(usage_from_openai_responses).unwrap_or_default(),
-            ));
+            out.push(map_response_completed(v));
         }
         "response.failed" | "response.incomplete" | "error" => {
             return Err(Error::Provider(format!("provider stream error: {v}")));
@@ -816,12 +830,38 @@ mod tests {
             "response":{"usage":{"input_tokens":3,"output_tokens":7,"input_tokens_details":{"cached_tokens":1}}}
         });
         let done = map_openai_responses_event(&ev, &mut ResponsesMapperState::default()).unwrap();
-        let StreamingEvent::Done(u) = done.into_iter().next().unwrap() else {
+        let StreamingEvent::Done { usage: u, .. } = done.into_iter().next().unwrap() else {
             panic!("expected Done");
         };
         assert_eq!(u.input_tokens, 2);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, 1);
+    }
+
+    #[test]
+    fn maps_incomplete_details_reason_into_done() {
+        for (details, expected) in [
+            (None, lofi_types::StopReason::EndTurn),
+            (Some("max_output_tokens"), lofi_types::StopReason::MaxTokens),
+            (Some("content_filter"), lofi_types::StopReason::Other),
+        ] {
+            let ev = match details {
+                Some(reason) => json!({
+                    "type":"response.completed",
+                    "response":{"status":"incomplete","incomplete_details":{"reason":reason}}
+                }),
+                None => json!({
+                    "type":"response.completed",
+                    "response":{"status":"completed"}
+                }),
+            };
+            let done =
+                map_openai_responses_event(&ev, &mut ResponsesMapperState::default()).unwrap();
+            let StreamingEvent::Done { stop_reason, .. } = done.into_iter().next().unwrap() else {
+                panic!("expected Done");
+            };
+            assert_eq!(stop_reason, Some(expected), "details {details:?}");
+        }
     }
 
     #[test]

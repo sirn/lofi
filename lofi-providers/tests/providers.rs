@@ -114,12 +114,15 @@ async fn openai_chat_completions_maps_canned_stream() {
         vec![
             StreamingEvent::TextDelta("Hello".to_string()),
             StreamingEvent::TextDelta(" world".to_string()),
-            StreamingEvent::Done(Usage {
-                input_tokens: 5,
-                output_tokens: 2,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            }),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                stop_reason: Some(lofi_types::StopReason::EndTurn),
+            },
         ]
     );
 
@@ -171,12 +174,15 @@ async fn openai_responses_maps_canned_stream() {
         vec![
             StreamingEvent::TextDelta("Hi".to_string()),
             StreamingEvent::TextDelta("!".to_string()),
-            StreamingEvent::Done(Usage {
-                input_tokens: 3,
-                output_tokens: 4,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            }),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                stop_reason: Some(lofi_types::StopReason::EndTurn),
+            },
         ]
     );
 
@@ -247,12 +253,15 @@ async fn anthropic_messages_maps_canned_stream() {
             StreamingEvent::ToolUseEnd {
                 id: "tool_1".to_string(),
             },
-            StreamingEvent::Done(Usage {
-                input_tokens: 0,
-                output_tokens: 10,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            }),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens: 0,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                stop_reason: None,
+            },
         ]
     );
 
@@ -339,12 +348,15 @@ async fn google_generative_ai_maps_canned_stream() {
                 target: Some("call_1".to_string()),
                 signature: "c2ln".to_string(),
             },
-            StreamingEvent::Done(Usage {
-                input_tokens: 6,
-                output_tokens: 7,
-                cache_read_tokens: 2,
-                cache_write_tokens: 0,
-            }),
+            StreamingEvent::Done {
+                usage: Usage {
+                    input_tokens: 6,
+                    output_tokens: 7,
+                    cache_read_tokens: 2,
+                    cache_write_tokens: 0,
+                },
+                stop_reason: Some(lofi_types::StopReason::EndTurn),
+            },
         ]
     );
 }
