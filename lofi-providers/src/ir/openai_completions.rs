@@ -302,6 +302,7 @@ pub(crate) struct ChatMapperState {
     // The delta key the server used to stream its chain-of-thought for the
     // current block (see the reasoning-delta branch in map_openai_chat_event).
     reasoning_field: Option<String>,
+    finish_reason: Option<lofi_types::StopReason>,
     provider: String,
     model: String,
 }
@@ -337,10 +338,31 @@ fn map_openai_chat_event(v: &Value, state: &mut ChatMapperState) -> Result<Vec<S
     // Emit the held accounting only when the frame produces no content. A
     // frame carrying both deltas and usage keeps its stream flowing; the usage
     // on a contentful frame is per-chunk accounting, not turn end.
+    if let Some(reason) = v
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+    {
+        state.finish_reason = Some(match reason {
+            "stop" => lofi_types::StopReason::EndTurn,
+            "length" | "max_tokens" | "model_context_window_exceeded" => {
+                lofi_types::StopReason::MaxTokens
+            }
+            "tool_calls" | "function_call" => lofi_types::StopReason::ToolUse,
+            _ => lofi_types::StopReason::Other,
+        });
+    }
+
+    let finish_reason = state.finish_reason;
     let drain = |out: &mut Vec<StreamingEvent>| {
         if out.is_empty() {
             if let Some(done) = done {
-                out.push(StreamingEvent::Done(done));
+                out.push(StreamingEvent::Done {
+                    usage: done,
+                    stop_reason: finish_reason,
+                });
             }
         }
     };
@@ -640,11 +662,14 @@ mod tests {
         });
         assert_eq!(
             map_openai_chat_event(&chunk, &mut ChatMapperState::default()).unwrap(),
-            vec![StreamingEvent::Done(lofi_types::Usage {
-                input_tokens: 3602,
-                output_tokens: 58,
-                ..Default::default()
-            })]
+            vec![StreamingEvent::Done {
+                usage: lofi_types::Usage {
+                    input_tokens: 3602,
+                    output_tokens: 58,
+                    ..Default::default()
+                },
+                stop_reason: None,
+            }]
         );
     }
 
@@ -773,12 +798,38 @@ mod tests {
             }
         });
         let done = map_openai_chat_event(&chunk, &mut ChatMapperState::default()).unwrap();
-        let StreamingEvent::Done(u) = done.into_iter().next().unwrap() else {
+        let StreamingEvent::Done { usage: u, .. } = done.into_iter().next().unwrap() else {
             panic!("expected Done");
         };
         assert_eq!(u.input_tokens, 8);
         assert_eq!(u.output_tokens, 5);
         assert_eq!(u.cache_read_tokens, 2);
+    }
+
+    #[test]
+    fn maps_finish_reason_into_done() {
+        for (raw, expected) in [
+            ("stop", lofi_types::StopReason::EndTurn),
+            ("length", lofi_types::StopReason::MaxTokens),
+            ("tool_calls", lofi_types::StopReason::ToolUse),
+            ("content_filter", lofi_types::StopReason::Other),
+        ] {
+            let mut state = ChatMapperState::default();
+            map_openai_chat_event(
+                &json!({"choices":[{"delta":{"content":"x"},"finish_reason":raw}]}),
+                &mut state,
+            )
+            .unwrap();
+            let usage = json!({
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+            });
+            let done = map_openai_chat_event(&usage, &mut state).unwrap();
+            let StreamingEvent::Done { stop_reason, .. } = done.into_iter().next().unwrap() else {
+                panic!("expected Done");
+            };
+            assert_eq!(stop_reason, Some(expected), "finish_reason {raw}");
+        }
     }
 
     #[test]

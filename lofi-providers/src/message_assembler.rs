@@ -138,7 +138,7 @@ impl MessageAssembler {
                     self.tools[i].ended = true;
                 }
             }
-            StreamingEvent::Done(_) | StreamingEvent::Error(_) => {}
+            StreamingEvent::Done { .. } | StreamingEvent::Error(_) => {}
         }
     }
 
@@ -230,7 +230,10 @@ mod tests {
         let events = [
             StreamingEvent::TextDelta("Hello".to_string()),
             StreamingEvent::TextDelta(", world".to_string()),
-            StreamingEvent::Done(Usage::default()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
         ];
         let m = assemble_message(&events);
         assert_eq!(m.role, Role::Assistant);
