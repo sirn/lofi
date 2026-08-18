@@ -15,7 +15,7 @@ use crate::tools::{truncate_tail_with, PgrpKillGuard};
 const CAPTURE_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
-pub struct DirectShellOutput {
+pub struct UserShellOutput {
     pub output: String,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
@@ -26,17 +26,17 @@ pub struct DirectShellOutput {
 
 /// Run a user-entered shell command outside the model tool sandbox.
 ///
-/// The direct-shell path intentionally uses the interactive environment. The
+/// The user-shell path intentionally uses the interactive environment. The
 /// model-run `bash` tool resolves a separate policy-controlled environment.
 ///
 /// # Errors
 /// Returns an error if the shell cannot be spawned, its pipes are unavailable,
 /// or command output/status cannot be read.
-pub async fn run_direct_shell(
+pub async fn run_user_shell(
     root: &Path,
     command_text: &str,
     cancel: Arc<AtomicBool>,
-) -> Result<DirectShellOutput> {
+) -> Result<UserShellOutput> {
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -55,11 +55,11 @@ pub async fn run_direct_shell(
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| Error::State("direct shell: stdout pipe unavailable".into()))?;
+        .ok_or_else(|| Error::State("user shell: stdout pipe unavailable".into()))?;
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| Error::State("direct shell: stderr pipe unavailable".into()))?;
+        .ok_or_else(|| Error::State("user shell: stderr pipe unavailable".into()))?;
     let cancelled = async {
         while !cancel.load(Ordering::Relaxed) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -77,7 +77,7 @@ pub async fn run_direct_shell(
         () = cancelled => {
             drop(guard);
             let _ = child.wait().await;
-            return Ok(DirectShellOutput {
+            return Ok(UserShellOutput {
                 output: String::new(),
                 exit_code: None,
                 signal: None,
@@ -93,7 +93,7 @@ pub async fn run_direct_shell(
     bytes.extend_from_slice(&err.0);
     let clean = strip_ansi(&String::from_utf8_lossy(&bytes));
     let captured = truncate_tail_with(clean.trim_end_matches('\n'), usize::MAX, CAPTURE_TAIL_BYTES);
-    Ok(DirectShellOutput {
+    Ok(UserShellOutput {
         output: captured.content,
         exit_code: status.code(),
         signal: status.signal(),
@@ -178,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn runs_in_root_and_captures_output() -> Result<()> {
         let dir = tempfile::tempdir().map_err(Error::Io)?;
-        let result = Box::pin(run_direct_shell(
+        let result = Box::pin(run_user_shell(
             dir.path(),
             "printf 'ok'; pwd",
             Arc::new(AtomicBool::new(false)),
