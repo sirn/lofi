@@ -394,6 +394,37 @@ fn direct_shell_records_exit_signal_and_large_output_without_blocking_shutdown()
 }
 
 #[test]
+fn direct_shell_reading_stdin_does_not_swallow_typed_keys() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    let script = fixture.workspace.join("probe.sh");
+    std::fs::write(
+        &script,
+        "i=0\nwhile [ $i -lt 120 ] && [ ! -e probe-got-ab ]; do sleep 0.1; read -r -t 0.05 line && printf '%s' \"$line\" > probe-got-ab; i=$((i+1)); done\nexit 0\n",
+    )
+    .unwrap();
+    tui.submit("!sh probe.sh");
+    tui.wait_for("Working for", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    tui.send(b"ZZPROBE-MARKER-ZZ\r");
+    tui.send(b"ab\r");
+    let got_path = fixture.workspace.join("probe-got-ab");
+    let started = std::time::Instant::now();
+    while !got_path.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !got_path.exists(),
+        "the !-shell must not read the TUI's terminal stdin"
+    );
+    tui.wait_for("Exit 0", WAIT);
+    tui.wait_for("ZZPROBE-MARKER-ZZ", WAIT);
+}
+
+#[test]
 fn no_session_recall_and_result_report_that_persistence_is_unavailable() {
     let server = MockServer::start(vec![
         tool_response(
