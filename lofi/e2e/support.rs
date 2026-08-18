@@ -1365,11 +1365,18 @@ impl Tui {
         Self::spawn_with_env(fixture, args, cwd, &[])
     }
 
-    fn spawn_with_env(fixture: &Fixture, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Self {
+    /// Open a PTY sized to match the parser grid and configure `command`
+    /// so the child runs with the slave end as stdin/stdout/stderr *and*
+    /// its controlling terminal. The
+    /// `setsid`/`TIOCSCTTY` dance in `pre_exec` ensures
+    /// `crossterm::terminal::size()` in the child reads the PTY dimensions,
+    /// not the test runner's outer terminal — otherwise the TUI paints past
+    /// the parser grid and `wait_for_scrollback` flakes.
+    fn command_on_fresh_pty(args: &[&str], cwd: &Path) -> (File, Command, File) {
         let pty = openpty(
             Some(&Winsize {
-                ws_row: 40,
-                ws_col: 120,
+                ws_row: TERMINAL_ROWS as u16,
+                ws_col: TERMINAL_COLS as u16,
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             }),
@@ -1380,19 +1387,42 @@ impl Tui {
         let slave = File::from(pty.slave);
         let stdin = slave.try_clone().unwrap();
         let stdout = slave.try_clone().unwrap();
+        let controlling = slave.try_clone().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_lofi"));
         command
             .args(args)
             .current_dir(cwd)
             .env("TERM", "xterm-256color")
-            .env("COLUMNS", "120")
-            .env("LINES", "40")
+            .env("COLUMNS", TERMINAL_COLS.to_string())
+            .env("LINES", TERMINAL_ROWS.to_string())
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(slave));
+        #[allow(unsafe_code)]
+        unsafe {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let fd = controlling.as_raw_fd();
+            command.pre_exec(move || {
+                nix::unistd::setsid().map_err(std::io::Error::from)?;
+                if nix::libc::ioctl(fd, nix::libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        // Return the duplicate alongside the command so callers can keep it
+        // open across `spawn`. `pre_exec` runs in the child after `fork`,
+        // so closing the fd in the parent beforehand would break `ioctl`.
+        (master, command, controlling)
+    }
+
+    fn spawn_with_env(fixture: &Fixture, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Self {
+        let (master, mut command, controlling) = Self::command_on_fresh_pty(args, cwd);
         configure_command(&mut command, fixture);
         command.envs(env.iter().copied());
         let child = command.spawn().unwrap();
+        drop(controlling);
         let mut reader_file = master.try_clone().unwrap();
         let output = Arc::new(Mutex::new(TerminalOutput::new()));
         let reader_output = Arc::clone(&output);
