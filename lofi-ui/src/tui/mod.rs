@@ -866,6 +866,10 @@ pub(crate) struct App {
     context_pressure: bool,
     run: Option<usize>,
     run_start: Option<Instant>,
+    /// Model label captured when the run started. A mid-run `/model` switch
+    /// updates the footer (the newly set model); the "Working for ..." line
+    /// must keep showing the model the in-flight run is actually using.
+    run_model_label: Option<String>,
     retry: Option<RetryState>,
     pinned: bool,
     top_line: usize,

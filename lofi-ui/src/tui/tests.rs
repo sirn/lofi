@@ -7233,6 +7233,21 @@ fn resume_does_not_restore_usage_measured_before_latest_compaction() {
 }
 
 #[test]
+fn working_status_keeps_the_run_model_across_a_mid_run_switch() {
+    let mut a = app(); // model_label = "openai/gpt-4o"
+    a.run = Some(0);
+    a.run_start = Some(Instant::now());
+    a.run_model_label = Some(a.session_model());
+
+    a.model_label = "anthropic/claude".into();
+    assert_eq!(a.run_label(), "openai/gpt-4o:medium");
+    assert_eq!(a.session_model(), "anthropic/claude:medium");
+
+    a.run_finished();
+    assert_eq!(a.run_label(), "anthropic/claude:medium");
+}
+
+#[test]
 fn working_status_is_replaced_in_place_by_done_status() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;

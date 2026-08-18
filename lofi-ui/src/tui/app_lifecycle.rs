@@ -56,6 +56,7 @@ impl App {
             startup_notices: Vec::new(),
             run: None,
             run_start: None,
+            run_model_label: None,
             retry: None,
             pinned: true,
             top_line: 0,
@@ -345,6 +346,7 @@ impl App {
         // to the transcript — so there is nothing to stamp or persist here.
         self.run_start = None;
         self.run = None;
+        self.run_model_label = None;
         self.retry = None;
     }
 
@@ -737,7 +739,9 @@ impl App {
     }
 
     pub(super) fn run_label(&self) -> String {
-        self.session_model()
+        self.run_model_label
+            .clone()
+            .unwrap_or_else(|| self.session_model())
     }
 
     /// Raw model identity for the session header (`store::create`). The App
