@@ -394,6 +394,58 @@ fn user_shell_records_exit_signal_and_large_output_without_blocking_shutdown() {
 }
 
 #[test]
+fn accepting_auto_mode_dialog_keeps_the_draft_in_the_input_box() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "auto-draft-call",
+            r#"return await lofi.bash({ cmd: "printf auto-draft-ran" });"#,
+        ),
+        delayed_text_response(
+            r#"{"decision":"ask","reason":"fixture asks"}"#,
+            std::time::Duration::from_millis(400),
+        ),
+        text_response("auto draft final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        r#"mode = "confirm"
+
+[auto_mode]
+enable = true
+provider = "mock"
+model = "alt"
+max_tokens = 128
+"#,
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("run the auto draft tool");
+    tui.wait_for("Working for", WAIT);
+    // Type a draft while the run and the auto-mode evaluation are in flight.
+    tui.send(b"DRAFT-NOT-A-PROMPT");
+    tui.wait_for("Permission Required", WAIT);
+    tui.wait_for("Auto evaluation asks", WAIT);
+
+    tui.send(b"\r");
+    tui.wait_for("auto draft final answer", WAIT);
+
+    let row = tui
+        .screen_row("DRAFT-NOT-A-PROMPT")
+        .expect("draft must remain in the input box");
+    assert!(row.contains('▌'), "draft row is not the input area: {row}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].body.contains("run the auto draft tool"));
+    assert!(!requests[2].body.contains("DRAFT-NOT-A-PROMPT"));
+    assert!(fixture
+        .events()
+        .iter()
+        .all(|event| !event.to_string().contains("DRAFT-NOT-A-PROMPT")));
+}
+
+#[test]
 fn user_shell_reading_stdin_does_not_swallow_typed_keys() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
