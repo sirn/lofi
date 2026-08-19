@@ -256,14 +256,12 @@ pub(crate) struct ResponsesMapperState {
     pub(crate) saw_completed: bool,
 }
 
-/// # Errors
-/// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
-/// or `error` events so a provider-reported failure fails the round trip.
+// A completed response that still ended early carries the reason in
+// `incomplete_details` (e.g. max_output_tokens); a plain completed status
+// is an end of turn.
 fn map_response_completed(v: &Value) -> StreamingEvent {
     let response = v.get("response").unwrap_or(v);
     let usage = response.get("usage").or_else(|| v.get("usage"));
-    // A completed response that still ended early carries the reason
-    // in incomplete_details (e.g. max_output_tokens).
     let stop_reason = match response
         .get("incomplete_details")
         .and_then(|d| d.get("reason"))
@@ -279,6 +277,9 @@ fn map_response_completed(v: &Value) -> StreamingEvent {
     }
 }
 
+/// # Errors
+/// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
+/// or `error` events so a provider-reported failure fails the round trip.
 fn map_openai_responses_event(
     v: &Value,
     state: &mut ResponsesMapperState,

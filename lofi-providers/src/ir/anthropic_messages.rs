@@ -834,7 +834,6 @@ mod tests {
         assert_eq!(u.output_tokens, 9);
         assert_eq!(u.cache_read_tokens, 1);
         assert_eq!(u.cache_write_tokens, 2);
-        // No delta carried a stop_reason, so Done reports none.
         assert_eq!(stop_reason, None);
     }
 
