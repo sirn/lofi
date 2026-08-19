@@ -4,11 +4,11 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    delayed_text_response, event_types, job_events, parallel_responses_tool_response,
-    parallel_tool_response, process_is_alive, responses_response, spawned_pid, text_response,
-    text_response_with_usage, tool_response, tool_response_with_usage, transcript_text,
-    truncated_text_response, wait_for_process_exit, Fixture, MockResponse, MockServer,
-    ProcessGuard, WAIT,
+    anthropic_text_response, anthropic_truncated_text_response, delayed_text_response, event_types,
+    job_events, parallel_responses_tool_response, parallel_tool_response, process_is_alive,
+    responses_response, spawned_pid, text_response, text_response_with_usage, tool_response,
+    tool_response_with_usage, transcript_text, truncated_text_response, wait_for_process_exit,
+    Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -1265,6 +1265,8 @@ fn truncated_response_continues_the_turn_once() {
 
     tui.submit("answer in full");
     tui.wait_for("continued after truncation", WAIT);
+    // The UI surfaced the live continuation notice.
+    tui.wait_for("response hit the token limit; continuing the turn", WAIT);
 
     // Two model requests: the truncated round and the continuation round.
     let requests = server.requests();
@@ -1285,6 +1287,84 @@ fn truncated_response_continues_the_turn_once() {
         .collect();
     assert_eq!(notice_events.len(), 1, "{events:?}");
     assert!(notice_events[0].to_string().contains("token limit"));
+}
+
+#[test]
+fn truncated_response_respects_the_one_continuation_budget() {
+    let server = MockServer::start(vec![
+        truncated_text_response("partial answer one"),
+        truncated_text_response("partial answer two"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("answer in full");
+    tui.wait_for("partial answer two", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    // The model was cut off twice, but the budget is one continuation per
+    // turn: no third request is issued and the turn still ends.
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
+fn anthropic_truncated_response_continues_the_turn_once() {
+    let server = MockServer::start(vec![
+        anthropic_truncated_text_response("anthropic partial"),
+        anthropic_text_response("anthropic continued"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "anthropic/tools"]);
+
+    tui.submit("answer in full");
+    tui.wait_for("anthropic continued", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    assert_eq!(server.requests().len(), 2);
+    // The Messages API requires strict user/assistant alternation: the
+    // nudge must land after the truncated assistant turn, as a user-role
+    // message the API accepts.
+    let request: serde_json::Value = serde_json::from_str(&server.requests()[1].body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(last.to_string().contains("token limit"));
+    assert_eq!(messages[messages.len() - 2]["role"], "assistant");
+}
+
+#[test]
+fn resumed_session_keeps_the_truncation_nudge_in_context() {
+    let server = MockServer::start(vec![
+        truncated_text_response("truncated partial"),
+        text_response("truncated completion"),
+        text_response("resumed answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&[]);
+
+    first.submit("first prompt");
+    first.wait_for("truncated completion", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("second prompt");
+    resumed.wait_for("resumed answer", WAIT);
+
+    // The nudge persists across processes, so the model still sees why it
+    // was told to continue.
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let request: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    assert!(request.to_string().contains("cut off at the token limit"));
+    // In history the nudge is the only notice-kind message; it never turns
+    // into user-authored prompt text.
+    let events = fixture.events();
+    let notices: Vec<_> = events
+        .iter()
+        .filter(|event| event.get("kind").and_then(|k| k.as_str()) == Some("notice"))
+        .collect();
+    assert_eq!(notices.len(), 1, "{events:?}");
 }
 
 #[test]

@@ -849,6 +849,68 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
 }
 
 #[tokio::test]
+async fn cancel_preempts_the_truncation_continuation() {
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+    let first_round = vec![
+        StreamingEvent::TextDelta("partial".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let agent = Agent {
+        provider: Arc::new(PendingAfterRoundProvider {
+            first: std::sync::Mutex::new(Some(first_round)),
+        }),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    {
+        let run = agent.run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            Some(&cursor),
+            false,
+            Some(cancel.clone()),
+            None,
+        );
+        tokio::pin!(run);
+
+        // Interrupt once the truncation notice went out, while the
+        // continuation round is still streaming.
+        loop {
+            let event = tokio::select! {
+                result = run.as_mut() => panic!("run settled before cancellation: {result:?}"),
+                event = rx.recv() => event.unwrap_or_else(|| panic!("run event channel closed")),
+            };
+            if matches!(event, AgentEvent::Notice(ref text) if text.contains("token limit")) {
+                break;
+            }
+        }
+        cancel.store(true, Ordering::Relaxed);
+        run.as_mut().await.unwrap();
+    }
+
+    // The interrupt wins over the continuation: the turn records as
+    // cancelled. The nudge still lands in the transcript, matching the
+    // existing policy that cancelled turns stay durable and in context.
+    let events = cursor.load_events().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, SessionEventKind::TurnCancelled { .. })));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::Message(message) if message.kind == lofi_types::PromptKind::Notice
+    )));
+}
+
+#[tokio::test]
 async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
