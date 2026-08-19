@@ -1043,6 +1043,9 @@ impl Agent {
         cancel: Option<&Arc<AtomicBool>>,
         on_job_acquired: Option<lofi_code::JobAcquireFn>,
     ) -> Result<Vec<ContentBlock>> {
+        if tool_uses.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
         // callback inside the sandbox, so they can't `await` on the bounded
