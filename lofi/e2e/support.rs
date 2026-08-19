@@ -366,6 +366,32 @@ data: [DONE]
     ))
 }
 
+/// A tool call cut off mid-arguments at the token limit: partial JSON,
+/// `finish_reason: "length"`, then usage so the mapper emits `Done`.
+pub fn truncated_tool_response(call_id: &str, partial_arguments: &str) -> MockResponse {
+    let event = json!({
+        "choices": [{ "delta": { "tool_calls": [{
+            "index": 0,
+            "id": call_id,
+            "type": "function",
+            "function": { "name": "exec", "arguments": partial_arguments }
+        }] }, "finish_reason": "length" }]
+    });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn parallel_tool_response(calls: &[(&str, &str)]) -> MockResponse {
     let calls: Vec<Value> = calls
         .iter()

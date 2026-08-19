@@ -915,6 +915,16 @@ impl Agent {
             return Err(error);
         }
 
+        // A tool use whose arguments never parse was cut off mid-stream.
+        // Compute before `finish` consumes the assembler; the set is only
+        // consulted on a token-cap stop, where the cut calls route to a
+        // synthetic result instead of executing truncated arguments.
+        let cut_tool_ids: std::collections::HashSet<String> =
+            if round_stop_reason == Some(lofi_types::StopReason::MaxTokens) {
+                assembler.unparseable_tool_ids().into_iter().collect()
+            } else {
+                std::collections::HashSet::new()
+            };
         let assistant_index = messages.len();
         messages.push(assembler.finish());
         // Collect the requested tool uses, then end the borrow so the rest
@@ -941,15 +951,16 @@ impl Agent {
             });
         }
 
-        let tool_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
+        let run_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
             .iter()
+            .filter(|(id, _, _)| !cut_tool_ids.contains(id))
             .map(|(id, name, input)| (id.as_str(), name.as_str(), input))
             .collect();
-        let results = match self
+        let executed = match self
             .execute_tools(
-                &tool_refs,
+                &run_refs,
                 tx,
-                stats,
+                stats.as_deref_mut(),
                 recall.clone(),
                 result.clone(),
                 cancel,
@@ -969,6 +980,46 @@ impl Agent {
                 return Err(error);
             }
         };
+
+        let mut executed_iter = executed.into_iter();
+        let mut results = Vec::with_capacity(tool_uses.len());
+        for (id, _, _) in &tool_uses {
+            if cut_tool_ids.contains(id) {
+                let content =
+                    "cut off: tool arguments were truncated by the provider token limit; \
+                     resend the tool call"
+                        .to_string();
+                let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
+                if !emit(
+                    tx,
+                    AgentEvent::ToolEnd {
+                        id: id.clone(),
+                        result: content.clone(),
+                        is_error: true,
+                        elapsed_ms,
+                    },
+                )
+                .await
+                {
+                    close_orphaned_tool_uses(messages);
+                    return Err(Error::Cancelled);
+                }
+                results.push(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content,
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            } else {
+                // execute_tools returns exactly one result per input; a
+                // short iterator means the tool loop already failed.
+                let Some(r) = executed_iter.next() else {
+                    close_orphaned_tool_uses(messages);
+                    return Err(Error::Provider("tool result count mismatch".into()));
+                };
+                results.push(r);
+            }
+        }
 
         messages.push(Message {
             role: Role::Tool,
@@ -992,6 +1043,9 @@ impl Agent {
         cancel: Option<&Arc<AtomicBool>>,
         on_job_acquired: Option<lofi_code::JobAcquireFn>,
     ) -> Result<Vec<ContentBlock>> {
+        if tool_uses.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
         // callback inside the sandbox, so they can't `await` on the bounded

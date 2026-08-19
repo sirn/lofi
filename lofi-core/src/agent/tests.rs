@@ -789,6 +789,92 @@ async fn clean_end_turn_does_not_continue() {
 }
 
 #[tokio::test]
+async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
+    let dir = tempdir().unwrap();
+    let cut_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "t_cut".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t_cut".into(),
+            delta: r#"{"code":"#.into(),
+        },
+        StreamingEvent::ToolUseStart {
+            id: "t_ok".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t_ok".into(),
+            delta: r#"{"code":"return 2"}"#.into(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let recovered = vec![
+        StreamingEvent::TextDelta("recovered".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![cut_round, recovered], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // The cut call was never executed: its result is a synthetic error
+    // naming the truncation. The valid call in the same round ran.
+    let tool_message = messages.iter().find(|m| m.role == Role::Tool).unwrap();
+    assert_eq!(tool_message.blocks.len(), 2);
+    let ContentBlock::ToolResult {
+        tool_use_id: cut_id,
+        content: cut_content,
+        is_error: cut_error,
+        ..
+    } = &tool_message.blocks[0]
+    else {
+        panic!("expected cut tool result");
+    };
+    assert_eq!(cut_id, "t_cut");
+    assert_eq!(cut_error, &true);
+    assert!(cut_content.contains("token limit"), "{cut_content}");
+    let ContentBlock::ToolResult {
+        tool_use_id: ok_id,
+        is_error: ok_error,
+        ..
+    } = &tool_message.blocks[1]
+    else {
+        panic!("expected valid tool result");
+    };
+    assert_eq!(ok_id, "t_ok");
+    assert_eq!(ok_error, &false);
+    // Results mirror the assistant message's declared order and the turn
+    // recovered in the next round.
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
