@@ -7,8 +7,8 @@ use crate::support::{
     anthropic_text_response, anthropic_truncated_text_response, delayed_text_response, event_types,
     job_events, parallel_responses_tool_response, parallel_tool_response, process_is_alive,
     responses_response, spawned_pid, text_response, text_response_with_usage, tool_response,
-    tool_response_with_usage, transcript_text, truncated_text_response, wait_for_process_exit,
-    Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
+    tool_response_with_usage, transcript_text, truncated_text_response, truncated_tool_response,
+    wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -1330,6 +1330,32 @@ fn anthropic_truncated_response_continues_the_turn_once() {
     assert_eq!(last["role"], "user");
     assert!(last.to_string().contains("token limit"));
     assert_eq!(messages[messages.len() - 2]["role"], "assistant");
+}
+
+#[test]
+fn truncated_tool_call_is_closed_and_recovered_without_executing() {
+    // The provider cut the tool call off mid-arguments: the JSON never
+    // parses, so nothing may run. The harness closes the call with a
+    // truncation result and the model recovers in the continuation round.
+    let server = MockServer::start(vec![
+        truncated_tool_response("call_cut", "{\"code\":"),
+        text_response("recovered after cut tool call"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("run something long");
+    tui.wait_for("recovered after cut tool call", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    // The continuation round's request carries a tool-role result that
+    // explains the truncation instead of an exec error for junk input.
+    let request: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let body = request.to_string();
+    assert!(body.contains("cut off"), "{body}");
+    assert!(body.contains("\"role\":\"tool\""), "{body}");
 }
 
 #[test]

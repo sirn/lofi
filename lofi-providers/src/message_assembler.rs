@@ -142,6 +142,19 @@ impl MessageAssembler {
         }
     }
 
+    /// Tool calls whose accumulated arguments do not parse as JSON: the
+    /// provider cut the call off mid-stream. Parse failure is the only
+    /// cut signal that works across every protocol — Completions streams
+    /// carry no per-call end marker, so `ToolUseEnd` absence proves nothing.
+    #[must_use]
+    pub fn unparseable_tool_ids(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|t| !t.input.is_empty() && serde_json::from_str::<Value>(&t.input).is_err())
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn finish(self) -> Message {
         let mut blocks = Vec::with_capacity(self.order.len());
@@ -274,6 +287,39 @@ mod tests {
         assert_eq!(id, "call_1");
         assert_eq!(name, "exec");
         assert_eq!(input, &serde_json::json!({"code": "1+1"}));
+    }
+
+    #[test]
+    fn unparseable_tool_ids_reports_cut_calls_only() {
+        let mut a = MessageAssembler::new();
+        a.push(StreamingEvent::ToolUseStart {
+            id: "partial".to_string(),
+            name: "exec".to_string(),
+        });
+        a.push(StreamingEvent::ToolUseInputDelta {
+            id: "partial".to_string(),
+            delta: r#"{"code":"#.to_string(),
+        });
+        a.push(StreamingEvent::ToolUseStart {
+            id: "whole".to_string(),
+            name: "exec".to_string(),
+        });
+        a.push(StreamingEvent::ToolUseInputDelta {
+            id: "whole".to_string(),
+            delta: r#"{"code":"1+1"}"#.to_string(),
+        });
+        a.push(StreamingEvent::ToolUseEnd {
+            id: "whole".to_string(),
+        });
+        // A tool with empty arguments is not a cut call.
+        a.push(StreamingEvent::ToolUseStart {
+            id: "empty".to_string(),
+            name: "exec".to_string(),
+        });
+        a.push(StreamingEvent::ToolUseEnd {
+            id: "empty".to_string(),
+        });
+        assert_eq!(a.unparseable_tool_ids(), vec!["partial".to_string()]);
     }
 
     #[test]
