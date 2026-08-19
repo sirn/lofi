@@ -676,7 +676,6 @@ async fn max_tokens_stop_continues_the_turn_once() {
         .await
         .unwrap();
 
-    // The continuation notice is a user-role message carrying the nudge.
     let notices: Vec<&Message> = messages
         .iter()
         .filter(|m| m.role == Role::User && m.kind == lofi_types::PromptKind::Notice)
@@ -688,7 +687,6 @@ async fn max_tokens_stop_continues_the_turn_once() {
         }
         other => panic!("unexpected block {other:?}"),
     }
-    // Both rounds ran: the model finished after the nudge.
     assert_eq!(
         messages
             .iter()
@@ -696,7 +694,6 @@ async fn max_tokens_stop_continues_the_turn_once() {
             .count(),
         2
     );
-    // The UI saw the live notice.
     let mut saw_notice = false;
     while let Ok(ev) = rx.try_recv() {
         if matches!(&ev, AgentEvent::Notice(n) if n.contains("token limit")) {
@@ -788,7 +785,6 @@ async fn clean_end_turn_does_not_continue() {
             .all(|m| m.kind != lofi_types::PromptKind::Notice),
         "clean end_turn must not trigger a continuation"
     );
-    // Prompt + one assistant round, nothing else.
     assert_eq!(messages.len(), 3);
 }
 
@@ -834,7 +830,6 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
         .unwrap();
 
     let events = cursor.load_tree_events().unwrap();
-    // The notice is durable.
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         SessionEventKind::Message(message)
