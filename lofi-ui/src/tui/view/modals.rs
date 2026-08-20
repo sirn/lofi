@@ -637,17 +637,11 @@ pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
     let total = picker.modes.len();
     let title = " Bash policy ";
     let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |m: &lofi_types::BashApprovalMode| {
-        format!(
-            "{} — {}",
-            crate::tui::policy_mode_label(*m),
-            crate::tui::policy_mode_description(*m)
-        )
-    };
+    let row_for = |m: &lofi_types::BashApprovalMode| crate::tui::policy_mode_label(*m);
     let content_w = picker
         .modes
         .iter()
-        .map(|m| prim::width(&row_for(m)))
+        .map(|m| prim::width(row_for(m)))
         .max()
         .unwrap_or(0);
     let chrome_w = prim::width(title).max(prim::width(help));
@@ -662,15 +656,10 @@ pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
     let need_sb = total > rows.content.height as usize;
     let scroll_area = modal_scroll_area(rows.content);
     let content = scroll_area.content;
-    let current = app
-        .policy_override
-        .as_ref()
-        .and_then(lofi_core::PolicyOverride::current)
-        .unwrap_or(if app.auto_mode_configured {
-            lofi_types::BashApprovalMode::AskAuto
-        } else {
-            lofi_types::BashApprovalMode::AskManual
-        });
+    let current = app.policy_override.as_ref().map_or_else(
+        || lofi_core::default_approval_mode(app.auto_mode_configured),
+        |o| o.effective(app.auto_mode_configured),
+    );
     let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker

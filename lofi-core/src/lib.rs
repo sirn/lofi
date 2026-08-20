@@ -22,7 +22,7 @@ pub use agent::{
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};
 pub use lofi_code::compact_hook::CodeCompactionHook;
-pub use lofi_code::policy::PolicyOverride;
+pub use lofi_code::policy::{default_mode as default_approval_mode, PolicyOverride};
 pub use lofi_code::tools::{
     JobAttributes, JobColor, JobInfo, JobRegistry, JobScreen, JobScreenLine, JobSpan, JobStyle,
 };

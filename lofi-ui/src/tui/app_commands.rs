@@ -119,7 +119,7 @@ impl App {
         }
         // Frozen styled rows are mode-specific, but retain and swap the tiny
         // per-mode height indexes so toggling back does not reparse every turn.
-        // The state itself surfaces as the `[VERBOSE]` tag on the rule line
+        // The state itself surfaces as the ` verbose ` tag on the rule line
         // rather than a chat turn, so toggling stays out of the transcript.
         self.switch_verbose_layout();
         self.debug_after_draw = Some("verbose");
@@ -985,15 +985,7 @@ impl App {
             modes.push(lofi_types::BashApprovalMode::AskAuto);
         }
         modes.push(lofi_types::BashApprovalMode::DenyAll);
-        // No dialog pick means the startup default: ask (auto) when
-        // configured, else ask (manual).
-        let current = override_handle
-            .current()
-            .unwrap_or(if self.auto_mode_configured {
-                lofi_types::BashApprovalMode::AskAuto
-            } else {
-                lofi_types::BashApprovalMode::AskManual
-            });
+        let current = override_handle.effective(self.auto_mode_configured);
         let selected = modes.iter().position(|m| *m == current).unwrap_or(1);
         self.policy_picker = Some(PolicyPickerState { modes, selected });
     }
@@ -1004,10 +996,6 @@ impl App {
                 if let Some(override_handle) = &self.policy_override {
                     override_handle.set(Some(*mode));
                 }
-                self.notify(
-                    NotifyKind::Info,
-                    format!("bash policy for this session: {}", policy_mode_label(*mode)),
-                );
             }
         }
     }

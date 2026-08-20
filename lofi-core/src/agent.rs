@@ -371,9 +371,6 @@ impl Agent {
         &self.tmp_dir
     }
 
-    /// The session's background-job registry. Cheap to clone (shares the
-    /// same map); the UI clones it once to render the job list and badge
-    /// and to kill jobs from the `/job` modal.
     /// The session-scoped `/policy` approval override handle; the TUI
     /// writes to it, every exec reads from it.
     #[must_use]
@@ -387,6 +384,9 @@ impl Agent {
         self.auto_mode.is_some()
     }
 
+    /// The session's background-job registry. Cheap to clone (shares the
+    /// same map); the UI clones it once to render the job list and badge
+    /// and to kill jobs from the `/job` modal.
     #[must_use]
     pub fn jobs(&self) -> lofi_code::tools::JobRegistry {
         self.jobs.clone()
