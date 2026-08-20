@@ -1986,6 +1986,7 @@ fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
             elapsed_ms: 1,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         SessionEventKind::UserShell {
             command: "pwd".into(),
@@ -2004,6 +2005,7 @@ fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
             elapsed_ms: 1,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut events: Vec<_> = kinds
@@ -2404,6 +2406,7 @@ fn turn_end_updates_usage() {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         },
+        stop_reason: None,
     });
     assert_eq!(a.total_in, 10);
     assert_eq!(a.total_out, 20);
@@ -2455,6 +2458,7 @@ fn round_usage_updates_totals_per_round() {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         },
+        stop_reason: None,
     });
     assert!((a.cost - 0.03).abs() < 1e-9);
     assert_eq!(a.turn_cost, 0.0);
@@ -2480,6 +2484,7 @@ fn turn_end_folds_bundled_totals_on_resume_path() {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         },
+        stop_reason: None,
     });
     assert!((a.cost - 0.05).abs() < 1e-9);
     assert_eq!(a.total_in, 10);
@@ -3249,6 +3254,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -3269,6 +3275,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -3493,6 +3500,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         SessionEventKind::Compaction {
             summary: "summary".into(),
@@ -3522,6 +3530,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -3597,6 +3606,7 @@ fn tree_revert_to_cancelled_turn_drops_aborted_tail() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         msg(user("second")),
         msg(assistant("partial")),
@@ -3672,6 +3682,7 @@ fn tree_hides_checkpoint_copies_and_reverts_to_pre_compaction_leaf() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ]
     .into_iter()
@@ -3754,6 +3765,7 @@ fn modal_tab_cycles_with_wraparound() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -3774,6 +3786,7 @@ fn modal_tab_cycles_with_wraparound() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -3852,6 +3865,7 @@ fn tree_revert_to_root_then_reopens() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
         SessionEventKind::Message(Message {
             role: Role::User,
@@ -3872,6 +3886,7 @@ fn tree_revert_to_root_then_reopens() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -3962,6 +3977,7 @@ fn tree_shows_tool_result_nodes() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -4089,6 +4105,7 @@ fn tree_exec_label_shows_native_tools() {
             elapsed_ms: 100,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ];
     let mut batch: Vec<SessionEvent> = kinds
@@ -4458,6 +4475,7 @@ fn footer_shows_ctx_after_usage() {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         },
+        stop_reason: None,
     });
     let r: String = a
         .render_footer_left(120)
@@ -4698,6 +4716,7 @@ fn turns_from_events_restores_timings() {
             elapsed_ms: 2000,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ]);
     let turns = turns_from_session_events(&events);
@@ -4745,6 +4764,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
             elapsed_ms: 10,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     ]
     .into_iter()
@@ -5041,6 +5061,7 @@ fn footer_and_header_show_cost_and_usage() {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         },
+        stop_reason: None,
     });
     let footer: String = a
         .render_footer_left(120)
@@ -5084,6 +5105,7 @@ fn footer_shows_cache_percentage_without_cumulative_cache_counts() {
             cache_read_tokens: 800_000,
             cache_write_tokens: 200_000,
         },
+        stop_reason: None,
     });
     let footer: String = a
         .render_footer_left(120)
@@ -6758,6 +6780,7 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
         elapsed_ms: 200,
         cost: 0.0,
         usage: Usage::default(),
+        stop_reason: None,
     });
     // A second turn so the first is frozen (exercises the frozen-render path).
     push_turn(&mut a);
@@ -7282,6 +7305,7 @@ fn working_status_is_replaced_in_place_by_done_status() {
         elapsed_ms: 1_500,
         cost: 0.0,
         usage: Usage::default(),
+        stop_reason: None,
     });
 
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
