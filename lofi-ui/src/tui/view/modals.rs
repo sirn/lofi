@@ -637,17 +637,11 @@ pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
     let total = picker.modes.len();
     let title = " Bash policy ";
     let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |m: &lofi_types::BashApprovalMode| {
-        format!(
-            "{} — {}",
-            crate::tui::policy_mode_label(*m),
-            crate::tui::policy_mode_description(*m)
-        )
-    };
+    let row_for = |m: &lofi_types::BashApprovalMode| crate::tui::policy_mode_label(*m);
     let content_w = picker
         .modes
         .iter()
-        .map(|m| prim::width(&row_for(m)))
+        .map(|m| prim::width(row_for(m)))
         .max()
         .unwrap_or(0);
     let chrome_w = prim::width(title).max(prim::width(help));

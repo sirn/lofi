@@ -119,7 +119,7 @@ impl App {
         }
         // Frozen styled rows are mode-specific, but retain and swap the tiny
         // per-mode height indexes so toggling back does not reparse every turn.
-        // The state itself surfaces as the `[VERBOSE]` tag on the rule line
+        // The state itself surfaces as the ` verbose ` tag on the rule line
         // rather than a chat turn, so toggling stays out of the transcript.
         self.switch_verbose_layout();
         self.debug_after_draw = Some("verbose");
@@ -996,10 +996,6 @@ impl App {
                 if let Some(override_handle) = &self.policy_override {
                     override_handle.set(Some(*mode));
                 }
-                self.notify(
-                    NotifyKind::Info,
-                    format!("bash policy for this session: {}", policy_mode_label(*mode)),
-                );
             }
         }
     }
