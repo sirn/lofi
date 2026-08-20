@@ -628,6 +628,83 @@ pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::ListState;
+    let Some(picker) = &app.policy_picker else {
+        return;
+    };
+    let t = app.theme;
+    let total = picker.modes.len();
+    let title = " Bash policy ";
+    let help = " ↑/↓ navigate  enter apply  esc close ";
+    let row_for = |m: &lofi_types::BashApprovalMode| {
+        format!(
+            "{} — {}",
+            crate::tui::policy_mode_label(*m),
+            crate::tui::policy_mode_description(*m)
+        )
+    };
+    let content_w = picker
+        .modes
+        .iter()
+        .map(|m| prim::width(&row_for(m)))
+        .max()
+        .unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = total.min(20);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+    let need_sb = total > rows.content.height as usize;
+    let scroll_area = modal_scroll_area(rows.content);
+    let content = scroll_area.content;
+    let current = app
+        .policy_override
+        .as_ref()
+        .and_then(lofi_core::PolicyOverride::current)
+        .unwrap_or(if app.auto_mode_configured {
+            lofi_types::BashApprovalMode::AskAuto
+        } else {
+            lofi_types::BashApprovalMode::AskManual
+        });
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
+    let items: Vec<ListItem> = picker
+        .modes
+        .iter()
+        .map(|m| {
+            ListItem::new(Span::styled(
+                row_for(m),
+                if *m == current {
+                    active_style
+                } else {
+                    inactive_style
+                },
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(focus_style(t));
+    let mut state = ListState::default().with_selected(Some(picker.selected));
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            state.offset(),
+            rows.content.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
+    }
+}
+
 pub(super) fn render_service_picker(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::ListState;
     let Some(picker) = &app.service_picker else {

@@ -160,6 +160,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "show session info"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
+    ("/policy", "change bash approval mode for this session"),
     ("/service", "switch the service tier"),
     ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
@@ -556,6 +557,14 @@ struct ThemePickerState {
     selected: usize,
 }
 
+/// State for the `/policy` modal: the session-scoped bash approval modes
+/// the user can pick. `AskAuto` is offered only when auto mode is
+/// configured.
+struct PolicyPickerState {
+    modes: Vec<lofi_core::BashApprovalMode>,
+    selected: usize,
+}
+
 impl ThemePickerState {
     const MODES: [lofi_types::ThemeMode; 3] = [
         lofi_types::ThemeMode::Auto,
@@ -626,6 +635,42 @@ impl Modal for ServicePickerState {
     }
     fn set_selected(&mut self, n: usize) {
         self.selected = n;
+    }
+}
+
+impl Modal for PolicyPickerState {
+    fn len(&self) -> usize {
+        self.modes.len()
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, n: usize) {
+        self.selected = n;
+    }
+}
+
+fn policy_mode_label(mode: lofi_core::BashApprovalMode) -> &'static str {
+    match mode {
+        lofi_core::BashApprovalMode::AllowAll => "allow all",
+        lofi_core::BashApprovalMode::AskManual => "ask (manual)",
+        lofi_core::BashApprovalMode::AskAuto => "ask (auto)",
+        lofi_core::BashApprovalMode::DenyAll => "deny all",
+    }
+}
+
+fn policy_mode_description(mode: lofi_core::BashApprovalMode) -> &'static str {
+    match mode {
+        lofi_core::BashApprovalMode::AllowAll => {
+            "run allowed and ask commands without prompting; deny still blocks"
+        }
+        lofi_core::BashApprovalMode::AskManual => {
+            "honor the policy; prompt to approve each \"ask\" command"
+        }
+        lofi_core::BashApprovalMode::AskAuto => {
+            "honor the policy; let auto mode decide each \"ask\" command"
+        }
+        lofi_core::BashApprovalMode::DenyAll => "block every command, even allowed ones",
     }
 }
 
@@ -887,6 +932,13 @@ pub(crate) struct App {
     picker_generation: Arc<AtomicU64>,
     model_picker: Option<ModelPickerState>,
     thinking_picker: Option<ThinkingPickerState>,
+    policy_picker: Option<PolicyPickerState>,
+    /// Shared handle to the session's bash approval override; written on
+    /// `/policy` confirm. None until the startup agent is wired in.
+    policy_override: Option<lofi_core::PolicyOverride>,
+    /// Whether auto-mode evaluation is configured; gates the `ask (auto)`
+    /// choice in the `/policy` dialog.
+    auto_mode_configured: bool,
     service_picker: Option<ServicePickerState>,
     theme_picker: Option<ThemePickerState>,
     /// The session's background-job registry, cloned from the agent at
@@ -1294,6 +1346,10 @@ async fn run_loop(
         // Clone the session's job registry for the `/job` modal and the
         // running-jobs badge. Cheap: shares the agent's map.
         app.jobs = Some(a.jobs());
+        // The `/policy` dialog writes the choice here; every exec in the
+        // session reads it. Cloned (not moved) so model switches keep it.
+        app.policy_override = Some(a.policy_override().clone());
+        app.auto_mode_configured = a.has_auto_mode();
         agent = Some(a);
     }
 

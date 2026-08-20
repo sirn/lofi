@@ -187,6 +187,10 @@ pub struct Agent {
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
+    /// Session-scoped `/policy` approval override. Shared with the TUI so
+    /// the dialog pick reaches tools built by later execs, and cloned into
+    /// every rebuilt agent so a model switch keeps the choice.
+    policy_override: lofi_code::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
     /// Session-scoped background jobs. Shared with every exec so a job
     /// spawned in one round is visible to the next. The host shuts down
@@ -234,6 +238,7 @@ impl Agent {
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
+            policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
         }
@@ -265,6 +270,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
         }
@@ -287,6 +293,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             truncate: self.truncate,
@@ -311,6 +318,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            policy_override: self.policy_override.clone(),
             skills_dir,
             jobs: self.jobs.clone(),
             truncate: self.truncate,
@@ -366,6 +374,19 @@ impl Agent {
     /// The session's background-job registry. Cheap to clone (shares the
     /// same map); the UI clones it once to render the job list and badge
     /// and to kill jobs from the `/job` modal.
+    /// The session-scoped `/policy` approval override handle; the TUI
+    /// writes to it, every exec reads from it.
+    #[must_use]
+    pub fn policy_override(&self) -> &lofi_code::policy::PolicyOverride {
+        &self.policy_override
+    }
+
+    /// Whether auto-mode approval evaluation is configured for this agent.
+    #[must_use]
+    pub fn has_auto_mode(&self) -> bool {
+        self.auto_mode.is_some()
+    }
+
     #[must_use]
     pub fn jobs(&self) -> lofi_code::tools::JobRegistry {
         self.jobs.clone()

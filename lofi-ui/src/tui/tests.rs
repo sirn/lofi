@@ -6155,6 +6155,73 @@ fn thinking_picker_confirm_sets_pending_switch() {
 }
 
 #[test]
+fn policy_picker_defaults_to_ask_manual_without_auto_mode() {
+    let mut a = app();
+    a.policy_override = Some(lofi_core::PolicyOverride::default());
+    a.auto_mode_configured = false;
+    a.open_policy_picker();
+    let picker = a.policy_picker.as_ref().unwrap();
+    assert_eq!(
+        picker.modes,
+        vec![
+            lofi_types::BashApprovalMode::AllowAll,
+            lofi_types::BashApprovalMode::AskManual,
+            lofi_types::BashApprovalMode::DenyAll
+        ]
+    );
+    assert_eq!(picker.selected, 1);
+    assert!(a.modal_open());
+}
+
+#[test]
+fn policy_picker_includes_and_defaults_to_ask_auto_when_configured() {
+    let mut a = app();
+    a.policy_override = Some(lofi_core::PolicyOverride::default());
+    a.auto_mode_configured = true;
+    a.open_policy_picker();
+    let picker = a.policy_picker.as_ref().unwrap();
+    assert_eq!(
+        picker.modes,
+        vec![
+            lofi_types::BashApprovalMode::AllowAll,
+            lofi_types::BashApprovalMode::AskManual,
+            lofi_types::BashApprovalMode::AskAuto,
+            lofi_types::BashApprovalMode::DenyAll
+        ]
+    );
+    assert_eq!(picker.selected, 2);
+}
+
+#[test]
+fn policy_picker_confirm_writes_the_shared_override() {
+    let mut a = app();
+    let override_handle = lofi_core::PolicyOverride::default();
+    a.policy_override = Some(override_handle.clone());
+    a.auto_mode_configured = false;
+    a.open_policy_picker();
+    a.policy_picker.as_mut().unwrap().selected = 2; // deny all
+    a.policy_picker_confirm();
+    assert!(a.policy_picker.is_none());
+    assert_eq!(
+        override_handle.current(),
+        Some(lofi_types::BashApprovalMode::DenyAll)
+    );
+}
+
+#[test]
+fn policy_picker_confirm_notice_names_the_mode() {
+    let mut a = app();
+    a.policy_override = Some(lofi_core::PolicyOverride::default());
+    a.auto_mode_configured = false;
+    a.open_policy_picker();
+    a.policy_picker_confirm();
+    let notify = a.notify.as_ref().unwrap();
+    assert!(notify
+        .msg
+        .contains("bash policy for this session: ask (manual)"));
+}
+
+#[test]
 fn service_picker_open_lists_auto_plus_declared() {
     let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium
     a.model_choices = vec![lofi_types::ModelChoice {

@@ -22,12 +22,13 @@ pub use agent::{
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};
 pub use lofi_code::compact_hook::CodeCompactionHook;
+pub use lofi_code::policy::PolicyOverride;
 pub use lofi_code::tools::{
     JobAttributes, JobColor, JobInfo, JobRegistry, JobScreen, JobScreenLine, JobSpan, JobStyle,
 };
 pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};
-pub use lofi_types::{CompactBlock, CompactionHook, SummarySection};
+pub use lofi_types::{BashApprovalMode, CompactBlock, CompactionHook, SummarySection};
 pub use lofi_types::{Config, SessionEvent};
 pub use models::ModelRegistry;
 pub use retry::{is_retryable_error, RetryPolicy};
