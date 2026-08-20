@@ -22,8 +22,8 @@ mod modals;
 mod prim;
 use modals::{
     render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_service_picker, render_slash_complete, render_theme_picker, render_thinking_picker,
-    render_tree_picker,
+    render_policy_picker, render_service_picker, render_slash_complete, render_theme_picker,
+    render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -134,6 +134,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.thinking_picker.is_some() {
         render_thinking_picker(f, area, app);
+    }
+    if app.policy_picker.is_some() {
+        render_policy_picker(f, area, app);
     }
     if app.service_picker.is_some() {
         render_service_picker(f, area, app);
@@ -635,8 +638,10 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     render_info(f, chunks[3], app);
 }
 
-/// Mode-badge strip. The bottom row carries the ` VERBOSE ` tag (while tool
-/// detail is expanded) and the mode chip (` INPUT ` / ` NAV `) on the right,
+/// Mode-badge strip. The bottom row carries the ` policy: … ` chip (while
+/// `/policy` set a non-default approval mode), the running-jobs badge, the
+/// ` verbose ` tag (while tool detail is expanded), and the mode chip
+/// (` INPUT ` / ` NAV `) on the right,
 /// and one notification badge on the left (quit > yank > retry > queue >
 /// transient status/error). A long notification wraps across up to
 /// [`NOTIFY_MAX_LINES`] rows above the chips instead of truncating to one,
@@ -652,6 +657,17 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     let chip_row = area.bottom().saturating_sub(1);
 
     let mut right: Vec<Span<'static>> = Vec::new();
+    // Non-default /policy mode persists for the session; warn accent reads
+    // as a caution, not ambient chrome.
+    if let Some(badge) = app.policy_badge() {
+        right.push(Span::styled(
+            format!(" {badge} "),
+            Style::new()
+                .fg(t.on_accent_text())
+                .bg(t.warn)
+                .add_modifier(bold),
+        ));
+    }
     // Persistent running-jobs count sits left of the mode chip; transient
     // badges own the left edge, so this stays out of their way.
     if let Some(badge) = app.jobs_badge() {
@@ -667,12 +683,14 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
     }
     if app.verbose {
         right.push(Span::styled(
-            " VERBOSE ",
+            " verbose ",
             Style::new().fg(t.muted).add_modifier(bold),
         ));
     }
-    // INPUT is the default state, so render it quietly; NAV/SELECT keep
-    // the accent chip so a modal shift pops.
+    // State chips stay lowercase (verbose, jobs, policy); the mode chip is
+    // the lone uppercase control indicator. INPUT is the default state, so
+    // render it quietly; NAV/SELECT keep the accent chip so a modal shift
+    // pops.
     let chip_style = if matches!(app.mode, Mode::Input) {
         Style::new().fg(t.muted).bg(t.panel_bg).add_modifier(bold)
     } else {

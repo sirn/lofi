@@ -30,6 +30,17 @@ impl BuiltinTools {
     /// races its decision against a manual response. Presentation and timing
     /// policy belong to consumers of that event.
     pub(super) async fn check_policy(&self, cmd: &str) -> Option<Value> {
+        // Allow-all auto-passes allow and ask decisions but explicit deny
+        // rules still block; deny-all is absolute and overrides even the
+        // allow list.
+        let mode = self.policy_override.effective(self.auto_mode.is_some());
+        if mode == lofi_types::BashApprovalMode::DenyAll {
+            return Some(self.blocked_result(
+                cmd,
+                "blocked by session policy: deny all commands",
+                "denied",
+            ));
+        }
         let decision = self.shell_policy.evaluate(cmd);
         let suffix = decision
             .matched_command
@@ -37,39 +48,53 @@ impl BuiltinTools {
             .map(|c| format!(" (command: {c})"))
             .unwrap_or_default();
         match decision.action {
-            lofi_types::PolicyAction::Deny => Some(json!({
-                "ok": false,
-                "output": format!("blocked by shell policy: {}{}", decision.reason, suffix),
-                "code": Value::Null,
-                "command": cmd,
-                "directory": self.root.display().to_string(),
-                "signal": Value::Null,
-                "duration_ms": 0,
-                "status": "denied",
-            })),
+            lofi_types::PolicyAction::Deny => Some(self.blocked_result(
+                cmd,
+                &format!("blocked by shell policy: {}{}", decision.reason, suffix),
+                "denied",
+            )),
             lofi_types::PolicyAction::Ask => {
-                let approved = if let Some(auto_mode) = &self.auto_mode {
-                    self.auto_mode_decision(cmd, auto_mode).await
-                } else {
-                    self.confirm_decision(cmd, crate::ConfirmReason::Policy)
-                        .await
+                if mode == lofi_types::BashApprovalMode::AllowAll {
+                    return None;
+                }
+                // An explicit `ask (manual)` pick bypasses an available auto
+                // mode; `ask (auto)` falls back to the manual prompt when no
+                // auto mode is configured.
+                let use_auto =
+                    mode == lofi_types::BashApprovalMode::AskAuto && self.auto_mode.is_some();
+                let approved = match (use_auto, &self.auto_mode) {
+                    (true, Some(auto_mode)) => self.auto_mode_decision(cmd, auto_mode).await,
+                    _ => {
+                        self.confirm_decision(cmd, crate::ConfirmReason::Policy)
+                            .await
+                    }
                 };
                 if approved {
                     return None;
                 }
-                Some(json!({
-                    "ok": false,
-                    "output": format!("requires confirmation: {}{}", decision.reason, suffix),
-                    "code": Value::Null,
-                    "command": cmd,
-                    "directory": self.root.display().to_string(),
-                    "signal": Value::Null,
-                    "duration_ms": 0,
-                    "status": "needs_confirmation",
-                }))
+                Some(self.blocked_result(
+                    cmd,
+                    &format!("requires confirmation: {}{}", decision.reason, suffix),
+                    "needs_confirmation",
+                ))
             }
             lofi_types::PolicyAction::Allow => None,
         }
+    }
+
+    /// Shared result shape for a command that did not run (denied or left
+    /// un-confirmed).
+    fn blocked_result(&self, cmd: &str, output: &str, status: &str) -> Value {
+        json!({
+            "ok": false,
+            "output": output,
+            "code": Value::Null,
+            "command": cmd,
+            "directory": self.root.display().to_string(),
+            "signal": Value::Null,
+            "duration_ms": 0,
+            "status": status,
+        })
     }
 
     async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> bool {
@@ -550,5 +575,131 @@ mod tests {
         let res = tools.bash(json!({ "cmd": "echo hi" })).await.unwrap();
         assert_eq!(res["ok"], json!(true), "got: {res}");
         assert_eq!(res["status"], json!("exited"));
+    }
+    fn tools_for_policy(
+        config: &lofi_types::ShellPolicyConfig,
+        confirm: Option<crate::ConfirmFn>,
+        auto_mode: Option<crate::AutoModeFn>,
+    ) -> (tempfile::TempDir, BuiltinTools) {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tools = BuiltinTools::with_skills_dir(
+            dir.path().to_path_buf(),
+            None,
+            tmp,
+            crate::BashEnv::default(),
+            crate::policy::defaults::resolve(config),
+            confirm,
+            auto_mode,
+            None,
+        );
+        (dir, tools)
+    }
+
+    fn mode_override(mode: lofi_types::BashApprovalMode) -> crate::policy::PolicyOverride {
+        let override_handle = crate::policy::PolicyOverride::default();
+        override_handle.set(Some(mode));
+        override_handle
+    }
+
+    fn command_entry(cmd: &str, mode: lofi_types::MatchMode) -> lofi_types::CommandEntry {
+        lofi_types::CommandEntry {
+            match_str: cmd.to_string(),
+            mode,
+        }
+    }
+
+    #[tokio::test]
+    async fn override_allow_all_auto_passes_ask_but_respects_deny() {
+        let config = lofi_types::ShellPolicyConfig {
+            deny: vec![command_entry("curl", lofi_types::MatchMode::Prefix)],
+            ..Default::default()
+        };
+        let (_dir, tools) = tools_for_policy(&config, None, None);
+        let tools =
+            tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AllowAll));
+        // Unmatched commands fail closed to ask; allow-all passes them
+        // without prompting.
+        assert!(tools.check_policy("echo clean").await.is_none());
+        let res = tools
+            .check_policy("curl https://example.com")
+            .await
+            .unwrap();
+        assert_eq!(res["status"], json!("denied"));
+    }
+
+    #[tokio::test]
+    async fn override_deny_all_blocks_an_allowed_command() {
+        let config = lofi_types::ShellPolicyConfig {
+            allow: vec![command_entry("echo", lofi_types::MatchMode::Prefix)],
+            ..Default::default()
+        };
+        let (_dir, tools) = tools_for_policy(&config, None, None);
+        let tools =
+            tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::DenyAll));
+        let res = tools.check_policy("echo hi").await.unwrap();
+        assert_eq!(res["status"], json!("denied"));
+    }
+
+    #[tokio::test]
+    async fn override_ask_manual_skips_an_available_auto_mode() {
+        // Everything unmatched fails closed to ask under the default policy.
+        let auto_called = Arc::new(AtomicBool::new(false));
+        let auto: crate::AutoModeFn = {
+            let auto_called = auto_called.clone();
+            Arc::new(move |_| {
+                auto_called.store(true, Ordering::Relaxed);
+                Box::pin(async {
+                    crate::AutoModeOutcome::Allow {
+                        reason: "safe".to_string(),
+                    }
+                })
+            })
+        };
+        let confirm: crate::ConfirmFn = Arc::new(|_| Box::pin(async { true }));
+        let (_dir, tools) = tools_for_policy(
+            &lofi_types::ShellPolicyConfig::default(),
+            Some(confirm),
+            Some(auto),
+        );
+        let tools =
+            tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskManual));
+        assert!(tools.check_policy("special-cmd").await.is_none());
+        assert!(!auto_called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn override_ask_auto_without_auto_mode_falls_back_to_the_prompt() {
+        let confirm: crate::ConfirmFn = Arc::new(|_| Box::pin(async { true }));
+        let (_dir, tools) = tools_for_policy(
+            &lofi_types::ShellPolicyConfig::default(),
+            Some(confirm),
+            None,
+        );
+        let tools =
+            tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto));
+        assert!(tools.check_policy("special-cmd").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn override_ask_auto_uses_auto_mode_when_configured() {
+        let auto: crate::AutoModeFn = Arc::new(|_| {
+            Box::pin(async {
+                crate::AutoModeOutcome::Allow {
+                    reason: "safe".to_string(),
+                }
+            })
+        });
+        let confirm: crate::ConfirmFn = Arc::new(|_| Box::pin(async { false }));
+        let (_dir, tools) = tools_for_policy(
+            &lofi_types::ShellPolicyConfig::default(),
+            Some(confirm),
+            Some(auto),
+        );
+        let tools =
+            tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto));
+        // Auto allowed it; the manual prompt answer (false) must not win.
+        assert!(tools.check_policy("special-cmd").await.is_none());
     }
 }
