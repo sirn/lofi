@@ -89,6 +89,9 @@ struct TurnStats {
     native_tools: Vec<NativeToolRecord>,
     cost: f64,
     usage: Usage,
+    // Stop reason of the latest finished round; the final round's value is
+    // what the turn summary and the durable TurnEnd marker carry.
+    stop_reason: Option<lofi_types::StopReason>,
 }
 
 impl TurnStats {
@@ -101,6 +104,7 @@ impl TurnStats {
             native_tools: Vec::new(),
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         }
     }
 
@@ -159,6 +163,7 @@ impl TurnStats {
                 .map(|d| d.as_millis() as u64)
                 .collect(),
             native_tools: self.native_tools.clone(),
+            stop_reason: self.stop_reason,
         }
     }
 }
