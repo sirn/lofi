@@ -561,7 +561,7 @@ struct ThemePickerState {
 /// the user can pick. `AskAuto` is offered only when auto mode is
 /// configured.
 struct PolicyPickerState {
-    modes: Vec<lofi_core::BashApprovalMode>,
+    modes: Vec<lofi_types::BashApprovalMode>,
     selected: usize,
 }
 
@@ -650,27 +650,27 @@ impl Modal for PolicyPickerState {
     }
 }
 
-fn policy_mode_label(mode: lofi_core::BashApprovalMode) -> &'static str {
+fn policy_mode_label(mode: lofi_types::BashApprovalMode) -> &'static str {
     match mode {
-        lofi_core::BashApprovalMode::AllowAll => "allow all",
-        lofi_core::BashApprovalMode::AskManual => "ask (manual)",
-        lofi_core::BashApprovalMode::AskAuto => "ask (auto)",
-        lofi_core::BashApprovalMode::DenyAll => "deny all",
+        lofi_types::BashApprovalMode::AllowAll => "allow all",
+        lofi_types::BashApprovalMode::AskManual => "ask (manual)",
+        lofi_types::BashApprovalMode::AskAuto => "ask (auto)",
+        lofi_types::BashApprovalMode::DenyAll => "deny all",
     }
 }
 
-fn policy_mode_description(mode: lofi_core::BashApprovalMode) -> &'static str {
+fn policy_mode_description(mode: lofi_types::BashApprovalMode) -> &'static str {
     match mode {
-        lofi_core::BashApprovalMode::AllowAll => {
+        lofi_types::BashApprovalMode::AllowAll => {
             "run allowed and ask commands without prompting; deny still blocks"
         }
-        lofi_core::BashApprovalMode::AskManual => {
+        lofi_types::BashApprovalMode::AskManual => {
             "honor the policy; prompt to approve each \"ask\" command"
         }
-        lofi_core::BashApprovalMode::AskAuto => {
+        lofi_types::BashApprovalMode::AskAuto => {
             "honor the policy; let auto mode decide each \"ask\" command"
         }
-        lofi_core::BashApprovalMode::DenyAll => "block every command, even allowed ones",
+        lofi_types::BashApprovalMode::DenyAll => "block every command, even allowed ones",
     }
 }
 
