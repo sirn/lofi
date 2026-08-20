@@ -153,6 +153,15 @@ impl App {
         }
     }
 
+    /// Persistent chip while `/policy` set a non-default approval mode.
+    pub(crate) fn policy_badge(&self) -> Option<String> {
+        let mode = self.policy_override.as_ref()?.current()?;
+        if mode == lofi_core::default_approval_mode(self.auto_mode_configured) {
+            return None;
+        }
+        Some(format!("policy: {}", policy_mode_label(mode)))
+    }
+
     /// Rows the notification area occupies at the given terminal width.
     /// Only the transient notify badge can overflow one line — quit, yank,
     /// retry, and queue badges are short by construction and always take a
