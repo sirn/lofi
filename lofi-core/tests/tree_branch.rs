@@ -47,6 +47,7 @@ fn turn_end() -> SessionEvent {
             elapsed_ms: 0,
             cost: 0.0,
             usage: Usage::default(),
+            stop_reason: None,
         },
     }
 }
