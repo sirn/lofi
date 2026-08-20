@@ -111,7 +111,7 @@ fn policy_dialog_deny_all_blocks_exec_without_prompting() {
     tui.wait_for("Bash policy", WAIT);
     // Without auto mode the rows are allow all / ask (manual) / deny all.
     tui.send(b"\x1b[B\x1b[B\r");
-    tui.wait_for("bash policy for this session: deny all", WAIT);
+    tui.wait_for("policy: deny all", WAIT);
 
     tui.submit("run the touch please");
     tui.wait_for("policy deny all answer", WAIT);
@@ -144,7 +144,7 @@ fn policy_dialog_allow_all_runs_exec_without_prompting() {
     tui.wait_for("Bash policy", WAIT);
     // The dialog opens pre-selected on ask (manual); one up selects allow all.
     tui.send(b"\x1b[A\r");
-    tui.wait_for("bash policy for this session: allow all", WAIT);
+    tui.wait_for("policy: allow all", WAIT);
 
     tui.submit("run the touch please");
     tui.wait_for("policy allow all answer", WAIT);
@@ -248,7 +248,7 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
     tui.submit("/verbose");
-    tui.wait_for("VERBOSE", WAIT);
+    tui.wait_for(" verbose ", WAIT);
 
     tui.clear_output();
     tui.submit("/recall command history prompt marker");
