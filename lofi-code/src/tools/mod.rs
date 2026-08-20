@@ -58,6 +58,9 @@ pub struct BuiltinTools {
     shell_policy: crate::policy::ResolvedPolicy,
     confirm: Option<crate::ConfirmFn>,
     auto_mode: Option<crate::AutoModeFn>,
+    /// Session-scoped `/policy` override shared with the owning agent so a
+    /// dialog pick applies to every later exec in the session.
+    policy_override: crate::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
@@ -121,6 +124,7 @@ impl BuiltinTools {
             shell_policy,
             confirm,
             auto_mode,
+            policy_override: crate::policy::PolicyOverride::default(),
             skills_dir,
             read_roots,
             cancel: None,
@@ -152,6 +156,13 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_on_job_acquired(mut self, hook: Option<crate::JobAcquireFn>) -> Self {
         self.on_job_acquired = hook;
+        self
+    }
+
+    /// Shares the session-scoped `/policy` approval override.
+    #[must_use]
+    pub fn with_policy_override(mut self, policy_override: crate::policy::PolicyOverride) -> Self {
+        self.policy_override = policy_override;
         self
     }
 

@@ -1224,6 +1224,7 @@ impl Agent {
                 shell_policy: self.shell_policy.clone(),
                 confirm,
                 auto_mode: self.auto_mode.clone(),
+                policy_override: self.policy_override.clone(),
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
                 jobs: self.jobs.clone(),

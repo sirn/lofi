@@ -1326,6 +1326,22 @@ pub enum PolicyAction {
     Deny,
 }
 
+/// Session-scoped bash approval mode, chosen in the `/policy` dialog. It
+/// never persists: every session starts in `AskManual`, or `AskAuto` when
+/// auto mode is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashApprovalMode {
+    /// Auto-approve `allow` and `ask` decisions without prompting;
+    /// explicit `deny` rules still block.
+    AllowAll,
+    /// Honor the policy; an `ask` decision prompts the user.
+    AskManual,
+    /// Honor the policy; an `ask` decision goes to auto-mode evaluation.
+    AskAuto,
+    /// Block every command, including ones the policy allows.
+    DenyAll,
+}
+
 /// This is distinct from YOLO mode: YOLO blindly allows anything not
 /// denied, while auto-mode makes a per-command safety judgment via an
 /// LLM call.

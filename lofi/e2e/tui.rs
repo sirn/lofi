@@ -96,6 +96,66 @@ fn topmost_policy_confirmation_handles_input_before_tree_picker() {
 }
 
 #[test]
+fn policy_dialog_deny_all_blocks_exec_without_prompting() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "policy-call",
+            "return await lofi.bash({ cmd: \"touch should-not-run\" });",
+        ),
+        text_response("policy deny all answer"),
+    ]);
+    let fixture = Fixture::with_policy(&server, "confirm");
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("/policy");
+    tui.wait_for("Bash policy", WAIT);
+    // Without auto mode the rows are allow all / ask (manual) / deny all.
+    tui.send(b"\x1b[B\x1b[B\r");
+    tui.wait_for("policy: deny all", WAIT);
+
+    tui.submit("run the touch please");
+    tui.wait_for("policy deny all answer", WAIT);
+
+    // No prompt appeared: the override blocked the exec outright and the
+    // denial result went back to the model.
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].body.contains("deny all"),
+        "{}",
+        requests[1].body
+    );
+    assert!(!fixture.workspace.join("should-not-run").exists());
+}
+
+#[test]
+fn policy_dialog_allow_all_runs_exec_without_prompting() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "policy-call",
+            "return await lofi.bash({ cmd: \"touch should-run\" });",
+        ),
+        text_response("policy allow all answer"),
+    ]);
+    let fixture = Fixture::with_policy(&server, "confirm");
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("/policy");
+    tui.wait_for("Bash policy", WAIT);
+    // The dialog opens pre-selected on ask (manual); one up selects allow all.
+    tui.send(b"\x1b[A\r");
+    tui.wait_for("policy: allow all", WAIT);
+
+    tui.submit("run the touch please");
+    tui.wait_for("policy allow all answer", WAIT);
+
+    // Under confirm policy this exec would have prompted; allow-all skipped
+    // the prompt and ran it.
+    assert_eq!(server.requests().len(), 2);
+    assert!(fixture.workspace.join("should-run").exists());
+}
+
+#[test]
 fn model_and_thinking_pickers_change_the_next_request() {
     let server = MockServer::start(vec![text_response("picker answer marker")]);
     let fixture = Fixture::new(&server);
@@ -188,7 +248,7 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
     tui.submit("/verbose");
-    tui.wait_for("VERBOSE", WAIT);
+    tui.wait_for(" verbose ", WAIT);
 
     tui.clear_output();
     tui.submit("/recall command history prompt marker");
