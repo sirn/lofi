@@ -277,6 +277,9 @@ impl Agent {
             match round {
                 Ok(outcome) => {
                     let finished = outcome.finished;
+                    // Latest finished round wins: the recorded reason must be
+                    // the round that actually ended the turn.
+                    stats.stop_reason = outcome.stop_reason;
                     // Persist before inspecting the consumer so a completed
                     // round is on disk even if the UI already went away.
                     commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
@@ -470,6 +473,7 @@ impl Agent {
                             elapsed_ms,
                             cost: stats.cost,
                             usage: stats.usage,
+                            stop_reason: stats.stop_reason,
                         })
                         .await
                     }
