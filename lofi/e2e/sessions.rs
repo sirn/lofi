@@ -6,9 +6,10 @@ use nix::unistd::Pid;
 use crate::support::{
     anthropic_text_response, anthropic_truncated_text_response, delayed_text_response, event_types,
     job_events, parallel_responses_tool_response, parallel_tool_response, process_is_alive,
-    responses_response, spawned_pid, text_response, text_response_with_usage, tool_response,
-    tool_response_with_usage, transcript_text, truncated_text_response, truncated_tool_response,
-    wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
+    responses_response, spawned_pid, stop_text_response, text_response, text_response_with_usage,
+    tool_response, tool_response_with_usage, transcript_text, truncated_responses_response,
+    truncated_text_response, truncated_tool_response, wait_for_process_exit, Fixture, MockResponse,
+    MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -1258,7 +1259,7 @@ fn background_job_completion_is_injected_as_a_notice_prompt() {
 fn truncated_response_continues_the_turn_once() {
     let server = MockServer::start(vec![
         truncated_text_response("partial answer"),
-        text_response("continued after truncation"),
+        stop_text_response("continued after truncation"),
     ]);
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
@@ -1287,6 +1288,16 @@ fn truncated_response_continues_the_turn_once() {
         .collect();
     assert_eq!(notice_events.len(), 1, "{events:?}");
     assert!(notice_events[0].to_string().contains("token limit"));
+    // The completed turn records the final round's stop reason; the turn
+    // ended with a continuation, so it is end_turn, not max_tokens.
+    let turn_ends: Vec<_> = events
+        .iter()
+        .filter(|event| event.get("type").and_then(|t| t.as_str()) == Some("turn_end"))
+        .collect();
+    assert_eq!(
+        turn_ends.last().unwrap()["stop_reason"].as_str(),
+        Some("end_turn")
+    );
 }
 
 #[test]
@@ -1330,6 +1341,34 @@ fn anthropic_truncated_response_continues_the_turn_once() {
     assert_eq!(last["role"], "user");
     assert!(last.to_string().contains("token limit"));
     assert_eq!(messages[messages.len() - 2]["role"], "assistant");
+}
+
+#[test]
+fn responses_truncated_response_continues_the_turn_once() {
+    let server = MockServer::start(vec![
+        truncated_responses_response("responses partial"),
+        responses_response("responses reasoning", "responses continued"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    tui.submit("answer in full");
+    tui.wait_for("responses continued", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    // Two model requests: the truncated round and the continuation round.
+    assert_eq!(server.requests().len(), 2);
+    // The continuation request's input ends with the nudge as a user-role
+    // input_text message, never as a user-typed prompt or instructions.
+    let request: serde_json::Value = serde_json::from_str(&server.requests()[1].body).unwrap();
+    let input = request["input"].as_array().unwrap();
+    let last = input.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"][0]["type"], "input_text");
+    assert!(last["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("token limit"));
 }
 
 #[test]

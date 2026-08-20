@@ -730,6 +730,25 @@ data: [DONE]
     ))
 }
 
+/// A clean end of turn, real-provider shape: text with `finish_reason:
+/// "stop"`, then a usage-only frame so the mapper emits `Done(EndTurn)`.
+pub fn stop_text_response(text: &str) -> MockResponse {
+    let event = json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "stop" }] });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn delayed_text_response(text: &str, delay: Duration) -> MockResponse {
     let event = json!({ "choices": [{ "delta": { "content": text } }] });
     MockResponse::delayed_sse(format!("data: {event}\n\ndata: [DONE]\n\n"), delay)
@@ -836,6 +855,33 @@ pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
 data: {reasoning_done}
 
 data: {text}
+
+data: {done}
+
+data: [DONE]
+
+"
+    ))
+}
+
+/// Token-limit truncation, Responses shape: text, then a completed event
+/// with `incomplete_details.reason: max_output_tokens` so the harness
+/// auto-continues the turn.
+pub fn truncated_responses_response(text: &str) -> MockResponse {
+    let text = json!({ "type": "response.output_text.delta", "delta": text });
+    let done = json!({
+        "type": "response.completed",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 5,
+            }
+        }
+    });
+    MockResponse::sse(format!(
+        "data: {text}
 
 data: {done}
 
