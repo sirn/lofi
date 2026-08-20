@@ -561,7 +561,7 @@ struct ThemePickerState {
 /// the user can pick. `AskAuto` is offered only when auto mode is
 /// configured.
 struct PolicyPickerState {
-    modes: Vec<lofi_core::BashApprovalMode>,
+    modes: Vec<lofi_types::BashApprovalMode>,
     selected: usize,
 }
 
@@ -650,27 +650,27 @@ impl Modal for PolicyPickerState {
     }
 }
 
-fn policy_mode_label(mode: lofi_core::BashApprovalMode) -> &'static str {
+fn policy_mode_label(mode: lofi_types::BashApprovalMode) -> &'static str {
     match mode {
-        lofi_core::BashApprovalMode::AllowAll => "allow all",
-        lofi_core::BashApprovalMode::AskManual => "ask (manual)",
-        lofi_core::BashApprovalMode::AskAuto => "ask (auto)",
-        lofi_core::BashApprovalMode::DenyAll => "deny all",
+        lofi_types::BashApprovalMode::AllowAll => "allow all",
+        lofi_types::BashApprovalMode::AskManual => "ask (manual)",
+        lofi_types::BashApprovalMode::AskAuto => "ask (auto)",
+        lofi_types::BashApprovalMode::DenyAll => "deny all",
     }
 }
 
-fn policy_mode_description(mode: lofi_core::BashApprovalMode) -> &'static str {
+fn policy_mode_description(mode: lofi_types::BashApprovalMode) -> &'static str {
     match mode {
-        lofi_core::BashApprovalMode::AllowAll => {
+        lofi_types::BashApprovalMode::AllowAll => {
             "run allowed and ask commands without prompting; deny still blocks"
         }
-        lofi_core::BashApprovalMode::AskManual => {
+        lofi_types::BashApprovalMode::AskManual => {
             "honor the policy; prompt to approve each \"ask\" command"
         }
-        lofi_core::BashApprovalMode::AskAuto => {
+        lofi_types::BashApprovalMode::AskAuto => {
             "honor the policy; let auto mode decide each \"ask\" command"
         }
-        lofi_core::BashApprovalMode::DenyAll => "block every command, even allowed ones",
+        lofi_types::BashApprovalMode::DenyAll => "block every command, even allowed ones",
     }
 }
 
@@ -1526,195 +1526,3 @@ async fn run_loop(
                         }
                     }
                     Some(Ok(tty_events::TuiEvent::Input(ev))) => {
-                        defer_redraw = matches!(ev, Event::Resize(_, _));
-                        if !app.should_quit {
-                            handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
-                        }
-                    if let Some(q) = app.pending_model_switch.take() {
-                        match switcher.as_ref().map_or(
-                            Err(lofi_core::Error::Config("no model registry".into())),
-                            |s| s.rebuild(agent.as_ref(), &q),
-                        ) {
-                            Ok((new_agent, model, level)) => {
-                                let tier = model.service_tier.clone();
-                                agent = Some(new_agent);
-                                app.apply_model_switch(&model, level, tier);
-                            }
-                            Err(e) => app.notify(
-                                NotifyKind::Error,
-                                format!("switch model: {e}"),
-                            ),
-                        }
-                    }
-                    if app.jobs_receiver_stale {
-                        job_notice_rx = app
-                            .jobs
-                            .as_ref()
-                            .map(lofi_core::JobRegistry::subscribe_notices);
-                        app.jobs_receiver_stale = false;
-                    }
-                    // Slash commands (notably /tree reconcile) can push
-                    // notices into prompt_queue while at rest. The queue's
-                    // usual consumer is the agent-finished branch of the
-                    // current_run select arm; without a live run, that arm
-                    // never fires and the notice would sit forever. Drain
-                    // at rest here, matching the mpsc notice path.
-                    if !app.should_quit
-                        && current_run.is_none()
-                        && !app.prompt_queue.is_empty()
-                        && agent.is_some()
-                    {
-                        if let Some(queued) = app.prompt_queue.first().cloned() {
-                            app.prompt_queue.remove(0);
-                            spawn_prompt(
-                                &mut app,
-                                agent.as_ref(),
-                                &mut current_run,
-                                queued.text,
-                                queued.kind,
-                            );
-                        }
-                    }
-                    }
-                    Some(Err(e)) => {
-                        last_err = Some(format!("input read failed: {e}"));
-                        break;
-                    }
-                    None => {
-                        last_err = Some("input stream ended".to_string());
-                        break;
-                    }
-                }
-                if defer_redraw {
-                    // Reflowing a large resumed transcript can take hundreds of
-                    // milliseconds. Debounce the whole resize burst so one
-                    // expensive leading draw cannot block event consumption and
-                    // split a single drag into repeated one-event batches.
-                    let now = Instant::now();
-                    if resize.deadline.is_none() {
-                        resize.started = Some(now);
-                        resize.events = 0;
-                    }
-                    resize.events = resize.events.saturating_add(1);
-                    resize.last = Some(now);
-                    resize.deadline = Some(
-                        tokio::time::Instant::now()
-                            + Duration::from_millis(RESIZE_DEBOUNCE_MS),
-                    );
-                } else {
-                    // Explicit user input should never wait behind resize UI
-                    // policy. Treat it as the end of the current resize burst.
-                    resize.deadline = None;
-                    dirty = true;
-                }
-            }
-            () = async {
-                match resize.deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => {
-                resize.deadline = None;
-                dirty = true;
-            }
-            _ = tick.tick() => {
-                if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
-                    dirty = true;
-                }
-                if app.run.is_some() {
-                    if let Some(s) = app.run.as_mut() {
-                        *s = s.wrapping_add(1);
-                    }
-                    dirty = true;
-                }
-                if app.retry.is_some() {
-                    dirty = true;
-                }
-                if app
-                    .jobs_modal
-                    .as_ref()
-                    .is_some_and(|modal| modal.viewing.is_some())
-                {
-                    dirty = true;
-                }
-                if let Some(t) = app.yank_notify {
-                    if t.elapsed() >= YANK_NOTIFY {
-                        app.yank_notify = None;
-                    }
-                    dirty = true;
-                }
-                if let Some(t) = app.ctrl_c_at {
-                    if t.elapsed() >= QUIT_DOUBLE_PRESS {
-                        app.ctrl_c_at = None;
-                    }
-                    dirty = true;
-                }
-                if let Some(n) = app.notify.as_ref() {
-                    if n.at.elapsed() >= NOTIFY_TTL {
-                        app.notify = None;
-                    }
-                    dirty = true;
-                }
-                // Drain pending resize height re-measure a little each tick
-                // so a width change on a long transcript never stalls a frame.
-                if app.remeasure_heights_step(16) {
-                    dirty = true;
-                }
-            }
-            notice = async {
-                match job_notice_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(text) = notice {
-                    let queued = QueuedPrompt {
-                        text,
-                        kind: lofi_types::PromptKind::Notice,
-                    };
-                    if let Some(r) = &current_run {
-                        app.prompt_queue.push(queued);
-                        r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
-                    } else if agent.is_some() {
-                        spawn_prompt(
-                            &mut app,
-                            agent.as_ref(),
-                            &mut current_run,
-                            queued.text,
-                            queued.kind,
-                        );
-                    }
-                    dirty = true;
-                }
-            }
-            picker_load = picker_load_rx.recv() => {
-                if let Some(load) = picker_load {
-                    app.apply_picker_load(load);
-                    dirty = true;
-                }
-            }
-            req = confirm_rx.recv() => {
-                if let Some(req) = req {
-                    if req.active.load(std::sync::atomic::Ordering::Relaxed) {
-                        app.queue_confirmation(req);
-                        dirty = true;
-                    }
-                }
-            }
-        }
-
-        if app.should_quit {
-            if let Some(r) = current_run.take() {
-                settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await;
-            }
-            break;
-        }
-    }
-    if let Some(jobs) = &app.jobs {
-        jobs.shutdown();
-    }
-    if let Some(msg) = last_err {
-        return Err(Error::Io(std::io::Error::other(msg)));
-    }
-    Ok(())
-}

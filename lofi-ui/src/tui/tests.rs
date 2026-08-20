@@ -6222,6 +6222,16 @@ fn policy_picker_confirm_notice_names_the_mode() {
 }
 
 #[test]
+fn policy_picker_requires_an_agent() {
+    let mut a = app();
+    assert!(a.slash_command("/policy"));
+    assert!(a.policy_picker.is_none());
+    let (msg, kind) = a.notify_badge().expect("no-agent /policy notified");
+    assert_eq!(kind, lofi_types::PromptKind::Error);
+    assert!(msg.contains("/policy"));
+}
+
+#[test]
 fn service_picker_open_lists_auto_plus_declared() {
     let mut a = app(); // model_label = "openai/gpt-4o", thinking = Medium
     a.model_choices = vec![lofi_types::ModelChoice {
