@@ -33,14 +33,7 @@ impl BuiltinTools {
         // Allow-all auto-passes allow and ask decisions but explicit deny
         // rules still block; deny-all is absolute and overrides even the
         // allow list.
-        let mode = self
-            .policy_override
-            .current()
-            .unwrap_or(if self.auto_mode.is_some() {
-                lofi_types::BashApprovalMode::AskAuto
-            } else {
-                lofi_types::BashApprovalMode::AskManual
-            });
+        let mode = self.policy_override.effective(self.auto_mode.is_some());
         if mode == lofi_types::BashApprovalMode::DenyAll {
             return Some(json!({
                 "ok": false,

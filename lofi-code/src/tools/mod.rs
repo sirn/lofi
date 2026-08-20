@@ -204,11 +204,6 @@ impl BuiltinTools {
     }
 
     #[must_use]
-    pub fn policy_override(&self) -> &crate::policy::PolicyOverride {
-        &self.policy_override
-    }
-
-    #[must_use]
     pub fn skills_dir(&self) -> Option<&Path> {
         self.skills_dir.as_deref()
     }
