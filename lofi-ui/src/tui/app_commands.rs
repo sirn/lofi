@@ -8,6 +8,7 @@ enum ModalSlot {
     Tree,
     Model,
     Thinking,
+    Policy,
     Service,
     Theme,
 }
@@ -118,7 +119,7 @@ impl App {
         }
         // Frozen styled rows are mode-specific, but retain and swap the tiny
         // per-mode height indexes so toggling back does not reparse every turn.
-        // The state itself surfaces as the `[VERBOSE]` tag on the rule line
+        // The state itself surfaces as the ` verbose ` tag on the rule line
         // rather than a chat turn, so toggling stays out of the transcript.
         self.switch_verbose_layout();
         self.debug_after_draw = Some("verbose");
@@ -187,6 +188,10 @@ impl App {
             }
             "/theme" => {
                 self.open_theme_picker();
+                true
+            }
+            "/policy" => {
+                self.open_policy_picker();
                 true
             }
             "/job" | "/jobs" => {
@@ -325,6 +330,11 @@ impl App {
         lines.push(info_kv(t, "/session", "show session info"));
         lines.push(info_kv(t, "/model", "switch the active model"));
         lines.push(info_kv(t, "/theme", "switch color scheme for this session"));
+        lines.push(info_kv(
+            t,
+            "/policy",
+            "change bash approval mode for this session",
+        ));
         lines.push(info_kv(t, "/thinking", "switch the thinking level"));
         lines.push(info_kv(t, "/service", "switch the service tier"));
         lines.push(info_kv(
@@ -959,6 +969,37 @@ impl App {
         true
     }
 
+    /// `/policy`: open the bash approval mode dialog. The choice is
+    /// session-scoped and never written to `policy.toml`.
+    pub(super) fn open_policy_picker(&mut self) {
+        let Some(override_handle) = &self.policy_override else {
+            self.notify(NotifyKind::Error, "no agent: /policy is unavailable");
+            return;
+        };
+        let mut modes = vec![
+            lofi_types::BashApprovalMode::AllowAll,
+            lofi_types::BashApprovalMode::AskManual,
+        ];
+        // ask (auto) requires a configured auto-mode evaluator.
+        if self.auto_mode_configured {
+            modes.push(lofi_types::BashApprovalMode::AskAuto);
+        }
+        modes.push(lofi_types::BashApprovalMode::DenyAll);
+        let current = override_handle.effective(self.auto_mode_configured);
+        let selected = modes.iter().position(|m| *m == current).unwrap_or(1);
+        self.policy_picker = Some(PolicyPickerState { modes, selected });
+    }
+
+    pub(super) fn policy_picker_confirm(&mut self) {
+        if let Some(picker) = self.policy_picker.take() {
+            if let Some(mode) = picker.modes.get(picker.selected) {
+                if let Some(override_handle) = &self.policy_override {
+                    override_handle.set(Some(*mode));
+                }
+            }
+        }
+    }
+
     pub(super) fn thinking_picker_confirm(&mut self) {
         if let Some(picker) = self.thinking_picker.take() {
             if let Some(level) = picker.levels.get(picker.selected) {
@@ -1309,6 +1350,7 @@ impl App {
             || self.tree_picker.is_some()
             || self.model_picker.is_some()
             || self.thinking_picker.is_some()
+            || self.policy_picker.is_some()
             || self.service_picker.is_some()
             || self.theme_picker.is_some()
             || self.jobs_modal.is_some()
@@ -1481,6 +1523,8 @@ impl App {
             Some(ModalSlot::Service)
         } else if self.thinking_picker.is_some() {
             Some(ModalSlot::Thinking)
+        } else if self.policy_picker.is_some() {
+            Some(ModalSlot::Policy)
         } else if self.model_picker.is_some() {
             Some(ModalSlot::Model)
         } else if self.tree_picker.is_some() {
@@ -1525,6 +1569,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Policy => self.policy_picker_confirm(),
                 ModalSlot::Service => self.service_picker_confirm(),
                 ModalSlot::Theme => self.theme_picker_confirm(),
             },
@@ -1543,6 +1588,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
                 ModalSlot::Thinking => self.thinking_picker_confirm(),
+                ModalSlot::Policy => self.policy_picker_confirm(),
                 ModalSlot::Service => self.service_picker_confirm(),
                 ModalSlot::Theme => self.theme_picker_confirm(),
             },
@@ -1564,6 +1610,7 @@ impl App {
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,
+                ModalSlot::Policy => self.policy_picker = None,
                 ModalSlot::Service => self.service_picker = None,
                 ModalSlot::Theme => self.theme_picker = None,
             },
@@ -1573,6 +1620,7 @@ impl App {
             || (matches!(slot, ModalSlot::Tree) && self.tree_picker.is_none())
             || (matches!(slot, ModalSlot::Model) && self.model_picker.is_none())
             || (matches!(slot, ModalSlot::Thinking) && self.thinking_picker.is_none())
+            || (matches!(slot, ModalSlot::Policy) && self.policy_picker.is_none())
             || (matches!(slot, ModalSlot::Service) && self.service_picker.is_none())
             || (matches!(slot, ModalSlot::Theme) && self.theme_picker.is_none())
         {
@@ -1619,6 +1667,8 @@ impl App {
             self.service_picker.as_mut().map(|t| t as &mut dyn Modal)
         } else if self.thinking_picker.is_some() {
             self.thinking_picker.as_mut().map(|t| t as &mut dyn Modal)
+        } else if self.policy_picker.is_some() {
+            self.policy_picker.as_mut().map(|p| p as &mut dyn Modal)
         } else if self.model_picker.is_some() {
             self.model_picker.as_mut().map(|m| m as &mut dyn Modal)
         } else if self.tree_picker.is_some() {

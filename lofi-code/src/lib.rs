@@ -185,6 +185,9 @@ pub struct ExecCtx {
     pub shell_policy: crate::policy::ResolvedPolicy,
     pub confirm: Option<ConfirmFn>,
     pub auto_mode: Option<AutoModeFn>,
+    /// Session-scoped `/policy` approval override shared with the owning
+    /// agent.
+    pub policy_override: crate::policy::PolicyOverride,
     pub skills_dir: Option<PathBuf>,
     /// Visible-output cap applied to file reads and bash output.
     pub truncate: crate::tools::truncate::TruncatedCap,
@@ -401,6 +404,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
             ctx.auto_mode.clone(),
             ctx.skills_dir.clone(),
         )
+        .with_policy_override(ctx.policy_override.clone())
         .with_cancel(opts.cancel.clone())
         .with_truncate(ctx.truncate)
         .with_jobs(ctx.jobs.clone())
@@ -631,6 +635,7 @@ mod tests {
             ),
             confirm: None,
             auto_mode: None,
+            policy_override: crate::policy::PolicyOverride::default(),
             skills_dir: None,
             truncate: crate::tools::truncate::TruncatedCap::default(),
             jobs: crate::tools::JobRegistry::new(),
@@ -855,6 +860,7 @@ mod tests {
             ),
             confirm: None,
             auto_mode: None,
+            policy_override: crate::policy::PolicyOverride::default(),
             skills_dir: None,
             truncate: crate::tools::truncate::TruncatedCap::default(),
             jobs: crate::tools::JobRegistry::new(),
