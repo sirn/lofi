@@ -553,6 +553,12 @@ pub enum SessionEventKind {
         elapsed_ms: u64,
         cost: f64,
         usage: Usage,
+        /// Stop reason reported for the final round of the turn — the round
+        /// that actually ended it. Persisted so finished transcripts
+        /// accumulate stop-reason evidence (e.g. how often turns end on a
+        /// clean stop versus a token cap).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<StopReason>,
     },
     /// A turn that ended in a non-retryable provider/runtime failure.
     /// Its partial messages stay on the visible lineage, but context rebuilds
