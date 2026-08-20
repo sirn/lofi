@@ -898,7 +898,7 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
         },
     ];
     let agent = agent_with(vec![truncated, final_round], dir.path());
-    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
     agent
@@ -932,6 +932,31 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
         kinds,
         vec![lofi_types::PromptKind::User, lofi_types::PromptKind::Notice]
     );
+
+    // The turn ended on the final round's clean stop. That reason is
+    // emitted live, persisted in the transcript marker, and re-emitted by
+    // replay — the evidence base for stop-reason-driven decisions.
+    let mut live_stop = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::TurnEnd { stop_reason, .. } = ev {
+            live_stop.push(stop_reason);
+        }
+    }
+    assert_eq!(live_stop, vec![Some(lofi_types::StopReason::EndTurn)]);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        SessionEventKind::TurnEnd {
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+            ..
+        }
+    )));
+    let mut replayed_stop = Vec::new();
+    crate::session::replay::replay_selected_session_events(&events, |ev| {
+        if let AgentEvent::TurnEnd { stop_reason, .. } = ev {
+            replayed_stop.push(stop_reason);
+        }
+    });
+    assert_eq!(replayed_stop, vec![Some(lofi_types::StopReason::EndTurn)]);
 }
 
 #[tokio::test]
