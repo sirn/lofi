@@ -662,15 +662,10 @@ pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
     let need_sb = total > rows.content.height as usize;
     let scroll_area = modal_scroll_area(rows.content);
     let content = scroll_area.content;
-    let current = app
-        .policy_override
-        .as_ref()
-        .and_then(lofi_core::PolicyOverride::current)
-        .unwrap_or(if app.auto_mode_configured {
-            lofi_types::BashApprovalMode::AskAuto
-        } else {
-            lofi_types::BashApprovalMode::AskManual
-        });
+    let current = app.policy_override.as_ref().map_or_else(
+        || lofi_core::default_approval_mode(app.auto_mode_configured),
+        |o| o.effective(app.auto_mode_configured),
+    );
     let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
     let inactive_style = Style::new().fg(t.fg);
     let items: Vec<ListItem> = picker

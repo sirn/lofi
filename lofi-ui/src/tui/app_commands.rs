@@ -985,15 +985,7 @@ impl App {
             modes.push(lofi_types::BashApprovalMode::AskAuto);
         }
         modes.push(lofi_types::BashApprovalMode::DenyAll);
-        // No dialog pick means the startup default: ask (auto) when
-        // configured, else ask (manual).
-        let current = override_handle
-            .current()
-            .unwrap_or(if self.auto_mode_configured {
-                lofi_types::BashApprovalMode::AskAuto
-            } else {
-                lofi_types::BashApprovalMode::AskManual
-            });
+        let current = override_handle.effective(self.auto_mode_configured);
         let selected = modes.iter().position(|m| *m == current).unwrap_or(1);
         self.policy_picker = Some(PolicyPickerState { modes, selected });
     }
