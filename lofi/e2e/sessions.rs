@@ -1945,3 +1945,30 @@ fn resume_picker_restores_a_tall_session_and_stays_navigable() {
     assert!(resumed_request.contains("resume alpha answer 025"));
     assert!(!resumed_request.contains("resume beta prompt one"));
 }
+
+/// A job-completion notice becomes a hollow-bullet turn live; resume must
+/// restore that shape (not replay the notice as a typed user prompt).
+#[test]
+fn resumed_notice_turn_keeps_its_notice_marker() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "spawn",
+            "return await lofi.jobSpawn({ cmd: \"sh -c 'sleep 0.4; exit 0'\" });",
+        ),
+        text_response("notice resume answer"),
+        text_response("notice acknowledged"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("spawn a notifying job");
+    tui.wait_for("notice resume answer", WAIT);
+    tui.wait_for("\u{25B7} job", WAIT);
+    tui.wait_for("notice acknowledged", WAIT);
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.wait_for("notice acknowledged", WAIT);
+    tui.wait_for("\u{25B7} job", WAIT);
+}
