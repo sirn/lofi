@@ -623,30 +623,24 @@ fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
 
 #[test]
 
-fn inline_markdown_bold_italic_underscore() {
+fn inline_markdown_bold_italic() {
     use ratatui::style::Modifier;
-    let spans = render_text_spans("**bold** *italic* _underline_");
+    let spans = render_text_spans("**bold** *italic* _also_italic_");
     let bold = spans
         .iter()
         .find(|s| s.content == "bold")
         .expect("bold span");
     assert!(bold.style.add_modifier == Modifier::BOLD, "bold: {bold:?}");
-    let italic = spans
-        .iter()
-        .find(|s| s.content == "italic")
-        .expect("italic span");
-    assert!(
-        italic.style.add_modifier == Modifier::ITALIC,
-        "italic: {italic:?}"
-    );
-    let under = spans
-        .iter()
-        .find(|s| s.content == "underline")
-        .expect("underline span");
-    assert!(
-        under.style.add_modifier == Modifier::UNDERLINED,
-        "underline: {under:?}"
-    );
+    for content in ["italic", "also_italic"] {
+        let span = spans
+            .iter()
+            .find(|s| s.content == content)
+            .expect("italic span");
+        assert!(
+            span.style.add_modifier == Modifier::ITALIC,
+            "{content}: {span:?}"
+        );
+    }
 }
 
 #[test]
