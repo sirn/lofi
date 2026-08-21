@@ -42,6 +42,29 @@ pub(super) fn replay_indexed_session(
     }
     app.turn_byte_ranges.clear();
     app.turn_event_offsets.clear();
+    // Read every turn-outcome event in one sweep of the file: per-turn
+    // `event_at` would open and seek the transcript once per turn — over a
+    // thousand opens on a long resume.
+    let mut flat_outcomes: Vec<u64> = Vec::new();
+    for (turn, &start_pos) in starts.iter().enumerate() {
+        let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
+        for &i in &visible[start_pos..end_pos] {
+            if matches!(
+                index[i].kind,
+                store::IndexKind::TurnEnd
+                    | store::IndexKind::TurnFailed
+                    | store::IndexKind::TurnCancelled
+            ) {
+                flat_outcomes.push(index[i].offset);
+            }
+        }
+    }
+    let mut outcomes: Vec<SessionEvent> = Vec::with_capacity(flat_outcomes.len());
+    cursor.visit_events(&flat_outcomes, |ev| {
+        outcomes.push(ev);
+        Ok(())
+    })?;
+    let mut outcomes = outcomes.into_iter();
     for (turn, &start_pos) in starts.iter().enumerate() {
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         let selected = &visible[start_pos..end_pos];
@@ -67,8 +90,10 @@ pub(super) fn replay_indexed_session(
                 ) {
                     continue;
                 }
-                let event = cursor.event_at(index[i].offset)?;
-                replay_selected_session_events(&[event], |ev| {
+                let Some(event) = outcomes.next() else {
+                    break;
+                };
+                replay_selected_session_events(std::slice::from_ref(&event), |ev| {
                     app.apply_file_backed_replay_event(ev);
                 });
             }
