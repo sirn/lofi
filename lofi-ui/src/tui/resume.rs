@@ -14,7 +14,9 @@ pub(super) fn replay_indexed_session(
     index: &[store::EventIndex],
     file_size: u64,
 ) -> Result<()> {
+    let t0 = std::time::Instant::now();
     let visible = lofi_core::session::replay::visible_index_path(cursor, index);
+    eprintln!("[phase] visible_index_path: {:?}", t0.elapsed());
     let starts: Vec<usize> = visible
         .iter()
         .enumerate()
@@ -35,7 +37,9 @@ pub(super) fn replay_indexed_session(
         })
         .collect();
     let prompt_offsets: Vec<u64> = prompt_entries.iter().map(|(_, offset)| *offset).collect();
+    eprintln!("[phase] prompt_setup: {:?}", t0.elapsed());
     let prompt_texts = cursor.prompt_texts(&prompt_offsets)?;
+    eprintln!("[phase] prompt_texts: {:?}", t0.elapsed());
     let mut prompts = vec![String::new(); starts.len()];
     for ((turn, _), prompt) in prompt_entries.into_iter().zip(prompt_texts) {
         prompts[turn] = prompt;
@@ -88,6 +92,7 @@ pub(super) fn replay_indexed_session(
             shell_turn.blocks.clear();
         }
     }
+    eprintln!("[phase] replay loop total: {:?}", t0.elapsed());
     debug_assert_eq!(app.turns.len(), app.turn_byte_ranges.len());
     debug_assert_eq!(app.turns.len(), app.turn_event_offsets.len());
     Ok(())
