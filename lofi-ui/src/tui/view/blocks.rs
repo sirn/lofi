@@ -1560,16 +1560,7 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
             Event::Start(tag) => {
                 let (modifier, link) = match &tag {
                     MdTag::Strong => (Some(Modifier::BOLD), None),
-                    MdTag::Emphasis => {
-                        // `_` is lofi's underline, `*` is italic; both parse
-                        // to `Emphasis`, so disambiguate by the opening marker.
-                        let m = if line[range.start..].starts_with('_') {
-                            Modifier::UNDERLINED
-                        } else {
-                            Modifier::ITALIC
-                        };
-                        (Some(m), None)
-                    }
+                    MdTag::Emphasis => (Some(Modifier::ITALIC), None),
                     MdTag::Strikethrough => (Some(Modifier::CROSSED_OUT), None),
                     MdTag::Link { dest_url, .. } => {
                         // Only hyperlink safe URLs (non-empty, no control or
