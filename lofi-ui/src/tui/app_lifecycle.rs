@@ -118,7 +118,9 @@ impl App {
             frozen_render: FrozenCache::new(),
             collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
             frozen_heights: Vec::new(),
+            frozen_heights_estimated: Vec::new(),
             frozen_heights_other_mode: Vec::new(),
+            frozen_heights_other_mode_estimated: Vec::new(),
             turn_byte_ranges: Vec::new(),
             turn_event_offsets: Vec::new(),
             render_epoch: 0,
@@ -370,6 +372,10 @@ impl App {
             &mut self.frozen_heights,
             &mut self.frozen_heights_other_mode,
         );
+        std::mem::swap(
+            &mut self.frozen_heights_estimated,
+            &mut self.frozen_heights_other_mode_estimated,
+        );
     }
 
     fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
@@ -603,11 +609,13 @@ impl App {
         let width_changed = self.frozen_width != width;
         if epoch_changed {
             // Content changed wholesale: every cached height is invalid, so
-            // drop and re-measure eagerly below. No incremental path here —
-            // the turns themselves are different.
+            // drop and refill below. No incremental path here — the turns
+            // themselves are different.
             self.frozen_render.clear();
             self.frozen_heights.clear();
+            self.frozen_heights_estimated.clear();
             self.frozen_heights_other_mode.clear();
+            self.frozen_heights_other_mode_estimated.clear();
             self.frozen_epoch = self.render_epoch;
             self.frozen_width = width;
             self.height_remeasure_from = None;
@@ -620,7 +628,13 @@ impl App {
             // now, the rest on the tick loop) instead of stalling this frame.
             self.frozen_render.clear();
             self.frozen_heights_other_mode.clear();
+            self.frozen_heights_other_mode_estimated.clear();
             self.frozen_width = width;
+            // Stale heights are estimates at the new width: the tick loop
+            // re-measures them.
+            for estimated in &mut self.frozen_heights_estimated {
+                *estimated = true;
+            }
             // Re-measure from the end: the cursor is an exclusive upper
             // bound that remeasure_heights_step walks down to zero.
             self.height_remeasure_from = Some(self.frozen_heights.len());
@@ -639,15 +653,43 @@ impl App {
         } else {
             n.saturating_sub(1)
         };
+        // A from-scratch fill (empty heights) over file-backed turns seeds
+        // byte-range estimates instead of measuring: exact heights for the
+        // whole transcript mean re-reading the whole session file before the
+        // first frame. Estimates are good enough for viewport math off screen;
+        // the viewport pass measures visible turns exactly and the tick loop
+        // converges the rest.
+        let seed = self.frozen_heights.is_empty();
         while self.frozen_heights.len() < target {
             // Heights are the compact permanent index. Measuring a newly
             // frozen verbose turn must not materialize its complete styled
             // output; the viewport pass renders only rows it needs.
-            let height = self.measure_turn_height(self.frozen_heights.len(), width);
-            self.frozen_heights.push(height);
+            let idx = self.frozen_heights.len();
+            let estimate = seed && self.turn_byte_ranges.get(idx).copied().flatten().is_some();
+            if estimate {
+                self.frozen_heights
+                    .push(self.estimate_turn_height(idx, width));
+                self.frozen_heights_estimated.push(true);
+            } else {
+                let height = self.measure_turn_height(idx, width);
+                self.frozen_heights.push(height);
+                self.frozen_heights_estimated.push(false);
+            }
+        }
+        if self
+            .frozen_heights_estimated
+            .iter()
+            .any(|&estimated| estimated)
+        {
+            // Exact heights converge from the bottom: the remeasure cursor is
+            // an exclusive upper bound walked down by the tick loop.
+            if self.height_remeasure_from.is_none() {
+                self.height_remeasure_from = Some(self.frozen_heights.len());
+            }
         }
         if self.frozen_heights.len() > target {
             self.frozen_heights.truncate(target);
+            self.frozen_heights_estimated.truncate(target);
             self.frozen_render.map.retain(|idx, _| *idx < target);
             self.frozen_render.order.retain(|idx| *idx < target);
             // A truncated pending re-measure must not run past the new end.
@@ -655,6 +697,18 @@ impl App {
                 self.height_remeasure_from = if hi > target { Some(target) } else { Some(hi) };
             }
         }
+    }
+
+    /// Rough line-count guess for a file-backed turn. Used as a placeholder
+    /// until `remeasure_heights_step` or the viewport pass replace it with the
+    /// exact measured height, so it never has to be right — only cheap. Undershoot
+    /// vs overshoot merely jitter off-screen scroll offsets while they converge.
+    fn estimate_turn_height(&self, idx: usize, width: usize) -> usize {
+        let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
+            return 4;
+        };
+        let bytes = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
+        bytes / (width.max(1) * 2) + 3
     }
 
     /// Render-height of one frozen turn at `width`. Shared by the eager fill
@@ -688,16 +742,24 @@ impl App {
         // Work back-to-front: the viewport is almost always pinned to the
         // bottom, so the last frozen turns are the visible ones. Measuring
         // those first makes the on-screen content exact on the first tick;
-        // the off-screen prefix converges over the following ticks.
-        let lo = next_hi.saturating_sub(budget);
-        for idx in lo..next_hi {
-            self.frozen_heights[idx] = self.measure_turn_height(idx, width);
+        // the off-screen prefix converges over the following ticks. Heights
+        // already exact (measured by the viewport pass, or never estimated)
+        // are skipped without spending budget.
+        let mut idx = next_hi;
+        let mut measured = 0;
+        while idx > 0 && measured < budget {
+            idx -= 1;
+            if self.frozen_heights_estimated[idx] {
+                self.frozen_heights[idx] = self.measure_turn_height(idx, width);
+                self.frozen_heights_estimated[idx] = false;
+                measured += 1;
+            }
         }
-        if lo == 0 {
+        if idx == 0 {
             self.height_remeasure_from = None;
             false
         } else {
-            self.height_remeasure_from = Some(lo);
+            self.height_remeasure_from = Some(idx);
             true
         }
     }
@@ -713,6 +775,42 @@ impl App {
             self.frozen_render.clear();
             return;
         }
+        // Stored heights drive which rows of a turn are drawn, so window and
+        // margin turns need exact values even while the off-screen prefix is
+        // still estimated. Measure those first, then recompute the window —
+        // one correction pass settles the selection in practice.
+        let mut visible = self.visible_frozen_range(off, height);
+        for _ in 0..2 {
+            let (first, last) = visible;
+            let lo = first.saturating_sub(1);
+            let hi = last.saturating_add(1).min(frozen - 1);
+            let mut measured = false;
+            for idx in lo..=hi {
+                if self.frozen_heights_estimated[idx] {
+                    self.frozen_heights[idx] = self.measure_turn_height(idx, width);
+                    self.frozen_heights_estimated[idx] = false;
+                    measured = true;
+                }
+            }
+            visible = self.visible_frozen_range(off, height);
+            if !measured {
+                break;
+            }
+        }
+        self.frozen_render.retain_near(Some(visible), frozen);
+        let (first, last) = visible;
+        let first = first.saturating_sub(1);
+        let last = last.saturating_add(1).min(frozen - 1);
+        for idx in first..=last {
+            self.ensure_frozen_turn(idx, width);
+        }
+    }
+
+    /// Turns whose stored height intersects the window
+    /// [off, off + height). Falls back to the last turn when the window is
+    /// past the end.
+    fn visible_frozen_range(&self, off: usize, height: usize) -> (usize, usize) {
+        let frozen = self.frozen_heights.len();
         let end = off.saturating_add(height);
         let mut pos = 0usize;
         let mut visible: Option<(usize, usize)> = None;
@@ -721,16 +819,9 @@ impl App {
             if turn_end > off && pos < end {
                 visible = Some(visible.map_or((idx, idx), |(first, _)| (first, idx)));
             }
-            pos = turn_end.saturating_add(1); // separator before next turn
+            pos = turn_end.saturating_add(1);
         }
-        let visible = visible.unwrap_or((frozen - 1, frozen - 1));
-        self.frozen_render.retain_near(Some(visible), frozen);
-        let (first, last) = visible;
-        let first = first.saturating_sub(1);
-        let last = last.saturating_add(1).min(frozen - 1);
-        for idx in first..=last {
-            self.ensure_frozen_turn(idx, width);
-        }
+        visible.unwrap_or((frozen - 1, frozen - 1))
     }
 
     pub(super) fn run_active(&self) -> bool {
