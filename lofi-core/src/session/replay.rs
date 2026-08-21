@@ -19,8 +19,8 @@ use crate::agent::AgentEvent;
 use crate::exec_input_code_and_label;
 use crate::shell::UserShellResult;
 
-/// Positions of pre-compaction tail events hidden by checkpointed compaction
-/// markers along `path`. `compaction_at` returns the marker's
+/// Marks pre-compaction tail events hidden by checkpointed compaction markers
+/// along `path`. `compaction_at` returns the marker's
 /// `(checkpointed_tail, first_kept_entry_id)` for the event at the given path
 /// position, or `None` when it is not a compaction; `id_matches` reports
 /// whether the event at a path position has the given id. Parameterising these
@@ -31,13 +31,18 @@ use crate::shell::UserShellResult;
 /// The target id is normalized into an `IndexId` once per marker: a compacted
 /// transcript otherwise re-parses the 32-char hex string on every one of the
 /// O(path) comparisons per marker, which dominates session-resume time on
-/// long, heavily compacted sessions.
+/// long, heavily compacted sessions. The first position of each id comes from
+/// a lazily built map — only materialized when a checkpointed marker exists —
+/// so locating the hide start is O(1) per marker instead of another scan.
+/// First-occurrence mapping reproduces the previous `(0..marker_pos).find`
+/// walk exactly: both resolve to the smallest position holding the id, and
+/// only positions before the marker count.
 fn hidden_compaction_range(
     path: &[usize],
     mut compaction_at: impl FnMut(usize) -> Option<(bool, String)>,
-    mut id_matches: impl FnMut(usize, &IndexId) -> bool,
-) -> HashSet<usize> {
-    let mut hidden = HashSet::new();
+    mut id_position: impl FnMut(&IndexId) -> Option<usize>,
+) -> Vec<bool> {
+    let mut hidden = vec![false; path.len()];
     for marker_pos in 0..path.len() {
         let Some((true, first_kept_entry_id)) = compaction_at(marker_pos) else {
             continue;
@@ -46,8 +51,8 @@ fn hidden_compaction_range(
             continue;
         }
         let want = IndexId::borrow(&first_kept_entry_id);
-        if let Some(start_pos) = (0..marker_pos).find(|&p| id_matches(p, &want)) {
-            hidden.extend(start_pos..marker_pos);
+        if let Some(start_pos) = id_position(&want).filter(|&p| p < marker_pos) {
+            hidden[start_pos..marker_pos].fill(true);
         }
     }
     hidden
@@ -56,6 +61,7 @@ fn hidden_compaction_range(
 #[must_use]
 pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
     let path = store::active_path_from_leaf(events);
+    let mut positions: Option<Map<IndexId, usize>> = None;
     let hidden = hidden_compaction_range(
         &path,
         |p| match &events[path[p]].kind {
@@ -66,9 +72,25 @@ pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
             } => Some((*checkpointed_tail, first_kept_entry_id.clone())),
             _ => None,
         },
-        |p, id| store::IndexId::borrow(&events[path[p]].id) == *id,
+        |id| {
+            positions
+                .get_or_insert_with(|| {
+                    let mut map = Map::new();
+                    for (pos, &i) in path.iter().enumerate() {
+                        // First occurrence holds: `insert` overwrites and a
+                        // later duplicate must not win the hide start.
+                        map.entry(IndexId::borrow(&events[i].id)).or_insert(pos);
+                    }
+                    map
+                })
+                .get(id)
+                .copied()
+        },
     );
-    path.into_iter().filter(|i| !hidden.contains(i)).collect()
+    path.into_iter()
+        .zip(hidden)
+        .filter_map(|(i, hide)| (!hide).then_some(i))
+        .collect()
 }
 
 pub fn replay_session_events(events: &[SessionEvent], emit: impl FnMut(AgentEvent)) {
@@ -439,23 +461,67 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
 /// Index-driven projections for resume and the status line. All operate on the
 /// lightweight index plus targeted `event_at` reads, so a resumed session's
 /// memory stays bounded by projection size, not transcript size.
+/// Only the hide-triggering fields of a checkpointed compaction marker; the
+/// verdict text never crosses the resume path.
+#[derive(serde::Deserialize)]
+struct CompactionMarkerProjection {
+    #[serde(default)]
+    checkpointed_tail: bool,
+    #[serde(default)]
+    first_kept_entry_id: String,
+}
+
 #[must_use]
 pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<usize> {
+    let markers: Vec<usize> = index
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, event)| (event.kind == IndexKind::Compaction).then_some(pos))
+        .collect();
+    if markers.is_empty() {
+        return (0..index.len()).collect();
+    }
+    // Fetch every marker's hide details in one sweep of the file. Reading
+    // them with per-marker `event_at` opens and seeks the transcript once per
+    // compaction, and long sessions compact often. A marker that fails to
+    // parse fills with "hide nothing", the treatment `compaction_details_at`
+    // gives it when fetched one by one.
+    let offsets: Vec<u64> = markers.iter().map(|&pos| index[pos].offset).collect();
+    let mut details: Vec<(bool, String)> = Vec::with_capacity(markers.len());
+    if cursor
+        .visit_event_values::<CompactionMarkerProjection>(&offsets, |marker| {
+            details.push((marker.checkpointed_tail, marker.first_kept_entry_id));
+            Ok(())
+        })
+        .is_err()
+    {
+        details.resize(markers.len(), (false, String::new()));
+    }
+    let mut details = details.into_iter();
     // The resume projection spans the whole index, so the path is 0..len and
     // hidden positions are index positions directly.
     let all: Vec<usize> = (0..index.len()).collect();
+    let mut positions: Option<Map<IndexId, usize>> = None;
     let hidden = hidden_compaction_range(
         &all,
-        |p| {
-            (index[p].kind == IndexKind::Compaction).then(|| {
-                let (_, _, checkpointed_tail, first_kept_entry_id) =
-                    cursor.compaction_details_at(index[p].offset);
-                (checkpointed_tail, first_kept_entry_id)
-            })
+        |p| (index[p].kind == IndexKind::Compaction).then(|| details.next().unwrap_or_default()),
+        |id| {
+            positions
+                .get_or_insert_with(|| {
+                    let mut map = Map::new();
+                    for (pos, event) in index.iter().enumerate() {
+                        map.entry(event.id.clone()).or_insert(pos);
+                    }
+                    map
+                })
+                .get(id)
+                .copied()
         },
-        |p, id| index[p].id == *id,
     );
-    (0..index.len()).filter(|i| !hidden.contains(i)).collect()
+    (0..index.len())
+        .zip(hidden)
+        .filter_map(|(i, hide)| (!hide).then_some(i))
+        .collect()
 }
 
 #[must_use]
