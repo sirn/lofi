@@ -66,10 +66,22 @@ impl SessionSink {
         id: &str,
     ) -> Result<(Self, SessionCursor, store::SessionSnapshot)> {
         let store = SessionStore::open()?;
-        let entry = store.find(cwd, id)?.ok_or_else(|| {
-            lofi_error::Error::State(format!("no session matching id '{id}' for this workspace"))
-        })?;
-        let (cursor, snapshot) = entry.open_snapshot()?;
+        let matches: Vec<_> = store
+            .list_files_for_cwd(cwd)?
+            .into_iter()
+            .filter(|file| file.id().starts_with(id))
+            .collect();
+        if matches.len() > 1 {
+            return Err(lofi_error::Error::State(format!(
+                "ambiguous session id '{id}'"
+            )));
+        }
+        let Some(file) = matches.into_iter().next() else {
+            return Err(lofi_error::Error::State(format!(
+                "no session matching id '{id}' for this workspace"
+            )));
+        };
+        let (cursor, snapshot) = file.open_snapshot()?;
         Ok((Self::resumed(cwd, cursor.clone())?, cursor, snapshot))
     }
 
@@ -82,15 +94,22 @@ impl SessionSink {
         cwd: &Path,
     ) -> Result<Option<(Self, SessionCursor, store::SessionSnapshot)>> {
         let store = SessionStore::open()?;
-        let Some(entry) = store.most_recent(cwd)? else {
-            return Ok(None);
-        };
-        let (cursor, snapshot) = entry.open_snapshot()?;
-        Ok(Some((
-            Self::resumed(cwd, cursor.clone())?,
-            cursor,
-            snapshot,
-        )))
+        // Files come newest-first. Open directly rather than going through
+        // `SessionEntry`: entries carry picker display metadata (message
+        // counts, previews) whose computation indexes each transcript in
+        // full — a whole extra scan of every session in this workspace on
+        // every `--continue`. A file that fails to open behaves as absent,
+        // the way unloadable files were ineligible before.
+        for file in store.list_files_for_cwd(cwd)? {
+            if let Ok((cursor, snapshot)) = file.open_snapshot() {
+                return Ok(Some((
+                    Self::resumed(cwd, cursor.clone())?,
+                    cursor,
+                    snapshot,
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// Borrow the active cursor, if one exists yet.
