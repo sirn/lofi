@@ -980,7 +980,6 @@ impl App {
             lofi_types::BashApprovalMode::AllowAll,
             lofi_types::BashApprovalMode::AskManual,
         ];
-        // ask (auto) requires a configured auto-mode evaluator.
         if self.auto_mode_configured {
             modes.push(lofi_types::BashApprovalMode::AskAuto);
         }

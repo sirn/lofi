@@ -6215,7 +6215,6 @@ fn policy_badge_hidden_at_default_and_for_a_default_pick() {
     a.auto_mode_configured = false;
     assert_eq!(a.policy_badge(), None);
 
-    // Re-picking the startup default keeps the chip hidden.
     a.open_policy_picker();
     a.policy_picker_confirm();
     assert_eq!(a.policy_badge(), None);

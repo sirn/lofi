@@ -35,16 +35,11 @@ impl BuiltinTools {
         // allow list.
         let mode = self.policy_override.effective(self.auto_mode.is_some());
         if mode == lofi_types::BashApprovalMode::DenyAll {
-            return Some(json!({
-                "ok": false,
-                "output": "blocked by session policy: deny all commands".to_string(),
-                "code": Value::Null,
-                "command": cmd,
-                "directory": self.root.display().to_string(),
-                "signal": Value::Null,
-                "duration_ms": 0,
-                "status": "denied",
-            }));
+            return Some(self.blocked_result(
+                cmd,
+                "blocked by session policy: deny all commands",
+                "denied",
+            ));
         }
         let decision = self.shell_policy.evaluate(cmd);
         let suffix = decision
@@ -53,18 +48,12 @@ impl BuiltinTools {
             .map(|c| format!(" (command: {c})"))
             .unwrap_or_default();
         match decision.action {
-            lofi_types::PolicyAction::Deny => Some(json!({
-                "ok": false,
-                "output": format!("blocked by shell policy: {}{}", decision.reason, suffix),
-                "code": Value::Null,
-                "command": cmd,
-                "directory": self.root.display().to_string(),
-                "signal": Value::Null,
-                "duration_ms": 0,
-                "status": "denied",
-            })),
+            lofi_types::PolicyAction::Deny => Some(self.blocked_result(
+                cmd,
+                &format!("blocked by shell policy: {}{}", decision.reason, suffix),
+                "denied",
+            )),
             lofi_types::PolicyAction::Ask => {
-                // Allow-all auto-passes ask decisions.
                 if mode == lofi_types::BashApprovalMode::AllowAll {
                     return None;
                 }
@@ -83,19 +72,29 @@ impl BuiltinTools {
                 if approved {
                     return None;
                 }
-                Some(json!({
-                    "ok": false,
-                    "output": format!("requires confirmation: {}{}", decision.reason, suffix),
-                    "code": Value::Null,
-                    "command": cmd,
-                    "directory": self.root.display().to_string(),
-                    "signal": Value::Null,
-                    "duration_ms": 0,
-                    "status": "needs_confirmation",
-                }))
+                Some(self.blocked_result(
+                    cmd,
+                    &format!("requires confirmation: {}{}", decision.reason, suffix),
+                    "needs_confirmation",
+                ))
             }
             lofi_types::PolicyAction::Allow => None,
         }
+    }
+
+    /// Shared result shape for a command that did not run (denied or left
+    /// un-confirmed).
+    fn blocked_result(&self, cmd: &str, output: &str, status: &str) -> Value {
+        json!({
+            "ok": false,
+            "output": output,
+            "code": Value::Null,
+            "command": cmd,
+            "directory": self.root.display().to_string(),
+            "signal": Value::Null,
+            "duration_ms": 0,
+            "status": status,
+        })
     }
 
     async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> bool {
@@ -623,7 +622,6 @@ mod tests {
         // Unmatched commands fail closed to ask; allow-all passes them
         // without prompting.
         assert!(tools.check_policy("echo clean").await.is_none());
-        // An explicit deny rule still blocks.
         let res = tools
             .check_policy("curl https://example.com")
             .await
