@@ -138,17 +138,30 @@ fn hidden_checkpoint_indices(
     cursor: &SessionCursor,
 ) -> std::collections::HashSet<usize> {
     let mut hidden = std::collections::HashSet::new();
+    // Lazily map lineage ids to their path position: the previous shape
+    // re-scanned the whole prefix per marker and re-parsed the 32-char hex id
+    // at every comparison.
+    let mut path_pos: Option<std::collections::HashMap<&IndexId, usize>> = None;
     for (marker_pos, &idx) in active_path.iter().enumerate() {
         if indices[idx].kind != IndexKind::Compaction {
             continue;
         }
         let (_, _, checkpointed, first_kept) = load_compaction_details(cursor, indices[idx].offset);
         if checkpointed && !first_kept.is_empty() {
-            if let Some(start) = active_path[..marker_pos]
-                .iter()
-                .position(|&i| indices[i].id.matches(&first_kept))
-            {
-                hidden.extend(active_path[start..marker_pos].iter().copied());
+            let want = IndexId::borrow(&first_kept);
+            let positions = path_pos.get_or_insert_with(|| {
+                let mut map = std::collections::HashMap::new();
+                for (pos, &i) in active_path.iter().enumerate() {
+                    // First occurrence holds: `insert` overwrites and a later
+                    // duplicate must not win the hide start.
+                    map.entry(&indices[i].id).or_insert(pos);
+                }
+                map
+            });
+            if let Some(&start) = positions.get(&want) {
+                if start < marker_pos {
+                    hidden.extend(active_path[start..marker_pos].iter().copied());
+                }
             }
         }
     }
