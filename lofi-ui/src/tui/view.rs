@@ -206,7 +206,6 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     app.render_profile.height = height;
     app.render_profile.turns = app.turns.len();
     app.render_profile.width_changed = width_changed;
-    let view_changed = width_changed || app.log_view_h != height;
     let nav_anchor = if width_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
         app.nav_content_anchor()
     } else {
@@ -337,7 +336,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // and scrolled between events; clamp the cursor if the log shrank.
     app.log_total = total;
     app.log_view_h = height;
-    if view_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
+    // The cursor must stay visible in Navigate/Select every frame, not only
+    // on a view change: between renders the estimated frozen heights keep
+    // converging on a resumed session, shifting totals and the base, and a
+    // tick-time reseat can otherwise leave the cursor above the window.
+    if matches!(app.mode, Mode::Navigate | Mode::Select) {
         app.nav_show_cursor();
         off = if app.pinned {
             base
