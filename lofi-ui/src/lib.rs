@@ -175,6 +175,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     let system_prompt = agent
         .as_ref()
         .map_or_else(String::new, |a| a.system_prompt().to_string());
+    eprintln!("[phase] resolve_agent_total: {:?}", t0.elapsed());
     Box::pin(tui::run(
         agent,
         label,
