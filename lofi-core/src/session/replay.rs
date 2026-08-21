@@ -485,26 +485,32 @@ pub fn compaction_status_from_index(
     cursor: &SessionCursor,
     index: &[EventIndex],
 ) -> (bool, Option<Usage>) {
-    let mut last_compaction_pos = None;
-    let mut last_usage = None;
-    for (pos, event) in index.iter().enumerate() {
-        match event.kind {
-            IndexKind::Compaction => last_compaction_pos = Some(pos),
-            IndexKind::TurnEnd | IndexKind::TurnFailed | IndexKind::TurnCancelled => {
-                if let Ok(ev) = cursor.event_at(event.offset) {
-                    match ev.kind {
-                        SessionEventKind::TurnEnd { usage, .. }
-                        | SessionEventKind::TurnFailed { usage, .. }
-                        | SessionEventKind::TurnCancelled { usage, .. } => {
-                            last_usage = Some((pos, usage));
-                        }
-                        _ => {}
-                    }
-                }
+    // Read only the latest turn outcome: the prior shape fetched every
+    // TurnEnd event on the transcript, and each fetch opens and seeks the
+    // session file — hundreds of opens on a long resume when only the final
+    // usage matters for the status line.
+    let last_compaction_pos = index
+        .iter()
+        .rposition(|event| event.kind == IndexKind::Compaction);
+    let last_usage = index
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, event)| {
+            matches!(
+                event.kind,
+                IndexKind::TurnEnd | IndexKind::TurnFailed | IndexKind::TurnCancelled
+            )
+        })
+        .find_map(|(pos, event)| {
+            let ev = cursor.event_at(event.offset).ok()?;
+            match ev.kind {
+                SessionEventKind::TurnEnd { usage, .. }
+                | SessionEventKind::TurnFailed { usage, .. }
+                | SessionEventKind::TurnCancelled { usage, .. } => Some((pos, usage)),
+                _ => None,
             }
-            _ => {}
-        }
-    }
+        });
     let usage_after_compaction = last_usage
         .filter(|(pos, _)| last_compaction_pos.is_none_or(|compact_pos| *pos > compact_pos))
         .map(|(_, usage)| usage);
