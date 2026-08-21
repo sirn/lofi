@@ -328,6 +328,51 @@ fn closing_large_tree_picker_releases_transient_memory() {
 }
 
 #[test]
+fn resume_by_id_prefix_selects_the_older_session() {
+    let server = MockServer::start(vec![
+        text_response("session one answer"),
+        text_response("session two answer"),
+        text_response("resumed one answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+
+    let mut first = fixture.spawn(&[]);
+    first.submit("session one prompt");
+    first.wait_for("session one answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut second = fixture.spawn(&[]);
+    second.submit("session two prompt");
+    second.wait_for("session two answer", WAIT);
+    second.submit("/quit");
+    second.wait_exit();
+
+    let files = fixture.session_files();
+    assert_eq!(files.len(), 2);
+    // Session file stems begin with the millisecond clock, so the sorted
+    // order is creation order; the timestamp part resolves unambiguously.
+    let first_id = files[0]
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.split('_').next())
+        .unwrap()
+        .to_string();
+
+    let mut resumed = fixture.spawn(&["--resume", &first_id]);
+    resumed.submit("resumed one prompt");
+    resumed.wait_for("resumed one answer", WAIT);
+    resumed.submit("/quit");
+    resumed.wait_exit();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].body.contains("session one prompt"));
+    assert!(!requests[2].body.contains("session two prompt"));
+    assert_eq!(fixture.session_files().len(), 2);
+}
+
+#[test]
 fn fresh_and_empty_continue_sessions_are_created_lazily() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
