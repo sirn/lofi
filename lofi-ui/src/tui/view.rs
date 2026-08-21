@@ -256,6 +256,24 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     };
     app.render_profile.live_height_us = phase_started.elapsed().as_micros();
 
+    // Firm up estimated heights around the viewport before the total/base/off
+    // math below: a bottom-pinned view computed from estimates would slice
+    // frozen turns at rows that disagree with their measured lines, drawing
+    // the wrong content (e.g. clipping the first turn entirely after a /tree
+    // rollback onto an estimate-seeded restore). The dedicated pass at the
+    // end of the frame stays: it converges what this provisional prediction
+    // missed.
+    let est_total = app.frozen_heights.iter().sum::<usize>()
+        + last_h
+        + if n_turns == 0 { 1 } else { n_turns - 1 };
+    let est_base = est_total.saturating_sub(height);
+    let est_off = if app.pinned {
+        est_base
+    } else {
+        app.top_line.min(est_base)
+    };
+    app.sync_frozen_cache_for_viewport(est_off, height, w);
+
     let frozen_total: usize = app.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
     let mut total: usize = frozen_total + last_h;
