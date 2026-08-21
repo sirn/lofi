@@ -1704,3 +1704,34 @@ fn repeated_hard_pressure_uses_a_cooldown_instead_of_a_compaction_loop() {
         .count();
     assert!(compaction_count <= 1);
 }
+
+/// Resume renders the newest turn at the bottom immediately, and the oldest
+/// turn must stay reachable by paging up. Geometry for off-screen turns may
+/// converge lazily, so the scroll has to work independently of how many turns
+/// live far above the viewport.
+#[test]
+fn resumed_many_turn_session_scrolls_to_first_turn() {
+    const TURNS: usize = 30;
+    let server = MockServer::start(
+        (0..TURNS)
+            .map(|index| text_response(&format!("scroll answer {index:03}")))
+            .collect(),
+    );
+    let fixture = Fixture::new(&server);
+    let mut seed = fixture.spawn(&[]);
+    for index in 0..TURNS {
+        seed.submit(&format!("scroll prompt {index:03}"));
+        seed.wait_for(&format!("scroll answer {index:03}"), WAIT);
+    }
+    seed.submit("/quit");
+    seed.wait_exit();
+
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.wait_for("scroll answer 029", WAIT);
+    tui.clear_output();
+    for _ in 0..40 {
+        tui.send(b"\x1b[5~");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    tui.wait_for("scroll prompt 000", WAIT);
+}
