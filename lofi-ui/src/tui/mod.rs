@@ -1647,9 +1647,31 @@ async fn run_loop(
                     }
                     dirty = true;
                 }
-                // Drain pending resize height re-measure a little each tick
-                // so a width change on a long transcript never stalls a frame.
-                if app.remeasure_heights_step(16) {
+                // Drain pending height re-measure a little each tick so a
+                // width change or estimate-seeded resume never stalls a
+                // frame. Absolute line indices shift while the estimates
+                // converge, so a Navigate/Select cursor must follow its
+                // content through each step instead of drifting (the cursor
+                // visibly jumps around while the user scrolls otherwise).
+                let navigating = matches!(app.mode, Mode::Navigate | Mode::Select);
+                if navigating && app.height_remeasure_from.is_some() {
+                    let nav_anchor = app.nav_content_anchor();
+                    let sel_anchor = match app.mode {
+                        Mode::Select => app.sel_content_anchor(),
+                        _ => None,
+                    };
+                    app.remeasure_heights_step(16);
+                    if let Some(anchor) = nav_anchor {
+                        // The converging geometry is frozen-turn-only at
+                        // rest, so an empty live last turn renders correctly.
+                        app.reseat_nav_cursor(anchor, &[], app.frozen_width);
+                    }
+                    if let Some(anchor) = sel_anchor {
+                        app.reseat_sel_anchor(anchor, &[], app.frozen_width);
+                    }
+                    app.nav_show_cursor();
+                    dirty = true;
+                } else if app.remeasure_heights_step(16) {
                     dirty = true;
                 }
             }
