@@ -180,6 +180,27 @@ fn model_and_thinking_pickers_change_the_next_request() {
 }
 
 #[test]
+fn service_picker_changes_the_next_request() {
+    let server = MockServer::start(vec![text_response("service answer marker")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("/service");
+    tui.wait_for("Service tier", WAIT);
+    // Rows are auto / flex / priority, pre-selected at the model's flex.
+    tui.send(b"\x1b[B\r");
+    tui.wait_for("switched to mock/chat:medium@priority", WAIT);
+
+    tui.submit("service prompt marker");
+    tui.wait_for("service answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(request["service_tier"], "priority");
+}
+
+#[test]
 fn mid_run_model_switch_keeps_the_working_line_model() {
     let server = MockServer::start(vec![delayed_text_response(
         "mid-run answer marker",
