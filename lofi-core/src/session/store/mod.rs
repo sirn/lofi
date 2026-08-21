@@ -408,16 +408,20 @@ impl SessionCursor {
         Ok(summaries)
     }
 
-    /// Read only the first text block from user-message events. Assistant and
-    /// tool payloads in the same record shape are skipped without allocation;
-    /// startup replay uses this to build file-backed historical turn shells.
+    /// Read only the first text block and the prompt kind from user-message
+    /// events. Assistant and tool payloads in the same record shape are
+    /// skipped without allocation; startup replay uses this to build
+    /// file-backed historical turn shells, and notice turns must come back
+    /// marked so they do not render as typed input.
     /// # Errors
     /// Propagates transcript seek/read/parse failures.
-    pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<String>> {
+    pub fn prompt_texts(&self, offsets: &[u64]) -> Result<Vec<(String, lofi_types::PromptKind)>> {
         #[derive(Deserialize)]
         struct PromptProjection {
             #[serde(default)]
             blocks: Vec<PromptBlockProjection>,
+            #[serde(default)]
+            kind: lofi_types::PromptKind,
         }
         #[derive(Deserialize)]
         struct PromptBlockProjection {
@@ -429,13 +433,14 @@ impl SessionCursor {
 
         let mut prompts = Vec::with_capacity(offsets.len());
         visit_event_values::<PromptProjection>(&self.path, offsets, |event| {
-            prompts.push(
+            prompts.push((
                 event
                     .blocks
                     .into_iter()
                     .find_map(|block| (block.kind == "text").then_some(block.text))
                     .unwrap_or_default(),
-            );
+                event.kind,
+            ));
             Ok(())
         })?;
         Ok(prompts)
@@ -1708,7 +1713,7 @@ mod tests {
             SessionCursor::new(path, None)
                 .prompt_texts(&[offsets[0]])
                 .unwrap(),
-            vec!["  raw prompt  \n".to_string()]
+            vec![("  raw prompt  \n".to_string(), lofi_types::PromptKind::User)]
         );
     }
 

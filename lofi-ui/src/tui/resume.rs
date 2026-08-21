@@ -36,7 +36,7 @@ pub(super) fn replay_indexed_session(
         .collect();
     let prompt_offsets: Vec<u64> = prompt_entries.iter().map(|(_, offset)| *offset).collect();
     let prompt_texts = cursor.prompt_texts(&prompt_offsets)?;
-    let mut prompts = vec![String::new(); starts.len()];
+    let mut prompts = vec![(String::new(), lofi_types::PromptKind::User); starts.len()];
     for ((turn, _), prompt) in prompt_entries.into_iter().zip(prompt_texts) {
         prompts[turn] = prompt;
     }
@@ -75,12 +75,10 @@ pub(super) fn replay_indexed_session(
                 app.apply_file_backed_replay_event(ev);
             });
         } else {
-            app.apply_file_backed_replay_event(AgentEvent::TurnStart {
-                prompt: prompts.get(turn).cloned().unwrap_or_default(),
-                // The kind is not persisted; replays render every prompt as a
-                // user turn.
-                kind: lofi_types::PromptKind::User,
-            });
+            // Notices keep their persisted kind: a hollow bullet marks them
+            // as app-injected, not typed input.
+            let (prompt, kind) = prompts.get(turn).cloned().unwrap_or_default();
+            app.apply_file_backed_replay_event(AgentEvent::TurnStart { prompt, kind });
             for &i in selected {
                 if !matches!(
                     index[i].kind,
