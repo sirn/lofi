@@ -622,7 +622,6 @@ fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
 }
 
 #[test]
-
 fn inline_markdown_bold_italic() {
     use ratatui::style::Modifier;
     let spans = render_text_spans("**bold** *italic* _also_italic_");
@@ -635,7 +634,7 @@ fn inline_markdown_bold_italic() {
         let span = spans
             .iter()
             .find(|s| s.content == content)
-            .expect("italic span");
+            .unwrap_or_else(|| panic!("{content} span"));
         assert!(
             span.style.add_modifier == Modifier::ITALIC,
             "{content}: {span:?}"
