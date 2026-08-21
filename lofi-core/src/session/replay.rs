@@ -77,7 +77,7 @@ pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
                 .get_or_insert_with(|| {
                     let mut map = Map::new();
                     for (pos, &i) in path.iter().enumerate() {
-                        // First occurrence holds: `collect` overwrites and a
+                        // First occurrence holds: `insert` overwrites and a
                         // later duplicate must not win the hide start.
                         map.entry(IndexId::borrow(&events[i].id)).or_insert(pos);
                     }
