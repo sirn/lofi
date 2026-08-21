@@ -1258,13 +1258,30 @@ enum ParseState {
     Osc(bool),
 }
 
+/// One rendered grid cell with its SGR background, so the tests can identify
+/// rows by their tint (the Navigate cursor line fills its whole width).
+#[derive(Clone, Copy, PartialEq)]
+struct ScreenCell {
+    ch: char,
+    bg: Option<ScreenBg>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ScreenBg {
+    Rgb(u8, u8, u8),
+    Indexed(u8),
+}
+
+const BLANK_CELL: ScreenCell = ScreenCell { ch: ' ', bg: None };
+
 struct TerminalScreen {
-    cells: Vec<Vec<char>>,
-    history: Vec<Vec<char>>,
+    cells: Vec<Vec<ScreenCell>>,
+    history: Vec<Vec<ScreenCell>>,
     row: usize,
     col: usize,
     saved: (usize, usize),
     state: ParseState,
+    bg: Option<ScreenBg>,
     utf8: Vec<u8>,
     utf8_remaining: usize,
 }
@@ -1272,12 +1289,13 @@ struct TerminalScreen {
 impl TerminalScreen {
     fn new() -> Self {
         Self {
-            cells: vec![vec![' '; TERMINAL_COLS]; TERMINAL_ROWS],
+            cells: vec![vec![BLANK_CELL; TERMINAL_COLS]; TERMINAL_ROWS],
             history: Vec::new(),
             row: 0,
             col: 0,
             saved: (0, 0),
             state: ParseState::Ground,
+            bg: None,
             utf8: Vec::new(),
             utf8_remaining: 0,
         }
@@ -1361,14 +1379,17 @@ impl TerminalScreen {
             self.line_feed();
         }
         if self.row < TERMINAL_ROWS && self.col < TERMINAL_COLS {
-            self.cells[self.row][self.col] = ch;
+            self.cells[self.row][self.col] = ScreenCell { ch, bg: self.bg };
         }
         let width = unicode_width::UnicodeWidthChar::width(ch)
             .unwrap_or(0)
             .max(1);
         for offset in 1..width {
             if self.row < TERMINAL_ROWS && self.col + offset < TERMINAL_COLS {
-                self.cells[self.row][self.col + offset] = ' ';
+                self.cells[self.row][self.col + offset] = ScreenCell {
+                    ch: ' ',
+                    bg: self.bg,
+                };
             }
         }
         self.col += width;
@@ -1383,7 +1404,7 @@ impl TerminalScreen {
             if self.history.len() > TERMINAL_ROWS * 4 {
                 self.history.remove(0);
             }
-            self.cells.push(vec![' '; TERMINAL_COLS]);
+            self.cells.push(vec![BLANK_CELL; TERMINAL_COLS]);
         }
     }
 
@@ -1424,16 +1445,58 @@ impl TerminalScreen {
             'K' if !private => self.erase_line(params.first().copied().unwrap_or(0)),
             'X' if !private => {
                 let end = (self.col + param(0, 1)).min(TERMINAL_COLS);
-                self.cells[self.row][self.col..end].fill(' ');
+                self.cells[self.row][self.col..end].fill(BLANK_CELL);
             }
             's' => self.saved = (self.row, self.col),
             'u' => (self.row, self.col) = self.saved,
             'h' if private && params.contains(&1049) => {
-                self.cells.iter_mut().for_each(|row| row.fill(' '));
+                self.cells.iter_mut().for_each(|row| row.fill(BLANK_CELL));
                 self.row = 0;
                 self.col = 0;
             }
+            'm' => self.apply_sgr(&params),
             _ => {}
+        }
+    }
+
+    // SGR tracking: only the background matters to the tests (the Navigate
+    // cursor line), and only enough to distinguish it from the reset state.
+    fn apply_sgr(&mut self, params: &[usize]) {
+        let mut i = 0;
+        if params.is_empty() {
+            self.bg = None;
+            return;
+        }
+        while i < params.len() {
+            match params[i] {
+                0 | 49 => self.bg = None,
+                38 | 48 => {
+                    // 39/49 are the "default" codes emitted as bare values;
+                    // 38/48 announce a foreground/background spec.
+                    let is_bg = params[i] == 48;
+                    match params.get(i + 1).copied() {
+                        Some(2) => {
+                            let r = params.get(i + 2).copied().unwrap_or(0) as u8;
+                            let g = params.get(i + 3).copied().unwrap_or(0) as u8;
+                            let b = params.get(i + 4).copied().unwrap_or(0) as u8;
+                            if is_bg {
+                                self.bg = Some(ScreenBg::Rgb(r, g, b));
+                            }
+                            i += 4;
+                        }
+                        Some(5) => {
+                            let n = params.get(i + 2).copied().unwrap_or(0) as u8;
+                            if is_bg {
+                                self.bg = Some(ScreenBg::Indexed(n));
+                            }
+                            i += 2;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
         }
     }
 
@@ -1441,15 +1504,15 @@ impl TerminalScreen {
         match mode {
             1 => {
                 for row in &mut self.cells[..self.row] {
-                    row.fill(' ');
+                    row.fill(BLANK_CELL);
                 }
-                self.cells[self.row][..=self.col].fill(' ');
+                self.cells[self.row][..=self.col].fill(BLANK_CELL);
             }
-            2 | 3 => self.cells.iter_mut().for_each(|row| row.fill(' ')),
+            2 | 3 => self.cells.iter_mut().for_each(|row| row.fill(BLANK_CELL)),
             _ => {
-                self.cells[self.row][self.col..].fill(' ');
+                self.cells[self.row][self.col..].fill(BLANK_CELL);
                 for row in &mut self.cells[self.row + 1..] {
-                    row.fill(' ');
+                    row.fill(BLANK_CELL);
                 }
             }
         }
@@ -1457,18 +1520,47 @@ impl TerminalScreen {
 
     fn erase_line(&mut self, mode: usize) {
         match mode {
-            1 => self.cells[self.row][..=self.col].fill(' '),
-            2 => self.cells[self.row].fill(' '),
-            _ => self.cells[self.row][self.col..].fill(' '),
+            1 => self.cells[self.row][..=self.col].fill(BLANK_CELL),
+            2 => self.cells[self.row].fill(BLANK_CELL),
+            _ => self.cells[self.row][self.col..].fill(BLANK_CELL),
         }
     }
 
     fn text(&self) -> String {
         self.cells
             .iter()
-            .map(|row| row.iter().collect::<String>().trim_end().to_string())
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.ch)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Text of the first row whose cells share one background over most of
+    /// the width. The Navigate cursor line is the only full-width tint in the
+    /// transcript log, so this identifies the cursor's row. Rows are limited
+    /// to the log band: the header (row 0) and the footer block carry their
+    /// own full-width chrome.
+    fn tinted_row_text(&self) -> Option<String> {
+        self.cells[2..self.cells.len().saturating_sub(6)]
+            .iter()
+            .find_map(|row| {
+                let mut counts: std::collections::HashMap<ScreenBg, usize> =
+                    std::collections::HashMap::new();
+                for cell in row {
+                    if let Some(bg) = cell.bg {
+                        *counts.entry(bg).or_default() += 1;
+                    }
+                }
+                counts
+                    .iter()
+                    .any(|(_, count)| *count * 2 >= TERMINAL_COLS)
+                    .then(|| row.iter().map(|cell| cell.ch).collect::<String>())
+            })
     }
 }
 
@@ -1628,6 +1720,13 @@ impl Tui {
 
     pub fn clear_output(&self) {
         self.output.lock().unwrap().clear();
+    }
+
+    /// Text of the full-width tinted row in the transcript log: the Navigate
+    /// cursor line. None outside Navigate/Select mode or while the cursor is
+    /// off screen.
+    pub fn tinted_row_text(&self) -> Option<String> {
+        self.output.lock().unwrap().screen.tinted_row_text()
     }
 
     pub fn screen_row(&self, needle: &str) -> Option<String> {
