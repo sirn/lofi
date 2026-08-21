@@ -438,323 +438,197 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
+/// Shared body of the single-column pickers (model, theme, thinking,
+/// policy, service): sized to the widest row, the active entry in primary
+/// bold, the selection highlight, and a scrollbar when rows overflow. The
+/// tree picker windows its own multi-span rows and renders separately.
+fn render_pick_modal(
+    f: &mut Frame,
+    area: Rect,
+    t: Theme,
+    title: &str,
+    help: &str,
+    rows: &[String],
+    active: Option<usize>,
+    selected: usize,
+) {
     use ratatui::widgets::ListState;
+    let total = rows.len();
+    let content_w = rows.iter().map(|r| prim::width(r)).max().unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = total.min(20);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let frame = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+    let need_sb = total > frame.content.height as usize;
+    let scroll_area = modal_scroll_area(frame.content);
+    let content = scroll_area.content;
+    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(t.fg);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            ListItem::new(Span::styled(
+                row.clone(),
+                if Some(i) == active {
+                    active_style
+                } else {
+                    inactive_style
+                },
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(focus_style(t));
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(list, content, &mut state);
+    if need_sb {
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            state.offset(),
+            frame.content.height as usize,
+            total,
+            t.subtle,
+            t.muted,
+        );
+    }
+}
+
+pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = &app.model_picker else {
         return;
     };
-    let t = app.theme;
-    let total = picker.choices.len();
-    let title = " Switch model ";
-    let help = " ↑/↓ navigate  enter switch  esc close ";
-    let active = app.model_label.clone();
-    let row_for = |c: &lofi_types::ModelChoice| {
-        let mut s = format!("{}/{}", c.provider, c.id);
-        if !c.name.is_empty() && c.name != c.id {
-            s.push_str("  ");
-            s.push_str(&c.name);
-        }
-        if !c.thinking_levels.is_empty() {
-            s.push_str("  ·thinks");
-        }
-        if c.supports_image {
-            s.push_str("  ·img");
-        }
-        s
-    };
-    let content_w = picker
-        .choices
-        .iter()
-        .map(|c| prim::width(&row_for(c)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = total.min(20);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
-    let scroll_area = modal_scroll_area(rows.content);
-    let content = scroll_area.content;
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
-    let items: Vec<ListItem> = picker
+    let rows: Vec<String> = picker
         .choices
         .iter()
         .map(|c| {
-            let is_active = format!("{}/{}", c.provider, c.id) == active;
-            ListItem::new(Span::styled(
-                row_for(c),
-                if is_active {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            ))
+            let mut s = format!("{}/{}", c.provider, c.id);
+            if !c.name.is_empty() && c.name != c.id {
+                s.push_str("  ");
+                s.push_str(&c.name);
+            }
+            if !c.thinking_levels.is_empty() {
+                s.push_str("  ·thinks");
+            }
+            if c.supports_image {
+                s.push_str("  ·img");
+            }
+            s
         })
         .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
-        prim::render_scrollbar(
-            f,
-            scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
-            total,
-            t.subtle,
-            t.muted,
-        );
-    }
+    let active = picker
+        .choices
+        .iter()
+        .position(|c| format!("{}/{}", c.provider, c.id) == app.model_label);
+    render_pick_modal(
+        f,
+        area,
+        app.theme,
+        " Switch model ",
+        " ↑/↓ navigate  enter switch  esc close ",
+        &rows,
+        active,
+        picker.selected,
+    );
 }
 
 pub(super) fn render_theme_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::ListState;
     let Some(picker) = &app.theme_picker else {
         return;
     };
-    let t = app.theme;
-    let title = " Color scheme ";
-    let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |m: lofi_types::ThemeMode| m.as_str().to_string();
-    let content_w = picker
+    let rows: Vec<String> = picker
         .modes
         .iter()
-        .map(|m| prim::width(&row_for(*m)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = picker.modes.len();
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let content = modal_scroll_area(rows.content).content;
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
-    let items: Vec<ListItem> = picker
-        .modes
-        .iter()
-        .map(|m| {
-            let is_active = *m == app.theme_mode;
-            ListItem::new(Span::styled(
-                row_for(*m),
-                if is_active {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            ))
-        })
+        .map(|m| m.as_str().to_string())
         .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    f.render_stateful_widget(list, content, &mut state);
-    // Three rows always fit: no scrollbar path needed.
+    let active = picker.modes.iter().position(|m| *m == app.theme_mode);
+    render_pick_modal(
+        f,
+        area,
+        app.theme,
+        " Color scheme ",
+        " ↑/↓ navigate  enter apply  esc close ",
+        &rows,
+        active,
+        picker.selected,
+    );
 }
 
 pub(super) fn render_thinking_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::ListState;
     let Some(picker) = &app.thinking_picker else {
         return;
     };
-    let t = app.theme;
-    let total = picker.levels.len();
-    let title = " Thinking level ";
-    let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |l: &lofi_types::ThinkingLevel| l.as_str().to_string();
-    let content_w = picker
+    let rows: Vec<String> = picker
         .levels
         .iter()
-        .map(|l| prim::width(&row_for(l)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = total.min(20);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
-    let scroll_area = modal_scroll_area(rows.content);
-    let content = scroll_area.content;
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
-    let items: Vec<ListItem> = picker
-        .levels
-        .iter()
-        .map(|l| {
-            let is_active = *l == app.thinking;
-            ListItem::new(Span::styled(
-                row_for(l),
-                if is_active {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            ))
-        })
+        .map(|l| l.as_str().to_string())
         .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
-        prim::render_scrollbar(
-            f,
-            scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
-            total,
-            t.subtle,
-            t.muted,
-        );
-    }
+    let active = picker.levels.iter().position(|l| *l == app.thinking);
+    render_pick_modal(
+        f,
+        area,
+        app.theme,
+        " Thinking level ",
+        " ↑/↓ navigate  enter apply  esc close ",
+        &rows,
+        active,
+        picker.selected,
+    );
 }
 
 pub(super) fn render_policy_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::ListState;
     let Some(picker) = &app.policy_picker else {
         return;
     };
-    let t = app.theme;
-    let total = picker.modes.len();
-    let title = " Bash policy ";
-    let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |m: &lofi_types::BashApprovalMode| crate::tui::policy_mode_label(*m);
-    let content_w = picker
+    let rows: Vec<String> = picker
         .modes
         .iter()
-        .map(|m| prim::width(row_for(m)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = total.min(20);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
-    let scroll_area = modal_scroll_area(rows.content);
-    let content = scroll_area.content;
+        .map(|m| crate::tui::policy_mode_label(*m).to_string())
+        .collect();
     let current = app.policy_override.as_ref().map_or_else(
         || lofi_core::default_approval_mode(app.auto_mode_configured),
         |o| o.effective(app.auto_mode_configured),
     );
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
-    let items: Vec<ListItem> = picker
-        .modes
-        .iter()
-        .map(|m| {
-            ListItem::new(Span::styled(
-                row_for(m),
-                if *m == current {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            ))
-        })
-        .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
-        prim::render_scrollbar(
-            f,
-            scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
-            total,
-            t.subtle,
-            t.muted,
-        );
-    }
+    let active = picker.modes.iter().position(|m| *m == current);
+    render_pick_modal(
+        f,
+        area,
+        app.theme,
+        " Bash policy ",
+        " ↑/↓ navigate  enter apply  esc close ",
+        &rows,
+        active,
+        picker.selected,
+    );
 }
 
 pub(super) fn render_service_picker(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::ListState;
     let Some(picker) = &app.service_picker else {
         return;
     };
-    let t = app.theme;
-    let total = picker.tiers.len();
-    let title = " Service tier ";
-    let help = " ↑/↓ navigate  enter apply  esc close ";
-    let row_for = |tier: &lofi_types::ServiceTier| tier.as_str().to_string();
-    let content_w = picker
+    let rows: Vec<String> = picker
         .tiers
         .iter()
-        .map(|t| prim::width(&row_for(t)))
-        .max()
-        .unwrap_or(0);
-    let chrome_w = prim::width(title).max(prim::width(help));
-    let w = u16::try_from(content_w.max(chrome_w) + 4)
-        .unwrap_or(40)
-        .min(area.width);
-    let visible_rows = total.min(20);
-    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(24);
-    let popup = centered_modal(area, w, desired_frame_h);
-    f.render_widget(Clear, popup);
-    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-    let need_sb = total > rows.content.height as usize;
-    let scroll_area = modal_scroll_area(rows.content);
-    let content = scroll_area.content;
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
-    let items: Vec<ListItem> = picker
-        .tiers
-        .iter()
-        .map(|tier| {
-            let is_active = *tier == app.service_tier;
-            ListItem::new(Span::styled(
-                row_for(tier),
-                if is_active {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            ))
-        })
+        .map(|t| t.as_str().to_string())
         .collect();
-    let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    f.render_stateful_widget(list, content, &mut state);
-    if need_sb {
-        prim::render_scrollbar(
-            f,
-            scroll_area.gutter,
-            state.offset(),
-            rows.content.height as usize,
-            total,
-            t.subtle,
-            t.muted,
-        );
-    }
+    let active = picker.tiers.iter().position(|t| *t == app.service_tier);
+    render_pick_modal(
+        f,
+        area,
+        app.theme,
+        " Service tier ",
+        " ↑/↓ navigate  enter apply  esc close ",
+        &rows,
+        active,
+        picker.selected,
+    );
 }
 
 pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
