@@ -6209,16 +6209,27 @@ fn policy_picker_confirm_writes_the_shared_override() {
 }
 
 #[test]
-fn policy_picker_confirm_notice_names_the_mode() {
+fn policy_badge_hidden_at_default_and_for_a_default_pick() {
+    let mut a = app();
+    a.policy_override = Some(lofi_core::PolicyOverride::default());
+    a.auto_mode_configured = false;
+    assert_eq!(a.policy_badge(), None);
+
+    // Re-picking the startup default keeps the chip hidden.
+    a.open_policy_picker();
+    a.policy_picker_confirm();
+    assert_eq!(a.policy_badge(), None);
+}
+
+#[test]
+fn policy_badge_shows_a_non_default_pick() {
     let mut a = app();
     a.policy_override = Some(lofi_core::PolicyOverride::default());
     a.auto_mode_configured = false;
     a.open_policy_picker();
+    a.policy_picker.as_mut().unwrap().selected = 2; // deny all
     a.policy_picker_confirm();
-    let notify = a.notify.as_ref().unwrap();
-    assert!(notify
-        .msg
-        .contains("bash policy for this session: ask (manual)"));
+    assert_eq!(a.policy_badge().as_deref(), Some("policy: deny all"));
 }
 
 #[test]
