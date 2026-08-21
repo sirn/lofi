@@ -1781,6 +1781,72 @@ fn resumed_many_turn_session_scrolls_to_first_turn() {
     tui.wait_for("scroll prompt 000", WAIT);
 }
 
+/// Resumed geometry starts as a byte estimate; tall lines-heavy turns make the
+/// estimate shrink the transcript badly. The navigate cursor must stay seated
+/// on the same content while exact heights converge, not jump to whatever
+/// content sits at its stale absolute line index.
+#[test]
+fn navigate_cursor_stays_on_its_content_while_resumed_heights_converge() {
+    const TURNS: usize = 40;
+    const LINES: usize = 16;
+    let server = MockServer::start(
+        (0..TURNS)
+            .map(|index| {
+                text_response(
+                    &(0..LINES)
+                        .map(|line| format!("drift answer {index:03} line {line:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            })
+            .collect(),
+    );
+    let fixture = Fixture::new(&server);
+    let mut seed = fixture.spawn(&[]);
+    for index in 0..TURNS {
+        seed.submit(&format!("drift prompt {index:03}"));
+        seed.wait_for(&format!("drift answer {index:03} line 15"), WAIT);
+    }
+    seed.submit("/quit");
+    seed.wait_exit();
+
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.wait_for("drift answer 039 line 15", WAIT);
+    tui.clear_output();
+    // Enter Navigate and browse immediately, before the resumed geometry has
+    // converged: the cursor starts on the last turn and walks up a few lines.
+    tui.send(b"\t");
+    tui.wait_for("NAV", WAIT);
+    for _ in 0..3 {
+        tui.send(b"k");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    // Convergence runs in background ticks; the tinted cursor row must hold
+    // the last turn's content the whole time. A sample can race a half-painted
+    // frame, so only a position that is wrong on two consecutive samples
+    // counts as drift.
+    let start = std::time::Instant::now();
+    let mut suspect: Option<Option<String>> = None;
+    while start.elapsed() < std::time::Duration::from_secs(1) {
+        let tinted = tui.tinted_row_text();
+        let ok = tinted.as_ref().is_some_and(|text| {
+            text.contains("drift answer 039") || text.contains("drift prompt 039")
+        });
+        if ok {
+            suspect = None;
+        } else if suspect.is_some() {
+            panic!("cursor drifted off the last turn while heights converged: {tinted:?}");
+        } else {
+            suspect = Some(tinted);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    tui.send(b"g");
+    tui.wait_for("drift prompt 000", WAIT);
+    tui.send(b"G");
+    tui.wait_for("drift answer 039 line 15", WAIT);
+}
+
 /// Resumed geometry starts as a byte estimate and converges lazily, so
 /// navigate-mode jumps issued right after startup must land at the requested
 /// end of the transcript before and after the estimate settles.
