@@ -504,10 +504,7 @@ pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<u
     let mut positions: Option<Map<IndexId, usize>> = None;
     let hidden = hidden_compaction_range(
         &all,
-        |p| {
-            (index[p].kind == IndexKind::Compaction)
-                .then(|| details.next().unwrap_or_default())
-        },
+        |p| (index[p].kind == IndexKind::Compaction).then(|| details.next().unwrap_or_default()),
         |id| {
             positions
                 .get_or_insert_with(|| {

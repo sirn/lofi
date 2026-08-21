@@ -1017,7 +1017,9 @@ impl App {
         index: &[store::EventIndex],
         file_size: u64,
     ) -> Result<()> {
+        let t0r = std::time::Instant::now();
         self.lifecycle.restore_history(cursor, index)?;
+        eprintln!("[phase] restore_history: {:?}", t0r.elapsed());
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
@@ -1026,8 +1028,12 @@ impl App {
         self.total_in = 0;
         self.total_out = 0;
         self.reset_compaction_gauges();
+        let t0p = std::time::Instant::now();
         replay_indexed_session(self, cursor, index, file_size)?;
+        eprintln!("[phase] replay: {:?}", t0p.elapsed());
+        let t0c = std::time::Instant::now();
         restore_compaction_from_index(self, cursor, index);
+        eprintln!("[phase] compaction_status: {:?}", t0c.elapsed());
         Ok(())
     }
 }
@@ -1192,7 +1198,9 @@ pub(crate) async fn run(
     enable_raw_mode().map_err(Error::Io)?;
     // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
     // (see terminal_bg module doc for why).
+    let t0t = std::time::Instant::now();
     let theme = Theme::resolve(ui_theme);
+    eprintln!("[phase] theme_resolve: {:?}", t0t.elapsed());
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1284,8 +1292,10 @@ async fn run_loop(
     app.theme_mode = theme_mode;
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
+    let t0l = std::time::Instant::now();
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size)?;
+        eprintln!("[phase] restore_indexed_session: {:?}", t0l.elapsed());
         // Jobs whose started marker is on this lineage but whose terminal
         // marker is not (process died, or user /tree'd a fresh branch
         // elsewhere). Their ids are stale; surface that on the first agent
