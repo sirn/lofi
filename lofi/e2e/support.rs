@@ -1471,8 +1471,6 @@ impl TerminalScreen {
             match params[i] {
                 0 | 49 => self.bg = None,
                 38 | 48 => {
-                    // 39/49 are the "default" codes emitted as bare values;
-                    // 38/48 announce a foreground/background spec.
                     let is_bg = params[i] == 48;
                     match params.get(i + 1).copied() {
                         Some(2) => {
@@ -1557,8 +1555,8 @@ impl TerminalScreen {
                     }
                 }
                 counts
-                    .iter()
-                    .any(|(_, count)| *count * 2 >= TERMINAL_COLS)
+                    .values()
+                    .any(|count| *count * 2 >= TERMINAL_COLS)
                     .then(|| row.iter().map(|cell| cell.ch).collect::<String>())
             })
     }

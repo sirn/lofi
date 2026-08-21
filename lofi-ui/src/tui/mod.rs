@@ -1660,7 +1660,7 @@ async fn run_loop(
                         Mode::Select => app.sel_content_anchor(),
                         _ => None,
                     };
-                    let more = app.remeasure_heights_step(16);
+                    app.remeasure_heights_step(16);
                     if let Some(anchor) = nav_anchor {
                         // The converging geometry is frozen-turn-only at
                         // rest, so an empty live last turn renders correctly.
@@ -1671,7 +1671,6 @@ async fn run_loop(
                     }
                     app.nav_show_cursor();
                     dirty = true;
-                    let _ = more;
                 } else if app.remeasure_heights_step(16) {
                     dirty = true;
                 }

@@ -1824,8 +1824,7 @@ fn navigate_cursor_stays_on_its_content_while_resumed_heights_converge() {
     // Convergence runs in background ticks; the tinted cursor row must hold
     // the last turn's content the whole time. A sample can race a half-painted
     // frame, so only a position that is wrong on two consecutive samples
-    // counts as drift. (Before the fix the cursor stayed nine turns back for
-    // the whole convergence, so this fails instantly there.)
+    // counts as drift.
     let start = std::time::Instant::now();
     let mut suspect: Option<Option<String>> = None;
     while start.elapsed() < std::time::Duration::from_secs(1) {
