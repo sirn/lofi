@@ -14,7 +14,7 @@ use lofi_types::{
     Usage,
 };
 
-use super::store::{self, EventIndex, IndexKind, SessionCursor};
+use super::store::{self, EventIndex, IndexId, IndexKind, SessionCursor};
 use crate::agent::AgentEvent;
 use crate::exec_input_code_and_label;
 use crate::shell::UserShellResult;
@@ -27,10 +27,15 @@ use crate::shell::UserShellResult;
 /// two lookups lets one hiding rule serve both the in-memory event slice (kind
 /// and id read inline) and the resume index (kind via `event_at`, id via the
 /// index's normalized `IndexId`).
+///
+/// The target id is normalized into an `IndexId` once per marker: a compacted
+/// transcript otherwise re-parses the 32-char hex string on every one of the
+/// O(path) comparisons per marker, which dominates session-resume time on
+/// long, heavily compacted sessions.
 fn hidden_compaction_range(
     path: &[usize],
     mut compaction_at: impl FnMut(usize) -> Option<(bool, String)>,
-    mut id_matches: impl FnMut(usize, &str) -> bool,
+    mut id_matches: impl FnMut(usize, &IndexId) -> bool,
 ) -> HashSet<usize> {
     let mut hidden = HashSet::new();
     for marker_pos in 0..path.len() {
@@ -40,7 +45,8 @@ fn hidden_compaction_range(
         if first_kept_entry_id.is_empty() {
             continue;
         }
-        if let Some(start_pos) = (0..marker_pos).find(|&p| id_matches(p, &first_kept_entry_id)) {
+        let want = IndexId::borrow(&first_kept_entry_id);
+        if let Some(start_pos) = (0..marker_pos).find(|&p| id_matches(p, &want)) {
             hidden.extend(start_pos..marker_pos);
         }
     }
@@ -60,7 +66,7 @@ pub fn visible_event_indices(events: &[SessionEvent]) -> Vec<usize> {
             } => Some((*checkpointed_tail, first_kept_entry_id.clone())),
             _ => None,
         },
-        |p, id| events[path[p]].id == id,
+        |p, id| store::IndexId::borrow(&events[path[p]].id) == *id,
     );
     path.into_iter().filter(|i| !hidden.contains(i)).collect()
 }
@@ -447,7 +453,7 @@ pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<u
                 (checkpointed_tail, first_kept_entry_id)
             })
         },
-        |p, id| index[p].id.matches(id),
+        |p, id| index[p].id == *id,
     );
     (0..index.len()).filter(|i| !hidden.contains(i)).collect()
 }

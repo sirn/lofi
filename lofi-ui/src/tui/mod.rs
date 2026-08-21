@@ -984,7 +984,14 @@ pub(crate) struct App {
     /// located and `total` computed without fetching rendered lines. Synced
     /// to the file-backed prefix (which may be all turns) for the active mode.
     frozen_heights: Vec<usize>,
+    /// Parallel to `frozen_heights`: true while the entry is a placeholder
+    /// estimate derived from the turn byte range, still waiting for an exact
+    /// re-measure by the tick loop or the viewport pass. Resumed transcripts
+    /// seed estimates for every historical turn so the first frame paints
+    /// without re-reading the whole session file.
+    frozen_heights_estimated: Vec<bool>,
     frozen_heights_other_mode: Vec<usize>,
+    frozen_heights_other_mode_estimated: Vec<bool>,
     render_epoch: u64,
     frozen_epoch: u64,
     /// Viewport width the frozen cache was last built at. A resize changes
