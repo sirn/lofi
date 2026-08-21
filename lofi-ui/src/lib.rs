@@ -121,8 +121,11 @@ impl PrintOptions {
 /// session. Model-resolution failures that reduce to "no active model" are
 /// swallowed into the no-model TUI mode described above.
 pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    eprintln!("[phase] enter: {:?}", t0.elapsed());
     let env = env_pairs(&opts.env)?;
     let session = resolve_session(&opts)?;
+    eprintln!("[phase] resolve_session: {:?}", t0.elapsed());
 
     // Restore the model+thinking the user last ran with unless --model was
     // given: the resumed session's final turn marker carries it (raw, on the
@@ -136,6 +139,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .flatten()
         .map(|m| m.query());
 
+    eprintln!("[phase] last_run_model: {:?}", t0.elapsed());
     let (agent, label, thinking, service_tier, hint, ctx_limit, compaction, ui_theme, switcher) =
         match resolve_startup_agent(&opts, restored.as_deref()).await? {
             StartupAgent::Ready(built) => {
@@ -175,6 +179,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     let system_prompt = agent
         .as_ref()
         .map_or_else(String::new, |a| a.system_prompt().to_string());
+    eprintln!("[phase] resolve_agent: {:?}", t0.elapsed());
     Box::pin(tui::run(
         agent,
         label,

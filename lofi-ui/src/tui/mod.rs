@@ -984,7 +984,14 @@ pub(crate) struct App {
     /// located and `total` computed without fetching rendered lines. Synced
     /// to the file-backed prefix (which may be all turns) for the active mode.
     frozen_heights: Vec<usize>,
+    /// Parallel to `frozen_heights`: true while the entry is a placeholder
+    /// estimate derived from the turn byte range, still waiting for an exact
+    /// re-measure by the tick loop or the viewport pass. Resumed transcripts
+    /// seed estimates for every historical turn so the first frame paints
+    /// without re-reading the whole session file.
+    frozen_heights_estimated: Vec<bool>,
     frozen_heights_other_mode: Vec<usize>,
+    frozen_heights_other_mode_estimated: Vec<bool>,
     render_epoch: u64,
     frozen_epoch: u64,
     /// Viewport width the frozen cache was last built at. A resize changes
@@ -1010,7 +1017,9 @@ impl App {
         index: &[store::EventIndex],
         file_size: u64,
     ) -> Result<()> {
+        let t0r = std::time::Instant::now();
         self.lifecycle.restore_history(cursor, index)?;
+        eprintln!("[phase] restore_history: {:?}", t0r.elapsed());
         self.turns.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
@@ -1019,7 +1028,9 @@ impl App {
         self.total_in = 0;
         self.total_out = 0;
         self.reset_compaction_gauges();
+        let t0p = std::time::Instant::now();
         replay_indexed_session(self, cursor, index, file_size)?;
+        eprintln!("[phase] replay_indexed_session: {:?}", t0p.elapsed());
         restore_compaction_from_index(self, cursor, index);
         Ok(())
     }
@@ -1182,10 +1193,13 @@ pub(crate) async fn run(
         tty_events::set_reports_enabled(false);
         default_hook(info);
     }));
+    let t0i = std::time::Instant::now();
     enable_raw_mode().map_err(Error::Io)?;
+    eprintln!("[phase] raw_mode: {:?}", t0i.elapsed());
     // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
     // (see terminal_bg module doc for why).
     let theme = Theme::resolve(ui_theme);
+    eprintln!("[phase] theme_resolve: {:?}", t0i.elapsed());
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -1255,6 +1269,7 @@ async fn run_loop(
     switcher: Option<ModelSwitcher>,
     system_prompt: String,
 ) -> Result<()> {
+    let t0l = std::time::Instant::now();
     let SessionConfig {
         sink,
         cursor,
@@ -1262,6 +1277,7 @@ async fn run_loop(
         file_size,
         cwd,
     } = session;
+    eprintln!("[phase] run_loop enter: {:?}", t0l.elapsed());
     let model_choices = switcher
         .as_ref()
         .map_or(Vec::new(), |s| s.choices().to_vec());
@@ -1279,6 +1295,7 @@ async fn run_loop(
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size)?;
+        eprintln!("[phase] restore_indexed_session: {:?}", t0l.elapsed());
         // Jobs whose started marker is on this lineage but whose terminal
         // marker is not (process died, or user /tree'd a fresh branch
         // elsewhere). Their ids are stale; surface that on the first agent
@@ -1301,6 +1318,7 @@ async fn run_loop(
     // compact turn ranges/offsets built above and opens a fresh cursor snapshot
     // only for branch operations. Explicitly drop it before the event loop so
     // an async state-machine frame cannot retain thousands of ID strings.
+    eprintln!("[phase] pre-loop: {:?}", t0l.elapsed());
     drop(index);
     // Resume replay creates file-backed shells for every historical turn,
     // including the final one. Viewport materialization owns the bounded
