@@ -46,6 +46,17 @@ impl SessionFile {
         self.last_active
     }
 
+    /// Session id: the file stem (`<millis>_<random>`), matching
+    /// `SessionEntry::id` without indexing the transcript.
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
@@ -885,27 +896,6 @@ impl SessionStore {
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
-    }
-
-    /// # Errors
-    /// Propagates [`list_for_cwd`](Self::list_for_cwd).
-    pub fn most_recent(&self, cwd: &Path) -> Result<Option<SessionEntry>> {
-        Ok(self.list_for_cwd(cwd)?.into_iter().next())
-    }
-
-    /// # Errors
-    /// Returns [`Error::State`] if `prefix` matches more than one session.
-    pub fn find(&self, cwd: &Path, prefix: &str) -> Result<Option<SessionEntry>> {
-        let matches: Vec<_> = self
-            .list_for_cwd(cwd)?
-            .into_iter()
-            .filter(|e| e.id().starts_with(prefix))
-            .collect();
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.into_iter().next()),
-            _ => Err(Error::State(format!("ambiguous session id '{prefix}'"))),
-        }
     }
 }
 
@@ -2276,22 +2266,6 @@ mod tests {
         assert_eq!(list[1].file.path, p1);
         assert_eq!(list[1].message_count, 1);
         assert_eq!(list[0].message_count, 0);
-    }
-
-    #[test]
-    fn most_recent_and_find_prefix() {
-        let (_guard, store) = isolated_store();
-        let cwd = Path::new("/tmp/y");
-        let _p1 = store.create(cwd, &"m".into()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let p2 = store.create(cwd, &"m".into()).unwrap();
-        let mr = store.most_recent(cwd).unwrap().unwrap();
-        assert_eq!(mr.file.path, p2);
-        let id2 = p2.file_stem().unwrap().to_str().unwrap();
-        let prefix = &id2[..id2.find('_').unwrap()];
-        let found = store.find(cwd, prefix).unwrap().unwrap();
-        assert_eq!(found.file.path, p2);
-        assert!(store.find(cwd, "zzz").unwrap().is_none());
     }
 
     #[test]
