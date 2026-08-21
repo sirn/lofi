@@ -659,21 +659,6 @@ fn policy_mode_label(mode: lofi_types::BashApprovalMode) -> &'static str {
     }
 }
 
-fn policy_mode_description(mode: lofi_types::BashApprovalMode) -> &'static str {
-    match mode {
-        lofi_types::BashApprovalMode::AllowAll => {
-            "run allowed and ask commands without prompting; deny still blocks"
-        }
-        lofi_types::BashApprovalMode::AskManual => {
-            "honor the policy; prompt to approve each \"ask\" command"
-        }
-        lofi_types::BashApprovalMode::AskAuto => {
-            "honor the policy; let auto mode decide each \"ask\" command"
-        }
-        lofi_types::BashApprovalMode::DenyAll => "block every command, even allowed ones",
-    }
-}
-
 impl Modal for ThemePickerState {
     fn len(&self) -> usize {
         self.modes.len()
