@@ -1806,6 +1806,14 @@ fn navigate_mode_scrolls_the_restored_transcript_after_continue() {
     tui.clear_output();
     tui.send(b"\t");
     tui.wait_for("NAV", WAIT);
+    // Browse a little before jumping: the cursor walks up from the bottom of
+    // the restored transcript a line at a time.
+    for _ in 0..3 {
+        tui.send(b"k");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    tui.send(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(30));
     tui.send(b"g");
     tui.wait_for("navigate continue prompt 000", WAIT);
     tui.send(b"G");
@@ -1848,6 +1856,12 @@ fn resume_picker_restores_a_tall_session_and_stays_navigable() {
 
     tui.send(b"\t");
     tui.wait_for("NAV", WAIT);
+    for _ in 0..3 {
+        tui.send(b"k");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    tui.send(b"j");
+    std::thread::sleep(std::time::Duration::from_millis(30));
     tui.send(b"g");
     tui.wait_for("resume alpha prompt 000", WAIT);
     tui.send(b"G");
