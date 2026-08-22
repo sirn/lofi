@@ -54,7 +54,19 @@ async fn load_config_missing_env_leaves_keyless() {
 [providers.openai]
 api_type = "openai-completions"
 env_name = "LOFI_TEST_DEFINITELY_MISSING_XYZ_42"
+"#;
+    std::fs::write(&path, toml).unwrap();
 
+    std::env::remove_var("LOFI_TEST_DEFINITELY_MISSING_XYZ_42");
+    let cfg = load_config(&path).await.unwrap();
+    assert!(cfg.providers.get("openai").unwrap().api_key.is_none());
+}
+
+#[tokio::test]
+async fn load_config_rejects_unresolvable_explicit_api_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let toml = r#"
 [providers.other]
 api_type = "openai-completions"
 api_key = "$LOFI_TEST_DEFINITELY_MISSING_XYZ_42"
@@ -62,9 +74,8 @@ api_key = "$LOFI_TEST_DEFINITELY_MISSING_XYZ_42"
     std::fs::write(&path, toml).unwrap();
 
     std::env::remove_var("LOFI_TEST_DEFINITELY_MISSING_XYZ_42");
-    let cfg = load_config(&path).await.unwrap();
-    assert!(cfg.providers.get("openai").unwrap().api_key.is_none());
-    assert!(cfg.providers.get("other").unwrap().api_key.is_none());
+    let err = load_config(&path).await.unwrap_err().to_string();
+    assert!(err.contains("providers.other.api_key"), "{err}");
 }
 
 #[tokio::test]
