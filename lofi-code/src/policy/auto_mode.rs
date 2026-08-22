@@ -23,12 +23,32 @@ Guidelines:
   network for non-routine purposes, escalate privileges, or has side effects
   the user should review.
 - When in doubt, return "ask".
+{SKILLS_RULE}Respond with the JSON object only, no markdown fences, no explanation outside the JSON."#;
 
-Respond with the JSON object only, no markdown fences, no explanation outside the JSON."#;
-
+/// Build the evaluator prompt. `skill_dirs` are user-installed skill roots
+/// (workspace `.lofi/skills`, config `skills/`); when non-empty the prompt
+/// marks commands executing their scripts as pre-vetted.
 #[must_use]
-pub fn build_prompt(command: &str, cwd: &str) -> String {
+pub fn build_prompt(command: &str, cwd: &str, skill_dirs: &[&std::path::Path]) -> String {
+    let skills_rule = if skill_dirs.is_empty() {
+        String::new()
+    } else {
+        let dirs = skill_dirs
+            .iter()
+            .map(|d| format!("  - {}", d.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "- The user has installed and vetted skill scripts under:\n{dirs}\n\
+             \x20 Commands that execute scripts from these directories are pre-vetted:\n\
+             \x20 evaluate the arguments, not the script itself. Allow unless the\n\
+             \x20 arguments are destructive, write outside the workspace, or\n\
+             \x20 escalate privileges. Passing a skill path as an argument to\n\
+             \x20 another operation is not pre-vetted.\n"
+        )
+    };
     AUTO_MODE_PROMPT
+        .replace("{SKILLS_RULE}", &skills_rule)
         .replace("{COMMAND}", command)
         .replace("{CWD}", cwd)
 }
@@ -126,10 +146,34 @@ mod tests {
 
     #[test]
     fn build_prompt_substitutes_placeholders() {
-        let p = build_prompt("ls -la", "/home/user/project");
+        let p = build_prompt("ls -la", "/home/user/project", &[]);
         assert!(p.contains("ls -la"));
         assert!(p.contains("/home/user/project"));
         assert!(!p.contains("{COMMAND}"));
         assert!(!p.contains("{CWD}"));
+        assert!(!p.contains("{SKILLS_RULE}"));
+    }
+
+    #[test]
+    fn build_prompt_without_skill_dirs_omits_rule() {
+        let p = build_prompt("ls", "/repo", &[]);
+        assert!(!p.contains("pre-vetted"));
+    }
+
+    #[test]
+    fn build_prompt_with_skill_dirs_marks_scripts_pre_vetted() {
+        let dirs: [&std::path::Path; 2] = [
+            std::path::Path::new("/home/u/.config/lofi/skills"),
+            std::path::Path::new("/repo/.lofi/skills"),
+        ];
+        let p = build_prompt("ls", "/repo", &dirs);
+        assert!(p.contains("- /home/u/.config/lofi/skills"));
+        assert!(p.contains("- /repo/.lofi/skills"));
+        assert!(p.contains("pre-vetted"));
+        // The rendered rule is line-wrapped; assert on substrings that
+        // survive the wrap.
+        assert!(p.contains("Passing a skill path as an argument to"));
+        assert!(p.contains("not pre-vetted"));
+        assert!(!p.contains("{SKILLS_RULE}"));
     }
 }
