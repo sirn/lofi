@@ -90,9 +90,9 @@ pub fn evaluate_shell_policy(command: &str) -> Result<lofi_code::policy::Decisio
 /// # Errors
 /// - [`Error::Config`] if an env var is missing or a shell command fails /
 ///   cannot be spawned.
-pub async fn resolve_value(s: &str) -> Result<String> {
+pub async fn resolve_value(s: &str, timeout: std::time::Duration) -> Result<String> {
     if let Some(cmd) = s.strip_prefix('!') {
-        run_shell(cmd).await
+        run_shell(cmd, timeout).await
     } else if s == "$$" {
         Ok("$".to_string())
     } else if s == "$!" {
@@ -180,27 +180,11 @@ impl Drop for EnvRestoreGuard {
     }
 }
 
-/// Default timeout for a `!cmd` credential helper (30s). A hung helper
-/// must not block startup indefinitely.
-const CRED_CMD_TIMEOUT_MS: u64 = 30_000;
 /// Cap captured credential-helper output so a misbehaving command can't
 /// fill memory within the timeout window.
 const CRED_CMD_MAX_BYTES: usize = 64 * 1024;
 
-fn cred_cmd_timeout() -> std::time::Duration {
-    // Tests override the production timeout so a hanging helper is
-    // exercised in milliseconds rather than 30 seconds.
-    #[cfg(test)]
-    if let Ok(ms) = std::env::var("LOFI_TEST_CRED_CMD_TIMEOUT_MS") {
-        if let Ok(ms) = ms.parse::<u64>() {
-            return std::time::Duration::from_millis(ms);
-        }
-    }
-    std::time::Duration::from_millis(CRED_CMD_TIMEOUT_MS)
-}
-
-async fn run_shell(cmd: &str) -> Result<String> {
-    let timeout = cred_cmd_timeout();
+async fn run_shell(cmd: &str, timeout: std::time::Duration) -> Result<String> {
     let mut command = tokio::process::Command::new("sh");
     command
         .arg("-c")
@@ -281,14 +265,74 @@ async fn run_shell(cmd: &str) -> Result<String> {
     }
 }
 
+/// Prefix for environment-based config overrides.
+/// `LOFI__SECTION__KEY=VALUE` replaces `[section] key` (deeper nesting uses
+/// more `__` separators, e.g. `LOFI__PROVIDERS__OPENAI__API_KEY`). Segment
+/// names are lowercased; the value parses as TOML when possible (`200`,
+/// `true`, `["a", "b"]`), otherwise it is used as a plain string.
+const ENV_OVERRIDE_PREFIX: &str = "LOFI__";
+
+/// Apply every `LOFI__*` environment variable over the parsed config
+/// document, then deserialize. Overrides exist so single values can be
+/// replaced without editing the file — including by tests lowering the
+/// credential-command timeout.
 /// # Errors
-/// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, or
-///   any value fails to resolve.
+/// [`Error::Config`] when an override names an empty path segment or walks
+/// through a non-table value.
+fn apply_env_overrides(doc: &mut toml::Value) -> Result<()> {
+    for (name, value) in std::env::vars() {
+        let Some(rest) = name.strip_prefix(ENV_OVERRIDE_PREFIX) else {
+            continue;
+        };
+        let path: Vec<String> = rest.split("__").map(str::to_lowercase).collect();
+        if path.iter().any(String::is_empty) {
+            return Err(Error::Config(format!("env override {name}: empty segment")));
+        }
+        let value = toml::from_str::<toml::Table>(&format!("v = {value}"))
+            .ok()
+            .and_then(|mut t| t.remove("v"))
+            .unwrap_or(toml::Value::String(value));
+        let mut node = &mut *doc;
+        for seg in &path[..path.len() - 1] {
+            match node {
+                toml::Value::Table(table) => {
+                    node = table
+                        .entry(seg.clone())
+                        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                }
+                _ => {
+                    return Err(Error::Config(format!(
+                        "env override {name}: {seg} is not a table"
+                    )))
+                }
+            }
+        }
+        match node {
+            toml::Value::Table(table) => {
+                table.insert(path[path.len() - 1].clone(), value);
+            }
+            _ => {
+                return Err(Error::Config(format!(
+                    "env override {name}: target is not a table"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// # Errors
+/// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, an
+///   env override is malformed, or any value fails to resolve.
 pub async fn load_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
-    let mut cfg: Config =
+    let mut doc: toml::Value =
         toml::from_str(&content).map_err(|e| Error::Config(format!("parse error: {e}")))?;
+    apply_env_overrides(&mut doc)?;
+    let mut cfg: Config = doc
+        .try_into()
+        .map_err(|e| Error::Config(format!("parse error: {e}")))?;
     let policy_path = policy_config_path(path)?;
     cfg.shell_policy = load_policy_or_default(&policy_path)?;
     resolve_config(&mut cfg).await?;
@@ -301,8 +345,13 @@ pub async fn load_config(path: &Path) -> Result<Config> {
 /// endpoint or silently send a wrong header. Errors name the provider and
 /// field, never the resolved secret. An empty resolution is dropped (treated
 /// as unset) rather than fatal.
-async fn resolve_explicit(provider: &str, field: &str, raw: &str) -> Result<Option<String>> {
-    resolve_value(raw)
+async fn resolve_explicit(
+    provider: &str,
+    field: &str,
+    raw: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<String>> {
+    resolve_value(raw, timeout)
         .await
         .map(|v| (!v.is_empty()).then_some(v))
         .map_err(|e| Error::Config(format!("providers.{provider}.{field}: {e}")))
@@ -319,26 +368,27 @@ async fn resolve_explicit(provider: &str, field: &str, raw: &str) -> Result<Opti
 /// - [`Error::Config`] if any explicitly configured value fails to resolve;
 ///   the error names the provider and field, never a secret value.
 pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
+    let timeout = std::time::Duration::from_millis(cfg.credential.timeout_ms);
     for (provider_name, provider) in &mut cfg.providers {
         if let Some(key) = provider.api_key.take() {
-            provider.api_key = resolve_explicit(provider_name, "api_key", &key).await?;
+            provider.api_key = resolve_explicit(provider_name, "api_key", &key, timeout).await?;
         } else if let Some(name) = provider.env_name.as_ref() {
             provider.api_key = std::env::var(name).ok().filter(|s| !s.is_empty());
         }
         if let Some(base) = provider.base_url.take() {
-            provider.base_url = resolve_explicit(provider_name, "base_url", &base).await?;
+            provider.base_url = resolve_explicit(provider_name, "base_url", &base, timeout).await?;
         }
         for (model_name, model) in &mut provider.models {
             if let Some(base) = model.base_url.take() {
                 let field = format!("models.{model_name}.base_url");
-                model.base_url = resolve_explicit(provider_name, &field, &base).await?;
+                model.base_url = resolve_explicit(provider_name, &field, &base, timeout).await?;
             }
         }
         if let Some(headers) = provider.headers.take() {
             let mut resolved = HashMap::with_capacity(headers.len());
             for (name, raw) in headers {
                 let field = format!("headers.{name}");
-                if let Some(v) = resolve_explicit(provider_name, &field, &raw).await? {
+                if let Some(v) = resolve_explicit(provider_name, &field, &raw, timeout).await? {
                     resolved.insert(name, v);
                 }
             }
@@ -406,19 +456,27 @@ pub fn default_config() -> Config {
     })
 }
 
-/// An existing file is parsed and resolved (leniently — see
-/// [`resolve_config`]); a missing file yields the built-in default config.
-/// In both cases a provider whose key is unset is left keyless, so the call
-/// itself never fails for a missing environment variable — that surfaces
-/// downstream as "no models configured".
+/// An existing file is parsed and resolved; a missing file yields the
+/// built-in default config. Both paths apply `LOFI__*` env overrides.
+/// Lenient `env_name` discovery keeps a provider with an unset key keyless
+/// (see [`resolve_config`]), surfacing downstream as "no models configured".
 /// # Errors
-/// [`Error::Config`] only when an existing file fails to read or parse as
-/// TOML.
+/// [`Error::Config`] when an existing file fails to read or parse as TOML,
+/// an env override is malformed, or an explicit value fails to resolve.
+/// # Panics
+/// Same contract as [`default_config`]: only if the built-in default TOML is
+/// malformed, which is a bug, not a runtime condition.
 pub async fn load_config_or_default(path: &Path) -> Result<Config> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => load_config(path).await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut cfg = default_config();
+            let mut doc: toml::Value = toml::from_str(DEFAULT_CONFIG_TOML).unwrap_or_else(|e| {
+                panic!("built-in default config must parse: {e}");
+            });
+            apply_env_overrides(&mut doc)?;
+            let mut cfg: Config = doc
+                .try_into()
+                .map_err(|e| Error::Config(format!("parse error: {e}")))?;
             resolve_config(&mut cfg).await?;
             Ok(cfg)
         }
@@ -435,6 +493,7 @@ mod tests {
 
     use super::*;
     use lofi_types::Api;
+    use std::time::Duration;
 
     /// Serializes tests that mutate process-global environment variables and
     /// restores the prior value on drop, so they neither race with each other
@@ -472,15 +531,25 @@ mod tests {
 
     #[tokio::test]
     async fn literal_value() {
-        assert_eq!(resolve_value("hello world").await.unwrap(), "hello world");
-        assert_eq!(resolve_value("").await.unwrap(), "");
+        assert_eq!(
+            resolve_value("hello world", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "hello world"
+        );
+        assert_eq!(
+            resolve_value("", Duration::from_secs(30)).await.unwrap(),
+            ""
+        );
     }
 
     #[tokio::test]
     async fn env_var_dollar() {
         std::env::set_var("LOFI_TEST_RESOLVE_BARE", "abc123");
         assert_eq!(
-            resolve_value("$LOFI_TEST_RESOLVE_BARE").await.unwrap(),
+            resolve_value("$LOFI_TEST_RESOLVE_BARE", Duration::from_secs(30))
+                .await
+                .unwrap(),
             "abc123"
         );
     }
@@ -489,48 +558,70 @@ mod tests {
     async fn env_var_braces() {
         std::env::set_var("LOFI_TEST_RESOLVE_BRACED", "brval");
         assert_eq!(
-            resolve_value("${LOFI_TEST_RESOLVE_BRACED}").await.unwrap(),
+            resolve_value("${LOFI_TEST_RESOLVE_BRACED}", Duration::from_secs(30))
+                .await
+                .unwrap(),
             "brval"
         );
     }
 
     #[tokio::test]
     async fn shell_command() {
-        let v = resolve_value("!echo hello").await.unwrap();
+        let v = resolve_value("!echo hello", Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(v, "hello");
     }
 
     #[tokio::test]
     async fn shell_command_trims_output() {
-        let v = resolve_value("!printf '  hi  \\n'").await.unwrap();
+        let v = resolve_value("!printf '  hi  \\n'", Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(v, "hi");
     }
 
     #[tokio::test]
     async fn shell_command_failure_errors() {
-        assert!(resolve_value("!false").await.is_err());
+        assert!(resolve_value("!false", Duration::from_secs(30))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn escapes_dollar_and_bang() {
-        assert_eq!(resolve_value("$$").await.unwrap(), "$");
-        assert_eq!(resolve_value("$!").await.unwrap(), "!");
+        assert_eq!(
+            resolve_value("$$", Duration::from_secs(30)).await.unwrap(),
+            "$"
+        );
+        assert_eq!(
+            resolve_value("$!", Duration::from_secs(30)).await.unwrap(),
+            "!"
+        );
     }
 
     #[tokio::test]
     async fn literal_with_embedded_dollar_stays_literal() {
-        assert_eq!(resolve_value("pa$$word").await.unwrap(), "pa$$word");
+        assert_eq!(
+            resolve_value("pa$$word", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "pa$$word"
+        );
     }
 
     #[tokio::test]
     async fn missing_env_error() {
-        let err = resolve_value("$LOFI_TEST_DEFINITELY_MISSING_XYZ").await;
+        let err = resolve_value("$LOFI_TEST_DEFINITELY_MISSING_XYZ", Duration::from_secs(30)).await;
         assert!(err.is_err());
     }
 
     #[tokio::test]
     async fn empty_braces_not_an_env_ref() {
-        assert_eq!(resolve_value("${}").await.unwrap(), "${}");
+        assert_eq!(
+            resolve_value("${}", Duration::from_secs(30)).await.unwrap(),
+            "${}"
+        );
     }
 
     #[test]
@@ -635,21 +726,58 @@ x-org = "$LOFI_TEST_STRICT_MISSING"
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn resolve_config_fails_on_credential_command_timeout() {
+    async fn load_config_honors_env_overrides() {
         let _g = env_lock();
-        let _t = capture_env("LOFI_TEST_CRED_CMD_TIMEOUT_MS");
-        std::env::set_var("LOFI_TEST_CRED_CMD_TIMEOUT_MS", "200");
-        let mut cfg: Config = toml::from_str(
+        let _r = capture_env("LOFI__RETRY__MAX_RETRIES");
+        let _b = capture_env("LOFI__PROVIDERS__P__BASE_URL");
+        let _s = capture_env("LOFI__PROVIDERS__P__NO_AUTH");
+        let _d = capture_env("LOFI__DEFAULT_MODEL");
+        std::env::set_var("LOFI__RETRY__MAX_RETRIES", "42");
+        // TOML literal strings keep the override free of double quotes.
+        std::env::set_var("LOFI__PROVIDERS__P__BASE_URL", "'https://override.invalid'");
+        std::env::set_var("LOFI__PROVIDERS__P__NO_AUTH", "true");
+        // A value that is not TOML is taken as a plain string.
+        std::env::set_var("LOFI__DEFAULT_MODEL", "p/plain-model");
+        let dir = std::env::temp_dir().join("lofi-config-env-override-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
             r#"[providers.p]
 api_type = "openai-completions"
-api_key = "!sleep 5"
 base_url = "https://example.invalid"
 "#,
         )
         .unwrap();
-        let err = resolve_config(&mut cfg).await.unwrap_err().to_string();
+        let cfg = load_config(&path).await.unwrap();
+        assert_eq!(cfg.retry.max_retries, 42);
+        let p = cfg.providers.get("p").unwrap();
+        assert_eq!(p.base_url.as_deref(), Some("https://override.invalid"));
+        assert!(p.no_auth);
+        assert_eq!(cfg.default_model.as_deref(), Some("p/plain-model"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_config_fails_on_credential_command_timeout() {
+        let _g = env_lock();
+        let _t = capture_env("LOFI__CREDENTIAL__TIMEOUT_MS");
+        std::env::set_var("LOFI__CREDENTIAL__TIMEOUT_MS", "200");
+        let dir = std::env::temp_dir().join("lofi-config-timeout-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.p]\napi_type = \"openai-completions\"\napi_key = \"!sleep 5\"\nbase_url = \"https://example.invalid\"\n",
+        )
+        .unwrap();
+        let err = load_config(&path).await.unwrap_err().to_string();
         assert!(err.contains("providers.p.api_key"), "{err}");
         assert!(err.contains("timed out"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
