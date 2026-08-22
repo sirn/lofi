@@ -747,7 +747,9 @@ mod tests {
             drop(guard);
         }
         assert_eq!(std::env::var("LOFI_TEST_APPLY_PRIOR").unwrap(), "prior");
-        #[tokio::test]
+    }
+
+    #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn load_config_honors_env_overrides() {
         let _g = env_lock();
