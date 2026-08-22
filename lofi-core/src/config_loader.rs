@@ -187,7 +187,20 @@ const CRED_CMD_TIMEOUT_MS: u64 = 30_000;
 /// fill memory within the timeout window.
 const CRED_CMD_MAX_BYTES: usize = 64 * 1024;
 
+fn cred_cmd_timeout() -> std::time::Duration {
+    // Tests override the production timeout so a hanging helper is
+    // exercised in milliseconds rather than 30 seconds.
+    #[cfg(test)]
+    if let Ok(ms) = std::env::var("LOFI_TEST_CRED_CMD_TIMEOUT_MS") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            return std::time::Duration::from_millis(ms);
+        }
+    }
+    std::time::Duration::from_millis(CRED_CMD_TIMEOUT_MS)
+}
+
 async fn run_shell(cmd: &str) -> Result<String> {
+    let timeout = cred_cmd_timeout();
     let mut command = tokio::process::Command::new("sh");
     command
         .arg("-c")
@@ -217,7 +230,7 @@ async fn run_shell(cmd: &str) -> Result<String> {
     // outlive the deadline.
     let cap = CRED_CMD_MAX_BYTES;
     let waited = tokio::time::timeout(
-        std::time::Duration::from_millis(CRED_CMD_TIMEOUT_MS),
+        timeout,
         Box::pin(async {
             let (out, err, status) = tokio::try_join!(
                 lofi_code::tools::read_capped(&mut stdout, cap),
@@ -261,7 +274,8 @@ async fn run_shell(cmd: &str) -> Result<String> {
             drop(guard);
             let _ = child.wait().await;
             Err(Error::Config(format!(
-                "credential command timed out after {CRED_CMD_TIMEOUT_MS}ms: {cmd}"
+                "credential command timed out after {}ms: {cmd}",
+                timeout.as_millis()
             )))
         }
     }
@@ -617,6 +631,25 @@ x-org = "$LOFI_TEST_STRICT_MISSING"
                 assert!(err.contains(needle), "{needle} missing from: {err}");
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_config_fails_on_credential_command_timeout() {
+        let _g = env_lock();
+        let _t = capture_env("LOFI_TEST_CRED_CMD_TIMEOUT_MS");
+        std::env::set_var("LOFI_TEST_CRED_CMD_TIMEOUT_MS", "200");
+        let mut cfg: Config = toml::from_str(
+            r#"[providers.p]
+api_type = "openai-completions"
+api_key = "!sleep 5"
+base_url = "https://example.invalid"
+"#,
+        )
+        .unwrap();
+        let err = resolve_config(&mut cfg).await.unwrap_err().to_string();
+        assert!(err.contains("providers.p.api_key"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
     }
 
     #[tokio::test]
