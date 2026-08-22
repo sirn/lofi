@@ -322,8 +322,8 @@ fn apply_env_overrides(doc: &mut toml::Value) -> Result<()> {
 }
 
 /// # Errors
-/// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, or
-///   an env override is malformed.
+/// - [`Error::Config`] if the file cannot be read, fails to parse as TOML, an
+///   env override is malformed, or any value fails to resolve.
 pub async fn load_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
@@ -339,39 +339,57 @@ pub async fn load_config(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Resolve one explicitly configured value. Unlike `env_name` discovery,
+/// an explicit value that fails to resolve is a configuration error: a
+/// dropped failure would otherwise let a request fall back to a default
+/// endpoint or silently send a wrong header. Errors name the provider and
+/// field, never the resolved secret. An empty resolution is dropped (treated
+/// as unset) rather than fatal.
+async fn resolve_explicit(
+    provider: &str,
+    field: &str,
+    raw: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<String>> {
+    resolve_value(raw, timeout)
+        .await
+        .map(|v| (!v.is_empty()).then_some(v))
+        .map_err(|e| Error::Config(format!("providers.{provider}.{field}: {e}")))
+}
+
 /// Resolve every provider's credentials and headers inside `cfg` in place.
-/// Resolution is **lenient** so a missing environment variable never aborts
-/// startup: a provider whose key cannot be resolved is left keyless (and
-/// therefore not available for selection). An explicit `api_key` (literal,
-/// `$VAR`, or `!cmd`) overrides `env_name`; otherwise `env_name` names the
-/// environment variable to read. Header values that fail to resolve are
-/// dropped rather than fatal.
+/// Explicit values (`api_key`, provider and model `base_url`, header
+/// values) are strict: a resolution failure aborts startup, because the user
+/// asked for that exact value. Only `env_name` discovery is lenient, so a
+/// fresh checkout without provider keys starts keyless instead of aborting.
+/// An explicit `api_key` (literal, `$VAR`, or `!cmd`) overrides
+/// `env_name`.
 /// # Errors
-/// Never errors in the current lenient implementation; the `Result` is kept
-/// for signature stability and future strict modes.
+/// - [`Error::Config`] if any explicitly configured value fails to resolve;
+///   the error names the provider and field, never a secret value.
 pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
     let timeout = std::time::Duration::from_millis(cfg.credential.timeout_ms);
-    for provider in cfg.providers.values_mut() {
+    for (provider_name, provider) in &mut cfg.providers {
         if let Some(key) = provider.api_key.take() {
-            provider.api_key = resolve_value(&key, timeout).await.ok().filter(|s| !s.is_empty());
+            provider.api_key = resolve_explicit(provider_name, "api_key", &key, timeout).await?;
         } else if let Some(name) = provider.env_name.as_ref() {
             provider.api_key = std::env::var(name).ok().filter(|s| !s.is_empty());
         }
         if let Some(base) = provider.base_url.take() {
-            provider.base_url = resolve_value(&base, timeout).await.ok().filter(|s| !s.is_empty());
+            provider.base_url = resolve_explicit(provider_name, "base_url", &base, timeout).await?;
         }
-        for model in provider.models.values_mut() {
+        for (model_name, model) in &mut provider.models {
             if let Some(base) = model.base_url.take() {
-                model.base_url = resolve_value(&base, timeout).await.ok().filter(|s| !s.is_empty());
+                let field = format!("models.{model_name}.base_url");
+                model.base_url = resolve_explicit(provider_name, &field, &base, timeout).await?;
             }
         }
         if let Some(headers) = provider.headers.take() {
             let mut resolved = HashMap::with_capacity(headers.len());
             for (name, raw) in headers {
-                if let Ok(v) = resolve_value(&raw, timeout).await {
-                    if !v.is_empty() {
-                        resolved.insert(name, v);
-                    }
+                let field = format!("headers.{name}");
+                if let Some(v) = resolve_explicit(provider_name, &field, &raw, timeout).await? {
+                    resolved.insert(name, v);
                 }
             }
             provider.headers = Some(resolved);
@@ -438,22 +456,23 @@ pub fn default_config() -> Config {
     })
 }
 
-/// An existing file is parsed and resolved (leniently — see
-/// [`resolve_config`]); a missing file yields the built-in default config.
-/// In both cases a provider whose key is unset is left keyless, so the call
-/// itself never fails for a missing environment variable — that surfaces
-/// downstream as "no models configured". Both paths apply `LOFI__*` env
-/// overrides.
+/// An existing file is parsed and resolved; a missing file yields the
+/// built-in default config. Both paths apply `LOFI__*` env overrides.
+/// Lenient `env_name` discovery keeps a provider with an unset key keyless
+/// (see [`resolve_config`]), surfacing downstream as "no models configured".
 /// # Errors
 /// [`Error::Config`] when an existing file fails to read or parse as TOML,
-/// or an env override is malformed.
+/// an env override is malformed, or an explicit value fails to resolve.
+/// # Panics
+/// Same contract as [`default_config`]: only if the built-in default TOML is
+/// malformed, which is a bug, not a runtime condition.
 pub async fn load_config_or_default(path: &Path) -> Result<Config> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => load_config(path).await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut doc: toml::Value = toml::from_str(DEFAULT_CONFIG_TOML).map_err(|e| {
-                Error::Config(format!("built-in default config must parse: {e}"))
-            })?;
+            let mut doc: toml::Value = toml::from_str(DEFAULT_CONFIG_TOML).unwrap_or_else(|e| {
+                panic!("built-in default config must parse: {e}");
+            });
             apply_env_overrides(&mut doc)?;
             let mut cfg: Config = doc
                 .try_into()
@@ -512,15 +531,25 @@ mod tests {
 
     #[tokio::test]
     async fn literal_value() {
-        assert_eq!(resolve_value("hello world", Duration::from_secs(30)).await.unwrap(), "hello world");
-        assert_eq!(resolve_value("", Duration::from_secs(30)).await.unwrap(), "");
+        assert_eq!(
+            resolve_value("hello world", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "hello world"
+        );
+        assert_eq!(
+            resolve_value("", Duration::from_secs(30)).await.unwrap(),
+            ""
+        );
     }
 
     #[tokio::test]
     async fn env_var_dollar() {
         std::env::set_var("LOFI_TEST_RESOLVE_BARE", "abc123");
         assert_eq!(
-            resolve_value("$LOFI_TEST_RESOLVE_BARE", Duration::from_secs(30)).await.unwrap(),
+            resolve_value("$LOFI_TEST_RESOLVE_BARE", Duration::from_secs(30))
+                .await
+                .unwrap(),
             "abc123"
         );
     }
@@ -529,37 +558,56 @@ mod tests {
     async fn env_var_braces() {
         std::env::set_var("LOFI_TEST_RESOLVE_BRACED", "brval");
         assert_eq!(
-            resolve_value("${LOFI_TEST_RESOLVE_BRACED}", Duration::from_secs(30)).await.unwrap(),
+            resolve_value("${LOFI_TEST_RESOLVE_BRACED}", Duration::from_secs(30))
+                .await
+                .unwrap(),
             "brval"
         );
     }
 
     #[tokio::test]
     async fn shell_command() {
-        let v = resolve_value("!echo hello", Duration::from_secs(30)).await.unwrap();
+        let v = resolve_value("!echo hello", Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(v, "hello");
     }
 
     #[tokio::test]
     async fn shell_command_trims_output() {
-        let v = resolve_value("!printf '  hi  \\n'", Duration::from_secs(30)).await.unwrap();
+        let v = resolve_value("!printf '  hi  \\n'", Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(v, "hi");
     }
 
     #[tokio::test]
     async fn shell_command_failure_errors() {
-        assert!(resolve_value("!false", Duration::from_secs(30)).await.is_err());
+        assert!(resolve_value("!false", Duration::from_secs(30))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn escapes_dollar_and_bang() {
-        assert_eq!(resolve_value("$$", Duration::from_secs(30)).await.unwrap(), "$");
-        assert_eq!(resolve_value("$!", Duration::from_secs(30)).await.unwrap(), "!");
+        assert_eq!(
+            resolve_value("$$", Duration::from_secs(30)).await.unwrap(),
+            "$"
+        );
+        assert_eq!(
+            resolve_value("$!", Duration::from_secs(30)).await.unwrap(),
+            "!"
+        );
     }
 
     #[tokio::test]
     async fn literal_with_embedded_dollar_stays_literal() {
-        assert_eq!(resolve_value("pa$$word", Duration::from_secs(30)).await.unwrap(), "pa$$word");
+        assert_eq!(
+            resolve_value("pa$$word", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "pa$$word"
+        );
     }
 
     #[tokio::test]
@@ -570,7 +618,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty_braces_not_an_env_ref() {
-        assert_eq!(resolve_value("${}", Duration::from_secs(30)).await.unwrap(), "${}");
+        assert_eq!(
+            resolve_value("${}", Duration::from_secs(30)).await.unwrap(),
+            "${}"
+        );
     }
 
     #[test]
@@ -609,6 +660,172 @@ mod tests {
         assert!(cfg.providers.get("openai").unwrap().api_key.is_none());
         assert!(cfg.providers.get("anthropic").unwrap().api_key.is_none());
         assert!(cfg.providers.get("google").unwrap().api_key.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_config_fails_on_unresolvable_explicit_values() {
+        let _g = env_lock();
+        let _m = capture_env("LOFI_TEST_STRICT_MISSING");
+        std::env::remove_var("LOFI_TEST_STRICT_MISSING");
+        let cases: [(&str, &[&str]); 5] = [
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+api_key = "$LOFI_TEST_STRICT_MISSING"
+base_url = "https://example.invalid"
+"#,
+                &["providers.p.api_key", "LOFI_TEST_STRICT_MISSING"],
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+api_key = "!exit 3"
+base_url = "https://example.invalid"
+"#,
+                &["providers.p.api_key"],
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+base_url = "$LOFI_TEST_STRICT_MISSING"
+"#,
+                &["providers.p.base_url"],
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+base_url = "https://example.invalid"
+
+[providers.p.models.m]
+base_url = "$LOFI_TEST_STRICT_MISSING"
+"#,
+                &["providers.p.models.m.base_url"],
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+base_url = "https://example.invalid"
+
+[providers.p.models.m]
+
+[providers.p.headers]
+x-org = "$LOFI_TEST_STRICT_MISSING"
+"#,
+                &["providers.p.headers.x-org"],
+            ),
+        ];
+        for (toml_text, needles) in cases {
+            let mut cfg: Config = toml::from_str(toml_text).unwrap();
+            let err = resolve_config(&mut cfg).await.unwrap_err().to_string();
+            for needle in needles {
+                assert!(err.contains(needle), "{needle} missing from: {err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_config_honors_env_overrides() {
+        let _g = env_lock();
+        let _r = capture_env("LOFI__RETRY__MAX_RETRIES");
+        let _b = capture_env("LOFI__PROVIDERS__P__BASE_URL");
+        let _s = capture_env("LOFI__PROVIDERS__P__NO_AUTH");
+        let _d = capture_env("LOFI__DEFAULT_MODEL");
+        std::env::set_var("LOFI__RETRY__MAX_RETRIES", "42");
+        // TOML literal strings keep the override free of double quotes.
+        std::env::set_var("LOFI__PROVIDERS__P__BASE_URL", "'https://override.invalid'");
+        std::env::set_var("LOFI__PROVIDERS__P__NO_AUTH", "true");
+        // A value that is not TOML is taken as a plain string.
+        std::env::set_var("LOFI__DEFAULT_MODEL", "p/plain-model");
+        let dir = std::env::temp_dir().join("lofi-config-env-override-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[providers.p]
+api_type = "openai-completions"
+base_url = "https://example.invalid"
+"#,
+        )
+        .unwrap();
+        let cfg = load_config(&path).await.unwrap();
+        assert_eq!(cfg.retry.max_retries, 42);
+        let p = cfg.providers.get("p").unwrap();
+        assert_eq!(p.base_url.as_deref(), Some("https://override.invalid"));
+        assert!(p.no_auth);
+        assert_eq!(cfg.default_model.as_deref(), Some("p/plain-model"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_config_fails_on_credential_command_timeout() {
+        let _g = env_lock();
+        let _t = capture_env("LOFI__CREDENTIAL__TIMEOUT_MS");
+        std::env::set_var("LOFI__CREDENTIAL__TIMEOUT_MS", "200");
+        let dir = std::env::temp_dir().join("lofi-config-timeout-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.p]\napi_type = \"openai-completions\"\napi_key = \"!sleep 5\"\nbase_url = \"https://example.invalid\"\n",
+        )
+        .unwrap();
+        let err = load_config(&path).await.unwrap_err().to_string();
+        assert!(err.contains("providers.p.api_key"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_config_keeps_lenient_env_name_and_drops_empty_values() {
+        let _g = env_lock();
+        let _m = capture_env("LOFI_TEST_STRICT_MISSING");
+        let _k = capture_env("LOFI_TEST_LENIENT");
+        std::env::remove_var("LOFI_TEST_STRICT_MISSING");
+        std::env::set_var("LOFI_TEST_LENIENT", "sk-lenient");
+        let mut cfg: Config = toml::from_str(
+            r#"[providers.p]
+api_type = "openai-completions"
+env_name = "LOFI_TEST_STRICT_MISSING"
+base_url = "https://example.invalid"
+
+[providers.p.models.m]
+
+[providers.q]
+api_type = "openai-completions"
+api_key = "$LOFI_TEST_LENIENT"
+base_url = "https://example.invalid"
+
+[providers.q.models.m]
+
+[providers.q.headers]
+x-empty = "!printf ''"
+x-ok = "literal-header"
+
+[providers.q.models.m2]
+base_url = "https://model.example.invalid"
+"#,
+        )
+        .unwrap();
+        resolve_config(&mut cfg).await.unwrap();
+        assert!(cfg.providers.get("p").unwrap().api_key.is_none());
+        let q = cfg.providers.get("q").unwrap();
+        assert_eq!(q.api_key.as_deref(), Some("sk-lenient"));
+        let headers = q.headers.as_ref().unwrap();
+        assert!(!headers.contains_key("x-empty"));
+        assert_eq!(
+            headers.get("x-ok").map(String::as_str),
+            Some("literal-header")
+        );
+        assert_eq!(
+            q.models.get("m2").unwrap().base_url.as_deref(),
+            Some("https://model.example.invalid")
+        );
     }
 
     #[tokio::test]
@@ -748,42 +965,6 @@ mod tests {
         }
         assert_eq!(std::env::var("LOFI_TEST_APPLY_PRIOR").unwrap(), "prior");
     }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn load_config_honors_env_overrides() {
-        let _g = env_lock();
-        let _r = capture_env("LOFI__RETRY__MAX_RETRIES");
-        let _b = capture_env("LOFI__PROVIDERS__P__BASE_URL");
-        let _s = capture_env("LOFI__PROVIDERS__P__NO_AUTH");
-        let _d = capture_env("LOFI__DEFAULT_MODEL");
-        std::env::set_var("LOFI__RETRY__MAX_RETRIES", "42");
-        // TOML literal strings keep the override free of double quotes.
-        std::env::set_var("LOFI__PROVIDERS__P__BASE_URL", "'https://override.invalid'");
-        std::env::set_var("LOFI__PROVIDERS__P__NO_AUTH", "true");
-        // A value that is not TOML is taken as a plain string.
-        std::env::set_var("LOFI__DEFAULT_MODEL", "p/plain-model");
-        let dir = std::env::temp_dir().join("lofi-config-env-override-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        std::fs::write(
-            &path,
-            r#"[providers.p]
-api_type = "openai-completions"
-base_url = "https://example.invalid"
-"#,
-        )
-        .unwrap();
-        let cfg = load_config(&path).await.unwrap();
-        assert_eq!(cfg.retry.max_retries, 42);
-        let p = cfg.providers.get("p").unwrap();
-        assert_eq!(p.base_url.as_deref(), Some("https://override.invalid"));
-        assert!(p.no_auth);
-        assert_eq!(cfg.default_model.as_deref(), Some("p/plain-model"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
 
     /// Env overrides mutate the parsed document before deserialization.
     /// The round trip must preserve table order: model fallback selection
