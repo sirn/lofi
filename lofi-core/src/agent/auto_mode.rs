@@ -34,6 +34,7 @@ pub fn build_auto_mode(
     registry: &crate::models::ModelRegistry,
     auto_cfg: &AutoModeConfig,
     cwd: &std::path::Path,
+    skills_dir: Option<&std::path::Path>,
 ) -> Result<Option<AutoModeFn>> {
     if !auto_cfg.enable {
         return Ok(None);
@@ -73,13 +74,25 @@ pub fn build_auto_mode(
     let max_tokens = auto_cfg.max_tokens.or(model.max_tokens);
     let cwd = cwd.to_path_buf();
 
+    // Skill roots that actually exist are marked pre-vetted in the evaluator
+    // prompt so installed skill scripts stop triggering confirmation.
+    let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = skills_dir.filter(|d| d.is_dir()) {
+        skill_dirs.push(dir.to_path_buf());
+    }
+    let ws_skills = cwd.join(".lofi").join("skills");
+    if ws_skills.is_dir() {
+        skill_dirs.push(ws_skills);
+    }
+
     let auto_mode_fn: AutoModeFn = Arc::new(move |command: String| {
         let provider = provider.clone();
         let model = model.clone();
         let cwd = cwd.clone();
+        let skill_dirs = skill_dirs.clone();
         Box::pin(async move {
             let handle = tokio::task::spawn(async move {
-                evaluate_command(&provider, &model, &command, &cwd, max_tokens).await
+                evaluate_command(&provider, &model, &command, &cwd, max_tokens, &skill_dirs).await
             });
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
             let outcome = match handle.await {
@@ -103,8 +116,11 @@ async fn evaluate_command(
     command: &str,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
+    skill_dirs: &[std::path::PathBuf],
 ) -> AutoModeOutcome {
-    let prompt = auto_mode::build_prompt(command, &cwd.display().to_string());
+    let skill_dirs: Vec<&std::path::Path> =
+        skill_dirs.iter().map(std::path::PathBuf::as_path).collect();
+    let prompt = auto_mode::build_prompt(command, &cwd.display().to_string(), &skill_dirs);
 
     let mut model = model.clone();
     model.thinking = lofi_types::ThinkingLevel::Off;
