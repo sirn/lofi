@@ -49,7 +49,7 @@ x-organization = "$EXAMPLE_ORGANIZATION"
 x-literal = "$$5"
 ```
 
-Alternatively, `env_name` names an API-key environment variable. Unlike an an explicit `api_key = "$VAR"`, a value that cannot be resolved leaves the provider unavailable. Header values that cannot be resolved are omitted.
+Only `env_name` discovery is lenient: an `env_name` variable that is missing or empty leaves the provider keyless and unavailable. Every explicitly configured value is strict. An `api_key`, provider or model `base_url`, or header value that fails to resolve (missing variable, failed or timed-out command) is a startup error that names the provider and field. A value that resolves to an empty string is treated as unset.
 
 `base_url` (per provider or per model) and `env_name` also resolve the same `$VAR` / `!command` forms, so an endpoint or key can be supplied by an environment variable rather than edited into the config.
 
