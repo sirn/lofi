@@ -330,7 +330,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
 }
 
 #[test]
-fn notice_message_uses_hollow_bullet_subtle_marker_and_italic_muted_body() {
+fn notice_message_uses_muted_bar_marker_and_italic_muted_body() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     use ratatui::style::Modifier;
@@ -349,17 +349,19 @@ fn notice_message_uses_hollow_bullet_subtle_marker_and_italic_muted_body() {
     };
     let lines = render_turn_lines(&cx, &turn);
     assert!(!lines.is_empty());
-    // Hollow bullet, subtle color (not the user color).
-    assert_eq!(lines[0].line.spans[0].content, "▷ ");
-    assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.subtle));
+    // Bar marker in muted, matching user/agent message structure.
+    assert_eq!(lines[0].line.spans[0].content, "▌ ");
+    assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.muted));
     // Body is muted and italic, not the regular user fg.
     let body = &lines[0].line.spans[1];
     assert_eq!(body.style.fg, Some(a.theme.muted));
     assert!(body.style.add_modifier.contains(Modifier::ITALIC));
-    // Marker only on the first row.
+    // Marker repeats on wrapped rows like user/agent messages.
     turn.prompt = "a long notice text that wraps to a second row easily".to_string();
     let lines = render_turn_lines(&cx, &turn);
-    assert!(lines.len() >= 2 || !lines.is_empty());
+    assert!(lines.iter().all(|line| {
+        line.line.spans[0].content == "▌ " && line.line.spans[0].style.fg == Some(a.theme.muted)
+    }));
 }
 
 #[test]
