@@ -281,38 +281,51 @@ pub async fn load_config(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Resolve one explicitly configured value. Unlike `env_name` discovery,
+/// an explicit value that fails to resolve is a configuration error: a
+/// dropped failure would otherwise let a request fall back to a default
+/// endpoint or silently send a wrong header. Errors name the provider and
+/// field, never the resolved secret. An empty resolution is dropped (treated
+/// as unset) rather than fatal.
+async fn resolve_explicit(provider: &str, field: &str, raw: &str) -> Result<Option<String>> {
+    resolve_value(raw)
+        .await
+        .map(|v| (!v.is_empty()).then_some(v))
+        .map_err(|e| Error::Config(format!("providers.{provider}.{field}: {e}")))
+}
+
 /// Resolve every provider's credentials and headers inside `cfg` in place.
-/// Resolution is **lenient** so a missing environment variable never aborts
-/// startup: a provider whose key cannot be resolved is left keyless (and
-/// therefore not available for selection). An explicit `api_key` (literal,
-/// `$VAR`, or `!cmd`) overrides `env_name`; otherwise `env_name` names the
-/// environment variable to read. Header values that fail to resolve are
-/// dropped rather than fatal.
+/// Explicit values (`api_key`, provider and model `base_url`, header
+/// values) are strict: a resolution failure aborts startup, because the user
+/// asked for that exact value. Only `env_name` discovery is lenient, so a
+/// fresh checkout without provider keys starts keyless instead of aborting.
+/// An explicit `api_key` (literal, `$VAR`, or `!cmd`) overrides
+/// `env_name`.
 /// # Errors
-/// Never errors in the current lenient implementation; the `Result` is kept
-/// for signature stability and future strict modes.
+/// - [`Error::Config`] if any explicitly configured value fails to resolve;
+///   the error names the provider and field, never a secret value.
 pub async fn resolve_config(cfg: &mut Config) -> Result<()> {
-    for provider in cfg.providers.values_mut() {
+    for (provider_name, provider) in &mut cfg.providers {
         if let Some(key) = provider.api_key.take() {
-            provider.api_key = resolve_value(&key).await.ok().filter(|s| !s.is_empty());
+            provider.api_key = resolve_explicit(provider_name, "api_key", &key).await?;
         } else if let Some(name) = provider.env_name.as_ref() {
             provider.api_key = std::env::var(name).ok().filter(|s| !s.is_empty());
         }
         if let Some(base) = provider.base_url.take() {
-            provider.base_url = resolve_value(&base).await.ok().filter(|s| !s.is_empty());
+            provider.base_url = resolve_explicit(provider_name, "base_url", &base).await?;
         }
-        for model in provider.models.values_mut() {
+        for (model_name, model) in &mut provider.models {
             if let Some(base) = model.base_url.take() {
-                model.base_url = resolve_value(&base).await.ok().filter(|s| !s.is_empty());
+                let field = format!("models.{model_name}.base_url");
+                model.base_url = resolve_explicit(provider_name, &field, &base).await?;
             }
         }
         if let Some(headers) = provider.headers.take() {
             let mut resolved = HashMap::with_capacity(headers.len());
             for (name, raw) in headers {
-                if let Ok(v) = resolve_value(&raw).await {
-                    if !v.is_empty() {
-                        resolved.insert(name, v);
-                    }
+                let field = format!("headers.{name}");
+                if let Some(v) = resolve_explicit(provider_name, &field, &raw).await? {
+                    resolved.insert(name, v);
                 }
             }
             provider.headers = Some(resolved);
@@ -542,6 +555,112 @@ mod tests {
         assert!(cfg.providers.get("openai").unwrap().api_key.is_none());
         assert!(cfg.providers.get("anthropic").unwrap().api_key.is_none());
         assert!(cfg.providers.get("google").unwrap().api_key.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_config_fails_on_unresolvable_explicit_values() {
+        let _g = env_lock();
+        let _m = capture_env("LOFI_TEST_STRICT_MISSING");
+        std::env::remove_var("LOFI_TEST_STRICT_MISSING");
+        let cases: [(&str, &str); 5] = [
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+api_key = "$LOFI_TEST_STRICT_MISSING"
+base_url = "https://example.invalid"
+"#,
+                "providers.p.api_key",
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+api_key = "$LOFI_TEST_STRICT_MISSING"
+base_url = "https://example.invalid"
+"#,
+                "LOFI_TEST_STRICT_MISSING",
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+api_key = "!exit 3"
+base_url = "https://example.invalid"
+"#,
+                "providers.p.api_key",
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+base_url = "$LOFI_TEST_STRICT_MISSING"
+"#,
+                "providers.p.base_url",
+            ),
+            (
+                r#"[providers.p]
+api_type = "openai-completions"
+base_url = "https://example.invalid"
+
+[providers.p.models.m]
+
+[providers.p.headers]
+x-org = "$LOFI_TEST_STRICT_MISSING"
+"#,
+                "providers.p.headers.x-org",
+            ),
+        ];
+        for (toml_text, needle) in cases {
+            let mut cfg: Config = toml::from_str(toml_text).unwrap();
+            let err = resolve_config(&mut cfg).await.unwrap_err().to_string();
+            assert!(err.contains(needle), "{needle} missing from: {err}");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resolve_config_keeps_lenient_env_name_and_drops_empty_values() {
+        let _g = env_lock();
+        let _m = capture_env("LOFI_TEST_STRICT_MISSING");
+        let _k = capture_env("LOFI_TEST_LENIENT");
+        std::env::remove_var("LOFI_TEST_STRICT_MISSING");
+        std::env::set_var("LOFI_TEST_LENIENT", "sk-lenient");
+        let mut cfg: Config = toml::from_str(
+            r#"[providers.p]
+api_type = "openai-completions"
+env_name = "LOFI_TEST_STRICT_MISSING"
+base_url = "https://example.invalid"
+
+[providers.p.models.m]
+
+[providers.q]
+api_type = "openai-completions"
+api_key = "$LOFI_TEST_LENIENT"
+base_url = "https://example.invalid"
+
+[providers.q.models.m]
+
+[providers.q.headers]
+x-empty = "!printf ''"
+x-ok = "literal-header"
+
+[providers.q.models.m2]
+base_url = "https://model.example.invalid"
+"#,
+        )
+        .unwrap();
+        resolve_config(&mut cfg).await.unwrap();
+        assert!(cfg.providers.get("p").unwrap().api_key.is_none());
+        let q = cfg.providers.get("q").unwrap();
+        assert_eq!(q.api_key.as_deref(), Some("sk-lenient"));
+        let headers = q.headers.as_ref().unwrap();
+        assert!(!headers.contains_key("x-empty"));
+        assert_eq!(
+            headers.get("x-ok").map(String::as_str),
+            Some("literal-header")
+        );
+        assert_eq!(
+            q.models.get("m2").unwrap().base_url.as_deref(),
+            Some("https://model.example.invalid")
+        );
     }
 
     #[tokio::test]
