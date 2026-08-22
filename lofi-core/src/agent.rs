@@ -422,8 +422,8 @@ impl Agent {
     /// Effective `max_tokens` for the next request, clipped so the request
     /// cannot demand more output than the remaining context window. Some
     /// providers reject `max_tokens >= context_window - input_tokens`; the
-    /// prior round's usage (`input_tokens + cache_read_tokens`) approximates
-    /// the next request's input. Returns `None` (omit the field) when the
+    /// prior round's [`Usage::context_tokens`] approximates the next
+    /// request's input. Returns `None` (omit the field) when the
     /// window or model cap is unknown.
     #[must_use]
     fn clipped_max_tokens(&self, prev_input_tokens: Option<u64>) -> Option<u64> {
