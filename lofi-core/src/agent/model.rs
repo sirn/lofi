@@ -47,9 +47,15 @@ pub async fn build_agent(
     let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root, env)?;
     let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
-    let agent = agent.with_skills_dir(skills_dir);
+    let agent = agent.with_skills_dir(skills_dir.clone());
     let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
-        match super::auto_mode::build_auto_mode(&config, &registry, auto_cfg, root) {
+        match super::auto_mode::build_auto_mode(
+            &config,
+            &registry,
+            auto_cfg,
+            root,
+            skills_dir.as_deref(),
+        ) {
             Ok(Some(fn_)) => agent.with_auto_mode(fn_),
             Ok(None) => agent,
             Err(e) => {
