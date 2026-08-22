@@ -447,12 +447,7 @@ impl DebugState {
             .cursor
             .as_ref()
             .map_or(0, store::SessionCursor::len);
-        let context_tokens = app.status_usage.map_or(0, |usage| {
-            usage.input_tokens
-                + usage.output_tokens
-                + usage.cache_read_tokens
-                + usage.cache_write_tokens
-        });
+        let context_tokens = app.status_usage.map_or(0, |usage| usage.context_tokens());
         let record = serde_json::json!({
             "schema_version": 1,
             "timestamp_ms": timestamp_ms,
