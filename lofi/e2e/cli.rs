@@ -397,3 +397,50 @@ fn reasoning_content_is_replayed_to_chat_completions_providers() {
     );
     assert!(second.contains("private rope"));
 }
+
+#[test]
+fn unresolved_explicit_values_fail_naming_the_provider_and_field() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let base = std::fs::read_to_string(&fixture.config).unwrap();
+
+    let cases = [
+        (
+            format!(
+                "[providers.broken_key]\napi_type = \"openai-completions\"\nbase_url = \"{}\"\napi_key = \"$LOFI_E2E_UNSET_API_KEY\"\n\n[providers.broken_key.models.chat]\n",
+                server.url()
+            ),
+            "broken_key",
+            "api_key",
+        ),
+        (
+            "[providers.broken_url]\napi_type = \"openai-completions\"\nno_auth = true\nbase_url = \"$LOFI_E2E_UNSET_BASE_URL\"\n\n[providers.broken_url.models.chat]\n"
+                .to_string(),
+            "broken_url",
+            "base_url",
+        ),
+        (
+            format!(
+                "[providers.broken_header]\napi_type = \"openai-completions\"\nno_auth = true\nbase_url = \"{}\"\n\n[providers.broken_header.models.chat]\n\n[providers.broken_header.headers]\nx-organization = \"$LOFI_E2E_UNSET_HEADER\"\n",
+                server.url()
+            ),
+            "broken_header",
+            "x-organization",
+        ),
+    ];
+    for (section, provider, field) in cases {
+        std::fs::write(&fixture.config, format!("{base}\n{section}")).unwrap();
+        let output = fixture.output(&["--list-models"]);
+        assert!(
+            !output.status.success(),
+            "unresolved {field} on {provider} must fail startup"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(provider),
+            "{provider} missing from: {stderr}"
+        );
+        assert!(stderr.contains(field), "{field} missing from: {stderr}");
+    }
+    assert_eq!(server.request_count(), 0);
+}
