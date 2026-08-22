@@ -4,12 +4,13 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::support::{
-    anthropic_text_response, anthropic_truncated_text_response, delayed_text_response, event_types,
-    job_events, parallel_responses_tool_response, parallel_tool_response, process_is_alive,
-    responses_response, spawned_pid, stop_text_response, text_response, text_response_with_usage,
-    tool_response, tool_response_with_usage, transcript_text, truncated_responses_response,
-    truncated_text_response, truncated_tool_response, wait_for_process_exit, Fixture, MockResponse,
-    MockServer, ProcessGuard, WAIT,
+    anthropic_text_response, anthropic_text_response_with_usage, anthropic_truncated_text_response,
+    delayed_text_response, event_types, job_events, parallel_responses_tool_response,
+    parallel_tool_response, process_is_alive, responses_response, spawned_pid, stop_text_response,
+    text_response, text_response_with_usage, tool_response, tool_response_with_usage,
+    transcript_text, truncated_responses_response, truncated_text_response,
+    truncated_tool_response, wait_for_process_exit, Fixture, MockResponse, MockServer,
+    ProcessGuard, WAIT,
 };
 
 #[test]
@@ -860,6 +861,40 @@ fn automatic_compaction_crossing_shapes_the_next_request() {
     assert!(messages.iter().any(|message| {
         message["role"] == "user" && message["content"] == "auto compact final prompt"
     }));
+}
+
+/// A turn whose prompt is almost all cache writes (cold cache after a
+/// compaction, TTL expiry, or prefix churn) fills the window exactly like
+/// cached reads would. The threshold check must count them, otherwise the
+/// gauge shows the context past the soft cap while auto-compaction stays
+/// silent.
+#[test]
+fn auto_compaction_counts_cache_writes_toward_the_threshold() {
+    let under = || anthropic_text_response_with_usage("under-threshold answer", 5, 0, 0);
+    let server = MockServer::start(vec![
+        under(),
+        under(),
+        under(),
+        under(),
+        // 2 + 0 read + 60 write + 3 output = 65 > max_context_tokens = 50,
+        // while input + cache read alone is 2.
+        anthropic_text_response_with_usage("cache write answer", 2, 0, 60),
+    ]);
+    let fixture = Fixture::new(&server);
+    fixture.enable_auto_compaction(50);
+    let mut tui = fixture.spawn(&["--model", "anthropic/tools"]);
+
+    for index in 0..4 {
+        tui.clear_output();
+        tui.submit(&format!("cache write prompt {index}"));
+        tui.wait_for("under-threshold answer", WAIT);
+    }
+    tui.submit("cache write crossing prompt");
+    tui.wait_for("cache write answer", WAIT);
+    tui.wait_for("Compacted", WAIT);
+
+    let events = fixture.events();
+    assert!(events.iter().any(|event| event["type"] == "compaction"));
 }
 
 #[test]

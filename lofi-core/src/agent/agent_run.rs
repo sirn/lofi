@@ -245,9 +245,9 @@ impl Agent {
                 detached = true;
                 break;
             }
-            // Feed the prior round's prompt size back in so the next request
+            // Feed the prior round's context fill back in so the next request
             // clips its output cap against the remaining context window.
-            let prev_input = Some(stats.usage.input_tokens + stats.usage.cache_read_tokens);
+            let prev_input = Some(stats.usage.context_tokens());
             let round = self
                 .run_once_inner(
                     &mut *messages,
@@ -339,8 +339,7 @@ impl Agent {
                     // the next round would overflow the window and let the UI
                     // force-compact + continue.
                     if let Some(threshold) = self.hard_compact_threshold() {
-                        let prompt_tokens =
-                            stats.usage.input_tokens + stats.usage.cache_read_tokens;
+                        let prompt_tokens = stats.usage.context_tokens();
                         if prompt_tokens > threshold {
                             context_pressure = true;
                             break;

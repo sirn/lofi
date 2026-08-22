@@ -437,6 +437,21 @@ pub struct Usage {
     pub cache_write_tokens: u64,
 }
 
+impl Usage {
+    /// Context-window fill from the just-finished round: everything the next
+    /// request must carry — fresh input plus cache reads and writes, then
+    /// this round's output. Cache writes count like reads: the written
+    /// prefix occupies the window (and is re-sent or re-billed) from the
+    /// next request on, so gauges and compaction thresholds must see it.
+    #[must_use]
+    pub fn context_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+}
+
 /// `call_id` avoids colliding with the flattened tree-level event `id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeToolRecord {
