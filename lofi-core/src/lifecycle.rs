@@ -21,7 +21,6 @@ pub struct AgentLifecycle {
     history: Arc<Mutex<Vec<Message>>>,
     compaction: CompactionConfig,
     context_window: u64,
-    previous_context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +54,6 @@ impl AgentLifecycle {
             history: Arc::new(Mutex::new(Vec::new())),
             compaction,
             context_window,
-            previous_context_tokens: None,
         }
     }
 
@@ -147,7 +145,6 @@ impl AgentLifecycle {
             .collect();
         let messages = history_from_cursor(cursor, &offsets)?;
         self.replace_history(messages)?;
-        self.reset_compaction_policy();
         Ok(())
     }
 
@@ -212,7 +209,6 @@ impl AgentLifecycle {
             .lock()
             .map_err(|_| Error::State("agent history lock poisoned".to_string()))?
             .clear();
-        self.reset_compaction_policy();
         Ok(())
     }
 
@@ -230,11 +226,6 @@ impl AgentLifecycle {
 
     pub fn set_context_window(&mut self, context_window: u64) {
         self.context_window = context_window;
-        self.reset_compaction_policy();
-    }
-
-    fn reset_compaction_policy(&mut self) {
-        self.previous_context_tokens = None;
     }
 
     #[must_use]
@@ -299,14 +290,13 @@ impl AgentLifecycle {
         }
         *history = new_history;
         drop(history);
-        self.reset_compaction_policy();
         // /compact can finish with no following agent run.
         crate::malloc_trim::release_freed_memory();
         Ok(Some(compaction))
     }
 
-    /// Evaluate the soft threshold at a settled model round and compact only
-    /// on an upward crossing.
+    /// Compact when the settled round's context fill exceeds the soft
+    /// threshold.
     /// # Errors
     /// Propagates compaction failures.
     pub fn auto_compact(
@@ -321,15 +311,7 @@ impl AgentLifecycle {
         let Some(threshold) = self.compaction.soft_threshold(self.context_window) else {
             return Ok(None);
         };
-        let current = usage.input_tokens + usage.cache_read_tokens;
-        if current <= threshold {
-            self.previous_context_tokens = Some(current);
-            return Ok(None);
-        }
-        if self
-            .previous_context_tokens
-            .is_some_and(|previous| previous > threshold)
-        {
+        if usage.context_tokens() <= threshold {
             return Ok(None);
         }
         self.compact(cursor, system_prompt)
@@ -592,6 +574,52 @@ mod tests {
         config.auto.context_ratio = Some(0.5);
         let lifecycle = AgentLifecycle::new(config, 100_000);
         assert_eq!(lifecycle.compact_budget(), 25_000);
+    }
+
+    #[test]
+    fn auto_compact_counts_cache_writes_and_output_toward_the_threshold() {
+        // Anthropic-style accounting on a cold cache: the prompt arrives as
+        // cache writes, so input + cache read alone stays under the threshold
+        // while the window is actually over it.
+        let mut config = CompactionConfig::default();
+        config.auto.max_context_tokens = Some(50);
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let make_msg = |role: Role, text: &str| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role,
+                blocks: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+                kind: PromptKind::default(),
+            }),
+        };
+        let mut events = Vec::new();
+        for turn in 0..5 {
+            events.push(make_msg(Role::User, &format!("u{turn}")));
+            events.push(make_msg(Role::Assistant, &format!("a{turn}")));
+        }
+        cursor.append_events(&mut events).unwrap();
+        let mut lifecycle = AgentLifecycle::new(config, 100_000);
+        let snapshot = cursor.snapshot().unwrap();
+        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+
+        let usage = Usage {
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 60,
+        };
+        let compaction = lifecycle
+            .auto_compact(usage, Some(&cursor), "system prompt")
+            .unwrap();
+        assert!(
+            compaction.is_some(),
+            "a cache-write-heavy turn past the threshold must auto-compact"
+        );
     }
 
     #[test]
