@@ -405,7 +405,7 @@ keep_calls = 6
 | `max_context_tokens` | integer | none | Absolute soft threshold. |
 | `context_ratio` | number | none | Fraction of the model's context window used as a soft threshold. |
 
-When both thresholds are present, the lower threshold wins. Soft compaction is checked after the agent settles; it does not interrupt a run. With neither threshold set, compaction is hard-limit-only.
+When both thresholds are present, the lower threshold wins. Soft compaction is checked after the agent settles; it does not interrupt a run. Thresholds and hard limits compare against the round's full context fill: input, output, cache-read, and cache-write tokens, the same total the footer gauge shows. With neither threshold set, compaction is hard-limit-only.
 
 ### Tiered retention with `[compaction.edit]`
 

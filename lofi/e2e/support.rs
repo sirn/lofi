@@ -561,6 +561,37 @@ data: {{}}
     ))
 }
 
+/// Anthropic end-of-turn carrying full usage accounting: fresh input and
+/// cache parts on `message_start`, output on `message_delta` — the split a
+/// real Messages API stream uses.
+pub fn anthropic_text_response_with_usage(
+    text: &str,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+) -> MockResponse {
+    let start = json!({
+        "message": {
+            "usage": {
+                "input_tokens": input_tokens,
+                "cache_read_input_tokens": cache_read_tokens,
+                "cache_creation_input_tokens": cache_write_tokens,
+            }
+        },
+    });
+    let delta = json!({
+        "index": 0,
+        "delta": { "type": "text_delta", "text": text },
+    });
+    let mdelta = json!({
+        "delta": { "stop_reason": "end_turn" },
+        "usage": { "output_tokens": 3 },
+    });
+    MockResponse::sse(format!(
+        "event: message_start\ndata: {start}\n\nevent: content_block_delta\ndata: {delta}\n\nevent: message_delta\ndata: {mdelta}\n\nevent: message_stop\ndata: {{}}\n\n"
+    ))
+}
+
 pub fn anthropic_text_response(text: &str) -> MockResponse {
     let delta = json!({
         "index": 0,
