@@ -58,6 +58,7 @@ impl App {
             run_start: None,
             run_model_label: None,
             retry: None,
+            pending_prompt_start: false,
             pinned: true,
             top_line: 0,
             last_base: 0,
@@ -162,12 +163,22 @@ impl App {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(super) fn apply_event(&mut self, ev: AgentEvent) {
         if let AgentEvent::TurnStart { prompt, kind } = ev {
-            self.freeze_previous_file_backed_turn();
-            self.push_turn(Turn {
-                prompt,
-                kind,
-                blocks: Vec::new(),
-            });
+            // spawn_agent_run pre-pushes the prompt at submit time so it
+            // shows before the working indicator's first frame. The
+            // matching TurnStart is then a confirmation, not a new turn.
+            let awaited = self.pending_prompt_start
+                && self.turns.last().is_some_and(|turn| {
+                    turn.blocks.is_empty() && turn.prompt == prompt && turn.kind == kind
+                });
+            self.pending_prompt_start = false;
+            if !awaited {
+                self.freeze_previous_file_backed_turn();
+                self.push_turn(Turn {
+                    prompt,
+                    kind,
+                    blocks: Vec::new(),
+                });
+            }
             self.turn_cost = 0.0;
             self.turn_has_round_usage = false;
             self.settled_usage_fresh = false;
@@ -353,6 +364,7 @@ impl App {
         self.run = None;
         self.run_model_label = None;
         self.retry = None;
+        self.pending_prompt_start = false;
     }
 
     pub(super) fn reset_compaction_gauges(&mut self) {
@@ -438,6 +450,19 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Push a submitted prompt immediately instead of waiting for the
+    /// engine's `TurnStart`, so it renders before the working indicator's
+    /// first frame.
+    pub(super) fn begin_prompt_turn(&mut self, prompt: String, kind: lofi_types::PromptKind) {
+        self.freeze_previous_file_backed_turn();
+        self.push_turn(Turn {
+            prompt,
+            kind,
+            blocks: Vec::new(),
+        });
+        self.pending_prompt_start = true;
     }
 
     pub(super) fn push_turn(&mut self, turn: Turn) {

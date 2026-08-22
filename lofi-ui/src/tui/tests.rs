@@ -8119,3 +8119,46 @@ fn notify_lines_counts_verbose_chip_width() {
     verbose.notify(NotifyKind::Error, msg);
     assert!(verbose.notify_lines(60) >= quiet.notify_lines(60));
 }
+
+#[test]
+fn turn_start_confirms_a_pre_pushed_prompt() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.begin_prompt_turn("hi".to_string(), lofi_types::PromptKind::User);
+    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.turns[1].prompt, "hi");
+    assert!(a.turns[1].blocks.is_empty());
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "hi".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    assert_eq!(a.turns.len(), 2);
+    assert!(!a.pending_prompt_start);
+}
+
+#[test]
+fn turn_start_pushes_when_no_prompt_is_awaited() {
+    let mut a = app();
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "hi".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "hi".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    assert_eq!(a.turns.len(), 2);
+}
+
+#[test]
+fn run_finished_disarms_a_pending_prompt_start() {
+    let mut a = app();
+    a.begin_prompt_turn("hi".to_string(), lofi_types::PromptKind::User);
+    a.run_finished();
+    assert!(!a.pending_prompt_start);
+    a.apply_event(AgentEvent::TurnStart {
+        prompt: "hi".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    assert_eq!(a.turns.len(), 2);
+}
