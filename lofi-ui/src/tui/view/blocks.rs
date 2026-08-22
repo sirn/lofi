@@ -208,28 +208,15 @@ impl Component for NoticeMessage<'_> {
         let t = cx.theme;
         let w = cx.width;
         let content_w = w.saturating_sub(2);
-        // Notices (job wake-ups, future automation) are de-emphasized so an
-        // app-injected prompt never competes visually with typed input:
-        // hollow bullet instead of a solid bar, outline-gray instead of the
-        // user color, italic muted body instead of regular fg. The marker
-        // appears on the first row only; continuation rows leave the gutter
-        // blank so the body reads as a single block.
-        let mark = Style::new().fg(t.subtle);
+        // Notices (job wake-ups, future automation) share the bar marker
+        // and row rhythm of user/agent messages but stay de-emphasized so
+        // an app-injected prompt never competes visually with typed input:
+        // muted color for marker and body, italic body.
+        let mark = Style::new().fg(t.muted);
         let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
-        render_markdown_body(
-            self.prompt.trim(),
-            t,
-            w,
-            content_w,
-            body_style,
-            move |row| {
-                if row == 0 {
-                    vec![Span::styled("▷ ", mark)]
-                } else {
-                    vec![Span::raw("  ")]
-                }
-            },
-        )
+        render_markdown_body(self.prompt.trim(), t, w, content_w, body_style, move |_| {
+            vec![Span::styled("▌ ", mark)]
+        })
     }
 }
 

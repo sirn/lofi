@@ -137,7 +137,7 @@ fn system_prompt_includes_the_skills_index_without_loading_skill_bodies() {
         system.contains("<description>system prompt skill description marker</description>"),
         "system prompt: {system}"
     );
-    assert!(system.contains(&skill_dir.display().to_string()));
+    assert!(!system.contains("<location>"), "system prompt: {system}");
     assert!(!system.contains("system prompt skill body must stay lazy"));
 }
 

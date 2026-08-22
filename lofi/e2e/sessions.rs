@@ -1998,12 +1998,12 @@ fn resumed_notice_turn_keeps_its_notice_marker() {
 
     tui.submit("spawn a notifying job");
     tui.wait_for("notice resume answer", WAIT);
-    tui.wait_for("\u{25B7} job", WAIT);
+    tui.wait_for("\u{258C} job", WAIT);
     tui.wait_for("notice acknowledged", WAIT);
     tui.submit("/quit");
     tui.wait_exit();
 
     let mut tui = fixture.spawn(&["--continue"]);
     tui.wait_for("notice acknowledged", WAIT);
-    tui.wait_for("\u{25B7} job", WAIT);
+    tui.wait_for("\u{258C} job", WAIT);
 }
