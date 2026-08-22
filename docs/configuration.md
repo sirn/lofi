@@ -6,6 +6,14 @@ The configuration directory is read-only from lofi's perspective, so it can be m
 
 Set `$LOFI_CONFIG` to use a different main configuration file, or `$LOFI_POLICY` to use a different shell-policy file.
 
+Any configuration value can be overridden per invocation with an environment variable of the form `LOFI__SECTION__KEY=VALUE`. Use `__` to walk into nested tables; segment names are lowercased before lookup. The value parses as TOML when possible (`200`, `true`, `["a", "b"]`, `'quoted'`), otherwise it is used as a plain string.
+
+```sh
+LOFI__RETRY__MAX_RETRIES=0 LOFI__CREDENTIAL__TIMEOUT_MS=1000 lofi
+```
+
+The `[credential] timeout_ms` setting controls how long a `!command` credential helper may run before it is rejected (default: 30000).
+
 When `config.toml` is absent, lofi falls back to built-in OpenAI Responses, Anthropic Messages, and Google Generative AI definitions. They become available when `$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, or `$GEMINI_API_KEY` is set. An explicit config file replaces that built-in provider tree.
 
 ## Minimal configuration
