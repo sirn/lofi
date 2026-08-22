@@ -111,10 +111,6 @@ pub(super) fn handle_event(
                 spawn_user_shell(app, current_run, command, exclude_from_context);
                 return;
             }
-            // Keep the completed turn intact until the engine's TurnStart
-            // arrives. TurnStart freezes it and pushes the new prompt in one
-            // event-handler call, so an intervening redraw cannot expose an
-            // old prompt with its assistant response temporarily removed.
             let Some(agent) = agent else {
                 app.push_turn(Turn {
                     prompt: prompt.clone(),
@@ -347,6 +343,9 @@ fn spawn_agent_run(
     let preempt_clone = preempt.clone();
     let continuation = prompt.is_none();
     let prompt = prompt.unwrap_or_default();
+    if !continuation {
+        app.begin_prompt_turn(prompt.clone(), prompt_kind);
+    }
     // Notices computed at session startup (e.g. stale job ids) ride the
     // first agent run so the model sees them inline before the user's text.
     // Continuations skip them: mid-run context is already shaped.
