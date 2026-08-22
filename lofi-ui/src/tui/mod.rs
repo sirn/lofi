@@ -901,6 +901,11 @@ pub(crate) struct App {
     /// must keep showing the model the in-flight run is actually using.
     run_model_label: Option<String>,
     retry: Option<RetryState>,
+    /// True between the submit-time prompt pre-push and the engine's
+    /// `TurnStart` for it. Gates the dedup in `apply_event` so replayed
+    /// transcripts (where consecutive identical prompts are legal)
+    /// never false-match the pre-pushed turn.
+    pending_prompt_start: bool,
     pinned: bool,
     top_line: usize,
     last_base: usize,
