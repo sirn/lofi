@@ -1,0 +1,186 @@
+//! Image processing for model context. Decode, downscale, and re-encode an
+//! image so the provider payload stays bounded.
+
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, GenericImageView};
+use lofi_error::{Error, Result};
+use lofi_types::ImageConfig;
+
+/// JPEG media type produced by [`normalize`]. Re-encoding always targets JPEG
+/// regardless of the source format, so the output media type is constant.
+pub const OUTPUT_MEDIA_TYPE: &str = "image/jpeg";
+
+/// Quality sweep bounds. Step from 90 down to 40, halving dimensions once
+/// if the lowest quality still overflows.
+const QUALITY_START: u8 = 90;
+const QUALITY_MIN: u8 = 40;
+const QUALITY_STEP: u8 = 10;
+
+/// Normalize an image: decode `bytes`, downscale to fit
+/// `cfg.max_width`×`cfg.max_height` (preserving aspect ratio), and re-encode
+/// as JPEG no larger than `cfg.max_bytes`. Returns the JPEG bytes and
+/// [`OUTPUT_MEDIA_TYPE`].
+///
+/// # Errors
+/// Returns [`Error::Tool`] when `bytes` is not a decodable image in an enabled
+/// format, or when no quality/dimension combination fits `cfg.max_bytes`.
+pub fn normalize(bytes: &[u8], cfg: &ImageConfig) -> Result<(Vec<u8>, String)> {
+    let format = image::guess_format(bytes)
+        .map_err(|e| Error::Tool(format!("unrecognized image format: {e}")))?;
+
+    // Decode under an allocation cap, not the 512 MiB decoder default. The
+    // cap is sized to the output bounding box with 8x headroom: an oversized
+    // input still decodes so it can be downscaled, while a file claiming
+    // pathological dimensions fails before its pixel buffer is committed.
+    let max_alloc = u64::from(cfg.max_width) * u64::from(cfg.max_height) * 4 * 8;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(limits);
+    let img = reader
+        .decode()
+        .map_err(|e| Error::Tool(format!("failed to decode {format:?} image: {e}")))?;
+
+    let mut img = fit_within(&img, cfg.max_width, cfg.max_height);
+
+    // Sweep JPEG quality down; if the floor still overflows, halve the frame
+    // and sweep again.
+    for round in 0..2 {
+        let mut quality = QUALITY_START;
+        loop {
+            let encoded = encode_jpeg(&img, quality)?;
+            if encoded.len() <= cfg.max_bytes {
+                return Ok((encoded, OUTPUT_MEDIA_TYPE.to_string()));
+            }
+            if quality <= QUALITY_MIN {
+                break;
+            }
+            quality = quality.saturating_sub(QUALITY_STEP).max(QUALITY_MIN);
+        }
+        if round == 0 {
+            img = halve(&img);
+        }
+    }
+
+    Err(Error::Tool(format!(
+        "image exceeds {} bytes even after downscaling and re-encoding",
+        cfg.max_bytes
+    )))
+}
+
+/// Downscale `img` to fit within `max_w`×`max_h` preserving aspect ratio.
+/// Returns the original image unchanged when it already fits.
+fn fit_within(img: &DynamicImage, max_w: u32, max_h: u32) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    if w <= max_w && h <= max_h {
+        return img.clone();
+    }
+    // `resize` preserves aspect ratio within the bounding box.
+    img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
+}
+
+fn halve(img: &DynamicImage) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    let nw = (w / 2).max(1);
+    let nh = (h / 2).max(1);
+    img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+}
+
+fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut out);
+    // JPEG has no alpha channel; flatten onto RGB8 first.
+    let rgb = img.to_rgb8();
+    let mut encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
+    encoder
+        .encode_image(&rgb)
+        .map_err(|e| Error::Tool(format!("failed to encode image as JPEG: {e}")))?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+
+    fn write_png(img: &DynamicImage) -> Vec<u8> {
+        let rgb = img.to_rgb8();
+        let (w, h) = rgb.dimensions();
+        let mut out = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut out);
+        image::codecs::png::PngEncoder::new(&mut cursor)
+            .write_image(rgb.as_raw(), w, h, ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let buf: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(w, h, Rgb([200u8, 100, 50]));
+        write_png(&DynamicImage::ImageRgb8(buf))
+    }
+
+    #[test]
+    fn rejects_non_image_bytes() {
+        let r = normalize(b"not an image", &ImageConfig::default());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn small_image_passes_through_as_jpeg() {
+        let png = solid_png(100, 80);
+        let (bytes, media_type) = normalize(&png, &ImageConfig::default()).unwrap();
+        assert_eq!(media_type, OUTPUT_MEDIA_TYPE);
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(img.dimensions(), (100, 80));
+    }
+
+    #[test]
+    fn oversized_image_is_downscaled_to_fit() {
+        let png = solid_png(4000, 3000);
+        let cfg = ImageConfig::default();
+        let (bytes, _) = normalize(&png, &cfg).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap();
+        let (w, h) = img.dimensions();
+        assert!(w <= cfg.max_width && h <= cfg.max_height, "{w}x{h}");
+        // Aspect ratio preserved: 4000x3000 -> 2000x1500.
+        assert_eq!((w, h), (2000, 1500));
+    }
+
+    #[test]
+    fn respects_byte_cap_by_dropping_quality() {
+        // A noisy (high-entropy) frame stays large at high quality, so the
+        // quality sweep must engage to meet a tight byte cap.
+        let mut buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(800, 800);
+        for (x, y, px) in buf.enumerate_pixels_mut() {
+            *px = Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+        }
+        let png = write_png(&DynamicImage::ImageRgb8(buf));
+        let cfg = ImageConfig {
+            max_width: 800,
+            max_height: 800,
+            max_bytes: 64 * 1024,
+        };
+        let (bytes, _) = normalize(&png, &cfg).unwrap();
+        assert!(
+            bytes.len() <= cfg.max_bytes,
+            "{} > {}",
+            bytes.len(),
+            cfg.max_bytes
+        );
+    }
+
+    #[test]
+    fn rejects_pathological_dimensions_before_committing_pixels() {
+        // A PNG whose header claims ~100k x 100k pixels would need ~40 GB
+        // decoded; the capped decode must refuse it rather than allocate.
+        // Forge a minimal valid PNG header with huge IHDR dimensions.
+        let mut png = solid_png(1, 1);
+        // IHDR width is big-endian at bytes 16..20, height at 20..24.
+        png[16..20].copy_from_slice(&100_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&100_000u32.to_be_bytes());
+        let r = normalize(&png, &ImageConfig::default());
+        assert!(r.is_err(), "oversized decode must be rejected");
+    }
+}
