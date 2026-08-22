@@ -105,8 +105,12 @@ fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path
 }
 
 /// Build the `<skills>` index the model reads with `lofi.skill(name)`, listing
-/// each available skill's name and one-line description. Returns `None` when
-/// no skills are installed, so the prompt never carries an empty index.
+/// each available skill's name and a trimmed description. Descriptions are cut
+/// at the first sentence or 160 characters: the index only needs enough to
+/// decide whether to load the skill, and full text is available through
+/// `lofi.skills()`. Locations are omitted because `lofi.skill(name)` resolves
+/// them. Returns `None` when no skills are installed, so the prompt never
+/// carries an empty index.
 fn skills_section(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> Option<String> {
     let skills_dir = config_dir.map(|d| d.join("skills"));
     let summaries =
@@ -121,13 +125,22 @@ fn skills_section(config_dir: Option<&std::path::Path>, root: &std::path::Path) 
         out.push_str("  <skill>\n    <name>");
         out.push_str(&s.name);
         out.push_str("</name>\n    <description>");
-        out.push_str(&s.description);
-        out.push_str("</description>\n    <location>");
-        out.push_str(&s.location);
-        out.push_str("</location>\n  </skill>\n");
+        out.push_str(trim_skill_description(&s.description));
+        out.push_str("</description>\n  </skill>\n");
     }
     out.push_str("</skills>");
     Some(out)
+}
+
+fn trim_skill_description(description: &str) -> &str {
+    let mut end = description
+        .find(". ")
+        .map_or(description.len(), |i| i + 1)
+        .min(160);
+    while !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    description[..end].trim_end()
 }
 
 fn read_agents_md(path: &std::path::Path) -> Option<String> {
@@ -509,7 +522,7 @@ mod tests {
         assert!(prompt.contains("</instruction>"));
         assert!(prompt.contains("<name>git-workflow</name>"));
         assert!(prompt.contains("<description>Standard branching workflow.</description>"));
-        assert!(prompt.contains("<location>"));
+        assert!(!prompt.contains("<location>"));
         assert!(prompt.contains("lofi.skill"));
     }
 
@@ -525,6 +538,23 @@ mod tests {
         // The base prompt references a `<skills>` index in prose; assert the
         // actual index block (which opens on its own line) is absent.
         assert!(!prompt.contains("\n<skills>"));
+    }
+
+    #[test]
+    fn trim_skill_description_cuts_after_first_sentence() {
+        assert_eq!(
+            trim_skill_description("Short summary. A long second sentence to ignore."),
+            "Short summary."
+        );
+        assert_eq!(
+            trim_skill_description("One sentence only"),
+            "One sentence only"
+        );
+        let long = "a".repeat(300);
+        assert_eq!(trim_skill_description(&long).len(), 160);
+        // Multi-byte content past the cut point stays on a char boundary.
+        let unicode = format!("{}€", "a".repeat(159));
+        assert_eq!(trim_skill_description(&unicode).len(), 159);
     }
 
     #[test]
