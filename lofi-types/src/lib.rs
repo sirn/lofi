@@ -1417,6 +1417,27 @@ fn default_retry_max_delay_ms() -> u64 {
     60_000
 }
 
+/// Credential helper (`!cmd` value resolution) limits. The timeout default
+/// is generous for interactive password managers; override it via
+/// `[credential] timeout_ms` or `LOFI__CREDENTIAL__TIMEOUT_MS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialConfig {
+    #[serde(default = "default_credential_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_credential_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for CredentialConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_credential_timeout_ms(),
+        }
+    }
+}
+
 /// Color scheme selection. `Auto` queries the terminal via OSC 11;
 /// `Light` / `Dark` force the corresponding palette without probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1573,6 +1594,8 @@ pub struct Config {
     #[serde(default)]
     pub retry: RetryConfig,
     #[serde(default)]
+    pub credential: CredentialConfig,
+    #[serde(default)]
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
@@ -1590,6 +1613,7 @@ impl Default for Config {
             image: ImageConfig::default(),
             shell_policy: ShellPolicyConfig::default(),
             retry: RetryConfig::default(),
+            credential: CredentialConfig::default(),
             default_provider: None,
             default_model: None,
             providers: IndexMap::new(),
