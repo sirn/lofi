@@ -2901,14 +2901,53 @@ fn session_info_opens_modal() {
     assert!(a.turns.is_empty());
     let info = a.info.as_ref().expect("modal opened");
     assert_eq!(info.title, "Session");
-    let body: String = info
+    let body = info
         .lines
         .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref())
-        .collect();
+        .map(|line| match line {
+            InfoLine::Section(label) => label.clone(),
+            InfoLine::Text(line) => line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+        })
+        .collect::<String>();
     assert!(body.contains("(none)"));
     assert!(body.contains("No session file"));
+}
+
+#[test]
+fn session_info_sections_use_muted_horizontal_rules() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    assert!(a.slash_command("/session"));
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let buffer = term.backend().buffer();
+    let section_y = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Session ─")
+        })
+        .expect("session section row");
+    let label = buffer
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "S" && cell.modifier.contains(Modifier::BOLD))
+        .expect("bold section label");
+    let rule = (0..buffer.area.width)
+        .map(|x| &buffer[(x, section_y)])
+        .find(|cell| cell.symbol() == "─")
+        .expect("section rule");
+
+    assert_eq!(label.fg, a.theme.primary);
+    assert_eq!(rule.fg, a.theme.muted);
 }
 
 #[test]
@@ -2920,12 +2959,18 @@ fn session_info_modal_shows_id_when_path_set() {
     ));
     assert!(a.slash_command("/session"));
     let info = a.info.as_ref().expect("modal opened");
-    let body: String = info
+    let body = info
         .lines
         .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref())
-        .collect();
+        .map(|line| match line {
+            InfoLine::Section(label) => label.clone(),
+            InfoLine::Text(line) => line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+        })
+        .collect::<String>();
     assert!(
         body.contains("abc123"),
         "body should contain the session id: {body}"
