@@ -153,6 +153,7 @@ impl Agent {
             };
             match handle_loop_detection(
                 outcome.loop_detail.as_deref(),
+                outcome.interrupted_thinking_index,
                 &mut loop_recovered,
                 &mut messages,
                 &tx,
@@ -401,9 +402,6 @@ impl Agent {
                     // Latest finished round wins: the recorded reason must be
                     // the round that actually ended the turn.
                     stats.stop_reason = outcome.stop_reason;
-                    // Persist before inspecting the consumer so a completed
-                    // round is on disk even if the UI already went away.
-                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
                     // An explicit interrupt wins races against both a normal
                     // terminal response and queued-prompt preemption. A native
                     // tool can observe cancellation, settle its process group,
@@ -416,14 +414,19 @@ impl Agent {
                         cancelled = true;
                         break;
                     }
-                    match handle_loop_detection(
+                    let loop_action = handle_loop_detection(
                         outcome.loop_detail.as_deref(),
+                        outcome.interrupted_thinking_index,
                         &mut loop_recovered,
                         messages,
                         &tx,
                     )
-                    .await
-                    {
+                    .await;
+                    // Loop handling can replace an interrupted, unsigned
+                    // reasoning message with a provider-valid recovery prompt.
+                    // Persist only after that correction reaches its final form.
+                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
+                    match loop_action {
                         LoopAction::Continue => continue,
                         LoopAction::Stop => {
                             if tx.is_closed() {
@@ -1115,6 +1118,7 @@ impl Agent {
                 finished: true,
                 stop_reason: round_stop_reason,
                 announced_tool_intent,
+                interrupted_thinking_index: round_loop_detail.as_ref().map(|_| assistant_index),
                 loop_detail: round_loop_detail,
             });
         }
@@ -1206,6 +1210,7 @@ impl Agent {
             stop_reason: round_stop_reason,
             announced_tool_intent: false,
             loop_detail: round_loop_detail.or(tool_loop_detail),
+            interrupted_thinking_index: None,
         })
     }
 
@@ -1524,6 +1529,7 @@ struct RoundOutcome {
     stop_reason: Option<lofi_types::StopReason>,
     announced_tool_intent: bool,
     loop_detail: Option<String>,
+    interrupted_thinking_index: Option<usize>,
 }
 
 fn tool_round_fingerprint(assistant: &Message, result: &Message) -> String {
@@ -1572,6 +1578,7 @@ enum LoopAction {
 
 async fn handle_loop_detection(
     detail: Option<&str>,
+    interrupted_thinking_index: Option<usize>,
     recovered: &mut bool,
     messages: &mut Vec<Message>,
     tx: &Sender<AgentEvent>,
@@ -1579,6 +1586,9 @@ async fn handle_loop_detection(
     let Some(detail) = detail else {
         return LoopAction::None;
     };
+    if let Some(index) = interrupted_thinking_index {
+        messages.remove(index);
+    }
     if *recovered {
         let _ = emit(
             Some(tx),
