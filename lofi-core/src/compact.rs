@@ -653,11 +653,10 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
     ];
     fn has_signal_near_start(lower: &str) -> bool {
         const MAX_PREFIX: usize = 60;
-        let prefix = if lower.len() > MAX_PREFIX {
-            &lower[..MAX_PREFIX]
-        } else {
-            lower
-        };
+        let prefix = lower
+            .char_indices()
+            .nth(MAX_PREFIX)
+            .map_or(lower, |(end, _)| &lower[..end]);
         SIGNALS.iter().any(|s| prefix.contains(s))
     }
     let mut out: Vec<String> = Vec::new();
@@ -1709,6 +1708,15 @@ mod tests {
         let prefs = extract_preferences(&blocks);
         assert!(prefs.iter().all(|p| !p.contains("openai provider")));
         assert!(prefs.iter().any(|p| p.contains("2-space indentation")));
+    }
+
+    #[test]
+    fn extract_preferences_handles_multibyte_prefix() {
+        let blocks = vec![CompactBlock::User {
+            text: format!("please {}", "グ".repeat(30)),
+        }];
+        let prefs = extract_preferences(&blocks);
+        assert_eq!(prefs, vec![format!("please {}", "グ".repeat(30))]);
     }
 
     #[test]
