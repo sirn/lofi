@@ -162,6 +162,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
+        auto_continue: lofi_types::AutoContinuePolicy::default(),
     }
 }
 
@@ -790,6 +791,216 @@ async fn clean_end_turn_does_not_continue() {
 }
 
 #[tokio::test]
+async fn tool_stop_without_a_tool_call_continues_by_default() {
+    let dir = tempdir().unwrap();
+    let lost = vec![
+        StreamingEvent::TextDelta("I will inspect it now.".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("done".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![lost, final_round], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let notices: Vec<_> = messages
+        .iter()
+        .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+        .collect();
+    assert_eq!(notices.len(), 1);
+    let ContentBlock::Text { text } = &notices[0].blocks[0] else {
+        panic!("expected notice text");
+    };
+    assert!(text.contains("tool call was not received"), "{text}");
+}
+
+#[tokio::test]
+async fn tool_stop_recovery_can_be_disabled() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![vec![StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        }]],
+        dir.path(),
+    )
+    .with_auto_continue(lofi_types::AutoContinuePolicy {
+        lost_tool_call: false,
+        intent: false,
+    });
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(messages
+        .iter()
+        .all(|message| message.kind != lofi_types::PromptKind::Notice));
+}
+
+#[tokio::test]
+async fn clean_stop_intent_continues_only_when_enabled() {
+    let dir = tempdir().unwrap();
+    let intent = vec![
+        StreamingEvent::TextDelta("I found the likely cause.\n\nNext, I'll run the tests.".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("done".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![intent, final_round], dir.path()).with_auto_continue(
+        lofi_types::AutoContinuePolicy {
+            lost_tool_call: true,
+            intent: true,
+        },
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn intent_recovery_is_disabled_by_default() {
+    assert!(!lofi_types::AutoContinuePolicy::default().intent);
+    let message = Message {
+        role: Role::Assistant,
+        blocks: vec![ContentBlock::Text {
+            text: "I'll run the tests next.".into(),
+        }],
+        kind: lofi_types::PromptKind::User,
+    };
+    assert!(assistant_announces_tool_intent(&message));
+}
+
+#[test]
+fn intent_detector_is_bounded_to_immediate_tool_actions() {
+    let message = |text: &str| Message {
+        role: Role::Assistant,
+        blocks: vec![ContentBlock::Text { text: text.into() }],
+        kind: lofi_types::PromptKind::User,
+    };
+    for positive in [
+        "Let me inspect the repository.",
+        "I’ll run the tests next.",
+        "I am going to check the logs.",
+        "I found it.\n\nNext, I'll load the ticket.",
+        "I'll verify that now.",
+    ] {
+        assert!(
+            assistant_announces_tool_intent(&message(positive)),
+            "{positive}"
+        );
+    }
+    for negative in [
+        "Let me know if you need anything else.",
+        "You can run the tests.",
+        "I can inspect it if you want.",
+        "I will not change that.",
+        "The next step is to run the tests.",
+        "I inspected the repository and fixed the issue.",
+    ] {
+        assert!(
+            !assistant_announces_tool_intent(&message(negative)),
+            "{negative}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn truncation_and_lost_tool_recovery_share_one_budget() {
+    let dir = tempdir().unwrap();
+    let truncated = vec![StreamingEvent::Done {
+        usage: Usage::default(),
+        stop_reason: Some(lofi_types::StopReason::MaxTokens),
+    }];
+    let lost_tool = vec![StreamingEvent::Done {
+        usage: Usage::default(),
+        stop_reason: Some(lofi_types::StopReason::ToolUse),
+    }];
+    let agent = agent_with(vec![truncated, lost_tool], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
     let dir = tempdir().unwrap();
     let cut_round = vec![
@@ -1238,6 +1449,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
+        auto_continue: lofi_types::AutoContinuePolicy::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -1309,6 +1521,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         jobs: lofi_code::tools::JobRegistry::new(),
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
+        auto_continue: lofi_types::AutoContinuePolicy::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
@@ -1614,6 +1827,7 @@ fn mc() -> ModelConfig {
         thinking_level: None,
         service_tiers: Vec::new(),
         service_tier: None,
+        auto_continue: lofi_types::AutoContinueConfig::default(),
         base_url: None,
         input_price: None,
         output_price: None,
@@ -1686,6 +1900,7 @@ fn provider(
         thinking_levels: Vec::new(),
         service_tier: None,
         service_tiers: Vec::new(),
+        auto_continue: lofi_types::AutoContinueConfig::default(),
     }
 }
 
