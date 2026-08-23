@@ -56,8 +56,13 @@ impl LoopDetector {
         let prefix_matches = z_array(&reversed);
         let max_period =
             (reversed.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
-        for period in THINKING_LOOP_MIN_BYTES..=max_period {
-            if prefix_matches[period] >= period * (THINKING_LOOP_REPETITIONS - 1) {
+        for (period, prefix_match) in prefix_matches
+            .iter()
+            .enumerate()
+            .take(max_period + 1)
+            .skip(THINKING_LOOP_MIN_BYTES)
+        {
+            if *prefix_match >= period * (THINKING_LOOP_REPETITIONS - 1) {
                 return Some(format!(
                     "repeated thinking pattern detected ({period} bytes repeated {THINKING_LOOP_REPETITIONS} times)"
                 ));
