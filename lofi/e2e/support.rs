@@ -118,6 +118,11 @@ impl MockResponse {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
+
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
 }
 
 pub struct MockServer {
