@@ -392,10 +392,16 @@ struct PickerState {
 #[derive(Debug, Clone)]
 struct InfoModal {
     title: String,
-    lines: Vec<Line<'static>>,
+    lines: Vec<InfoLine>,
     scroll: usize,
     total: usize,
     view_h: usize,
+}
+
+#[derive(Debug, Clone)]
+enum InfoLine {
+    Section(String),
+    Text(Line<'static>),
 }
 
 impl InfoModal {
@@ -420,29 +426,29 @@ impl InfoModal {
     }
 }
 
-fn info_section(t: Theme, label: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        label.to_string(),
-        Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-    ))
+fn info_section(label: &str) -> InfoLine {
+    InfoLine::Section(label.to_string())
 }
 
 /// `key  value` row: key bold in `fg`, value muted, key padded to a fixed
 /// column so the values line up. Longer keys just overflow the column.
-fn info_kv(t: Theme, key: &str, value: &str) -> Line<'static> {
+fn info_kv(t: Theme, key: &str, value: &str) -> InfoLine {
     const COL: usize = 12;
     let pad = COL.saturating_sub(key.chars().count());
-    Line::from(vec![
+    InfoLine::Text(Line::from(vec![
         Span::styled(
             format!("{}{}", key, " ".repeat(pad)),
             Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::new().fg(t.muted)),
-    ])
+    ]))
 }
 
-fn info_note(t: Theme, text: &str) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), Style::new().fg(t.muted)))
+fn info_note(t: Theme, text: &str) -> InfoLine {
+    InfoLine::Text(Line::from(Span::styled(
+        text.to_string(),
+        Style::new().fg(t.muted),
+    )))
 }
 
 fn format_bytes(n: u64) -> String {
