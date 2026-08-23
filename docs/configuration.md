@@ -135,8 +135,15 @@ The settings are resolved field by field in this order:
 3. `[providers.<name>.auto_continue]`.
 4. The static model override, when present.
 
-Auto-discovered models use the provider policy. Remote model metadata does not
-currently set per-model continuation policy.
+Auto-discovered models use the provider policy by default. A model entry from
+the remote endpoint can override it with an `auto_continue` object:
+
+```json
+{"id":"broken-template","auto_continue":{"intent":true}}
+```
+
+Remote values use the same fields as static model configuration. Explicit
+static model values take precedence over remote values.
 
 `lost_tool_call` recovers a protocol contradiction: the provider reports a
 tool-use stop but sends no tool call. Its built-in default is `true`.
