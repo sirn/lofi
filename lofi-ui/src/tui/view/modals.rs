@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::{JobViewContent, Theme};
+use crate::tui::{InfoLine, JobViewContent, Theme};
 
 use ratatui::style::Color;
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
@@ -354,10 +354,24 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn wrap_info_lines_styled(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+fn render_info_lines(lines: &[InfoLine], width: usize, t: Theme) -> Vec<Line<'static>> {
+    let section_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
+    let rule_style = Style::new().fg(t.subtle);
     let mut out = Vec::new();
-    for l in lines {
-        out.extend(prim::wrap_line_styled(l, width));
+    for line in lines {
+        match line {
+            InfoLine::Section(label) => {
+                let label_width = prim::width(label);
+                let rule_width = width.saturating_sub(label_width.saturating_add(1));
+                let mut spans = vec![Span::styled(label.clone(), section_style)];
+                if rule_width > 0 {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled("─".repeat(rule_width), rule_style));
+                }
+                out.push(Line::from(spans));
+            }
+            InfoLine::Text(line) => out.extend(prim::wrap_line_styled(line, width)),
+        }
     }
     out
 }
@@ -376,18 +390,20 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     // whitespace and styles) so the row count for the scrollbar and the
     // rendered output agree exactly.
     let max_w = area.width.saturating_sub(4) as usize;
-    let line_w = |l: &Line| {
-        l.spans
+    let line_w = |line: &InfoLine| match line {
+        InfoLine::Section(label) => prim::width(label),
+        InfoLine::Text(line) => line
+            .spans
             .iter()
-            .map(|s| prim::width(s.content.as_ref()))
-            .sum::<usize>()
+            .map(|span| prim::width(span.content.as_ref()))
+            .sum::<usize>(),
     };
     let max_body = info.lines.iter().map(line_w).max().unwrap_or(0);
     let inner_w = max_body.min(max_w).max(prim::width(&title));
     let max_body_h = (area.height as usize).saturating_sub(4);
-    let need_sb = wrap_info_lines_styled(&info.lines, inner_w.max(1)).len() > max_body_h;
+    let need_sb = render_info_lines(&info.lines, inner_w.max(1), t).len() > max_body_h;
     let body_w = inner_w;
-    let wrapped = wrap_info_lines_styled(&info.lines, body_w);
+    let wrapped = render_info_lines(&info.lines, body_w, t);
     let total = wrapped.len();
     let view_h = total.min(max_body_h);
     let desired_frame_h = u16::try_from(view_h + 4).unwrap_or(12);
