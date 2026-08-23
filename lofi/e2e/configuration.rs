@@ -155,8 +155,13 @@ context_window = "context_length"
 }
 
 #[test]
-fn discovered_model_inherits_intent_recovery_from_provider_config() {
-    let models = serde_json::json!({ "data": [{ "id": "broken-template" }] });
+fn discovered_model_uses_intent_recovery_from_remote_metadata() {
+    let models = serde_json::json!({
+        "data": [{
+            "id": "broken-template",
+            "auto_continue": {"intent": true}
+        }]
+    });
     let server = MockServer::start(vec![
         MockResponse::json(&models),
         stop_text_response("I will run the tests next."),
@@ -179,8 +184,6 @@ models_url = "{}/models"
 auth = false
 ttl_seconds = 3600
 
-[providers.auto-recovery.auto_continue]
-intent = true
 "#,
             server.url(),
             server.url()

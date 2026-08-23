@@ -73,6 +73,12 @@ fn fill_missing(dst: &mut ModelConfig, src: &ModelConfig) {
     if dst.service_tier.is_none() {
         dst.service_tier.clone_from(&src.service_tier);
     }
+    if dst.auto_continue.lost_tool_call.is_none() {
+        dst.auto_continue.lost_tool_call = src.auto_continue.lost_tool_call;
+    }
+    if dst.auto_continue.intent.is_none() {
+        dst.auto_continue.intent = src.auto_continue.intent;
+    }
     if dst.base_url.is_none() {
         dst.base_url.clone_from(&src.base_url);
     }
@@ -207,6 +213,11 @@ pub(super) fn parse_auto_models(
         let cache_read_price = price(&fields.cache_read);
         let cache_write_price = price(&fields.cache_write);
         let per_request_price = price(&fields.per_request);
+        let auto_continue = entry
+            .get("auto_continue")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
         let supported_params = entry.get("supported_parameters").and_then(Value::as_array);
         let supports_reasoning =
             supported_params.is_some_and(|a| a.iter().any(|p| p.as_str() == Some("reasoning")));
@@ -237,7 +248,7 @@ pub(super) fn parse_auto_models(
                 thinking_level: am.thinking_level.clone(),
                 service_tiers: am.service_tiers.clone(),
                 service_tier: am.service_tier.clone(),
-                auto_continue: lofi_types::AutoContinueConfig::default(),
+                auto_continue,
                 base_url: Some(base_url),
                 input_price,
                 output_price,

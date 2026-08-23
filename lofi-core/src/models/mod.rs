@@ -667,7 +667,12 @@ mod tests {
     fn parse_auto_models_maps_id_name_and_api_override() {
         let payload = serde_json::json!({
             "data": [
-                {"id": "remote-1", "name": "Remote One", "preferred_api": "messages"},
+                {
+                    "id": "remote-1",
+                    "name": "Remote One",
+                    "preferred_api": "messages",
+                    "auto_continue": {"intent": true}
+                },
             ]
         });
         let mut p = pcfg(Api::OpenAiCompletions, IndexMap::new());
@@ -698,6 +703,7 @@ mod tests {
         assert_eq!(models[0].1.name.as_deref(), Some("Remote One"));
         assert_eq!(models[0].1.api_type.as_deref(), Some("anthropic-messages"));
         assert_eq!(models[0].1.thinking_levels, vec![ThinkingLevel::Medium]);
+        assert_eq!(models[0].1.auto_continue.intent, Some(true));
         assert!(models[0].1.reasoning.unwrap_or(false));
         assert_eq!(
             models[0].1.base_url.as_deref(),
