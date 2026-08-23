@@ -28,6 +28,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+lofi-providers = { workspace = true }
+nix = { workspace = true, features = ["process", "term", "ioctl"] }
 tempfile = { workspace = true }
 
 [lints]
