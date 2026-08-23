@@ -645,6 +645,164 @@ async fn completed_final_round_is_on_disk_before_turn_end() {
 }
 
 #[tokio::test]
+async fn repeated_tool_results_notify_after_pairing_and_recover_once() {
+    let dir = tempdir().unwrap();
+    let tool_round = |id: usize| {
+        vec![
+            StreamingEvent::ToolUseStart {
+                id: format!("t{id}"),
+                name: "exec".into(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: format!("t{id}"),
+                delta: serde_json::json!({ "code": "return 1" }).to_string(),
+            },
+            StreamingEvent::ToolUseEnd {
+                id: format!("t{id}"),
+            },
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: Some(lofi_types::StopReason::ToolUse),
+            },
+        ]
+    };
+    let mut rounds: Vec<_> = (0..5).map(tool_round).collect();
+    rounds.push(vec![
+        StreamingEvent::TextDelta("changed approach".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ]);
+    let agent = agent_with(rounds, dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(128);
+    let mut messages = Vec::new();
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let Some(notice_index) = messages
+        .iter()
+        .position(|message| message.kind == lofi_types::PromptKind::Notice)
+    else {
+        panic!("missing loop notice");
+    };
+    assert_eq!(messages[notice_index - 1].role, Role::Tool);
+    assert_eq!(messages[notice_index + 1].role, Role::Assistant);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .count(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn repeated_thinking_notifies_agent_and_allows_one_recovery() {
+    let dir = tempdir().unwrap();
+    let pattern = "abcdefghij".repeat(10);
+    let looping = vec![StreamingEvent::ThinkingDelta(pattern.repeat(3))];
+    let final_round = vec![
+        StreamingEvent::TextDelta("changed approach".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![looping, final_round], dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let notices: Vec<_> = messages
+        .iter()
+        .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(messages[1].role, Role::User);
+    assert_eq!(messages[2].role, Role::Assistant);
+    let ContentBlock::Text { text } = &notices[0].blocks[0] else {
+        panic!("expected notice text");
+    };
+    assert!(text.contains("different concrete action"), "{text}");
+    let mut saw_loop_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::Notice(text) if text.contains("potential agent loop")) {
+            saw_loop_notice = true;
+        }
+    }
+    assert!(saw_loop_notice);
+}
+
+#[tokio::test]
+async fn repeated_thinking_stops_after_failed_recovery() {
+    let dir = tempdir().unwrap();
+    let pattern = "abcdefghij".repeat(10);
+    let looping = || vec![StreamingEvent::ThinkingDelta(pattern.repeat(3))];
+    let agent = agent_with(vec![looping(), looping(), looping()], dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+            .count(),
+        1
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count(),
+        0
+    );
+    let mut saw_stop_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::Notice(text) if text.contains("recovery failed")) {
+            saw_stop_notice = true;
+        }
+    }
+    assert!(saw_stop_notice);
+}
+
+#[tokio::test]
 async fn max_tokens_stop_continues_the_turn_once() {
     let dir = tempdir().unwrap();
     let truncated = vec![
