@@ -1,8 +1,9 @@
 use crate::support::{
-    anthropic_usage_response, eof_cut_responses_response, event_types,
-    google_thinking_usage_response, lost_tool_response, responses_response, text_response,
-    thinking_response, tool_response, transcript_text, wait_for_process_exit, Fixture,
-    MockResponse, MockServer, ProcessGuard, WAIT,
+    anthropic_text_response, anthropic_tool_response, anthropic_usage_response,
+    eof_cut_responses_response, event_types, google_text_response, google_thinking_usage_response,
+    google_tool_response, lost_tool_response, responses_response, responses_tool_response,
+    text_response, thinking_response, tool_response, transcript_text, wait_for_process_exit,
+    Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -303,6 +304,111 @@ fn repeated_thinking_stops_after_failed_recovery_for_all_api_types() {
         assert!(!transcript.contains("discarded first loop answer"), "{api}");
         assert!(
             !transcript.contains("discarded second loop answer"),
+            "{api}"
+        );
+    }
+}
+
+type ToolResponse = fn(&str, &str) -> MockResponse;
+type TextResponse = fn(&str) -> MockResponse;
+
+fn tool_loop_api_cases() -> [(&'static str, &'static str, ToolResponse, TextResponse); 4] {
+    [
+        (
+            "OpenAI Completions",
+            "mock/chat",
+            tool_response,
+            text_response,
+        ),
+        (
+            "OpenAI Responses",
+            "responses/reasoning",
+            responses_tool_response,
+            |text| responses_response("different reasoning", text),
+        ),
+        (
+            "Anthropic Messages",
+            "anthropic/tools",
+            anthropic_tool_response,
+            anthropic_text_response,
+        ),
+        (
+            "Google Generative AI",
+            "google/tools",
+            google_tool_response,
+            google_text_response,
+        ),
+    ]
+}
+
+#[test]
+fn repeated_tool_results_notify_and_recover_once_for_all_api_types() {
+    for (api, model, tool, text) in tool_loop_api_cases() {
+        let mut responses = (0..5)
+            .map(|index| tool(&format!("loop-call-{index}"), "return 1"))
+            .collect::<Vec<_>>();
+        responses.push(
+            text("tool loop recovery answer marker")
+                .with_delay(std::time::Duration::from_millis(500)),
+        );
+        let server = MockServer::start(responses);
+        let fixture = Fixture::new(&server);
+        let mut tui = fixture.spawn(&["--model", model]);
+
+        tui.submit("tool loop recovery prompt marker");
+        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("tool loop recovery answer marker", WAIT);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 6, "{api}");
+        assert!(
+            requests[5]
+                .body
+                .contains("repeated tool-result cycle detected"),
+            "{api}"
+        );
+        let transcript = transcript_text(&fixture.events());
+        assert!(
+            transcript.contains("A potential loop was detected"),
+            "{api}"
+        );
+        assert!(
+            transcript.contains("tool loop recovery answer marker"),
+            "{api}"
+        );
+    }
+}
+
+#[test]
+fn repeated_tool_results_stop_after_failed_recovery_for_all_api_types() {
+    for (api, model, tool, _) in tool_loop_api_cases() {
+        let responses = (0..6)
+            .map(|index| {
+                let response = tool(&format!("loop-call-{index}"), "return 1");
+                if index == 5 {
+                    response.with_delay(std::time::Duration::from_millis(500))
+                } else {
+                    response
+                }
+            })
+            .collect::<Vec<_>>();
+        let server = MockServer::start(responses);
+        let fixture = Fixture::new(&server);
+        let mut tui = fixture.spawn(&["--model", model]);
+
+        tui.submit("failed tool loop recovery prompt marker");
+        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("agent stopped after loop recovery failed", WAIT);
+
+        assert_eq!(server.request_count(), 6, "{api}");
+        assert!(
+            event_types(&fixture.events()).contains(&"turn_end"),
+            "{api}"
+        );
+        let transcript = transcript_text(&fixture.events());
+        assert_eq!(
+            transcript.matches("A potential loop was detected").count(),
+            1,
             "{api}"
         );
     }
