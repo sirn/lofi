@@ -620,20 +620,16 @@ fn extract_session_goal(blocks: &[CompactBlock]) -> Vec<String> {
     }
     keep.sort_unstable();
     for &i in &keep {
-        let clipped = clip(prompts[i], 200);
-        let key = clipped.to_lowercase();
+        let summarized = summarize_prompt(prompts[i], 200);
+        let key = summarized.to_lowercase();
         if seen.insert(key) {
-            out.push(clipped);
+            out.push(summarized);
         }
     }
     out
 }
 
-/// User Preferences: user lines that read as a directive.
-/// Signal keywords must appear near the start of a clause (first 60 chars
-/// of a line/sentence) to avoid matching incidental questions like "can
-/// you use the openai provider?". Questions (lines ending in '?') are
-/// excluded entirely.
+/// User Preferences: user clauses that read as a directive.
 fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
     const SIGNALS: &[&str] = &[
         "prefer",
@@ -665,16 +661,18 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         let CompactBlock::User { text } = b else {
             continue;
         };
-        let trimmed = text.trim();
-        if trimmed.ends_with('?') {
+        let directives = prompt_units(text)
+            .into_iter()
+            .filter(|unit| {
+                !unit.trim_end().ends_with('?')
+                    && has_signal_near_start(&unit.to_lowercase())
+            })
+            .collect::<Vec<_>>();
+        if directives.is_empty() {
             continue;
         }
-        let lower = trimmed.to_lowercase();
-        if !has_signal_near_start(&lower) {
-            continue;
-        }
-        let line = clip(trimmed, 160);
-        if line.len() < 8 {
+        let line = summarize_units(&directives, 160);
+        if line.chars().count() < 8 {
             continue;
         }
         let key = line.to_lowercase();
@@ -686,6 +684,241 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         }
     }
     out
+}
+
+#[derive(Debug)]
+struct SummaryUnit {
+    text: String,
+    position: usize,
+    salience: f64,
+}
+
+/// Produce a deterministic extractive summary. Units retain their source
+/// text, so compaction cannot rewrite paths, identifiers, numbers, or negation.
+fn summarize_prompt(text: &str, max: usize) -> String {
+    summarize_units(&prompt_units(text), max)
+}
+
+fn summarize_units(units: &[String], max: usize) -> String {
+    if units.is_empty() || max == 0 {
+        return String::new();
+    }
+    let frequencies = term_frequencies(units);
+    let last = units.len().saturating_sub(1);
+    let candidates = units
+        .iter()
+        .enumerate()
+        .map(|(position, text)| SummaryUnit {
+            text: text.clone(),
+            position,
+            salience: unit_salience(text, position, last, &frequencies),
+        })
+        .collect::<Vec<_>>();
+    let max_salience = candidates
+        .iter()
+        .map(|candidate| candidate.salience)
+        .fold(1.0_f64, f64::max);
+
+    let mut selected = Vec::<usize>::new();
+    let mut used = 0;
+    while selected.len() < 3 {
+        let mut best: Option<(usize, f64)> = None;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if selected.contains(&index) {
+                continue;
+            }
+            let separator = usize::from(!selected.is_empty()) * 2;
+            let size = candidate.text.chars().count() + separator;
+            if used + size > max {
+                continue;
+            }
+            let relevance = candidate.salience / max_salience;
+            if !selected.is_empty() && relevance < 0.3 {
+                continue;
+            }
+            let redundancy = selected
+                .iter()
+                .map(|&chosen| ngram_similarity(&candidate.text, &candidates[chosen].text))
+                .fold(0.0_f64, f64::max);
+            let mmr = 0.75 * relevance - 0.25 * redundancy;
+            let replace = best.is_none_or(|(best_index, best_score)| {
+                mmr.total_cmp(&best_score).is_gt()
+                    || (mmr.total_cmp(&best_score).is_eq()
+                        && candidate.position < candidates[best_index].position)
+            });
+            if replace {
+                best = Some((index, mmr));
+            }
+        }
+        let Some((index, _)) = best else {
+            break;
+        };
+        used += candidates[index].text.chars().count() + usize::from(!selected.is_empty()) * 2;
+        selected.push(index);
+    }
+
+    if selected.is_empty() {
+        let best = candidates
+            .iter()
+            .max_by(|left, right| {
+                left.salience
+                    .total_cmp(&right.salience)
+                    .then_with(|| right.position.cmp(&left.position))
+            })
+            .expect("non-empty candidates");
+        return clip(&best.text, max);
+    }
+    selected.sort_by_key(|&index| candidates[index].position);
+    selected
+        .into_iter()
+        .map(|index| candidates[index].text.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn prompt_units(text: &str) -> Vec<String> {
+    let mut units = Vec::new();
+    let mut current = String::new();
+    for ch in text.trim().chars() {
+        current.push(ch);
+        if matches!(ch, '\n' | '.' | '?' | '!' | ';' | '。' | '？' | '！' | '；') {
+            push_prompt_unit(&mut units, &mut current);
+        }
+    }
+    push_prompt_unit(&mut units, &mut current);
+
+    let mut split = Vec::new();
+    for unit in units {
+        if unit.chars().count() <= 100 {
+            split.push(unit);
+            continue;
+        }
+        let mut current = String::new();
+        for ch in unit.chars() {
+            current.push(ch);
+            if matches!(ch, ',' | '，') && current.chars().count() >= 30 {
+                push_prompt_unit(&mut split, &mut current);
+            }
+        }
+        push_prompt_unit(&mut split, &mut current);
+    }
+    split
+}
+
+fn push_prompt_unit(units: &mut Vec<String>, current: &mut String) {
+    let unit = current
+        .trim()
+        .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '•'))
+        .trim();
+    if !unit.is_empty() {
+        units.push(unit.to_string());
+    }
+    current.clear();
+}
+
+fn term_frequencies(units: &[String]) -> std::collections::HashMap<String, usize> {
+    let mut frequencies = std::collections::HashMap::new();
+    for unit in units {
+        for term in content_terms(unit) {
+            *frequencies.entry(term).or_default() += 1;
+        }
+    }
+    frequencies
+}
+
+fn content_terms(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .filter(|term| term.chars().count() > 2)
+        .map(str::to_lowercase)
+}
+
+fn unit_salience(
+    text: &str,
+    position: usize,
+    last: usize,
+    frequencies: &std::collections::HashMap<String, usize>,
+) -> f64 {
+    const DIRECTIVES: &[&str] = &[
+        "please",
+        "prefer",
+        "do not",
+        "don't",
+        "must",
+        "should",
+        "make sure",
+        "avoid",
+        "implement",
+        "add ",
+        "fix ",
+        "remove",
+        "use ",
+        "keep ",
+        "look up",
+        "inspect",
+    ];
+    const REQUESTS: &[&str] = &[
+        "can you",
+        "could you",
+        "would you",
+        "will you",
+        "how ",
+        "what ",
+        "why ",
+    ];
+    const FILLER: &[&str] = &[
+        "thanks",
+        "thank you",
+        "hello",
+        "hi ",
+        "for context",
+        "background:",
+    ];
+
+    let lower = text.to_lowercase();
+    let directive = DIRECTIVES.iter().any(|signal| lower.contains(signal));
+    let request = REQUESTS.iter().any(|signal| lower.starts_with(signal));
+    let protected = usize::from(text.contains("://") || text.contains('/') || text.contains('`'))
+        + usize::from(text.chars().any(|ch| ch.is_ascii_digit()))
+        + usize::from(text.split_whitespace().any(|word| word.contains('_')));
+    let repeated = content_terms(text)
+        .collect::<std::collections::HashSet<_>>()
+        .iter()
+        .filter_map(|term| frequencies.get(term))
+        .filter(|&&count| count > 1)
+        .count();
+
+    1.0 + if directive { 3.0 } else { 0.0 }
+        + if request { 2.0 } else { 0.0 }
+        + if position == 0 { 1.0 } else { 0.0 }
+        + if position == last { 1.5 } else { 0.0 }
+        + (protected.min(2) as f64 * 1.5)
+        + (repeated.min(3) as f64 * 0.5)
+        - if FILLER.iter().any(|prefix| lower.starts_with(prefix)) {
+            1.5
+        } else {
+            0.0
+        }
+}
+
+fn ngram_similarity(left: &str, right: &str) -> f64 {
+    fn ngrams(text: &str) -> std::collections::HashSet<String> {
+        let chars = text.to_lowercase().chars().collect::<Vec<_>>();
+        if chars.len() < 3 {
+            return [chars.into_iter().collect()].into_iter().collect();
+        }
+        chars
+            .windows(3)
+            .map(|window| window.iter().collect())
+            .collect()
+    }
+    let left = ngrams(left);
+    let right = ngrams(right);
+    let union = left.union(&right).count();
+    if union == 0 {
+        0.0
+    } else {
+        left.intersection(&right).count() as f64 / union as f64
+    }
 }
 
 fn extract_files(blocks: &[CompactBlock]) -> Vec<String> {
