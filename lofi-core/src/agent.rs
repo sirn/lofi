@@ -35,6 +35,8 @@ pub struct ConfirmRequest {
 }
 
 mod agent_run;
+#[cfg(test)]
+use agent_run::assistant_announces_tool_intent;
 mod auto_mode;
 mod event;
 mod exec;
@@ -76,6 +78,8 @@ const PER_EVENT_OVERHEAD: usize = 64;
 /// token-limit stop, nudging the model to pick up where it was cut off.
 const TRUNCATION_CONTINUATION_PROMPT: &str =
     "Your previous response was cut off at the token limit. Continue where you left off.";
+const LOST_TOOL_CONTINUATION_PROMPT: &str = "Your tool call was not received. Continue the task by issuing the required tool call again. If no tool call is required, give the final answer.";
+const INTENT_CONTINUATION_PROMPT: &str = "Continue the task now. If the task is already complete, give the final answer. Do not only describe the next action.";
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -184,6 +188,7 @@ pub struct Agent {
     shell_policy: ResolvedPolicy,
     truncate: lofi_code::TruncatedCap,
     image: lofi_types::ImageConfig,
+    auto_continue: lofi_types::AutoContinuePolicy,
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
@@ -235,6 +240,7 @@ impl Agent {
             shell_policy,
             truncate,
             image,
+            auto_continue: lofi_types::AutoContinuePolicy::default(),
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
@@ -267,6 +273,7 @@ impl Agent {
             shell_policy: self.shell_policy.clone(),
             truncate: self.truncate,
             image: self.image,
+            auto_continue: self.auto_continue,
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
@@ -298,6 +305,7 @@ impl Agent {
             jobs: self.jobs.clone(),
             truncate: self.truncate,
             image: self.image,
+            auto_continue: self.auto_continue,
         }
     }
 
@@ -323,6 +331,7 @@ impl Agent {
             jobs: self.jobs.clone(),
             truncate: self.truncate,
             image: self.image,
+            auto_continue: self.auto_continue,
         }
     }
 
@@ -411,6 +420,12 @@ impl Agent {
     #[must_use]
     pub fn with_retry(mut self, retry: crate::retry::RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    #[must_use]
+    pub fn with_auto_continue(mut self, policy: lofi_types::AutoContinuePolicy) -> Self {
+        self.auto_continue = policy;
         self
     }
 

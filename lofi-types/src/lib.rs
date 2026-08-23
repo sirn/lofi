@@ -880,6 +880,8 @@ pub struct ModelConfig {
     #[serde(default)]
     pub service_tier: Option<ServiceTier>,
     #[serde(default)]
+    pub auto_continue: AutoContinueConfig,
+    #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
     pub input_price: Option<f64>,
@@ -1062,6 +1064,8 @@ pub struct ProviderConfig {
     pub service_tier: Option<ServiceTier>,
     #[serde(default)]
     pub service_tiers: Vec<ServiceTier>,
+    #[serde(default)]
+    pub auto_continue: AutoContinueConfig,
 }
 
 impl ProviderConfig {
@@ -1113,6 +1117,52 @@ pub struct AgentConfig {
     pub service_tier: Option<ServiceTier>,
     #[serde(default)]
     pub service_tiers: Vec<ServiceTier>,
+    #[serde(default)]
+    pub auto_continue: AutoContinueConfig,
+}
+
+/// Partial auto-continuation policy. Each configured level overlays the
+/// preceding global or provider level field by field. Static models can add
+/// one final override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AutoContinueConfig {
+    /// Recover when the provider reports a tool stop but emits no tool call.
+    #[serde(default)]
+    pub lost_tool_call: Option<bool>,
+    /// Recover a clean stop whose final sentence announces an immediate tool action.
+    #[serde(default)]
+    pub intent: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoContinuePolicy {
+    pub lost_tool_call: bool,
+    pub intent: bool,
+}
+
+impl Default for AutoContinuePolicy {
+    fn default() -> Self {
+        Self {
+            lost_tool_call: true,
+            intent: false,
+        }
+    }
+}
+
+impl AutoContinuePolicy {
+    #[must_use]
+    pub fn resolve(configs: &[AutoContinueConfig]) -> Self {
+        let mut policy = Self::default();
+        for config in configs {
+            if let Some(enabled) = config.lost_tool_call {
+                policy.lost_tool_call = enabled;
+            }
+            if let Some(enabled) = config.intent {
+                policy.intent = enabled;
+            }
+        }
+        policy
+    }
 }
 
 /// The optional `[compaction.auto]` **soft caps** are speculative: a run may
@@ -1952,6 +2002,7 @@ mod tests {
                             thinking_level: None,
                             service_tiers: Vec::new(),
                             service_tier: None,
+                            auto_continue: AutoContinueConfig::default(),
                             base_url: None,
                             input_price: None,
                             output_price: None,
@@ -1968,6 +2019,7 @@ mod tests {
                 thinking_levels: Vec::new(),
                 service_tier: None,
                 service_tiers: Vec::new(),
+                auto_continue: AutoContinueConfig::default(),
             },
         );
         let cfg = Config {

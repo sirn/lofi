@@ -1,4 +1,6 @@
-use crate::support::{text_response, tool_response, Fixture, MockResponse, MockServer, WAIT};
+use crate::support::{
+    stop_text_response, text_response, tool_response, Fixture, MockResponse, MockServer, WAIT,
+};
 
 #[test]
 fn automatic_policy_approval_uses_the_configured_model_and_skips_the_modal() {
@@ -150,6 +152,58 @@ context_window = "context_length"
     );
     assert!(String::from_utf8_lossy(&cached.stdout)
         .contains("discovery/remote-thinking-model — Remote Thinking Model"));
+}
+
+#[test]
+fn discovered_model_inherits_intent_recovery_from_provider_config() {
+    let models = serde_json::json!({ "data": [{ "id": "broken-template" }] });
+    let server = MockServer::start(vec![
+        MockResponse::json(&models),
+        stop_text_response("I will run the tests next."),
+        text_response("auto model continuation answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!(
+            r#"{config}
+[providers.auto-recovery]
+base_url = "{}"
+api_type = "openai-completions"
+no_auth = true
+
+[providers.auto-recovery.auto_models]
+enabled = true
+models_url = "{}/models"
+auth = false
+ttl_seconds = 3600
+
+[providers.auto-recovery.auto_continue]
+intent = true
+"#,
+            server.url(),
+            server.url()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.output(&[
+        "--model",
+        "auto-recovery/broken-template",
+        "--print",
+        "exercise discovered model recovery",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("auto model continuation answer"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].path, "/models");
+    assert!(requests[2].body.contains("Continue the task now"));
 }
 
 #[test]

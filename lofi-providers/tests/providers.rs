@@ -62,6 +62,7 @@ fn cfg(api: Api, base_url: String) -> ProviderConfig {
         thinking_levels: Vec::new(),
         service_tier: None,
         service_tiers: Vec::new(),
+        auto_continue: lofi_types::AutoContinueConfig::default(),
     }
 }
 

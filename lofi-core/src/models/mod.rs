@@ -136,6 +136,24 @@ impl ModelRegistry {
     }
 
     #[must_use]
+    pub fn auto_continue_policy(
+        &self,
+        agent: &lofi_types::AgentConfig,
+        model: &Model,
+    ) -> lofi_types::AutoContinuePolicy {
+        let provider = self.providers.get(&model.provider);
+        let model_config = provider.and_then(|config| config.models.get(&model.id));
+        let mut configs = vec![agent.auto_continue];
+        if let Some(provider) = provider {
+            configs.push(provider.auto_continue);
+        }
+        if let Some(model) = model_config {
+            configs.push(model.auto_continue);
+        }
+        lofi_types::AutoContinuePolicy::resolve(&configs)
+    }
+
+    #[must_use]
     pub fn available(&self) -> Vec<Model> {
         self.models
             .iter()
@@ -337,6 +355,7 @@ mod tests {
             thinking_levels: Vec::new(),
             service_tier: None,
             service_tiers: Vec::new(),
+            auto_continue: lofi_types::AutoContinueConfig::default(),
         }
     }
 
@@ -354,6 +373,7 @@ mod tests {
                 thinking_level: None,
                 service_tiers: Vec::new(),
                 service_tier: None,
+                auto_continue: lofi_types::AutoContinueConfig::default(),
                 base_url: None,
                 input_price: None,
                 output_price: None,
@@ -458,6 +478,38 @@ mod tests {
         assert_eq!(
             models.get("claude").unwrap().name.as_deref(),
             Some("Claude")
+        );
+    }
+
+    #[test]
+    fn auto_continue_policy_resolves_global_provider_and_model_fields() {
+        let mut provider = pcfg(Api::OpenAiCompletions, models(&["m"]));
+        provider.auto_continue.intent = Some(true);
+        provider
+            .models
+            .get_mut("m")
+            .unwrap()
+            .auto_continue
+            .lost_tool_call = Some(false);
+        let config = Config {
+            agent: lofi_types::AgentConfig {
+                auto_continue: lofi_types::AutoContinueConfig {
+                    lost_tool_call: Some(true),
+                    intent: Some(false),
+                },
+                ..lofi_types::AgentConfig::default()
+            },
+            providers: IndexMap::from([("p".to_string(), provider)]),
+            ..Config::default()
+        };
+        let registry = ModelRegistry::load(&config).unwrap();
+        let model = registry.resolve("p/m").unwrap();
+        assert_eq!(
+            registry.auto_continue_policy(&config.agent, model),
+            lofi_types::AutoContinuePolicy {
+                lost_tool_call: false,
+                intent: true,
+            }
         );
     }
 

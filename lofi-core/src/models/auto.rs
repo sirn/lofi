@@ -237,6 +237,7 @@ pub(super) fn parse_auto_models(
                 thinking_level: am.thinking_level.clone(),
                 service_tiers: am.service_tiers.clone(),
                 service_tier: am.service_tier.clone(),
+                auto_continue: lofi_types::AutoContinueConfig::default(),
                 base_url: Some(base_url),
                 input_price,
                 output_price,

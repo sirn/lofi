@@ -237,9 +237,9 @@ impl Agent {
         // The image-omit notice fires once per turn (on the first round),
         // not once per tool round.
         let mut omit_notice_sent = false;
-        // Auto-continuation on a truncated round fires at most once per turn
-        // so a model that keeps hitting the cap cannot loop unattended.
-        let mut truncation_continued = false;
+        // All automatic recovery paths share one per-turn budget so a broken
+        // provider template or repeated token cap cannot loop unattended.
+        let mut auto_continued = false;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -296,35 +296,46 @@ impl Agent {
                         break;
                     }
                     if finished {
-                        // Unambiguous truncation: the provider cut the model
-                        // off at the token cap mid-answer, so the stop was
-                        // not a deliberate end of turn. Nudge the model once
-                        // to continue, in the same turn. The notice persists
-                        // (like a job notice) so the model still sees the
-                        // nudge after resume/compaction; it replays as a
-                        // notice-kind turn, never as user input.
-                        if !truncation_continued
-                            && outcome.stop_reason == Some(lofi_types::StopReason::MaxTokens)
+                        let recovery = if outcome.stop_reason
+                            == Some(lofi_types::StopReason::MaxTokens)
                         {
-                            truncation_continued = true;
-                            messages.push(Message {
-                                role: Role::User,
-                                blocks: vec![ContentBlock::Text {
-                                    text: TRUNCATION_CONTINUATION_PROMPT.to_string(),
-                                }],
-                                kind: lofi_types::PromptKind::Notice,
-                            });
-                            if !emit(
-                                Some(&tx),
-                                AgentEvent::Notice(
-                                    "response hit the token limit; continuing the turn".into(),
-                                ),
-                            )
-                            .await
-                            {
-                                detached = true;
+                            Some((
+                                TRUNCATION_CONTINUATION_PROMPT,
+                                "response hit the token limit; continuing the turn",
+                            ))
+                        } else if self.auto_continue.lost_tool_call
+                            && outcome.stop_reason == Some(lofi_types::StopReason::ToolUse)
+                        {
+                            Some((
+                                LOST_TOOL_CONTINUATION_PROMPT,
+                                "provider stopped for a tool call but emitted none; continuing the turn",
+                            ))
+                        } else if self.auto_continue.intent
+                            && outcome.stop_reason == Some(lofi_types::StopReason::EndTurn)
+                            && outcome.announced_tool_intent
+                        {
+                            Some((
+                                INTENT_CONTINUATION_PROMPT,
+                                "response stopped after announcing an action; continuing the turn",
+                            ))
+                        } else {
+                            None
+                        };
+                        if !auto_continued {
+                            if let Some((prompt, notice)) = recovery {
+                                auto_continued = true;
+                                messages.push(Message {
+                                    role: Role::User,
+                                    blocks: vec![ContentBlock::Text {
+                                        text: prompt.to_string(),
+                                    }],
+                                    kind: lofi_types::PromptKind::Notice,
+                                });
+                                if !emit(Some(&tx), AgentEvent::Notice(notice.into())).await {
+                                    detached = true;
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         finished_normally = true;
                         break;
@@ -948,9 +959,11 @@ impl Agent {
         };
 
         if tool_uses.is_empty() {
+            let announced_tool_intent = assistant_announces_tool_intent(&messages[assistant_index]);
             return Ok(RoundOutcome {
                 finished: true,
                 stop_reason: round_stop_reason,
+                announced_tool_intent,
             });
         }
 
@@ -1032,6 +1045,7 @@ impl Agent {
         Ok(RoundOutcome {
             finished: false,
             stop_reason: round_stop_reason,
+            announced_tool_intent: false,
         })
     }
 
@@ -1348,6 +1362,64 @@ async fn commit_progress(
 struct RoundOutcome {
     finished: bool,
     stop_reason: Option<lofi_types::StopReason>,
+    announced_tool_intent: bool,
+}
+
+pub(super) fn assistant_announces_tool_intent(message: &Message) -> bool {
+    let Some(text) = message.blocks.iter().rev().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let paragraph = text.trim().rsplit("\n\n").next().unwrap_or("").trim();
+    if paragraph.is_empty() || paragraph.chars().count() > 240 {
+        return false;
+    }
+    let normalized = paragraph.replace(['’', '‘'], "'").to_ascii_lowercase();
+    let sentence = normalized
+        .rsplit(['.', '!', '?'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let action = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+        "next, i'll ",
+        "next i'll ",
+    ]
+    .iter()
+    .find_map(|prefix| sentence.strip_prefix(prefix));
+    let Some(action) = action else {
+        return false;
+    };
+    if action.starts_with("not ") {
+        return false;
+    }
+    let verb = action
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    matches!(
+        verb,
+        "inspect"
+            | "check"
+            | "read"
+            | "load"
+            | "search"
+            | "run"
+            | "test"
+            | "verify"
+            | "investigate"
+            | "implement"
+            | "fix"
+            | "update"
+            | "edit"
+            | "try"
+    )
 }
 
 /// Enforces the pairing invariant: every trailing assistant `ToolUse` block
