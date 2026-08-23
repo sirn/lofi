@@ -1,7 +1,7 @@
 use crate::support::{
-    eof_cut_responses_response, event_types, lost_tool_response, responses_response, text_response,
-    tool_response, transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer,
-    ProcessGuard, WAIT,
+    delayed_responses_response, eof_cut_responses_response, event_types, lost_tool_response,
+    responses_response, text_response, tool_response, transcript_text, wait_for_process_exit,
+    Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -208,6 +208,65 @@ fn openai_responses_streams_reasoning_text_and_usage_through_the_tui() {
     assert!(transcript.contains("responses thinking marker"));
     assert!(transcript.contains("responses answer marker"));
     assert!(transcript.contains("cache_read_tokens"));
+}
+
+#[test]
+fn repeated_responses_thinking_notifies_and_recovers_once() {
+    let pattern = "abcdefghij".repeat(10);
+    let server = MockServer::start(vec![
+        responses_response(&pattern.repeat(3), "discarded loop answer"),
+        delayed_responses_response(
+            "different reasoning",
+            "loop recovery answer marker",
+            std::time::Duration::from_millis(500),
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    tui.submit("loop recovery prompt marker");
+    tui.wait_for("potential agent loop detected", WAIT);
+    tui.wait_for("loop recovery answer marker", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body.contains("A potential loop was detected"));
+    assert!(requests[1]
+        .body
+        .contains("repeated thinking pattern detected"));
+    let transcript = transcript_text(&fixture.events());
+    assert!(transcript.contains("A potential loop was detected"));
+    assert!(transcript.contains("loop recovery answer marker"));
+    assert!(!transcript.contains("discarded loop answer"));
+}
+
+#[test]
+fn repeated_responses_thinking_stops_after_failed_recovery() {
+    let pattern = "abcdefghij".repeat(10).repeat(3);
+    let server = MockServer::start(vec![
+        responses_response(&pattern, "discarded first loop answer"),
+        delayed_responses_response(
+            &pattern,
+            "discarded second loop answer",
+            std::time::Duration::from_millis(500),
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    tui.submit("failed loop recovery prompt marker");
+    tui.wait_for("potential agent loop detected", WAIT);
+    tui.wait_for("agent stopped after loop recovery failed", WAIT);
+
+    assert_eq!(server.request_count(), 2);
+    assert!(event_types(&fixture.events()).contains(&"turn_end"));
+    let transcript = transcript_text(&fixture.events());
+    assert_eq!(
+        transcript.matches("A potential loop was detected").count(),
+        1
+    );
+    assert!(!transcript.contains("discarded first loop answer"));
+    assert!(!transcript.contains("discarded second loop answer"));
 }
 
 #[test]
