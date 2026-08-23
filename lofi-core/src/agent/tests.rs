@@ -742,8 +742,8 @@ async fn repeated_thinking_notifies_agent_and_allows_one_recovery() {
         .filter(|message| message.kind == lofi_types::PromptKind::Notice)
         .collect();
     assert_eq!(notices.len(), 1);
-    assert_eq!(messages[2].role, Role::User);
-    assert_eq!(messages[3].role, Role::Assistant);
+    assert_eq!(messages[1].role, Role::User);
+    assert_eq!(messages[2].role, Role::Assistant);
     let ContentBlock::Text { text } = &notices[0].blocks[0] else {
         panic!("expected notice text");
     };
@@ -791,7 +791,7 @@ async fn repeated_thinking_stops_after_failed_recovery() {
             .iter()
             .filter(|message| message.role == Role::Assistant)
             .count(),
-        2
+        0
     );
     let mut saw_stop_notice = false;
     while let Ok(event) = rx.try_recv() {

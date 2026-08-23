@@ -262,6 +262,7 @@ fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
                 .contains("repeated thinking pattern detected"),
             "{api}"
         );
+        assert!(!requests[1].body.contains(&pattern), "{api}");
         let transcript = transcript_text(&fixture.events());
         assert!(
             transcript.contains("A potential loop was detected"),
