@@ -133,7 +133,8 @@ The settings are resolved field by field in this order:
 1. Built-in defaults.
 2. `[agent.auto_continue]`.
 3. `[providers.<name>.auto_continue]`.
-4. The static model override, when present.
+4. Remote model metadata, when present.
+5. The static model override, when present.
 
 Auto-discovered models use the provider policy by default. A model entry from
 the remote endpoint can override it with an `auto_continue` object:
