@@ -661,7 +661,7 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         let CompactBlock::User { text } = b else {
             continue;
         };
-        let directives = prompt_units(text)
+        let directives = text_units(text)
             .into_iter()
             .filter(|unit| {
                 !unit.trim_end().ends_with('?') && has_signal_near_start(&unit.to_lowercase())
@@ -670,7 +670,7 @@ fn extract_preferences(blocks: &[CompactBlock]) -> Vec<String> {
         if directives.is_empty() {
             continue;
         }
-        let line = summarize_units(&directives, 160);
+        let line = summarize_units(&directives, 160, SummaryKind::Prompt);
         if line.chars().count() < 8 {
             continue;
         }
@@ -692,13 +692,27 @@ struct SummaryUnit {
     salience: f64,
 }
 
+#[derive(Clone, Copy)]
+enum SummaryKind {
+    Prompt,
+    Response,
+}
+
 /// Produce a deterministic extractive summary. Units retain their source
 /// text, so compaction cannot rewrite paths, identifiers, numbers, or negation.
 fn summarize_prompt(text: &str, max: usize) -> String {
-    summarize_units(&prompt_units(text), max)
+    summarize_text(text, max, SummaryKind::Prompt)
 }
 
-fn summarize_units(units: &[String], max: usize) -> String {
+fn summarize_response(text: &str, max: usize) -> String {
+    summarize_text(text, max, SummaryKind::Response)
+}
+
+fn summarize_text(text: &str, max: usize, kind: SummaryKind) -> String {
+    summarize_units(&text_units(text), max, kind)
+}
+
+fn summarize_units(units: &[String], max: usize, kind: SummaryKind) -> String {
     if units.is_empty() || max == 0 {
         return String::new();
     }
@@ -710,7 +724,7 @@ fn summarize_units(units: &[String], max: usize) -> String {
         .map(|(position, text)| SummaryUnit {
             text: text.clone(),
             position,
-            salience: unit_salience(text, position, last, &frequencies),
+            salience: unit_salience(text, position, last, &frequencies, kind),
         })
         .collect::<Vec<_>>();
     let max_salience = candidates
@@ -774,7 +788,7 @@ fn summarize_units(units: &[String], max: usize) -> String {
         .join("; ")
 }
 
-fn prompt_units(text: &str) -> Vec<String> {
+fn text_units(text: &str) -> Vec<String> {
     let mut units = Vec::new();
     let mut current = String::new();
     let mut chars = text.trim().chars().peekable();
@@ -834,7 +848,39 @@ fn unit_salience(
     position: usize,
     last: usize,
     frequencies: &std::collections::HashMap<String, usize>,
+    kind: SummaryKind,
 ) -> f64 {
+    let lower = text.to_lowercase();
+    let normalized = lower.trim_start_matches(['#', '*', '_', ' ']);
+    let protected = usize::from(text.contains("://") || text.contains('/') || text.contains('`'))
+        + usize::from(text.chars().any(|ch| ch.is_ascii_digit()))
+        + usize::from(text.split_whitespace().any(|word| word.contains('_')));
+    let repeated = content_terms(text)
+        .collect::<std::collections::HashSet<_>>()
+        .iter()
+        .filter_map(|term| frequencies.get(term))
+        .filter(|&&count| count > 1)
+        .count();
+    let role_score = match kind {
+        SummaryKind::Prompt => prompt_role_score(&lower, normalized),
+        SummaryKind::Response => response_role_score(&lower, normalized),
+    };
+    let position_score = match kind {
+        SummaryKind::Prompt => {
+            (if position == 0 { 1.0 } else { 0.0 }) + (if position == last { 1.5 } else { 0.0 })
+        }
+        SummaryKind::Response => {
+            (if position == 0 { 0.5 } else { 0.0 }) + (if position == last { 2.0 } else { 0.0 })
+        }
+    };
+
+    1.0 + role_score
+        + position_score
+        + (protected.min(2) as f64 * 1.5)
+        + (repeated.min(3) as f64 * 0.5)
+}
+
+fn prompt_role_score(lower: &str, normalized: &str) -> f64 {
     const DIRECTIVES: &[&str] = &[
         "please",
         "prefer",
@@ -870,31 +916,51 @@ fn unit_salience(
         "for context",
         "background:",
     ];
-
-    let lower = text.to_lowercase();
     let directive = DIRECTIVES.iter().any(|signal| lower.contains(signal));
-    let request = REQUESTS.iter().any(|signal| lower.starts_with(signal));
-    let protected = usize::from(text.contains("://") || text.contains('/') || text.contains('`'))
-        + usize::from(text.chars().any(|ch| ch.is_ascii_digit()))
-        + usize::from(text.split_whitespace().any(|word| word.contains('_')));
-    let repeated = content_terms(text)
-        .collect::<std::collections::HashSet<_>>()
-        .iter()
-        .filter_map(|term| frequencies.get(term))
-        .filter(|&&count| count > 1)
-        .count();
+    let request = REQUESTS.iter().any(|signal| normalized.starts_with(signal));
+    let filler = FILLER.iter().any(|prefix| normalized.starts_with(prefix));
+    (if directive { 3.0 } else { 0.0 }) + if request { 2.0 } else { 0.0 }
+        - if filler { 1.5 } else { 0.0 }
+}
 
-    1.0 + if directive { 3.0 } else { 0.0 }
-        + if request { 2.0 } else { 0.0 }
-        + if position == 0 { 1.0 } else { 0.0 }
-        + if position == last { 1.5 } else { 0.0 }
-        + (protected.min(2) as f64 * 1.5)
-        + (repeated.min(3) as f64 * 0.5)
-        - if FILLER.iter().any(|prefix| lower.starts_with(prefix)) {
-            1.5
-        } else {
-            0.0
-        }
+fn response_role_score(lower: &str, normalized: &str) -> f64 {
+    const OUTCOMES: &[&str] = &[
+        "implemented",
+        "fixed",
+        "added",
+        "removed",
+        "changed",
+        "found",
+        "cause",
+        "result",
+        "passes",
+        "passed",
+        "failed",
+        "error",
+        "verified",
+        "complete",
+        "done",
+        "remaining",
+        "blocked",
+        "cannot",
+        "warning",
+    ];
+    const PROGRESS: &[&str] = &[
+        "i will",
+        "i'll",
+        "i am ",
+        "i'm ",
+        "let me",
+        "next i",
+        "now i",
+        "checking",
+        "running",
+        "reviewing",
+        "inspecting",
+    ];
+    let outcome = OUTCOMES.iter().any(|signal| lower.contains(signal));
+    let progress = PROGRESS.iter().any(|prefix| normalized.starts_with(prefix));
+    (if outcome { 3.0 } else { 0.0 }) - if progress { 2.5 } else { 0.0 }
 }
 
 fn ngram_similarity(left: &str, right: &str) -> f64 {
@@ -1116,7 +1182,7 @@ fn build_brief(blocks: &[CompactBlock], hooks: &[Arc<dyn CompactionHook>]) -> St
                 lines.push(t);
             }
             CompactBlock::Assistant { text } => {
-                let t = clip(text.trim(), TRUNC_ASSISTANT);
+                let t = summarize_response(text, TRUNC_ASSISTANT);
                 if t.is_empty() {
                     continue;
                 }
@@ -1951,6 +2017,33 @@ mod tests {
         let brief = build_brief(&blocks, &[]);
         assert!(brief.contains("Please fix src/auth.rs"));
         assert!(!brief.contains("context context"));
+    }
+
+    #[test]
+    fn brief_summarizes_agent_outcomes_instead_of_clipping_progress() {
+        let blocks = vec![CompactBlock::Assistant {
+            text: format!(
+                "I will inspect the implementation before making changes. {}. Found the crash cause in src/compact.rs. Fixed the UTF-8 boundary handling. All 238 tests passed.",
+                "Progress details ".repeat(20)
+            ),
+        }];
+        let brief = build_brief(&blocks, &[]);
+        assert!(brief.contains("Found the crash cause in src/compact.rs."));
+        assert!(brief.contains("All 238 tests passed."));
+        assert!(!brief.contains("I will inspect"));
+        assert!(!brief.contains("Progress details"));
+    }
+
+    #[test]
+    fn response_summary_keeps_failures_and_remaining_work() {
+        let summary = summarize_response(
+            "I am checking the build now. Formatting passed. Clippy failed in src/lib.rs. Remaining work: fix the lint error.",
+            100,
+        );
+        assert!(summary.contains("Formatting passed."));
+        assert!(summary.contains("Clippy failed in src/lib.rs."));
+        assert!(summary.contains("Remaining work: fix the lint error."));
+        assert!(!summary.contains("checking the build"));
     }
 
     #[test]
