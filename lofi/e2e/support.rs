@@ -879,7 +879,7 @@ data: [DONE]
     ))
 }
 
-fn responses_body(thinking: &str, text: &str) -> String {
+pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
     let thinking = json!({
         "type": "response.reasoning_summary_text.delta",
         "item_id": "reasoning-1",
@@ -905,7 +905,7 @@ fn responses_body(thinking: &str, text: &str) -> String {
             }
         }
     });
-    format!(
+    MockResponse::sse(format!(
         "data: {thinking}
 
 data: {reasoning_done}
@@ -917,11 +917,7 @@ data: {done}
 data: [DONE]
 
 "
-    )
-}
-
-pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
-    MockResponse::sse(responses_body(thinking, text))
+    ))
 }
 
 /// Token-limit truncation, Responses shape: text, then a completed event
