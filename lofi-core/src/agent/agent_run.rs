@@ -46,15 +46,18 @@ impl LoopDetector {
 
     fn check_thinking(&mut self) -> Option<String> {
         self.thinking_checked_at = self.thinking.len();
+        let relevant = THINKING_LOOP_REPETITIONS * THINKING_LOOP_MAX_PERIOD_BYTES;
+        let start = self.thinking.len().saturating_sub(relevant);
+        let reversed = self.thinking[start..]
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        let prefix_matches = z_array(&reversed);
         let max_period =
-            (self.thinking.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
+            (reversed.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
         for period in THINKING_LOOP_MIN_BYTES..=max_period {
-            let repeated = period * THINKING_LOOP_REPETITIONS;
-            let tail = &self.thinking[self.thinking.len() - repeated..];
-            if tail
-                .chunks_exact(period)
-                .all(|chunk| chunk == &tail[..period])
-            {
+            if prefix_matches[period] >= period * (THINKING_LOOP_REPETITIONS - 1) {
                 return Some(format!(
                     "repeated thinking pattern detected ({period} bytes repeated {THINKING_LOOP_REPETITIONS} times)"
                 ));
@@ -86,6 +89,26 @@ impl LoopDetector {
         }
         None
     }
+}
+
+fn z_array(bytes: &[u8]) -> Vec<usize> {
+    let mut matches = vec![0; bytes.len()];
+    let (mut left, mut right) = (0, 0);
+    for index in 1..bytes.len() {
+        if index < right {
+            matches[index] = matches[index - left].min(right - index);
+        }
+        while index + matches[index] < bytes.len()
+            && bytes[matches[index]] == bytes[index + matches[index]]
+        {
+            matches[index] += 1;
+        }
+        if index + matches[index] > right {
+            left = index;
+            right = index + matches[index];
+        }
+    }
+    matches
 }
 
 /// Per-round tuneables that callers usually leave unset. Grouping them keeps
@@ -1942,6 +1965,22 @@ mod tests {
             assert!(detector.add_thinking(&pattern).is_none());
             assert!(detector.finish_thinking().is_none());
         }
+    }
+
+    #[test]
+    fn thinking_loop_detects_varied_period_and_rejects_near_match() {
+        let pattern = (0..137)
+            .map(|index| char::from(b'!' + (index * 17 % 90) as u8))
+            .collect::<String>();
+        let mut near = format!("{pattern}{pattern}{pattern}");
+        near.replace_range(near.len() - 1.., "~");
+
+        let mut detector = LoopDetector::default();
+        assert!(detector.add_thinking(&near).is_none());
+        detector.start_round();
+        assert!(detector
+            .add_thinking(&pattern.repeat(3))
+            .is_some_and(|detail| detail.contains("137 bytes")));
     }
 
     #[test]
