@@ -19,6 +19,11 @@ struct LoopDetector {
 }
 
 impl LoopDetector {
+    fn start_round(&mut self) {
+        self.thinking.clear();
+        self.thinking_checked_at = 0;
+    }
+
     fn add_thinking(&mut self, delta: &str) -> Option<String> {
         self.thinking.extend_from_slice(delta.as_bytes());
         if self.thinking.len() > THINKING_LOOP_HISTORY_BYTES {
@@ -29,6 +34,17 @@ impl LoopDetector {
         if self.thinking.len() < self.thinking_checked_at + THINKING_LOOP_MIN_BYTES {
             return None;
         }
+        self.check_thinking()
+    }
+
+    fn finish_thinking(&mut self) -> Option<String> {
+        if self.thinking.len() == self.thinking_checked_at {
+            return None;
+        }
+        self.check_thinking()
+    }
+
+    fn check_thinking(&mut self) -> Option<String> {
         self.thinking_checked_at = self.thinking.len();
         let max_period =
             (self.thinking.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
@@ -856,6 +872,9 @@ impl Agent {
         };
         let mut stream = stream;
 
+        if let Some(detector) = loop_detector.as_deref_mut() {
+            detector.start_round();
+        }
         let mut assembler = MessageAssembler::new();
         // Round usage is captured and emitted as `AgentEvent::Done` only when
         // the round is terminal (no tool calls), so `Done` remains a true
@@ -910,6 +929,13 @@ impl Agent {
                                     {
                                         return Err(Error::Cancelled);
                                     }
+                                }
+                                if let Some(detail) = loop_detector
+                                    .as_deref_mut()
+                                    .and_then(LoopDetector::finish_thinking)
+                                {
+                                    round_loop_detail = Some(detail);
+                                    break;
                                 }
                             }
                             match &e {
@@ -1050,6 +1076,11 @@ impl Agent {
                         }
                     },
                 }
+            }
+            if round_loop_detail.is_none() {
+                round_loop_detail = loop_detector
+                    .as_deref_mut()
+                    .and_then(LoopDetector::finish_thinking);
             }
             if let (Some(start), Some(s)) = (thinking_open.take(), stats.as_deref_mut()) {
                 let elapsed = start.elapsed();
@@ -1887,6 +1918,30 @@ mod tests {
         assert!(detector
             .add_thinking(&pattern)
             .is_some_and(|detail| detail.contains("repeated thinking")));
+    }
+
+    #[test]
+    fn thinking_loop_checks_a_short_final_delta() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        assert!(detector
+            .add_thinking(&format!("{}{}", pattern.repeat(2), &pattern[..1]))
+            .is_none());
+        assert!(detector.add_thinking(&pattern[1..]).is_none());
+        assert!(detector
+            .finish_thinking()
+            .is_some_and(|detail| detail.contains("repeated thinking")));
+    }
+
+    #[test]
+    fn thinking_loop_does_not_span_provider_rounds() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        for _ in 0..3 {
+            detector.start_round();
+            assert!(detector.add_thinking(&pattern).is_none());
+            assert!(detector.finish_thinking().is_none());
+        }
     }
 
     #[test]
