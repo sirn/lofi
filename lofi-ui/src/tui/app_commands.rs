@@ -269,7 +269,7 @@ impl App {
 
     pub(super) fn show_help(&mut self) {
         let t = self.theme;
-        let mut lines: Vec<Line<'static>> = vec![info_section(t, "Keys")];
+        let mut lines = vec![info_section("Keys")];
         lines.push(info_kv(t, "Enter", "send"));
         lines.push(info_kv(t, "Alt+Enter", "newline (Ctrl+J)"));
         lines.push(info_kv(t, "Alt+Up", "restore queued prompt"));
@@ -297,8 +297,8 @@ impl App {
             "!!command",
             "run shell command; omit from context",
         ));
-        lines.push(Line::from(""));
-        lines.push(info_section(t, "Navigate"));
+        lines.push(InfoLine::Text(Line::from("")));
+        lines.push(info_section("Navigate"));
         lines.push(info_kv(t, "j/k ↑↓", "scroll"));
         lines.push(info_kv(t, "h/l ←→", "move column"));
         lines.push(info_kv(t, "0 ^ $", "start / first non-blank / end"));
@@ -308,13 +308,13 @@ impl App {
         lines.push(info_kv(t, "v", "select"));
         lines.push(info_kv(t, "y", "yank line"));
         lines.push(info_kv(t, "i", "back to Input"));
-        lines.push(Line::from(""));
-        lines.push(info_section(t, "Select"));
+        lines.push(InfoLine::Text(Line::from("")));
+        lines.push(info_section("Select"));
         lines.push(info_kv(t, "move", "extends selection"));
         lines.push(info_kv(t, "y / Enter", "yank → Input"));
         lines.push(info_kv(t, "Tab / Esc", "back"));
-        lines.push(Line::from(""));
-        lines.push(info_section(t, "Commands"));
+        lines.push(InfoLine::Text(Line::from("")));
+        lines.push(info_section("Commands"));
         lines.push(info_kv(t, "/help", "this help"));
         lines.push(info_kv(t, "/clear", "clear log"));
         lines.push(info_kv(t, "/compact", "fold older history into a summary"));
@@ -344,7 +344,7 @@ impl App {
         ));
         lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
-        lines.push(Line::from(""));
+        lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_note(
             t,
             "Type / for slash-command autocomplete (↑/↓ and Tab).",
@@ -360,7 +360,7 @@ impl App {
 
     pub(super) fn show_session_info(&mut self) {
         let t = self.theme;
-        let mut lines: Vec<Line<'static>> = vec![info_section(t, "Session")];
+        let mut lines = vec![info_section("Session")];
         #[allow(clippy::single_match_else)]
         match self.session.cursor.as_ref() {
             Some(cursor) => {
@@ -376,8 +376,8 @@ impl App {
                 ));
             }
         }
-        lines.push(Line::from(""));
-        lines.push(info_section(t, "Model"));
+        lines.push(InfoLine::Text(Line::from("")));
+        lines.push(info_section("Model"));
         lines.push(info_kv(t, "model", &self.session_model()));
         lines.push(info_kv(
             t,
@@ -385,8 +385,8 @@ impl App {
             &self.lifecycle.history_stats().messages.to_string(),
         ));
         lines.push(info_kv(t, "turns", &self.turns.len().to_string()));
-        lines.push(Line::from(""));
-        lines.push(info_section(t, "Workspace"));
+        lines.push(InfoLine::Text(Line::from("")));
+        lines.push(info_section("Workspace"));
         lines.push(info_kv(t, "root", &self.session.cwd.display().to_string()));
         self.info = Some(InfoModal {
             title: "Session".to_string(),
@@ -1469,11 +1469,13 @@ impl App {
                     let text = info
                         .lines
                         .iter()
-                        .map(|l| {
-                            l.spans
+                        .map(|line| match line {
+                            InfoLine::Section(label) => label.clone(),
+                            InfoLine::Text(line) => line
+                                .spans
                                 .iter()
-                                .map(|s| s.content.as_ref())
-                                .collect::<String>()
+                                .map(|span| span.content.as_ref())
+                                .collect::<String>(),
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
