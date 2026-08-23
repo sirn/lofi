@@ -33,6 +33,7 @@ mod tests;
 #[allow(clippy::wildcard_imports)]
 use {input::*, replay::*, resume::*, text::*, tree::*};
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout, Write};
@@ -65,6 +66,7 @@ use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 
 use base64::Engine;
+use futures::FutureExt as _;
 
 pub(crate) mod terminal_bg;
 pub(crate) mod theme;
@@ -1178,22 +1180,6 @@ pub(crate) async fn run(
     system_prompt: String,
 ) -> Result<()> {
     tty_events::ensure_terminal_input().map_err(Error::Io)?;
-    // Restore the terminal before the default panic handler writes, so a crash
-    // surfaces on the normal screen instead of vanishing with the alternate
-    // screen the TUI tears down in `TerminalGuard::drop`.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableBracketedPaste,
-            DisableFocusChange,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-        tty_events::set_reports_enabled(false);
-        default_hook(info);
-    }));
     enable_raw_mode().map_err(Error::Io)?;
     // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
     // (see terminal_bg module doc for why).
@@ -1227,28 +1213,42 @@ pub(crate) async fn run(
 
     let mut guard = TerminalGuard { terminal };
     let local = LocalSet::new();
-    let result = local
-        .run_until(async move {
-            // `run_loop` exceeds clippy's large_futures stack limit.
-            Box::pin(run_loop(
-                &mut guard,
-                agent,
-                theme,
-                ui_theme,
-                model_label,
-                thinking,
-                service_tier,
-                session,
-                no_models_hint,
-                ctx_limit,
-                compaction,
-                switcher,
-                system_prompt,
-            ))
-            .await
-        })
-        .await;
-    result
+    let result = std::panic::AssertUnwindSafe(local.run_until(async move {
+        // `run_loop` exceeds clippy's large_futures stack limit.
+        Box::pin(run_loop(
+            &mut guard,
+            agent,
+            theme,
+            ui_theme,
+            model_label,
+            thinking,
+            service_tier,
+            session,
+            no_models_hint,
+            ctx_limit,
+            compaction,
+            switcher,
+            system_prompt,
+        ))
+        .await
+    }))
+    .catch_unwind()
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(payload) => Err(Error::State(format!(
+            "TUI panicked: {}",
+            panic_message(payload.as_ref())
+        ))),
+    }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1429,7 +1429,11 @@ async fn run_loop(
                     None => {
                         if let Some(r) = current_run.take() {
                             let was_user_shell = r.user_shell.is_some();
-                            r.handle.abort();
+                            if let Err(error) = r.handle.await {
+                                app.apply_event(AgentEvent::Error(format!(
+                                    "run task failed: {error}"
+                                )));
+                            }
                             app.run_finished();
                             app.debug_sample(if was_user_shell { "user_shell_settled" } else { "agent_settled" });
                             if !app.should_quit {
