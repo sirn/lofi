@@ -118,6 +118,11 @@ impl MockResponse {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
+
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
 }
 
 pub struct MockServer {
@@ -874,7 +879,7 @@ data: [DONE]
     ))
 }
 
-pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
+fn responses_body(thinking: &str, text: &str) -> String {
     let thinking = json!({
         "type": "response.reasoning_summary_text.delta",
         "item_id": "reasoning-1",
@@ -900,7 +905,7 @@ pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
             }
         }
     });
-    MockResponse::sse(format!(
+    format!(
         "data: {thinking}
 
 data: {reasoning_done}
@@ -912,7 +917,11 @@ data: {done}
 data: [DONE]
 
 "
-    ))
+    )
+}
+
+pub fn responses_response(thinking: &str, text: &str) -> MockResponse {
+    MockResponse::sse(responses_body(thinking, text))
 }
 
 /// Token-limit truncation, Responses shape: text, then a completed event

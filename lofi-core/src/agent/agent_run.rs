@@ -2,10 +2,80 @@
 
 use super::*;
 
+const THINKING_LOOP_MIN_BYTES: usize = 100;
+const THINKING_LOOP_REPETITIONS: usize = 3;
+const THINKING_LOOP_MAX_PERIOD_BYTES: usize = 2 * 1024;
+const THINKING_LOOP_HISTORY_BYTES: usize = 24 * 1024;
+const TOOL_LOOP_REPETITIONS: usize = 5;
+const TOOL_LOOP_MAX_CYCLE: usize = 5;
+const MAX_PROVIDER_ROUNDS: usize = 100;
+const LOOP_RECOVERY_PROMPT: &str = "A potential loop was detected in your repeated reasoning or tool results. Stop repeating the same approach. Review the latest result, choose a different concrete action, and continue only if it makes forward progress.";
+
+#[derive(Default)]
+struct LoopDetector {
+    thinking: Vec<u8>,
+    thinking_checked_at: usize,
+    tool_rounds: Vec<String>,
+}
+
+impl LoopDetector {
+    fn add_thinking(&mut self, delta: &str) -> Option<String> {
+        self.thinking.extend_from_slice(delta.as_bytes());
+        if self.thinking.len() > THINKING_LOOP_HISTORY_BYTES {
+            let excess = self.thinking.len() - THINKING_LOOP_HISTORY_BYTES;
+            self.thinking.drain(..excess);
+            self.thinking_checked_at = self.thinking_checked_at.saturating_sub(excess);
+        }
+        if self.thinking.len() < self.thinking_checked_at + THINKING_LOOP_MIN_BYTES {
+            return None;
+        }
+        self.thinking_checked_at = self.thinking.len();
+        let max_period =
+            (self.thinking.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
+        for period in THINKING_LOOP_MIN_BYTES..=max_period {
+            let repeated = period * THINKING_LOOP_REPETITIONS;
+            let tail = &self.thinking[self.thinking.len() - repeated..];
+            if tail
+                .chunks_exact(period)
+                .all(|chunk| chunk == &tail[..period])
+            {
+                return Some(format!(
+                    "repeated thinking pattern detected ({period} bytes repeated {THINKING_LOOP_REPETITIONS} times)"
+                ));
+            }
+        }
+        None
+    }
+
+    fn add_tool_round(&mut self, fingerprint: String) -> Option<String> {
+        self.tool_rounds.push(fingerprint);
+        let keep = TOOL_LOOP_REPETITIONS * TOOL_LOOP_MAX_CYCLE;
+        if self.tool_rounds.len() > keep {
+            self.tool_rounds.remove(0);
+        }
+        for cycle in 1..=TOOL_LOOP_MAX_CYCLE {
+            let repeated = cycle * TOOL_LOOP_REPETITIONS;
+            if self.tool_rounds.len() < repeated {
+                continue;
+            }
+            let tail = &self.tool_rounds[self.tool_rounds.len() - repeated..];
+            if tail
+                .chunks_exact(cycle)
+                .all(|chunk| chunk == &tail[..cycle])
+            {
+                return Some(format!(
+                    "repeated tool-result cycle detected ({cycle} round cycle repeated {TOOL_LOOP_REPETITIONS} times)"
+                ));
+            }
+        }
+        None
+    }
+}
+
 /// Per-round tuneables that callers usually leave unset. Grouping them keeps
 /// [`Agent::run_once_inner`] (and the public entry points that forward to it)
 /// under the argument-count lint without a long `None`-studded call shape.
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct RoundOpts<'a> {
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
@@ -15,6 +85,7 @@ struct RoundOpts<'a> {
     /// at the continuation loop, not once per tool round in `run_once_inner`.
     suppress_omit_notice: bool,
     on_job_acquired: Option<lofi_code::JobAcquireFn>,
+    loop_detector: Option<&'a mut LoopDetector>,
 }
 
 impl Agent {
@@ -44,21 +115,55 @@ impl Agent {
         {
             return Ok(());
         }
+        let mut loop_detector = LoopDetector::default();
+        let mut loop_recovered = false;
+        let mut provider_rounds = 0usize;
         loop {
             if tx.is_closed() {
                 return Ok(());
             }
-            let finished = match self
-                .run_once_inner(&mut messages, Some(&tx), None, RoundOpts::default())
+            provider_rounds += 1;
+            if provider_rounds > MAX_PROVIDER_ROUNDS {
+                let _ = emit(
+                    Some(&tx),
+                    AgentEvent::Notice(format!(
+                        "agent stopped after the {MAX_PROVIDER_ROUNDS}-round safety limit"
+                    )),
+                )
+                .await;
+                return Ok(());
+            }
+            let outcome = match self
+                .run_once_inner(
+                    &mut messages,
+                    Some(&tx),
+                    None,
+                    RoundOpts {
+                        loop_detector: Some(&mut loop_detector),
+                        ..RoundOpts::default()
+                    },
+                )
                 .await
             {
-                Ok(outcome) => outcome.finished,
+                Ok(outcome) => outcome,
                 // A gone receiver is a graceful cancellation, not a provider
                 // error: stop the run cleanly instead of surfacing it.
                 Err(Error::Cancelled) => return Ok(()),
                 Err(e) => return Err(e),
             };
-            if finished || tx.is_closed() {
+            match handle_loop_detection(
+                outcome.loop_detail.as_deref(),
+                &mut loop_recovered,
+                &mut messages,
+                &tx,
+            )
+            .await
+            {
+                LoopAction::Continue => continue,
+                LoopAction::Stop => return Ok(()),
+                LoopAction::None => {}
+            }
+            if outcome.finished || tx.is_closed() {
                 return Ok(());
             }
         }
@@ -240,6 +345,9 @@ impl Agent {
         // All automatic recovery paths share one per-turn budget so a broken
         // provider template or repeated token cap cannot loop unattended.
         let mut auto_continued = false;
+        let mut loop_recovered = false;
+        let mut loop_detector = LoopDetector::default();
+        let mut provider_rounds = 0usize;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -248,6 +356,18 @@ impl Agent {
             // Feed the prior round's context fill back in so the next request
             // clips its output cap against the remaining context window.
             let prev_input = Some(stats.usage.context_tokens());
+            provider_rounds += 1;
+            if provider_rounds > MAX_PROVIDER_ROUNDS {
+                let _ = emit(
+                    Some(&tx),
+                    AgentEvent::Notice(format!(
+                        "agent stopped after the {MAX_PROVIDER_ROUNDS}-round safety limit"
+                    )),
+                )
+                .await;
+                finished_normally = true;
+                break;
+            }
             let round = self
                 .run_once_inner(
                     &mut *messages,
@@ -260,6 +380,7 @@ impl Agent {
                         prev_input_tokens: prev_input,
                         suppress_omit_notice: omit_notice_sent,
                         on_job_acquired: on_job_acquired.clone(),
+                        loop_detector: Some(&mut loop_detector),
                     },
                 )
                 .await;
@@ -294,6 +415,25 @@ impl Agent {
                     {
                         cancelled = true;
                         break;
+                    }
+                    match handle_loop_detection(
+                        outcome.loop_detail.as_deref(),
+                        &mut loop_recovered,
+                        messages,
+                        &tx,
+                    )
+                    .await
+                    {
+                        LoopAction::Continue => continue,
+                        LoopAction::Stop => {
+                            if tx.is_closed() {
+                                detached = true;
+                            } else {
+                                finished_normally = true;
+                            }
+                            break;
+                        }
+                        LoopAction::None => {}
                     }
                     if finished {
                         let recovery = if outcome.stop_reason
@@ -635,6 +775,7 @@ impl Agent {
             prev_input_tokens,
             suppress_omit_notice,
             on_job_acquired,
+            mut loop_detector,
         } = opts;
         let schema = exec_tool_schema();
         let mut model = self.model.clone();
@@ -722,6 +863,7 @@ impl Agent {
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, CodePrefixDecoder> = HashMap::new();
+        let mut round_loop_detail: Option<String> = None;
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
             loop {
@@ -779,6 +921,12 @@ impl Agent {
                                     }
                                     if !emit(tx, AgentEvent::Thinking(d.clone())).await {
                                         return Err(Error::Cancelled);
+                                    }
+                                    if let Some(detail) = loop_detector
+                                        .as_deref_mut()
+                                        .and_then(|detector| detector.add_thinking(d))
+                                    {
+                                        round_loop_detail = Some(detail);
                                     }
                                 }
                                 StreamingEvent::ToolUseStart { id, name } => {
@@ -890,6 +1038,9 @@ impl Agent {
                             if terminal {
                                 break;
                             }
+                            if round_loop_detail.is_some() {
+                                break;
+                            }
                         }
                         Err(err) => {
                             return Err(err);
@@ -964,6 +1115,7 @@ impl Agent {
                 finished: true,
                 stop_reason: round_stop_reason,
                 announced_tool_intent,
+                loop_detail: round_loop_detail,
             });
         }
 
@@ -1037,15 +1189,23 @@ impl Agent {
             }
         }
 
+        let result_index = messages.len();
         messages.push(Message {
             role: Role::Tool,
             blocks: results,
             kind: lofi_types::PromptKind::User,
         });
+        let tool_loop_detail = loop_detector.and_then(|detector| {
+            detector.add_tool_round(tool_round_fingerprint(
+                &messages[assistant_index],
+                &messages[result_index],
+            ))
+        });
         Ok(RoundOutcome {
             finished: false,
             stop_reason: round_stop_reason,
             announced_tool_intent: false,
+            loop_detail: round_loop_detail.or(tool_loop_detail),
         })
     }
 
@@ -1363,6 +1523,86 @@ struct RoundOutcome {
     finished: bool,
     stop_reason: Option<lofi_types::StopReason>,
     announced_tool_intent: bool,
+    loop_detail: Option<String>,
+}
+
+fn tool_round_fingerprint(assistant: &Message, result: &Message) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut value = String::new();
+    for block in &assistant.blocks {
+        if let ContentBlock::ToolUse { name, input, .. } = block {
+            value.push_str(name);
+            value.push('\0');
+            value.push_str(&serde_json::to_string(input).unwrap_or_default());
+            value.push('\0');
+        }
+    }
+    for block in &result.blocks {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = block
+        {
+            value.push_str(if *is_error { "error" } else { "ok" });
+            value.push('\0');
+            value.push_str(content);
+            value.push('\0');
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn loop_recovery_message(detail: &str) -> Message {
+    Message {
+        role: Role::User,
+        blocks: vec![ContentBlock::Text {
+            text: format!("{LOOP_RECOVERY_PROMPT} Detection: {detail}"),
+        }],
+        kind: lofi_types::PromptKind::Notice,
+    }
+}
+
+enum LoopAction {
+    None,
+    Continue,
+    Stop,
+}
+
+async fn handle_loop_detection(
+    detail: Option<&str>,
+    recovered: &mut bool,
+    messages: &mut Vec<Message>,
+    tx: &Sender<AgentEvent>,
+) -> LoopAction {
+    let Some(detail) = detail else {
+        return LoopAction::None;
+    };
+    if *recovered {
+        let _ = emit(
+            Some(tx),
+            AgentEvent::Notice(format!(
+                "agent stopped after loop recovery failed: {detail}"
+            )),
+        )
+        .await;
+        return LoopAction::Stop;
+    }
+    *recovered = true;
+    messages.push(loop_recovery_message(detail));
+    if emit(
+        Some(tx),
+        AgentEvent::Notice(format!(
+            "potential agent loop detected; requesting a different approach: {detail}"
+        )),
+    )
+    .await
+    {
+        LoopAction::Continue
+    } else {
+        LoopAction::Stop
+    }
 }
 
 pub(super) fn assistant_announces_tool_intent(message: &Message) -> bool {
@@ -1626,6 +1866,49 @@ mod tests {
             }],
             kind: PromptKind::default(),
         }
+    }
+
+    #[test]
+    fn thinking_loop_requires_three_repeated_long_suffixes() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        assert!(detector.add_thinking(&pattern).is_none());
+        assert!(detector.add_thinking(&pattern).is_none());
+        assert!(detector
+            .add_thinking(&pattern)
+            .is_some_and(|detail| detail.contains("repeated thinking")));
+    }
+
+    #[test]
+    fn changing_tool_results_do_not_trigger_a_loop() {
+        let mut detector = LoopDetector::default();
+        for result in ["1", "2", "3", "4", "5"] {
+            assert!(detector
+                .add_tool_round(format!("same-call:{result}"))
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn identical_tool_result_rounds_trigger_after_five_repetitions() {
+        let mut detector = LoopDetector::default();
+        for _ in 0..TOOL_LOOP_REPETITIONS - 1 {
+            assert!(detector.add_tool_round("same".into()).is_none());
+        }
+        assert!(detector
+            .add_tool_round("same".into())
+            .is_some_and(|detail| detail.contains("tool-result cycle")));
+    }
+
+    #[test]
+    fn alternating_tool_result_cycle_is_detected() {
+        let mut detector = LoopDetector::default();
+        for fingerprint in ["a", "b"].into_iter().cycle().take(9) {
+            assert!(detector.add_tool_round(fingerprint.into()).is_none());
+        }
+        assert!(detector
+            .add_tool_round("b".into())
+            .is_some_and(|detail| detail.contains("2 round cycle")));
     }
 
     #[test]

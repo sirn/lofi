@@ -1,7 +1,8 @@
 use crate::support::{
-    eof_cut_responses_response, event_types, lost_tool_response, responses_response, text_response,
-    tool_response, transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer,
-    ProcessGuard, WAIT,
+    anthropic_usage_response, eof_cut_responses_response, event_types,
+    google_thinking_usage_response, lost_tool_response, responses_response, text_response,
+    thinking_response, tool_response, transcript_text, wait_for_process_exit, Fixture,
+    MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -208,6 +209,102 @@ fn openai_responses_streams_reasoning_text_and_usage_through_the_tui() {
     assert!(transcript.contains("responses thinking marker"));
     assert!(transcript.contains("responses answer marker"));
     assert!(transcript.contains("cache_read_tokens"));
+}
+
+type ThinkingResponse = fn(&str, &str) -> MockResponse;
+
+fn loop_api_cases() -> [(&'static str, &'static str, ThinkingResponse); 4] {
+    [
+        ("OpenAI Completions", "mock/chat:high", thinking_response),
+        (
+            "OpenAI Responses",
+            "responses/reasoning:high",
+            responses_response,
+        ),
+        (
+            "Anthropic Messages",
+            "anthropic/tools:high",
+            |thinking, text| anthropic_usage_response(thinking, "loop-signature", text),
+        ),
+        (
+            "Google Generative AI",
+            "google/tools:high",
+            google_thinking_usage_response,
+        ),
+    ]
+}
+
+#[test]
+fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
+    let pattern = "abcdefghij".repeat(10);
+    for (api, model, response) in loop_api_cases() {
+        let server = MockServer::start(vec![
+            response(&pattern.repeat(3), "discarded loop answer"),
+            response("different reasoning", "loop recovery answer marker")
+                .with_delay(std::time::Duration::from_millis(500)),
+        ]);
+        let fixture = Fixture::new(&server);
+        let mut tui = fixture.spawn(&["--model", model]);
+
+        tui.submit("loop recovery prompt marker");
+        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("loop recovery answer marker", WAIT);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{api}");
+        assert!(
+            requests[1].body.contains("A potential loop was detected"),
+            "{api}"
+        );
+        assert!(
+            requests[1]
+                .body
+                .contains("repeated thinking pattern detected"),
+            "{api}"
+        );
+        let transcript = transcript_text(&fixture.events());
+        assert!(
+            transcript.contains("A potential loop was detected"),
+            "{api}"
+        );
+        assert!(transcript.contains("loop recovery answer marker"), "{api}");
+        assert!(!transcript.contains("discarded loop answer"), "{api}");
+    }
+}
+
+#[test]
+fn repeated_thinking_stops_after_failed_recovery_for_all_api_types() {
+    let pattern = "abcdefghij".repeat(10).repeat(3);
+    for (api, model, response) in loop_api_cases() {
+        let server = MockServer::start(vec![
+            response(&pattern, "discarded first loop answer"),
+            response(&pattern, "discarded second loop answer")
+                .with_delay(std::time::Duration::from_millis(500)),
+        ]);
+        let fixture = Fixture::new(&server);
+        let mut tui = fixture.spawn(&["--model", model]);
+
+        tui.submit("failed loop recovery prompt marker");
+        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("agent stopped after loop recovery failed", WAIT);
+
+        assert_eq!(server.request_count(), 2, "{api}");
+        assert!(
+            event_types(&fixture.events()).contains(&"turn_end"),
+            "{api}"
+        );
+        let transcript = transcript_text(&fixture.events());
+        assert_eq!(
+            transcript.matches("A potential loop was detected").count(),
+            1,
+            "{api}"
+        );
+        assert!(!transcript.contains("discarded first loop answer"), "{api}");
+        assert!(
+            !transcript.contains("discarded second loop answer"),
+            "{api}"
+        );
+    }
 }
 
 #[test]
