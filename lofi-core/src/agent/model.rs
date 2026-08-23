@@ -238,6 +238,7 @@ pub fn rebuild_agent(
         .get(&model_obj.provider)
         .ok_or_else(|| Error::Config(format!("provider not found: {}", model_obj.provider)))?;
     let provider = open(model_obj.api, provider_cfg)?;
+    let auto_continue = registry.auto_continue_policy(&config.agent, &model_obj);
 
     let agent = if let Some(a) = existing {
         a.with_model(provider, model_obj.clone())
@@ -260,6 +261,7 @@ pub fn rebuild_agent(
         .with_tmp_lease(tmp_lease)
         .with_retry(crate::retry::RetryPolicy::from(config.retry))
     };
+    let agent = agent.with_auto_continue(auto_continue);
     Ok((agent, model_obj, level))
 }
 
