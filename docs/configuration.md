@@ -109,6 +109,47 @@ thinking_level = "high"
 
 A command-line suffix such as `--model openai/o3:high` selects the level for that run. Default precedence is model, provider, then `[agent]`; the command line overrides all three. Non-`off` levels must appear in the model `thinking_levels` list.
 
+## Automatic turn continuation
+
+Lofi can recover when a provider reports that it stopped for a tool call but
+its template parser emits no structured tool call. This recovery is enabled by
+default. A separate clean-stop intent detector is disabled by default because
+it uses the assistant text as a bounded heuristic.
+
+```toml
+[agent.auto_continue]
+lost_tool_call = true
+intent = false
+
+[providers.example.auto_continue]
+intent = true
+
+[providers.example.models.broken-template.auto_continue]
+lost_tool_call = false
+```
+
+The settings are resolved field by field in this order:
+
+1. Built-in defaults.
+2. `[agent.auto_continue]`.
+3. `[providers.<name>.auto_continue]`.
+4. The static model override, when present.
+
+Auto-discovered models use the provider policy. Remote model metadata does not
+currently set per-model continuation policy.
+
+`lost_tool_call` recovers a protocol contradiction: the provider reports a
+tool-use stop but sends no tool call. Its built-in default is `true`.
+
+`intent` recovers a clean end-of-turn whose final short paragraph announces an
+immediate tool-related action, such as “I’ll run the tests next.” Its built-in
+default is `false`. Enable it only for providers or models whose templates are
+known to lose tool calls.
+
+All automatic recovery paths share a budget of one continuation per user turn.
+The recovery prompt is stored as a notice-kind message, not as user-authored
+input.
+
 ## Service tiers
 
 Service tiers are per-request routing hints forwarded to the provider. They are useful with OpenAI's own plans and with proxies that expose multiple service classes. Supported values are `auto`, `flex`, `priority`, and any provider-defined value (custom values serialize verbatim). `auto` omits the field so the provider uses its default.

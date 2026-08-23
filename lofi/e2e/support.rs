@@ -780,6 +780,26 @@ data: [DONE]
     ))
 }
 
+/// A provider reports a tool stop but its template parser emits no tool call.
+pub fn lost_tool_response(text: &str) -> MockResponse {
+    let event = json!({
+        "choices": [{ "delta": { "content": text }, "finish_reason": "tool_calls" }]
+    });
+    let usage = json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    });
+    MockResponse::sse(format!(
+        "data: {event}
+
+data: {usage}
+
+data: [DONE]
+
+"
+    ))
+}
+
 pub fn delayed_text_response(text: &str, delay: Duration) -> MockResponse {
     let event = json!({ "choices": [{ "delta": { "content": text } }] });
     MockResponse::delayed_sse(format!("data: {event}\n\ndata: [DONE]\n\n"), delay)

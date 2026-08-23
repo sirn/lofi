@@ -1,6 +1,7 @@
 use crate::support::{
-    eof_cut_responses_response, event_types, responses_response, text_response, tool_response,
-    transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
+    eof_cut_responses_response, event_types, lost_tool_response, responses_response, text_response,
+    tool_response, transcript_text, wait_for_process_exit, Fixture, MockResponse, MockServer,
+    ProcessGuard, WAIT,
 };
 
 #[test]
@@ -273,6 +274,31 @@ fn truncated_responses_stream_retries_without_persisting_partial_output() {
     assert!(!transcript.contains("discarded partial marker"));
     assert!(transcript.contains("complete response marker"));
     assert!(event_types(&fixture.events()).contains(&"turn_end"));
+}
+
+#[test]
+fn missing_tool_call_is_reissued_after_provider_tool_stop() {
+    let server = MockServer::start(vec![
+        lost_tool_response("I will inspect the files now."),
+        tool_response(
+            "reissued-tool",
+            r#"return { marker: "reissued tool marker" };"#,
+        ),
+        text_response("reissued tool final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let output = fixture.output(&["--print", "recover the missing tool call"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reissued tool final answer"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].body.contains("Your tool call was not received"));
+    assert!(requests[2].body.contains("reissued tool marker"));
 }
 
 #[test]
