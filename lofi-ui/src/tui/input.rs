@@ -365,23 +365,31 @@ fn spawn_agent_run(
                 kind: lofi_types::PromptKind::Notice,
             });
         }
-        let result = agent
-            .run_continuation(
-                &mut messages,
-                prompt,
-                prompt_kind,
-                tx,
-                cursor.as_ref(),
-                continuation,
-                Some(cancel_clone),
-                Some(preempt_clone),
-            )
-            .await;
+        let result = std::panic::AssertUnwindSafe(agent.run_continuation(
+            &mut messages,
+            prompt,
+            prompt_kind,
+            tx,
+            cursor.as_ref(),
+            continuation,
+            Some(cancel_clone),
+            Some(preempt_clone),
+        ))
+        .catch_unwind()
+        .await;
         if let Ok(mut stored) = history.lock() {
             *stored = messages;
         }
-        if let Err(error) = result {
-            let _ = err_tx.send(AgentEvent::Error(error.to_string())).await;
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(payload) => Some(format!(
+                "agent task panicked: {}",
+                panic_message(payload.as_ref())
+            )),
+        };
+        if let Some(error) = error {
+            let _ = err_tx.send(AgentEvent::Error(error)).await;
         }
     });
     install_run(app, current_run, handle, rx, cancel, preempt, None);

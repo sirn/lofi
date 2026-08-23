@@ -1716,6 +1716,7 @@ name = "lofi-ui"
 version = "0.2.5"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "clap",
  "crossterm",
@@ -1723,6 +1724,7 @@ dependencies = [
  "futures",
  "lofi-core",
  "lofi-error",
+ "lofi-providers",
  "lofi-types",
  "lz4_flex",
  "nix",
