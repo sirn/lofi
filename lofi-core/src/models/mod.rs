@@ -442,10 +442,16 @@ mod tests {
     #[test]
     fn inject_discovered_merges_unset_fields_from_discovered() {
         let mut models = models(&["gpt-4o"]);
-        models.get_mut("gpt-4o").unwrap().thinking_levels = vec![ThinkingLevel::Medium];
+        let model = models.get_mut("gpt-4o").unwrap();
+        model.thinking_levels = vec![ThinkingLevel::Medium];
+        model.auto_continue.intent = Some(false);
         let mut discovered = mc_named("gpt-4o", "GPT-4o").1;
         discovered.context_window = Some(128_000);
         discovered.input_price = Some(0.005);
+        discovered.auto_continue = lofi_types::AutoContinueConfig {
+            lost_tool_call: Some(false),
+            intent: Some(true),
+        };
         let entries = vec![("gpt-4o".to_string(), discovered)];
         inject_discovered(&mut models, &entries);
         let m = models.get("gpt-4o").unwrap();
@@ -453,6 +459,8 @@ mod tests {
         assert_eq!(m.name.as_deref(), Some("GPT-4o"));
         assert_eq!(m.context_window, Some(128_000));
         assert_eq!(m.input_price, Some(0.005));
+        assert_eq!(m.auto_continue.lost_tool_call, Some(false));
+        assert_eq!(m.auto_continue.intent, Some(false));
     }
 
     #[test]
