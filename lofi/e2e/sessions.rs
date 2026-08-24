@@ -298,6 +298,46 @@ fn tree_rollback_excludes_future_turns_and_preserves_the_old_branch() {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn resuming_a_large_transcript_releases_replay_memory() {
+    // Replay must leave the transcript on disk: a resumed session holds only
+    // the history the next request needs, not per-turn render state.
+    let turns = 24;
+    let responses = (0..turns)
+        .map(|n| {
+            text_response(&format!(
+                "{}\n\nRESUMED_MARKER_{n}",
+                "lorem ipsum dolor sit amet\n".repeat(10_000)
+            ))
+        })
+        .collect::<Vec<_>>();
+    let server = MockServer::start(responses);
+    let fixture = Fixture::new(&server);
+    let mut seed = fixture.spawn(&[]);
+    let fresh = seed.resident_kib();
+    for n in 0..turns {
+        seed.submit(&format!("large transcript prompt {n}"));
+        seed.wait_for(&format!("RESUMED_MARKER_{n}"), WAIT);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let settled = seed.resident_kib();
+    seed.submit("/quit");
+    seed.wait_exit();
+
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.wait_for(&format!("RESUMED_MARKER_{}", turns - 1), WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let resumed = tui.resident_kib();
+
+    // The settled process holds the conversation history the next request
+    // needs; a resumed process must not exceed that state materially.
+    assert!(
+        resumed <= settled + 16 * 1024,
+        "resume retained replay memory: fresh={fresh} KiB, settled={settled} KiB, resumed={resumed} KiB"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn closing_large_tree_picker_releases_transient_memory() {
     let server = MockServer::start(vec![text_response("memory seed answer")]);
     let fixture = Fixture::new(&server);
