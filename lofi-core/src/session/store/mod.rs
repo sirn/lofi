@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 use index::{
-    compaction_index_suffix, index_kind_for_event, load_collapsed_events_at, load_compaction_path,
-    load_event_at, load_event_by_id, load_event_range, load_events_at, load_index,
-    load_index_range, load_indexed_path, visit_event_values, visit_events,
+    compaction_index_suffix, index_kind_for_event, load_compaction_path, load_event_at,
+    load_event_by_id, load_event_range, load_events_at, load_index, load_index_range,
+    load_indexed_path, visit_event_values, visit_events,
 };
 pub use index::{EventIndex, IndexId, IndexKind};
 
@@ -342,12 +342,6 @@ impl SessionCursor {
         } else {
             (0, 0, false, String::new())
         }
-    }
-
-    /// # Errors
-    /// Propagates transcript seek, read, and parsing failures.
-    pub fn collapsed_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
-        load_collapsed_events_at(&self.path, offsets)
     }
 
     /// # Errors
@@ -1588,133 +1582,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
         (dir, store)
-    }
-
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn collapsed_loader_skips_only_invisible_success_bodies() {
-        let (_guard, store) = isolated_store();
-        let path = store
-            .create(Path::new("/tmp/collapsed-projection"), &"p/m".into())
-            .unwrap();
-        let large = "x".repeat(128 * 1024);
-        let mut events = vec![
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text {
-                        text: "  raw prompt  \n".to_string(),
-                    }],
-                    kind: PromptKind::default(),
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::Assistant,
-                    blocks: vec![ContentBlock::ToolUse {
-                        id: "exec-1".to_string(),
-                        name: "exec".to_string(),
-                        input: serde_json::json!({"code": "x"}),
-                    }],
-                    kind: PromptKind::default(),
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::Message(Message {
-                    role: Role::Tool,
-                    blocks: vec![ContentBlock::ToolResult {
-                        tool_use_id: "exec-1".to_string(),
-                        content: large.clone(),
-                        is_error: false,
-                        images: Vec::new(),
-                    }],
-                    kind: PromptKind::default(),
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 0,
-                    name: "read".to_string(),
-                    args: "a.txt".to_string(),
-                    result: large.clone(),
-                    is_error: false,
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 1,
-                    name: "write".to_string(),
-                    args: "b.txt".to_string(),
-                    result: "visible write result".to_string(),
-                    is_error: false,
-                }),
-            },
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: "exec-1".to_string(),
-                    call_id: 2,
-                    name: "read".to_string(),
-                    args: "missing".to_string(),
-                    result: "visible error".to_string(),
-                    is_error: true,
-                }),
-            },
-        ];
-        append_events(&path, &mut events, None).unwrap();
-        let (_, index, _) = load_index(&path).unwrap();
-        let offsets: Vec<_> = index
-            .iter()
-            .filter(|entry| entry.kind != IndexKind::Cursor)
-            .map(|entry| entry.offset)
-            .collect();
-        let collapsed = load_collapsed_events_at(&path, &offsets).unwrap();
-        let complete = load_events_at(&path, &offsets).unwrap();
-
-        let tool_result = match &collapsed[2].kind {
-            SessionEventKind::Message(message) => match &message.blocks[0] {
-                ContentBlock::ToolResult { content, .. } => content,
-                _ => panic!("expected tool result"),
-            },
-            _ => panic!("expected tool message"),
-        };
-        assert!(tool_result.is_empty());
-        let natives: Vec<_> = collapsed
-            .iter()
-            .filter_map(|event| match &event.kind {
-                SessionEventKind::NativeTool(record) => Some(record),
-                _ => None,
-            })
-            .collect();
-        assert!(natives[0].result.is_empty());
-        assert_eq!(natives[1].result, "visible write result");
-        assert_eq!(natives[2].result, "visible error");
-        let full_read = complete.iter().find_map(|event| match &event.kind {
-            SessionEventKind::NativeTool(record) if record.name == "read" && !record.is_error => {
-                Some(&record.result)
-            }
-            _ => None,
-        });
-        assert_eq!(full_read.map(String::len), Some(large.len()));
-        assert_eq!(
-            SessionCursor::new(path, None)
-                .prompt_texts(&[offsets[0]])
-                .unwrap(),
-            vec![("  raw prompt  \n".to_string(), lofi_types::PromptKind::User)]
-        );
     }
 
     #[test]
