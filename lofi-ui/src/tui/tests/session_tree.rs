@@ -171,6 +171,81 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
 }
 
 #[test]
+fn oversized_turn_skips_the_collapsed_cache() {
+    // A single entry past the per-turn cap reparses from the transcript on
+    // demand instead of flushing every other entry out of the budget.
+    use lofi_core::session::store::SessionStore;
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+    // Incompressible pseudo-random text so the lz4 entry stays above the cap.
+    let mut entropy = String::with_capacity(2 * 1024 * 1024);
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    while entropy.len() < 2 * 1024 * 1024 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        entropy.push(char::from(b'!' + (state % 90) as u8));
+    }
+    let mut evs = vec![
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: entropy }],
+                kind: PromptKind::default(),
+            }),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: "small answer".into(),
+                }],
+                kind: PromptKind::default(),
+            }),
+        },
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: Usage::default(),
+                stop_reason: None,
+            },
+        },
+    ];
+    test_append_events(&path, &mut evs, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store,
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    let c0 = a.session.cursor.as_ref().unwrap().clone();
+    let snap = c0.snapshot().unwrap();
+    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
+        .unwrap();
+
+    let rendered = a.materialize_turn(0);
+    assert!(!rendered.blocks.is_empty());
+    assert!(
+        a.collapsed_turns.borrow().map.is_empty(),
+        "entry above the cap must not be retained"
+    );
+}
+
+#[test]
 fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     use lofi_core::session::store::SessionStore;
     let dir = tempfile::tempdir().unwrap();
