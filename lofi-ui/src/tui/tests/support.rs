@@ -124,17 +124,6 @@ pub(super) fn confirm_request(
     )
 }
 
-pub(super) fn join_rendered(text: &ratatui::text::Text<'static>) -> String {
-    let mut s = String::new();
-    for line in &text.lines {
-        for span in &line.spans {
-            s.push_str(span.content.as_ref());
-        }
-        s.push('\n');
-    }
-    s
-}
-
 pub(super) fn user_text(m: &lofi_types::Message) -> &str {
     match &m.blocks[..] {
         [lofi_types::ContentBlock::Text { text }] => text,

@@ -169,11 +169,7 @@ impl App {
         };
         let (label, _) = self.mode_badge();
         let mode_w = super::view::width(label) + 2;
-        let verbose_w = if self.verbose { 10 } else { 0 };
-        let avail = w
-            .saturating_sub(4)
-            .saturating_sub(mode_w)
-            .saturating_sub(verbose_w);
+        let avail = w.saturating_sub(4).saturating_sub(mode_w);
         if avail == 0 {
             return 1;
         }
