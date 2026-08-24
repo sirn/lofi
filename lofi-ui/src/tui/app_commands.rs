@@ -109,22 +109,6 @@ fn run_tree_snapshot(
 }
 
 impl App {
-    pub(super) fn toggle_verbose(&mut self) {
-        self.debug_sample("verbose");
-        self.verbose = !self.verbose;
-        if self.verbose {
-            self.restore_last_committed_exec_results();
-        } else {
-            self.release_last_committed_exec_results();
-        }
-        // Frozen styled rows are mode-specific, but retain and swap the tiny
-        // per-mode height indexes so toggling back does not reparse every turn.
-        // The state itself surfaces as the ` verbose ` tag on the rule line
-        // rather than a chat turn, so toggling stays out of the transcript.
-        self.switch_verbose_layout();
-        self.debug_after_draw = Some("verbose");
-    }
-
     /// Handle a submitted line starting with '/'. Returns true if it was a
     /// recognized command (so the caller does not start a run).
     pub(super) fn slash_command(&mut self, line: &str) -> bool {
@@ -168,10 +152,6 @@ impl App {
             }
             "/tree" => {
                 self.open_tree_picker();
-                true
-            }
-            "/verbose" => {
-                self.toggle_verbose();
                 true
             }
             "/model" => {
@@ -300,7 +280,13 @@ impl App {
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_section("Navigate"));
         lines.push(info_kv(t, "j/k ↑↓", "scroll"));
-        lines.push(info_kv(t, "h/l ←→", "move column"));
+        lines.push(info_kv(
+            t,
+            "h/l ←→",
+            "collapse / expand detail; move column",
+        ));
+        lines.push(info_kv(t, "Enter", "toggle detail; yank ordinary line"));
+        lines.push(info_kv(t, "Shift+↑/↓", "scroll expanded detail"));
         lines.push(info_kv(t, "0 ^ $", "start / first non-blank / end"));
         lines.push(info_kv(t, "w b e", "next / prev word"));
         lines.push(info_kv(t, "g G", "top / bottom"));
@@ -342,7 +328,6 @@ impl App {
             "/job",
             "list background jobs, view output, stop",
         ));
-        lines.push(info_kv(t, "/verbose", "toggle tool detail"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_note(
@@ -403,6 +388,7 @@ impl App {
             self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
         }
         self.turns.clear();
+        self.expanded_details.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();

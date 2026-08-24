@@ -69,6 +69,86 @@ impl App {
         self.log_vis.get(rel).map_or((0, 0), |v| v.content)
     }
 
+    fn cursor_detail(&self) -> Option<view::DetailTarget> {
+        let rel = self.nav_cursor.checked_sub(self.log_off)?;
+        self.log_details.get(rel)?.clone()
+    }
+
+    fn cursor_turn(&self) -> usize {
+        let mut turn = 0;
+        for idx in 0..self.turns.len() {
+            if self.turn_start_line(idx) <= self.nav_cursor {
+                turn = idx;
+            } else {
+                break;
+            }
+        }
+        turn
+    }
+
+    fn invalidate_detail_layout(&mut self, turn: usize) {
+        self.collapsed_turns.get_mut().remove(turn);
+        self.frozen_render.clear();
+        if let Some(height) = self.frozen_heights_estimated.get_mut(turn) {
+            *height = true;
+            self.height_remeasure_from = Some(
+                self.height_remeasure_from
+                    .unwrap_or_default()
+                    .max(turn.saturating_add(1)),
+            );
+        }
+    }
+
+    pub(super) fn set_cursor_detail_expanded(&mut self, expanded: bool) -> bool {
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let is_expanded = self.expanded_details.contains_key(&target.key);
+        if expanded == is_expanded {
+            return false;
+        }
+        let turn = self.cursor_turn();
+        if expanded {
+            self.expanded_details
+                .insert(target.key, DetailState { turn, scroll: None });
+        } else {
+            self.expanded_details.remove(&target.key);
+        }
+        self.invalidate_detail_layout(turn);
+        true
+    }
+
+    pub(super) fn toggle_cursor_detail(&mut self) -> bool {
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let expanded = !self.expanded_details.contains_key(&target.key);
+        self.set_cursor_detail_expanded(expanded)
+    }
+
+    pub(super) fn scroll_cursor_detail(&mut self, delta: i32) -> bool {
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let turn = {
+            let Some(state) = self.expanded_details.get_mut(&target.key) else {
+                return false;
+            };
+            let max = target.total.saturating_sub(DETAIL_VIEW_ROWS);
+            let current = state
+                .scroll
+                .unwrap_or_else(|| if target.tail { max } else { 0 });
+            state.scroll = Some(if delta > 0 {
+                current.saturating_add(delta as usize).min(max)
+            } else {
+                current.saturating_sub(delta.unsigned_abs() as usize)
+            });
+            state.turn
+        };
+        self.invalidate_detail_layout(turn);
+        true
+    }
+
     pub(super) fn nav_col_delta(&mut self, delta: i32) {
         let (cstart, cend) = self.cursor_content_range();
         let raw = if delta > 0 {
@@ -648,6 +728,7 @@ impl App {
 
     pub(super) fn clear_log(&mut self) {
         self.turns.clear();
+        self.expanded_details.clear();
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
