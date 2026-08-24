@@ -1,6 +1,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use std::cell::Cell;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::mem::size_of;
@@ -13,7 +14,9 @@ pub(super) struct DebugState {
     debug_dir: PathBuf,
     started: Instant,
     latest_rss_bytes: Option<u64>,
+    latest_peak_bytes: Option<u64>,
     latest_heap_bytes: Option<u64>,
+    live_sizes: Cell<Option<(Instant, u64, u64)>>,
     previous_sample: Option<SampleTotals>,
     slow_render_window: Option<Box<SlowRenderWindow>>,
 }
@@ -170,13 +173,19 @@ impl App {
 
     pub(crate) fn debug_memory_line(&self) -> Option<Line<'static>> {
         let debug = self.debug.as_ref()?;
+        // Samples only land on lifecycle events, so the line would sit stale
+        // for the whole duration of an agent run. Refresh cheap process-level
+        // numbers at most once per second; RSS peak (VmHWM) never decreases,
+        // which explains a higher top reading next to a settled RSS.
+        let (rss, peak) = debug.live_sizes();
         let components = self.component_memory_json();
         let measured = components["estimated_total_bytes"].as_u64().unwrap_or(0);
         let history = components["history_bytes"].as_u64().unwrap_or(0);
         let value = |n: Option<u64>| n.map_or_else(|| "–".to_string(), format_bytes);
         Some(Line::from(format!(
-            "  Debug · Total RSS {} · Heap RSS {} · Measured {} · History {}",
-            value(debug.latest_rss_bytes),
+            "  Debug · RSS {} · Peak {} · Heap {} · Measured {} · History {}",
+            value(rss),
+            value(peak),
             value(debug.latest_heap_bytes),
             format_bytes(measured),
             format_bytes(history),
@@ -223,8 +232,7 @@ impl App {
                 .flatten()
                 .map(|offsets| offsets.capacity() * size_of::<u64>())
                 .sum::<usize>()
-            + (self.frozen_heights.capacity() + self.frozen_heights_other_mode.capacity())
-                * size_of::<usize>();
+            + self.frozen_heights.capacity() * size_of::<usize>();
         let estimated_total = history_bytes
             + turns_bytes
             + render_cache_bytes
@@ -247,6 +255,22 @@ impl App {
 }
 
 impl DebugState {
+    /// Live RSS and RSS peak, cached for one second. The full sample path
+    /// also walks smaps; a plain status read is cheap enough for the
+    /// per-frame debug line.
+    fn live_sizes(&self) -> (Option<u64>, Option<u64>) {
+        if let Some((at, rss, peak)) = self.live_sizes.get() {
+            if at.elapsed() < Duration::from_secs(1) {
+                return (Some(rss), Some(peak));
+            }
+        }
+        let Some((rss, peak)) = read_status_sizes() else {
+            return (self.latest_rss_bytes, self.latest_peak_bytes);
+        };
+        self.live_sizes.set(Some((Instant::now(), rss, peak)));
+        (Some(rss), Some(peak))
+    }
+
     fn create() -> std::io::Result<Self> {
         let mut debug_dir = lofi_core::state::ensure_state_dir()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -259,7 +283,9 @@ impl DebugState {
             debug_dir,
             started: Instant::now(),
             latest_rss_bytes: None,
+            latest_peak_bytes: None,
             latest_heap_bytes: None,
+            live_sizes: Cell::new(None),
             previous_sample: None,
             slow_render_window: None,
         })
@@ -436,6 +462,7 @@ impl DebugState {
         };
         let previous = self.previous_sample.replace(totals);
         self.latest_rss_bytes = (process.rss_bytes > 0).then_some(process.rss_bytes);
+        self.latest_peak_bytes = (process.rss_peak_bytes > 0).then_some(process.rss_peak_bytes);
         self.latest_heap_bytes =
             (process.mappings.heap.rss > 0).then_some(process.mappings.heap.rss);
         let timestamp_ms = SystemTime::now()
@@ -519,7 +546,7 @@ impl DebugState {
                 "context_tokens": context_tokens,
                 "context_limit": app.ctx_limit,
                 "compacted": app.compacted,
-                "verbose": app.verbose,
+                "expanded_details": app.expanded_details.len(),
             }
         });
         serde_json::to_writer(&mut *file, &record)?;
@@ -665,6 +692,33 @@ fn read_mapping_breakdown() -> std::io::Result<MappingBreakdown> {
     Ok(breakdown)
 }
 
+fn read_status_sizes() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let mut rss = None;
+    let mut peak = None;
+    for line in status.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !matches!(key, "VmRSS" | "VmHWM") {
+            continue;
+        }
+        let Some(kib) = value
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        match key {
+            "VmRSS" => rss = Some(kib * 1024),
+            "VmHWM" => peak = Some(kib * 1024),
+            _ => {}
+        }
+    }
+    Some((rss?, peak?))
+}
+
 fn read_process_memory() -> std::io::Result<ProcessMemory> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
@@ -747,7 +801,9 @@ mod tests {
             debug_dir,
             started: Instant::now(),
             latest_rss_bytes: None,
+            latest_peak_bytes: None,
             latest_heap_bytes: None,
+            live_sizes: Cell::new(None),
             previous_sample: None,
             slow_render_window: None,
         }
