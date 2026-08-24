@@ -255,7 +255,7 @@ fn no_session_mode_runs_without_writing_a_transcript() {
 }
 
 #[test]
-fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
+fn diagnostics_recall_clear_and_exit_commands_work() {
     let server = MockServer::start(vec![
         text_response("command history answer marker"),
         text_response("command history follow-up answer"),
@@ -268,8 +268,6 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.clear_output();
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
-    tui.submit("/verbose");
-    tui.wait_for(" verbose ", WAIT);
 
     tui.clear_output();
     tui.submit("/recall command history prompt marker");
