@@ -148,6 +148,13 @@ const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 /// the task is aborted so an uninterruptible tool cannot pin the process.
 const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
+const DETAIL_VIEW_ROWS: usize = 5;
+
+static NEXT_DETAIL_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_detail_id() -> u64 {
+    NEXT_DETAIL_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
@@ -166,8 +173,19 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/service", "switch the service tier"),
     ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
-    ("/verbose", "toggle tool detail"),
 ];
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+enum DetailKey {
+    Thinking(u64),
+    NativeTool { parent: String, id: u64 },
+    ExecResult(String),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DetailState {
+    scroll: Option<usize>,
+}
 
 /// A native tool call (`lofi.bash`/`lofi.read`/…) observed inside an `exec`
 /// block, surfaced so the UI can render each one under its parent exec.
@@ -210,6 +228,8 @@ struct ToolCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ThinkingBlock {
+    #[serde(skip, default = "next_detail_id")]
+    id: u64,
     text: String,
     #[serde(skip, default = "Instant::now")]
     start: Instant,
@@ -917,7 +937,7 @@ pub(crate) struct App {
     pinned: bool,
     top_line: usize,
     last_base: usize,
-    verbose: bool,
+    expanded_details: HashMap<DetailKey, DetailState>,
     debug_after_draw: Option<&'static str>,
     debug: Option<debug_stats::DebugState>,
     should_quit: bool,
