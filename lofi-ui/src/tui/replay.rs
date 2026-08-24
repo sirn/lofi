@@ -90,6 +90,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         });
         return;
     }
+    let turn_index = turns.len().saturating_sub(1);
     let Some(turn) = turns.last_mut() else {
         return;
     };
@@ -129,12 +130,14 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         AgentEvent::ToolStart { id, name } => {
             finalize_open_thinking(turn);
             turn.blocks.push(Block::Tool(ToolCall {
+                detail_id: detail_block_id(turn_index, turn.blocks.len()),
                 id,
                 name,
                 input: String::new(),
                 label: None,
                 native: Vec::new(),
                 result: None,
+                result_availability: ResultAvailability::None,
                 result_committed: false,
                 is_error: false,
                 done: false,
@@ -173,6 +176,9 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                             nt.done = true;
                         }
                     }
+                }
+                if !result.is_empty() {
+                    t.result_availability = ResultAvailability::Available;
                 }
                 t.result = Some(result);
                 t.is_error = is_error;
