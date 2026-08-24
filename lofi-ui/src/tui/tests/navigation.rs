@@ -646,3 +646,156 @@ fn ctrl_c_in_nav_returns_to_input_pinned() {
     assert!(a.pinned);
     assert_eq!(a.top_line, 42);
 }
+
+#[test]
+fn detail_keys_focus_and_scroll_the_expanded_row() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.mode = Mode::Navigate;
+    a.log_off = 0;
+    a.log_total = 1;
+    a.log_view_h = 1;
+    a.nav_cursor = 0;
+    let key = DetailKey::NativeTool { parent: 0, id: 7 };
+    a.log_details = vec![Some(view::DetailTarget {
+        key: key.clone(),
+        total: 12,
+        tail: false,
+        row: None,
+    })];
+    let mut run = None;
+
+    handle_event(&plain_key(KeyCode::Char(' ')), &mut a, None, &mut run);
+    assert!(a.expanded_details.contains_key(&key));
+    assert_eq!(a.detail_focus.as_ref().map(|focus| focus.cursor), Some(0));
+    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    assert_eq!(a.detail_focus.as_ref().map(|focus| focus.cursor), Some(1));
+    handle_event(
+        &Event::Key(crossterm::event::KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        )),
+        &mut a,
+        None,
+        &mut run,
+    );
+    assert_eq!(a.detail_focus.as_ref().map(|focus| focus.cursor), Some(1));
+    assert_eq!(a.expanded_details[&key].scroll, None);
+    handle_event(&plain_key(KeyCode::PageDown), &mut a, None, &mut run);
+    assert_eq!(a.detail_focus.as_ref().map(|focus| focus.cursor), Some(11));
+    assert_eq!(a.expanded_details[&key].scroll, Some(2));
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(!a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_none());
+    assert_eq!(a.mode, Mode::Navigate);
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_some());
+    handle_event(&plain_key(KeyCode::Char(' ')), &mut a, None, &mut run);
+    assert!(!a.expanded_details.contains_key(&key));
+}
+
+#[test]
+fn detail_select_survives_frames_and_copies_the_raw_source() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "copy".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "copy".to_string(),
+        code: "copy detail one
+copy detail two"
+            .to_string(),
+        label: None,
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "copy".to_string(),
+        result: "{\"value\":null}".to_string(),
+        is_error: false,
+        elapsed_ms: 0,
+    });
+    let key = DetailKey::Exec(detail_block_id(0, 0));
+    let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let header = a
+        .log_details
+        .iter()
+        .position(|target| {
+            target
+                .as_ref()
+                .is_some_and(|target| target.key == key && target.row.is_none())
+        })
+        .expect("exec detail header");
+    a.mode = Mode::Navigate;
+    a.nav_cursor = header;
+    let mut run = None;
+
+    handle_event(&plain_key(KeyCode::Char(' ')), &mut a, None, &mut run);
+    assert!(a.detail_focus.is_some());
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_some());
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_some());
+
+    handle_event(&plain_key(KeyCode::Char('v')), &mut a, None, &mut run);
+    handle_event(&plain_key(KeyCode::Char('j')), &mut a, None, &mut run);
+    handle_event(&plain_key(KeyCode::Char('$')), &mut a, None, &mut run);
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+
+    assert_eq!(
+        a.selection_text().as_deref(),
+        Some("copy detail one\ncopy detail two")
+    );
+
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(a.detail_focus.is_none());
+    assert!(!a.expanded_details.contains_key(&key));
+    assert_eq!(a.nav_cursor, header);
+    assert_eq!(a.mode, Mode::Navigate);
+}
+
+#[test]
+fn mouse_wheel_scrolls_the_inline_detail_under_the_pointer() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.mode = Mode::Navigate;
+    a.log_rect = ratatui::layout::Rect::new(0, 0, 40, 5);
+    a.log_off = 0;
+    a.log_total = 1;
+    a.log_view_h = 5;
+    let key = DetailKey::NativeTool { parent: 0, id: 8 };
+    a.log_details = vec![Some(view::DetailTarget {
+        key: key.clone(),
+        total: 12,
+        tail: false,
+        row: None,
+    })];
+    a.expanded_details.insert(
+        key.clone(),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+
+    handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut a,
+    );
+
+    assert_eq!(a.expanded_details[&key].scroll, Some(1));
+}
