@@ -7,6 +7,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::theme::{active_indicator, Theme};
+use crate::tui::DetailKey;
 use crate::tui::SPINNER;
 
 /// Display width of `s` in terminal cells: wide chars (CJK, emoji) count as
@@ -120,6 +121,14 @@ pub struct RenderLine {
     pub content: (usize, usize),
     pub raw: Option<RawLine>,
     pub links: Vec<Hyperlink>,
+    pub detail: Option<DetailTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DetailTarget {
+    pub key: DetailKey,
+    pub total: usize,
+    pub tail: bool,
 }
 
 impl RenderLine {
@@ -137,6 +146,11 @@ impl RenderLine {
 
     pub fn with_links(mut self, links: Vec<Hyperlink>) -> Self {
         self.links = links;
+        self
+    }
+
+    pub fn with_detail(mut self, key: DetailKey, total: usize, tail: bool) -> Self {
+        self.detail = Some(DetailTarget { key, total, tail });
         self
     }
 }
@@ -179,6 +193,7 @@ pub fn render(
         content: (start, end),
         raw: None,
         links: Vec::new(),
+        detail: None,
     }
 }
 
@@ -192,6 +207,7 @@ pub fn rblank() -> RenderLine {
         content: (0, 0),
         raw: None,
         links: Vec::new(),
+        detail: None,
     }
 }
 
@@ -304,7 +320,7 @@ fn osc8_symbol(url: &str, symbol: &str, opening: bool, closing: bool) -> String 
     out
 }
 
-fn span_width(spans: &[Span<'static>]) -> usize {
+pub fn span_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| width(&s.content)).sum()
 }
 pub fn truncate(s: &str, max_w: usize) -> String {
