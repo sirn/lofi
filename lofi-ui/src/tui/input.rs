@@ -37,10 +37,14 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Escape is the interrupt key: it dismisses completion first, then aborts
-    // an active stream. Ctrl-C is deliberately not a bare interrupt alias; it
-    // first peels away the editor/nav state (see handle_ctrl_c) so it only
-    // cancels a turn from a clean, empty prompt.
+    // Escape is the interrupt key: it dismisses completion and an expanded
+    // detail first, then aborts an active stream. Ctrl-C is deliberately not
+    // a bare interrupt alias; it first peels away the editor/nav state (see
+    // handle_ctrl_c) so it only cancels a turn from a clean, empty prompt.
+    if k.code == KeyCode::Esc && app.detail_focus.is_some() {
+        app.collapse_detail_focus();
+        return;
+    }
     if k.code == KeyCode::Esc
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())
@@ -658,6 +662,9 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
     if k.modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
+    if k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Up | KeyCode::Down) {
+        return;
+    }
     if apply_motion(k, app) {
         return;
     }
@@ -678,6 +685,13 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
             app.sel = None;
             app.nav_col_delta(1);
         }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.sel = None;
+            if !app.toggle_cursor_detail() && k.code == KeyCode::Enter {
+                app.yank_line();
+                app.enter_input();
+            }
+        }
         KeyCode::Char('g') => {
             app.sel = None;
             app.nav_top();
@@ -692,8 +706,8 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
             app.enter_input();
         }
         KeyCode::Char('i') | KeyCode::Tab => app.enter_input(),
-        KeyCode::Char('[') => app.nav_jump_turn(-1),
-        KeyCode::Char(']') => app.nav_jump_turn(1),
+        KeyCode::Char('[') if app.detail_focus.is_none() => app.nav_jump_turn(-1),
+        KeyCode::Char(']') if app.detail_focus.is_none() => app.nav_jump_turn(1),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
         _ => {}
@@ -704,10 +718,16 @@ pub(super) fn handle_select_key(k: &KeyEvent, app: &mut App) {
     if k.modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
+    if k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Up | KeyCode::Down) {
+        return;
+    }
     if apply_motion(k, app) {
         return;
     }
     match k.code {
+        KeyCode::Enter | KeyCode::Char(' ') if app.detail_focus.is_some() => {
+            app.toggle_cursor_detail();
+        }
         KeyCode::Char('j') | KeyCode::Down => app.nav_move(1),
         KeyCode::Char('k') | KeyCode::Up => app.nav_move(-1),
         KeyCode::Char('h') | KeyCode::Left => app.nav_col_delta(-1),
@@ -722,8 +742,8 @@ pub(super) fn handle_select_key(k: &KeyEvent, app: &mut App) {
             app.mode = Mode::Navigate;
             app.sel = None;
         }
-        KeyCode::Char('[') => app.nav_jump_turn(-1),
-        KeyCode::Char(']') => app.nav_jump_turn(1),
+        KeyCode::Char('[') if app.detail_focus.is_none() => app.nav_jump_turn(-1),
+        KeyCode::Char(']') if app.detail_focus.is_none() => app.nav_jump_turn(1),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
         _ => {}
@@ -736,17 +756,68 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
         && m.column >= app.log_rect.x
         && m.column < app.log_rect.x + app.log_rect.width;
     let can_select = app.mode == Mode::Input || app.mode == Mode::Navigate;
+    let detail_at = |app: &App, row: u16| {
+        let rel = row.saturating_sub(app.log_rect.y) as usize;
+        app.log_details.get(rel)?.clone()
+    };
     match m.kind {
-        MouseEventKind::ScrollUp if in_log => app.scroll_nav(-3),
-        MouseEventKind::ScrollDown if in_log => app.scroll_nav(3),
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if in_log => {
+            let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                -1
+            } else {
+                1
+            };
+            let cell = log_cell(app, m.row, m.column);
+            app.nav_cursor = cell.0;
+            if let Some(detail) = detail_at(app, m.row) {
+                if app.mode == Mode::Navigate {
+                    app.detail_focus = Some(DetailFocus::on(&detail, cell.1));
+                }
+            } else {
+                app.collapse_detail_focus();
+            }
+            if !app.scroll_cursor_detail(delta) {
+                app.scroll_nav(if delta < 0 { -3 } else { 3 });
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if can_select => {
             app.sel = None;
             if in_log {
                 let cell = log_cell(app, m.row, m.column);
+                if app.mode == Mode::Navigate {
+                    if let Some(detail) = detail_at(app, m.row) {
+                        if detail.row.is_some() {
+                            app.detail_focus = Some(DetailFocus::on(&detail, cell.1));
+                            app.sel = Some(Selection {
+                                start: cell,
+                                end: cell,
+                            });
+                            return;
+                        }
+                    }
+                }
                 app.sel = Some(Selection {
                     start: cell,
                     end: cell,
                 });
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if in_log && app.detail_focus.is_some() => {
+            let cell = log_cell(app, m.row, m.column);
+            if let Some(detail) = detail_at(app, m.row) {
+                if let Some(focus) = app.detail_focus.as_mut() {
+                    if detail.key == focus.key {
+                        if let Some(row) = detail.row {
+                            focus.cursor = row;
+                            focus.col = cell.1;
+                            app.nav_cursor = cell.0;
+                            app.nav_col = cell.1;
+                            if let Some(sel) = app.sel.as_mut() {
+                                sel.end = cell;
+                            }
+                        }
+                    }
+                }
             }
         }
         MouseEventKind::Drag(MouseButton::Left) if in_log && can_select => {
@@ -759,7 +830,7 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
             app.yank_selection();
             // Return to Input mode after a drag-yank so the user can
             // immediately type (mouse drag is a quick-peek action).
-            app.mode = Mode::Input;
+            app.enter_input();
         }
         _ => {}
     }

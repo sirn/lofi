@@ -80,6 +80,85 @@ fn resize_defers_height_remeasure_off_the_frame() {
 }
 
 #[test]
+fn height_remeasure_does_not_populate_the_collapsed_cache() {
+    use lofi_core::session::store::SessionStore;
+    // File-backed resumed turns: exact heights are seeded from byte ranges
+    // and converged by the tick-loop re-measure. That pass walks every turn;
+    // it must not claim collapsed-cache slots — the cache is for turns the
+    // user actually views, not a mirror of the whole transcript.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("s"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+    let mut evs = Vec::new();
+    for i in 0..3 {
+        evs.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text {
+                    text: format!("prompt {i}"),
+                }],
+                kind: PromptKind::default(),
+            }),
+        });
+        evs.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: format!("answer {i}"),
+                }],
+                kind: PromptKind::default(),
+            }),
+        });
+        evs.push(SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: Usage::default(),
+                stop_reason: None,
+            },
+        });
+    }
+    test_append_events(&path, &mut evs, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        store,
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    let c0 = a.session.cursor.as_ref().unwrap().clone();
+    let snap = c0.snapshot().unwrap();
+    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
+        .unwrap();
+
+    a.ensure_frozen(40);
+    assert!(
+        a.height_remeasure_from.is_some(),
+        "estimated heights pending exact re-measure"
+    );
+    while a.remeasure_heights_step(16) {}
+    assert!(
+        a.collapsed_turns.borrow().map.is_empty(),
+        "re-measure must not retain collapsed turns"
+    );
+
+    // Viewport materialization still caches what the user looks at.
+    let _ = a.materialize_turn(0);
+    assert_eq!(a.collapsed_turns.borrow().map.len(), 1);
+}
+
+#[test]
 fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
