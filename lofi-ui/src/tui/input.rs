@@ -658,6 +658,19 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
     if k.modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
+    if k.modifiers.contains(KeyModifiers::SHIFT) {
+        match k.code {
+            KeyCode::Up => {
+                app.scroll_cursor_detail(-1);
+                return;
+            }
+            KeyCode::Down => {
+                app.scroll_cursor_detail(1);
+                return;
+            }
+            _ => {}
+        }
+    }
     if apply_motion(k, app) {
         return;
     }
@@ -677,6 +690,13 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
         KeyCode::Char('l') | KeyCode::Right => {
             app.sel = None;
             app.nav_col_delta(1);
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.sel = None;
+            if !app.toggle_cursor_detail() && k.code == KeyCode::Enter {
+                app.yank_line();
+                app.enter_input();
+            }
         }
         KeyCode::Char('g') => {
             app.sel = None;
@@ -737,8 +757,20 @@ pub(super) fn handle_mouse(m: MouseEvent, app: &mut App) {
         && m.column < app.log_rect.x + app.log_rect.width;
     let can_select = app.mode == Mode::Input || app.mode == Mode::Navigate;
     match m.kind {
-        MouseEventKind::ScrollUp if in_log => app.scroll_nav(-3),
-        MouseEventKind::ScrollDown if in_log => app.scroll_nav(3),
+        MouseEventKind::ScrollUp if in_log => {
+            let cell = log_cell(app, m.row, m.column);
+            app.nav_cursor = cell.0;
+            if !app.scroll_cursor_detail(-1) {
+                app.scroll_nav(-3);
+            }
+        }
+        MouseEventKind::ScrollDown if in_log => {
+            let cell = log_cell(app, m.row, m.column);
+            app.nav_cursor = cell.0;
+            if !app.scroll_cursor_detail(1) {
+                app.scroll_nav(3);
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if can_select => {
             app.sel = None;
             if in_log {
