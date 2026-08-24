@@ -3,8 +3,159 @@ use serde_json::Value;
 
 use crate::support::{
     delayed_text_response, delayed_tool_response, process_is_alive, spawned_pid, text_response,
-    tool_response, transcript_text, wait_for_process_exit, Fixture, MockServer, ProcessGuard, WAIT,
+    thinking_tool_response, tool_response, transcript_text, wait_for_process_exit, Fixture,
+    MockServer, ProcessGuard, Tui, WAIT,
 };
+
+fn enter_navigation(tui: &mut Tui) {
+    tui.send(b"\t");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
+fn select_transcript_row(tui: &mut Tui, needle: &str) {
+    for _ in 0..40 {
+        let current = tui.tinted_row_text();
+        if current.as_deref().is_some_and(|row| row.contains(needle)) {
+            return;
+        }
+        let rows = tui.screen_text();
+        let rows = rows.lines().collect::<Vec<_>>();
+        let target = rows.iter().position(|row| row.contains(needle));
+        if let Some((target, current)) = target.zip(tui.tinted_row_index()) {
+            tui.send(if target < current { b"k" } else { b"j" });
+        } else {
+            tui.send(b"k");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "could not select transcript row {needle:?}; current: {:?}; screen:\n{}",
+        tui.tinted_row_text(),
+        tui.screen_text()
+    );
+}
+
+#[test]
+fn expanded_transcript_details_are_independent_adaptive_and_styled() {
+    let server = MockServer::start(vec![
+        thinking_tool_response(
+            "thinking-detail-one\nthinking-detail-two",
+            "detail-e2e-call",
+            r#"await lofi.bash({ cmd: "printf 'left-%s\\nright-%s\\n' 1 2" });
+return "detail-executive-one\\ndetail-executive-two";"#,
+        ),
+        text_response("detail first answer marker"),
+        text_response("detail freezing answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("detail e2e prompt");
+    tui.wait_for("detail first answer marker", WAIT);
+    tui.submit("freeze the detail e2e turn");
+    tui.wait_for("detail freezing answer marker", WAIT);
+
+    for row in ["Thought for", "Exec", "Tool bash", "Succeed"] {
+        let line = tui
+            .screen_row(row)
+            .unwrap_or_else(|| panic!("missing {row} row; screen:\n{}", tui.screen_text()));
+        assert!(line.contains('▸'), "{row} has no collapsed caret: {line}");
+    }
+
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    tui.wait_for("await lofi.bash", WAIT);
+
+    select_transcript_row(&mut tui, "Tool bash");
+    tui.send(b"\r");
+    tui.wait_for_screen("left-1", WAIT);
+    tui.wait_for_screen("right-2", WAIT);
+
+    let screen = tui.screen_text();
+    let rows = screen.lines().collect::<Vec<_>>();
+    let bash = rows
+        .iter()
+        .position(|row| row.contains("Tool bash"))
+        .unwrap();
+    let result = rows.iter().position(|row| row.contains("Succeed")).unwrap();
+    assert_eq!(
+        result - bash,
+        3,
+        "a two-line native detail must render exactly two rows:\n{screen}"
+    );
+    assert!(tui.row_has_raised_background("left-1"));
+    let detail_rows = rows
+        .iter()
+        .filter(|row| row.contains("left-1") || row.contains("right-2"))
+        .collect::<Vec<_>>();
+    assert_eq!(detail_rows.len(), 2);
+    assert!(detail_rows.iter().all(|row| !row.contains('┌')));
+    assert!(detail_rows.iter().all(|row| !row.contains('└')));
+    assert!(detail_rows.iter().all(|row| {
+        let start = row.find("left-").or_else(|| row.find("right-")).unwrap();
+        !row[start..].contains('│')
+    }));
+
+    select_transcript_row(&mut tui, "Thought for");
+    tui.send(b"\r");
+    tui.wait_for_screen("thinking-detail-one", WAIT);
+    assert!(
+        tui.row_has_raised_background("thinking-detail-one"),
+        "screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(tui.row_has_italic_text("thinking-detail-one"));
+}
+
+#[test]
+fn reloaded_native_tool_details_show_their_caret_before_any_expansion() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "reloaded-detail-call",
+            r#"await lofi.read("reloaded-hidden-detail.txt");
+return "exec-result-reload-one\nexec-result-reload-two";"#,
+        ),
+        text_response("reloaded detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.workspace.join("reloaded-hidden-detail.txt"),
+        "reloaded-hidden-first\nreloaded-hidden-second\n",
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("persist a reloaded detail prompt");
+    tui.wait_for("reloaded detail answer marker", WAIT);
+    tui.submit("/exit");
+    tui.wait_exit();
+
+    let mut reloaded = fixture.spawn(&["--continue"]);
+    reloaded.wait_for_screen("persist a reloaded detail prompt", WAIT);
+    reloaded.wait_for_screen("Tool read", WAIT);
+    for row in ["Tool read", "Succeed"] {
+        let line = reloaded
+            .screen_row(row)
+            .unwrap_or_else(|| panic!("missing {row} row; screen:\n{}", reloaded.screen_text()));
+        assert!(
+            line.contains('▸'),
+            "reloaded hidden {row} detail has no collapsed caret before expansion: {line}"
+        );
+    }
+    assert!(!reloaded.screen_text().contains("exec-result-reload-one"));
+
+    enter_navigation(&mut reloaded);
+    select_transcript_row(&mut reloaded, "Succeed");
+    reloaded.send(b"\r");
+    reloaded.wait_for_screen("exec-result-reload-one", WAIT);
+    reloaded.wait_for_screen("exec-result-reload-two", WAIT);
+    let read_row = reloaded.screen_row("Tool read").unwrap();
+    assert!(
+        read_row.contains('▸'),
+        "expanding Succeed changed Tool read: {read_row}"
+    );
+}
 
 #[test]
 fn user_shell_context_marker_controls_the_next_model_request() {
@@ -255,7 +406,7 @@ fn no_session_mode_runs_without_writing_a_transcript() {
 }
 
 #[test]
-fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
+fn diagnostics_recall_clear_and_exit_commands_work() {
     let server = MockServer::start(vec![
         text_response("command history answer marker"),
         text_response("command history follow-up answer"),
@@ -268,8 +419,6 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.clear_output();
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
-    tui.submit("/verbose");
-    tui.wait_for(" verbose ", WAIT);
 
     tui.clear_output();
     tui.submit("/recall command history prompt marker");
