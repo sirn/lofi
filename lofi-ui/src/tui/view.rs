@@ -28,9 +28,9 @@ use modals::{
 
 #[allow(unused_imports)] // used by tests and render harnesses
 pub(crate) use prim::RawLine;
-pub(crate) use prim::RenderLine;
 pub(crate) use prim::VisLine;
 pub(crate) use prim::{width, wrap};
+pub(crate) use prim::{DetailTarget, RenderLine};
 
 pub(crate) use prim::HStack;
 
@@ -170,6 +170,7 @@ fn feed_segment(
     want: &mut usize,
     vis: &mut Vec<Line<'static>>,
     visv: &mut Vec<VisLine>,
+    details: &mut Vec<Option<DetailTarget>>,
     links: &mut Vec<Vec<prim::Hyperlink>>,
 ) {
     if *want == 0 {
@@ -189,6 +190,7 @@ fn feed_segment(
             content: rl.content,
             raw: rl.raw.clone(),
         });
+        details.push(rl.detail.clone());
         links.push(rl.links.clone());
         *pos += 1;
         *want -= 1;
@@ -363,6 +365,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
     let mut visv: Vec<VisLine> = Vec::with_capacity(height);
+    let mut details: Vec<Option<DetailTarget>> = Vec::with_capacity(height);
     let mut links: Vec<Vec<prim::Hyperlink>> = Vec::with_capacity(height);
     let mut pos = 0usize;
     let mut want = height;
@@ -374,6 +377,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             &mut want,
             &mut vis,
             &mut visv,
+            &mut details,
             &mut links,
         );
     } else {
@@ -386,6 +390,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     &mut want,
                     &mut vis,
                     &mut visv,
+                    &mut details,
                     &mut links,
                 );
                 if want == 0 {
@@ -400,7 +405,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     let turn_start = pos;
                     if let Some(lines) = app.frozen_render.get(i) {
                         feed_segment(
-                            lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                            lines,
+                            &mut pos,
+                            off,
+                            &mut want,
+                            &mut vis,
+                            &mut visv,
+                            &mut details,
+                            &mut links,
                         );
                     } else {
                         let start = off.saturating_sub(turn_start);
@@ -410,7 +422,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         app.render_profile.frozen_window_us += phase_started.elapsed().as_micros();
                         pos = turn_start + start;
                         feed_segment(
-                            &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                            &lines,
+                            &mut pos,
+                            off,
+                            &mut want,
+                            &mut vis,
+                            &mut visv,
+                            &mut details,
+                            &mut links,
                         );
                     }
                 }
@@ -433,7 +452,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     app.render_profile.live_window_us += phase_started.elapsed().as_micros();
                     pos = turn_start + start;
                     feed_segment(
-                        &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                        &lines,
+                        &mut pos,
+                        off,
+                        &mut want,
+                        &mut vis,
+                        &mut visv,
+                        &mut details,
+                        &mut links,
                     );
                 }
             }
@@ -443,37 +469,128 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     app.log_vis = visv;
+    app.log_details = details;
     app.render_profile.log_total_us = log_started.elapsed().as_micros();
 
-    if let Some(sel) = &app.sel {
-        let (sl, sc) = sel.start;
-        let (el, ec) = sel.end;
-        let ((sl, sc), (el, ec)) = if (sl, sc) <= (el, ec) {
-            ((sl, sc), (el, ec))
-        } else {
-            ((el, ec), (sl, sc))
-        };
-        let sel_bg = app.theme.selection;
-        let vis_len = vis.len();
-        if vis_len > 0 && el >= off && sl < off + vis_len {
-            let lo = sl.max(off);
-            let hi = el.min(off + vis_len - 1);
-            for li in lo..=hi {
-                let rel = li - off;
-                let s = &app.log_vis[rel].rendered;
-                let (cstart, cend) = app
-                    .log_vis
-                    .get(rel)
-                    .map_or((0, s.chars().count()), |v| v.content);
-                // Clamp to the content range so the highlight covers only the
-                // content — never the leading gutter or the trailing padding.
-                let cs = if li == sl { sc } else { 0 };
-                let ce = if li == el { ec } else { s.chars().count() };
-                let cs = cs.clamp(cstart, cend);
-                let ce = ce.clamp(cstart, cend);
-                if cs < ce {
-                    prim::apply_selection(&mut vis[rel], cs, ce, sel_bg);
+    if app.detail_focus.is_none() {
+        if let Some(sel) = &app.sel {
+            let (sl, sc) = sel.start;
+            let (el, ec) = sel.end;
+            let ((sl, sc), (el, ec)) = if (sl, sc) <= (el, ec) {
+                ((sl, sc), (el, ec))
+            } else {
+                ((el, ec), (sl, sc))
+            };
+            let sel_bg = app.theme.selection;
+            let vis_len = vis.len();
+            if vis_len > 0 && el >= off && sl < off + vis_len {
+                let lo = sl.max(off);
+                let hi = el.min(off + vis_len - 1);
+                for li in lo..=hi {
+                    let rel = li - off;
+                    let s = &app.log_vis[rel].rendered;
+                    let (cstart, cend) = app
+                        .log_vis
+                        .get(rel)
+                        .map_or((0, s.chars().count()), |v| v.content);
+                    // Clamp to the content range so the highlight covers only the
+                    // content — never the leading gutter or the trailing padding.
+                    let cs = if li == sl { sc } else { 0 };
+                    let ce = if li == el { ec } else { s.chars().count() };
+                    let cs = cs.clamp(cstart, cend);
+                    let ce = ce.clamp(cstart, cend);
+                    if cs < ce {
+                        prim::apply_selection(&mut vis[rel], cs, ce, sel_bg);
+                    }
                 }
+            }
+        }
+    }
+
+    if let Some(focus) = app.detail_focus.as_mut() {
+        if let Some(target) = app
+            .log_details
+            .iter()
+            .flatten()
+            .find(|target| target.key == focus.key)
+            .cloned()
+        {
+            let last = target.total.saturating_sub(1);
+            focus.cursor = focus.cursor.min(last);
+            if let Some(anchor) = focus.anchor.as_mut() {
+                anchor.0 = anchor.0.min(last);
+            }
+            let (key, cursor) = (focus.key.clone(), focus.cursor);
+            if let Some(rel) = app.log_details.iter().position(|target| {
+                target
+                    .as_ref()
+                    .is_some_and(|target| target.key == key && target.row == Some(cursor))
+            }) {
+                let (cstart, cend) = app.log_vis[rel].content;
+                focus.col = if cend > cstart {
+                    focus.col.clamp(cstart, cend - 1)
+                } else {
+                    cstart
+                };
+            }
+        } else {
+            app.detail_focus = None;
+        }
+    }
+
+    if let Some(focus) = app.detail_focus.as_ref() {
+        if app.mode == Mode::Select {
+            if let Some(anchor) = focus.anchor {
+                let cursor = (focus.cursor, focus.col);
+                let ((sr, sc), (er, ec)) = if anchor <= cursor {
+                    (anchor, cursor)
+                } else {
+                    (cursor, anchor)
+                };
+                for (rel, target) in app.log_details.iter().enumerate() {
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    let Some(row) = target.row else {
+                        continue;
+                    };
+                    if target.key != focus.key || row < sr || row > er {
+                        continue;
+                    }
+                    let (cstart, cend) = app.log_vis[rel].content;
+                    let cs = if row == sr { sc } else { cstart };
+                    let ce = if row == er { ec + 1 } else { cend };
+                    let cs = cs.clamp(cstart, cend);
+                    let ce = ce.clamp(cstart, cend);
+                    if cs < ce {
+                        prim::apply_selection(&mut vis[rel], cs, ce, app.theme.selection);
+                    }
+                }
+            }
+        }
+        if let Some(rel) = app.focused_detail_row_index(focus.cursor) {
+            let (cstart, cend) = app.log_vis.get(rel).map_or((0, 0), |v| v.content);
+            if app.mode == Mode::Navigate {
+                prim::apply_line_bg(&mut vis[rel], app.theme.cursor_line);
+                let used: usize = vis[rel]
+                    .spans
+                    .iter()
+                    .map(|span| prim::width(span.content.as_ref()))
+                    .sum();
+                if used < w {
+                    vis[rel].spans.push(Span::styled(
+                        " ".repeat(w - used),
+                        Style::new().bg(app.theme.cursor_line),
+                    ));
+                }
+            }
+            if app.mode == Mode::Select {
+                let col = if cend > cstart {
+                    focus.col.clamp(cstart, cend - 1)
+                } else {
+                    cstart
+                };
+                prim::apply_selection(&mut vis[rel], col, col + 1, app.theme.select_cursor);
             }
         }
     }
@@ -483,7 +600,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // the cursor cell in a distinct color over the selection. Blank spacing
     // lines have no spans to tint, so fill the width — otherwise the cursor
     // vanishes between blocks.
-    if app.mode == Mode::Navigate || app.mode == Mode::Select {
+    if app.detail_focus.is_none() && matches!(app.mode, Mode::Navigate | Mode::Select) {
         let cur = app.nav_cursor;
         if cur >= off && cur < off + vis.len() {
             let rel = cur - off;
@@ -661,8 +778,7 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Mode-badge strip. The bottom row carries the ` policy: … ` chip (while
 /// `/policy` set a non-default approval mode), the running-jobs badge, the
-/// ` verbose ` tag (while tool detail is expanded), and the mode chip
-/// (` INPUT ` / ` NAV `) on the right,
+/// mode chip (` INPUT ` / ` NAV `) on the right,
 /// and one notification badge on the left (quit > yank > retry > queue >
 /// transient status/error). A long notification wraps across up to
 /// [`NOTIFY_MAX_LINES`] rows above the chips instead of truncating to one,
@@ -702,13 +818,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(bold),
         ));
     }
-    if app.verbose {
-        right.push(Span::styled(
-            " verbose ",
-            Style::new().fg(t.muted).add_modifier(bold),
-        ));
-    }
-    // State chips stay lowercase (verbose, jobs, policy); the mode chip is
+    // State chips stay lowercase (jobs, policy); the mode chip is
     // the lone uppercase control indicator. INPUT is the default state, so
     // render it quietly; NAV/SELECT keep the accent chip so a modal shift
     // pops.

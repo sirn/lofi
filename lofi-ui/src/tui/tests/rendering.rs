@@ -131,6 +131,7 @@ fn rich_header_suffix_for_read_and_bash() {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Tool(ToolCall {
+            detail_id: 0,
             id: "e1".to_string(),
             name: "exec".to_string(),
             input: String::new(),
@@ -174,6 +175,7 @@ fn rich_header_suffix_for_read_and_bash() {
                 },
             ],
             result: Some("{\"value\":null}".to_string()),
+            result_availability: ResultAvailability::Available,
             result_committed: false,
             is_error: false,
             done: true,
@@ -338,8 +340,8 @@ fn agent_response_uses_agent_rail_but_thinking_and_tools_do_not() {
     };
     let thinking = lines
         .iter()
-        .find(|line| rendered(line).contains("Private thought"))
-        .expect("thinking row");
+        .find(|line| rendered(line).contains("Thought for"))
+        .expect("collapsed thinking row");
     assert_ne!(thinking.line.spans[0].content, "▌ ");
     let tool = lines
         .iter()
@@ -380,16 +382,38 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
         width: 80,
         active_turn: false,
     };
+    let collapsed = render_turn_lines(&cx, &a.turns[0]);
+    assert_eq!(collapsed.len(), 2, "header and status start collapsed");
+    assert!(collapsed[0].detail.is_some());
+    a.expanded_details.insert(
+        DetailKey::Exec(0),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
     let lines = render_turn_lines(&cx, &a.turns[0]);
-
-    assert_eq!(lines.len(), 3, "header, command, and status only");
-    for line in &lines {
+    assert!(lines
+        .iter()
+        .any(|line| line.line.to_string().contains("lofi.bash")));
+    for (index, line) in lines.iter().enumerate() {
         assert_eq!(line.line.spans[0].content, "  ", "two-cell left gutter");
-        assert!(
-            line.line.spans.iter().all(|span| span.style.bg.is_none()),
-            "exec has no background tile: {:?}",
-            line.line
-        );
+        if index == 0 || index + 1 == lines.len() {
+            assert!(line.line.spans.iter().all(|span| span.style.bg.is_none()));
+        } else {
+            assert!(line
+                .line
+                .spans
+                .iter()
+                .skip(2)
+                .all(|span| span.style.bg == Some(a.theme.surface)));
+        }
     }
 }
 
@@ -403,6 +427,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
+            id: 0,
             command: "ps".to_string(),
             output: "PID TTY\n42 pts/3".to_string(),
             exit_code: Some(0),
@@ -413,6 +438,22 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
             exclude_from_context: false,
         }],
     });
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let collapsed = render_turn_lines(&cx, &a.turns[0]);
+    assert_eq!(collapsed.len(), 2);
+    assert!(collapsed[1].line.to_string().contains("▸"));
+    a.expanded_details.insert(
+        DetailKey::UserShell(0),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -431,20 +472,14 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
         })
         .collect();
 
-    assert_eq!(
-        rendered,
-        vec![
-            "  $ ps",
-            "  │ PID TTY",
-            "  │ 42 pts/3",
-            "  └ ✓ Exit 0, took 1.1s",
-        ]
-    );
+    let text = rendered.join("\n");
+    assert!(text.contains("PID TTY"));
+    assert!(text.contains("42 pts/3"));
+    assert!(text.contains("Exit 0, took 1.1s ▾"));
     assert_eq!(lines[0].line.spans[1].content, "$ ");
     assert_eq!(lines[0].line.spans[1].style.fg, Some(a.theme.success));
     assert_eq!(lines[0].line.spans[2].style.fg, Some(a.theme.fg));
-    assert_eq!(lines[1].line.spans[1].style.fg, Some(a.theme.subtle));
-    assert_eq!(lines[3].line.spans[2].style.fg, Some(a.theme.success));
+    assert_eq!(lines[1].line.spans[2].style.fg, Some(a.theme.success));
 }
 
 #[test]
@@ -457,6 +492,7 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
+            id: 0,
             command: "false".to_string(),
             output: "failed".to_string(),
             exit_code: Some(7),
@@ -474,18 +510,327 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
         active_turn: false,
     };
     let lines = render_turn_lines(&cx, &a.turns[0]);
-    let status: String = lines[2]
+    let status: String = lines[1]
         .line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
 
-    assert_eq!(status, "  └ ✗ Exit 7, took 0.9s");
+    assert_eq!(status, "  └ ✗ Exit 7, took 0.9s ▸");
     assert_eq!(lines[0].line.spans[1].style.fg, Some(a.theme.success));
     assert_eq!(lines[0].line.spans[2].style.fg, Some(a.theme.fg));
     assert_eq!(lines[1].line.spans[2].style.fg, Some(a.theme.error));
-    assert_eq!(lines[2].line.spans[2].style.fg, Some(a.theme.error));
+}
+
+#[test]
+fn compaction_summary_expands_from_its_marker() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: String::new(),
+        blocks: vec![Block::Compaction {
+            id: 9,
+            summarized: 12,
+            kept: 3,
+            summary: "summary detail".to_string(),
+        }],
+    });
+    let render = |app: &App| {
+        let cx = Cx {
+            app,
+            theme: app.theme,
+            width: 80,
+            active_turn: false,
+        };
+        render_turn_lines(&cx, &app.turns[0])
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let collapsed = render(&a);
+    assert!(collapsed.contains("Compacted 12 messages · kept 3 ▸"));
+    assert!(!collapsed.contains("summary detail"));
+
+    a.expanded_details.insert(
+        DetailKey::Compaction(9),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let expanded = render(&a);
+    assert!(expanded.contains("summary detail"));
+    assert!(expanded.contains('▾'));
+}
+
+#[test]
+fn successful_exec_result_can_expand_when_it_has_distinct_content() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "exec-id".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "exec-id".to_string(),
+        result: "distinct result".to_string(),
+        is_error: false,
+        elapsed_ms: 1,
+    });
+    let key = DetailKey::ExecResult(detail_block_id(0, 0));
+    let render = |app: &App| {
+        let cx = Cx {
+            app,
+            theme: app.theme,
+            width: 80,
+            active_turn: false,
+        };
+        render_turn_lines(&cx, &app.turns[0])
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(!render(&a).contains("distinct result"));
+    a.expanded_details.insert(
+        key,
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    assert!(render(&a).contains("distinct result"));
+}
+
+#[test]
+fn unloaded_result_caret_is_stable_when_another_detail_expands() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "exec-id".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "exec-id".to_string(),
+        code: "return 1".to_string(),
+        label: None,
+    });
+    a.apply_event(AgentEvent::ToolEnd {
+        id: "exec-id".to_string(),
+        result: "durable result".to_string(),
+        is_error: false,
+        elapsed_ms: 1,
+    });
+    let Block::Tool(tool) = &mut a.turns[0].blocks[0] else {
+        unreachable!();
+    };
+    tool.result = None;
+
+    let render = |app: &App| {
+        let cx = Cx {
+            app,
+            theme: app.theme,
+            width: 80,
+            active_turn: false,
+        };
+        render_turn_lines(&cx, &app.turns[0])
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(render(&a).matches('▸').count(), 2);
+    a.expanded_details.insert(
+        DetailKey::Exec(detail_block_id(0, 0)),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let expanded = render(&a);
+    assert_eq!(expanded.matches('▾').count(), 1);
+    assert_eq!(expanded.matches('▸').count(), 1);
+}
+
+#[test]
+fn expanded_detail_height_scales_to_its_content() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Thinking(
+        "short thinking one\nshort thinking two".to_string(),
+    ));
+    a.apply_event(AgentEvent::ThinkingEnd { elapsed_ms: 10 });
+    let id = detail_block_id(0, 0);
+    let collapsed_cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let collapsed = render_turn_lines(&collapsed_cx, &a.turns[0]);
+    a.expanded_details.insert(
+        DetailKey::Thinking(id),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    assert_eq!(lines.len(), collapsed.len() + 2);
+    assert_eq!(
+        lines[3].line.to_string().trim_end(),
+        "     short thinking one"
+    );
+    assert_eq!(
+        lines[4].line.to_string().trim_end(),
+        "     short thinking two"
+    );
+}
+
+#[test]
+fn expanded_detail_caps_at_ten_rows_and_keeps_a_right_margin() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use ratatui::style::Style;
+    use ratatui::text::Span;
+
+    let mut a = app();
+    push_turn(&mut a);
+    let body = (0..15)
+        .map(|row| format!("margin-detail-{row:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    a.apply_event(AgentEvent::Thinking(body));
+    a.apply_event(AgentEvent::ThinkingEnd { elapsed_ms: 10 });
+    let key = DetailKey::Thinking(detail_block_id(0, 0));
+    a.expanded_details.insert(
+        key.clone(),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 40,
+        active_turn: false,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let body_rows = lines
+        .iter()
+        .filter(|line| {
+            line.detail
+                .as_ref()
+                .is_some_and(|target| target.key == key && target.row.is_some())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(body_rows.len(), 10, "expected only the maximum detail window");
+    let first = &body_rows[0];
+    assert!(first.line.to_string().contains("margin-detail-05"));
+    assert!(!lines
+        .iter()
+        .any(|line| line.line.to_string().contains("margin-detail-00")));
+    let used = first
+        .line
+        .spans
+        .iter()
+        .map(|span| crate::tui::view::width(span.content.as_ref()))
+        .sum::<usize>();
+    assert_eq!(used, 40);
+    assert_eq!(
+        first.line.spans.last(),
+        Some(&Span::styled(" ", Style::new().bg(a.theme.surface)))
+    );
+}
+
+#[test]
+fn expanded_thinking_keeps_its_style_on_the_raised_surface() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+    use ratatui::style::{Color, Modifier};
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Thinking("styled thinking".to_string()));
+    a.apply_event(AgentEvent::ThinkingEnd { elapsed_ms: 10 });
+    let id = detail_block_id(0, 0);
+    a.expanded_details.insert(
+        DetailKey::Thinking(id),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let detail = &render_turn_lines(&cx, &a.turns[0])[3];
+    let text = detail
+        .line
+        .spans
+        .iter()
+        .find(|span| span.content == "styled thinking")
+        .expect("thinking detail span");
+    assert_eq!(text.style.fg, Some(Color::Indexed(244)));
+    assert_eq!(text.style.bg, Some(Color::Indexed(235)));
+    assert!(text.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn repeated_provider_tool_ids_get_independent_detail_keys() {
+    let events = [
+        AgentEvent::TurnStart {
+            prompt: "first".to_string(),
+            kind: lofi_types::PromptKind::User,
+        },
+        AgentEvent::ToolStart {
+            id: "reused".to_string(),
+            name: "exec".to_string(),
+        },
+        AgentEvent::TurnStart {
+            prompt: "second".to_string(),
+            kind: lofi_types::PromptKind::User,
+        },
+        AgentEvent::ToolStart {
+            id: "reused".to_string(),
+            name: "exec".to_string(),
+        },
+    ];
+    let mut turns = Vec::new();
+    for event in events {
+        apply_event_to_turns(&mut turns, event);
+    }
+    let Block::Tool(first) = &turns[0].blocks[0] else {
+        panic!("first tool");
+    };
+    let Block::Tool(second) = &turns[1].blocks[0] else {
+        panic!("second tool");
+    };
+    assert_ne!(first.detail_id, second.detail_id);
 }
 
 #[test]
@@ -1381,283 +1726,105 @@ fn inline_markdown_table_renders_inline_formatting() {
 }
 
 #[test]
-fn numbered_empty_body_line_keeps_its_number() {
+fn native_tool_details_expand_independently_in_a_fixed_viewport() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
-    let mut a = app();
-    // Verbose so the `read` result renders — non-verbose now hides
-    // non-bash results for a cleaner transcript.
-    a.verbose = true;
-    push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart {
-        id: "e1".to_string(),
-        name: "exec".to_string(),
-    });
-    a.apply_event(AgentEvent::ToolInput {
-        id: "e1".to_string(),
-        code: "lofi.read('a.txt')".to_string(),
-        label: Some("read a".to_string()),
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 0,
-        name: "read".to_string(),
-        args: "a.txt".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(),
-        id: 0,
-        result: serde_json::json!({ "content": "line one\n\nline three", "start_line": 1, "total_lines": 3, "truncated": false }).to_string(),
-        is_error: false,
-    });
-    a.apply_event(AgentEvent::ToolEnd {
-        id: "e1".to_string(),
-        result: "{\"value\":null}".to_string(),
-        is_error: false,
-        elapsed_ms: 0,
-    });
-    let turn = &a.turns[0];
-    let cx = Cx {
-        app: &a,
-        theme: a.theme,
-        width: 80,
-        active_turn: false,
-    };
-    let rls = render_turn_lines(&cx, turn);
-    // The empty-body numbered line keeps its decoration: content range
-    // collapses to (cstart, cstart) but the line still has spans, so the
-    // Navigate cursor overlay preserves it instead of replacing it.
-    let empty = rls
-        .iter()
-        .find(|rl| rl.content.0 > 0 && rl.content.0 == rl.content.1 && !rl.line.spans.is_empty())
-        .expect("empty-body numbered line should keep its decoration");
-    let s: String = empty
-        .line
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    assert!(
-        s.contains(" 2 ") || s.contains(" 2"),
-        "number preserved: {s:?}"
-    );
-}
 
-#[test]
-#[allow(clippy::too_many_lines)]
-fn non_verbose_hides_read_results_keeps_mutations_and_errors() {
-    use crate::tui::view::blocks::render_turn_lines;
-    use crate::tui::view::component::Cx;
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::ToolStart {
         id: "e1".to_string(),
         name: "exec".to_string(),
     });
-    a.apply_event(AgentEvent::ToolInput {
-        id: "e1".to_string(),
-        code: "lofi.read('a.txt'); lofi.write(...); lofi.edit(...); lofi.bash('echo x')"
+    for (id, name, result) in [
+        (
+            1,
+            "read",
+            serde_json::json!({
+                "content": "head one\nhead two\nhead three\nhead four\nhead five\nhead six",
+                "start_line": 1,
+                "total_lines": 6,
+                "truncated": false
+            })
             .to_string(),
-        label: Some("mixed".to_string()),
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 0,
-        name: "read".to_string(),
-        args: "a.txt".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(), id: 0, result: serde_json::json!({ "content": "secret line one", "start_line": 1, "total_lines": 1, "truncated": false }).to_string(), is_error: false,
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 1,
-        name: "write".to_string(),
-        args: "b.txt".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(),
-        id: 1,
-        result: serde_json::json!({ "ok": true, "content": "written content here" }).to_string(),
-        is_error: false,
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 2,
-        name: "edit".to_string(),
-        args: "c.txt".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(),
-        id: 2,
-        result: serde_json::json!({ "ok": true, "old": "old text", "new": "edited content here" })
+        ),
+        (
+            2,
+            "bash",
+            serde_json::json!({
+                "output": "tail one\ntail two\ntail three\ntail four\ntail five\ntail six",
+                "code": 0
+            })
             .to_string(),
-        is_error: false,
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 3,
-        name: "bash".to_string(),
-        args: "echo x".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(),
-        id: 3,
-        result: serde_json::json!({ "ok": true, "output": "bash output here", "code": 0 })
-            .to_string(),
-        is_error: false,
-    });
-    a.apply_event(AgentEvent::NativeToolStart {
-        parent: "e1".to_string(),
-        id: 4,
-        name: "read".to_string(),
-        args: "missing.txt".to_string(),
-    });
-    a.apply_event(AgentEvent::NativeToolEnd {
-        parent: "e1".to_string(),
-        id: 4,
-        result: "no such file".to_string(),
-        is_error: true,
-    });
+        ),
+    ] {
+        a.apply_event(AgentEvent::NativeToolStart {
+            parent: "e1".to_string(),
+            id,
+            name: name.to_string(),
+            args: String::new(),
+        });
+        a.apply_event(AgentEvent::NativeToolEnd {
+            parent: "e1".to_string(),
+            id,
+            result,
+            is_error: false,
+        });
+    }
     a.apply_event(AgentEvent::ToolEnd {
         id: "e1".to_string(),
-        result: "{\"value\":null}".to_string(),
+        result: String::new(),
         is_error: false,
-        elapsed_ms: 0,
+        elapsed_ms: 1,
     });
-    let text = |a: &App| -> String {
+
+    let render = |app: &App| {
         let cx = Cx {
-            app: a,
-            theme: a.theme,
+            app,
+            theme: app.theme,
             width: 80,
             active_turn: false,
         };
-        render_turn_lines(&cx, &a.turns[0])
+        render_turn_lines(&cx, &app.turns[0])
             .iter()
-            .flat_map(|rl| rl.line.spans.iter())
-            .flat_map(|s| s.content.chars())
-            .collect()
+            .map(|line| {
+                line.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
     };
-    a.verbose = false;
-    let nv = text(&a);
-    assert!(
-        !nv.contains("secret line one"),
-        "non-verbose read body should hide: {nv}"
-    );
-    assert!(
-        nv.contains("bash output here"),
-        "non-verbose bash body should show: {nv}"
-    );
-    assert!(
-        nv.contains("written content here"),
-        "non-verbose write body should show its content: {nv}"
-    );
-    assert!(
-        nv.contains("edited content here"),
-        "non-verbose edit body should show its content: {nv}"
-    );
-    assert!(
-        nv.contains("no such file"),
-        "non-verbose error should stay visible: {nv}"
-    );
-    assert!(
-        nv.contains("Tool read"),
-        "read header should still show: {nv}"
-    );
-    assert!(
-        nv.contains("Tool write"),
-        "write header should still show: {nv}"
-    );
-    a.verbose = true;
-    let v = text(&a);
-    assert!(
-        v.contains("secret line one"),
-        "verbose read body should show: {v}"
-    );
-}
+    let collapsed = render(&a).join("\n");
+    assert!(!collapsed.contains("head one"));
+    assert!(!collapsed.contains("tail six"));
+    assert_eq!(collapsed.matches('▸').count(), 2);
 
-#[test]
-fn non_verbose_hides_exec_result_body_keeps_status_and_errors() {
-    use crate::tui::view::blocks::render_turn_lines;
-    use crate::tui::view::component::Cx;
-    let text = |a: &App| -> String {
-        let cx = Cx {
-            app: a,
-            theme: a.theme,
-            width: 80,
-            active_turn: false,
-        };
-        render_turn_lines(&cx, &a.turns[0])
+    a.expanded_details.insert(
+        DetailKey::NativeTool { parent: 0, id: 1 },
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let expanded = render(&a);
+    let text = expanded.join("\n");
+    assert!(text.contains("head one"));
+    assert!(
+        !text.contains("head six"),
+        "head view starts at the first row"
+    );
+    assert!(!text.contains("tail six"), "bash sibling remains collapsed");
+    assert_eq!(
+        expanded
             .iter()
-            .flat_map(|rl| rl.line.spans.iter())
-            .flat_map(|s| s.content.chars())
-            .collect()
-    };
-    let mut a = app();
-    push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart {
-        id: "e1".to_string(),
-        name: "exec".to_string(),
-    });
-    a.apply_event(AgentEvent::ToolInput {
-        id: "e1".to_string(),
-        code: "const x = 1;".to_string(),
-        label: Some("compute".to_string()),
-    });
-    a.apply_event(AgentEvent::ToolEnd {
-        id: "e1".to_string(),
-        result: "{\"value\":\"all done marker\"}".to_string(),
-        is_error: false,
-        elapsed_ms: 0,
-    });
-    a.verbose = false;
-    let nv = text(&a);
-    assert!(
-        !nv.contains("all done marker"),
-        "non-verbose exec result body should hide: {nv}"
+            .filter(|line| line.contains("head "))
+            .count(),
+        5
     );
-    assert!(
-        nv.contains("Succeed"),
-        "non-verbose exec status header should stay: {nv}"
-    );
-    a.verbose = true;
-    a.verbose = true;
-    a.verbose = true;
-    let v = text(&a);
-    assert!(
-        v.contains("all done marker"),
-        "verbose exec result body should show: {v}"
-    );
-
-    // A failed exec keeps its error body even in non-verbose so a failure is
-    // never silently swallowed.
-    let mut a = app();
-    push_turn(&mut a);
-    a.apply_event(AgentEvent::ToolStart {
-        id: "e2".to_string(),
-        name: "exec".to_string(),
-    });
-    a.apply_event(AgentEvent::ToolInput {
-        id: "e2".to_string(),
-        code: "throw new Error('x')".to_string(),
-        label: Some("compute".to_string()),
-    });
-    a.apply_event(AgentEvent::ToolEnd {
-        id: "e2".to_string(),
-        result: "exec blew up here".to_string(),
-        is_error: true,
-        elapsed_ms: 0,
-    });
-    a.verbose = false;
-    let nv = text(&a);
-    assert!(
-        nv.contains("exec blew up here"),
-        "non-verbose exec error body should stay: {nv}"
-    );
-    assert!(
-        nv.contains("Failed"),
-        "non-verbose exec error status should stay: {nv}"
-    );
+    assert_eq!(text.matches('▾').count(), 1);
+    assert_eq!(text.matches('▸').count(), 1);
 }
 
 #[test]
@@ -1743,12 +1910,18 @@ fn empty_text_blocks_leave_no_gap() {
         .lines
         .iter()
         .map(|l| {
-            l.spans
+            let text_is_empty = l
+                .spans
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect::<String>()
                 .trim()
-                .is_empty()
+                .is_empty();
+            let is_raised_detail = l
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(a.theme.surface));
+            text_is_empty && !is_raised_detail
         })
         .collect();
     let max_run = blanks

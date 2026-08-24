@@ -9,12 +9,82 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use crate::tui::theme::{active_indicator, agent_indicator, user_indicator, Theme};
-use crate::tui::{App, Block, NativePreview, NativeTool, ThinkingBlock, ToolCall, Turn};
+use crate::tui::{
+    App, Block, DetailKey, NativePreview, NativeTool, ResultAvailability, ThinkingBlock, ToolCall,
+    Turn, DETAIL_VIEW_ROWS,
+};
 
 use super::component::{Component, Cx, Stack};
 use super::prim::{self, Hyperlink, RawLine, RenderLine};
 
 const PREVIEW_LINES: usize = 3;
+
+fn detail_marker(expanded: bool) -> &'static str {
+    if expanded {
+        "▾"
+    } else {
+        "▸"
+    }
+}
+
+fn detail_visual_rows(lines: &[String], inner: usize) -> Vec<String> {
+    lines
+        .iter()
+        .flat_map(|line| prim::wrap_pre(line, inner.max(1)))
+        .collect()
+}
+
+fn detail_row_count(lines: &[String], width: usize, deco: &[Span<'static>]) -> usize {
+    let inner = width.saturating_sub(prim::span_width(deco) + 2);
+    detail_visual_rows(lines, inner).len()
+}
+
+fn detail_box(
+    lines: &[String],
+    key: &DetailKey,
+    tail: bool,
+    force_open: bool,
+    cx: &Cx,
+    deco: &[Span<'static>],
+    style: Style,
+) -> Vec<RenderLine> {
+    let expanded = cx.app.expanded_details.get(key);
+    if expanded.is_none() && !force_open {
+        return Vec::new();
+    }
+    // Reserve one cell after the mini-scrollbar as outer right margin.
+    let inner = cx.width.saturating_sub(prim::span_width(deco) + 3);
+    let rows = detail_visual_rows(lines, inner);
+    let total = rows.len();
+    let target =
+        |line: RenderLine, row: usize| line.with_detail_row((*key).clone(), total, tail, row);
+    let max = total.saturating_sub(DETAIL_VIEW_ROWS);
+    let start = expanded
+        .and_then(|state| state.scroll)
+        .unwrap_or(if tail { max } else { 0 })
+        .min(max);
+    let visible_rows = total.min(DETAIL_VIEW_ROWS);
+    let visible = &rows[start..total.min(start + visible_rows)];
+    let raised = style.bg(cx.theme.surface);
+    let scroll = Style::new().fg(cx.theme.subtle).bg(cx.theme.surface);
+    let mut out = Vec::with_capacity(visible_rows);
+    for (row, shown) in visible.iter().map(String::as_str).enumerate() {
+        let used = prim::width(shown);
+        let thumb_row = (start * visible_rows.saturating_sub(1)).checked_div(max);
+        let detail_span = prim::rline(
+            deco.to_vec(),
+            vec![
+                Span::styled(" ", raised),
+                Span::styled(shown.to_string(), raised),
+                Span::styled(" ".repeat(inner.saturating_sub(used)), raised),
+                Span::styled(if thumb_row == Some(row) { "┃" } else { " " }, scroll),
+                Span::styled(" ", raised),
+            ],
+        );
+        out.push(target(detail_span, start + row));
+    }
+    out
+}
 
 struct RenderWindow {
     range: std::ops::Range<usize>,
@@ -114,6 +184,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 }
             }
             Block::UserShell {
+                id,
                 command,
                 output,
                 exit_code,
@@ -123,6 +194,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 cancelled,
                 exclude_from_context,
             } => stack.push(UserShellLine {
+                id: *id,
                 command,
                 output,
                 exit_code: *exit_code,
@@ -163,14 +235,16 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 });
             }
             Block::Compaction {
+                id,
                 summarized,
                 kept,
                 summary,
             } => {
                 stack.push(CompactionLine {
+                    id: *id,
                     summarized: *summarized,
                     kept: *kept,
-                    summary: summary.clone(),
+                    summary,
                 });
             }
         }
@@ -345,6 +419,7 @@ fn emit_blank(
             true,
         )),
         links: Vec::new(),
+        detail: None,
     });
     *row += 1;
 }
@@ -562,6 +637,7 @@ fn emit_quote(
                 content: (deco_len, deco_len + content_len),
                 raw: Some(RawLine::new(src_arc, map, true)),
                 links: Vec::new(),
+                detail: None,
             });
             *row += 1;
             continue;
@@ -2035,66 +2111,53 @@ struct Thinking<'a> {
 impl Component for Thinking<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        let body = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
-        let content_w = cx.width.saturating_sub(2);
         let text = trim_reasoning_summary(&self.block.text);
         let working = self.block.elapsed.is_none() && cx.active_turn;
         if text.is_empty() && !working {
             return Vec::new();
         }
-        let mut out = render_markdown_body(&text, t, cx.width, content_w, body, |_| {
-            vec![Span::raw("  ")]
-        });
-        if working {
-            if !out.is_empty() {
-                out.push(prim::rblank());
-            }
-            out.push(prim::rline(
-                vec![Span::raw("  ")],
-                vec![Span::styled("Thinking...", body)],
-            ));
-        } else if let Some(d) = self.block.elapsed {
-            if !d.is_zero() {
-                if !out.is_empty() {
-                    out.push(prim::rblank());
-                }
-                let thought_lead = vec![
-                    Span::raw("  "),
-                    Span::styled("◇ ", Style::new().fg(t.subtle)),
-                ];
-                out.push(prim::rline(
-                    thought_lead,
-                    vec![Span::styled(
-                        format!("Thought for {}", prim::fmt_duration(d)),
-                        Style::new().fg(t.subtle),
-                    )],
-                ));
-            }
-        }
-        out
-    }
-
-    fn height(&self, cx: &Cx) -> usize {
-        let text = trim_reasoning_summary(&self.block.text);
-        let working = self.block.elapsed.is_none() && cx.active_turn;
-        if text.is_empty() && !working {
-            return 0;
-        }
-        let content_w = cx.width.saturating_sub(2);
-        let md = markdown_body_height(&text, content_w);
-        if working {
-            // +1 for the "Thinking..." line, +1 for the blank separator (if body non-empty).
-            md + if md > 0 { 2 } else { 1 }
-        } else if let Some(d) = self.block.elapsed {
-            if d.is_zero() {
-                md
-            } else {
-                // +1 for the "Thought for {duration}" line, +1 blank separator (if any).
-                md + if md > 0 { 2 } else { 1 }
-            }
+        let key = DetailKey::Thinking(self.block.id);
+        let expanded = working || cx.app.expanded_details.contains_key(&key);
+        let label = if working {
+            "Thinking...".to_string()
         } else {
-            md
+            format!(
+                "Thought for {}",
+                prim::fmt_duration(self.block.elapsed.unwrap_or_default())
+            )
+        };
+        let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+        let deco = vec![Span::raw("    ")];
+        let total = detail_row_count(&lines, cx.width, &deco);
+        let mut header = prim::rline(
+            vec![
+                Span::raw("  "),
+                Span::styled("◇ ", Style::new().fg(t.subtle)),
+            ],
+            vec![
+                Span::styled(label, Style::new().fg(t.subtle)),
+                Span::styled(
+                    format!(" {}", detail_marker(expanded)),
+                    Style::new().fg(t.subtle),
+                ),
+            ],
+        )
+        .with_detail(key.clone(), total, true);
+        if working && text.is_empty() {
+            header.detail = None;
+            return vec![header];
         }
+        let mut out = vec![header];
+        out.extend(detail_box(
+            &lines,
+            &key,
+            true,
+            working,
+            cx,
+            &deco,
+            Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
+        ));
+        out
     }
 }
 
@@ -2141,7 +2204,6 @@ impl Component for ExecBlock<'_> {
 impl ExecBlock<'_> {
     fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
-        let w = cx.width;
         let mut out = RenderWindow::new(range);
 
         let header = match &self.tool.label {
@@ -2155,57 +2217,76 @@ impl ExecBlock<'_> {
         } else {
             t.success
         };
-        out.push(prim::rline(
+        let key = DetailKey::Exec(self.tool.detail_id);
+        let expanded = cx.app.expanded_details.contains_key(&key);
+        let code = self
+            .tool
+            .input
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let code_deco = vec![
+            Span::raw("  "),
+            Span::styled("│ ", Style::new().fg(t.subtle)),
+        ];
+        let total = detail_row_count(&code, cx.width, &code_deco);
+        let has_detail = !self.tool.input.is_empty();
+        let mut content = vec![Span::styled(
+            header,
+            Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
+        )];
+        if has_detail {
+            content.push(Span::styled(
+                format!(" {}", detail_marker(expanded)),
+                Style::new().fg(t.subtle),
+            ));
+        }
+        let mut header = prim::rline(
             vec![
                 Span::raw("  "),
                 Span::styled("· ", Style::new().fg(status_color)),
             ],
-            vec![Span::styled(
-                header,
-                Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
-            )],
-        ));
-
-        // Trim a trailing newline so a terminated command doesn't render an
-        // empty rail line at the bottom of the code body.
-        let code: Vec<&str> = self.tool.input.trim_end_matches('\n').split('\n').collect();
-        let lw = code.len().to_string().len().max(3);
-        let rail = Span::styled("│ ", Style::new().fg(t.subtle));
-        let avail = w.saturating_sub(4).saturating_sub(lw + 1);
-        for (i, line) in code.iter().enumerate() {
-            let n = format!("{:>lw$} ", i + 1, lw = lw);
-            let blank_n = " ".repeat(lw + 1);
-            let body_style = Style::new().fg(t.fg);
-            let num_style = Style::new().fg(t.subtle);
-            for (j, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
-                let num_span = if j == 0 {
-                    Span::styled(n.clone(), num_style)
-                } else {
-                    Span::styled(blank_n.clone(), num_style)
-                };
-                out.push(prim::rline(
-                    vec![Span::raw("  "), rail.clone(), num_span],
-                    vec![Span::styled(seg, body_style)],
-                ));
-            }
+            content,
+        );
+        if has_detail {
+            header = header.with_detail(key.clone(), total, false);
+        }
+        out.push(header);
+        if has_detail {
+            out.extend(detail_box(
+                &code,
+                &key,
+                false,
+                false,
+                cx,
+                &code_deco,
+                Style::new().fg(t.fg),
+            ));
         }
 
         let n_total = self.tool.native.len();
         for (idx, nt) in self.tool.native.iter().enumerate() {
             let is_last = idx + 1 == n_total && !self.tool.done;
-            out.append_component(&ExecBlockBranch { nt, is_last }, cx);
+            out.append_component(
+                &ExecBlockBranch {
+                    parent: self.tool.detail_id,
+                    nt,
+                    is_last,
+                },
+                cx,
+            );
         }
 
         if self.tool.done {
-            out.extend(exec_result_lines(self.tool, t, w, cx.app.verbose));
+            out.extend(exec_result_lines(self.tool, cx));
         }
 
         out
     }
 }
-
-fn exec_result_lines(tool: &ToolCall, t: Theme, w: usize, verbose: bool) -> Vec<RenderLine> {
-    let mut out = Vec::new();
+fn exec_result_lines(tool: &ToolCall, cx: &Cx) -> Vec<RenderLine> {
+    let t = cx.theme;
     let (icon, label, fg_color) = if tool.is_error {
         ("✗", "Failed", t.error)
     } else {
@@ -2216,67 +2297,56 @@ fn exec_result_lines(tool: &ToolCall, t: Theme, w: usize, verbose: bool) -> Vec<
         .filter(|d| !d.is_zero())
         .map(|d| format!(", took {}", prim::fmt_duration(d)))
         .unwrap_or_default();
-    let summary = format!("{label}{took}");
-    out.push(prim::rline(
+    let mut content = vec![Span::styled(
+        format!("{label}{took}"),
+        Style::new().fg(t.fg),
+    )];
+    let display = tool
+        .result
+        .as_deref()
+        .map(|result| lofi_core::exec_result_display(result, tool.is_error))
+        .unwrap_or_default();
+    let lines = split_lines(&display);
+    let key = DetailKey::ExecResult(tool.detail_id);
+    let expanded = cx.app.expanded_details.contains_key(&key);
+    let deco = vec![Span::raw("  "), Span::raw("  "), Span::raw("  ")];
+    let total = detail_row_count(&lines, cx.width, &deco);
+    let has_detail =
+        matches!(tool.result_availability, ResultAvailability::Available) || !display.is_empty();
+    if has_detail {
+        content.push(Span::styled(
+            format!(" {}", detail_marker(expanded)),
+            Style::new().fg(t.subtle),
+        ));
+    }
+    let mut header = prim::rline(
         vec![
             Span::raw("  "),
             Span::styled("└ ", Style::new().fg(t.subtle)),
             Span::styled(format!("{icon} "), Style::new().fg(fg_color)),
         ],
-        vec![Span::styled(summary, Style::new().fg(t.fg))],
-    ));
-    // In non-verbose mode, hide the final result body for a cleaner
-    // transcript — the native-tool lines above already showed the work.
-    // Keep it on error (and in verbose) so a failure is never swallowed.
-    if !verbose && !tool.is_error {
-        return out;
+        content,
+    );
+    if has_detail {
+        header = header.with_detail(key.clone(), total, true);
     }
-
-    let Some(result) = &tool.result else {
-        return out;
-    };
-    let display = lofi_core::exec_result_display(result, tool.is_error);
-    if display.is_empty() {
-        return out;
-    }
-    let indent = 2 + 2 + 2; // left gutter + branch column + own rail
-    let all: Vec<&str> = display.trim_end_matches('\n').split('\n').collect();
-    let limit = if verbose { all.len() } else { PREVIEW_LINES };
-    let hidden = all.len().saturating_sub(limit);
-    let avail = w.saturating_sub(indent);
-    let body_fg = if tool.is_error { t.error } else { t.muted };
-    let rail_deco = vec![
-        Span::raw("  "),
-        Span::raw("  "),
-        Span::styled("│ ", Style::new().fg(t.subtle)),
-    ];
-    let body_style = Style::new().fg(body_fg);
-    // Wrap each result line preserving its formatting; the rail repeats on
-    // every continuation row. `hidden` counts logical lines, not wrapped
-    // rows, so the `(N lines hidden)` cap stays accurate.
-    for line in all.iter().take(limit) {
-        for seg in prim::wrap_pre(line, avail) {
-            out.push(prim::rline(
-                rail_deco.clone(),
-                vec![Span::styled(seg, body_style)],
-            ));
-        }
-    }
-    if hidden > 0 {
-        let cap = format!("({hidden} lines hidden)");
-        out.push(prim::rline(
-            vec![
-                Span::raw("  "),
-                Span::raw("  "),
-                Span::styled("… ", Style::new().fg(t.subtle)),
-            ],
-            vec![Span::styled(cap, Style::new().fg(t.subtle))],
+    let mut out = vec![header];
+    if has_detail {
+        out.extend(detail_box(
+            &lines,
+            &key,
+            true,
+            false,
+            cx,
+            &deco,
+            Style::new().fg(if tool.is_error { t.error } else { t.muted }),
         ));
     }
     out
 }
 
 struct ExecBlockBranch<'a> {
+    parent: u64,
     nt: &'a NativeTool,
     is_last: bool,
 }
@@ -2544,10 +2614,6 @@ pub(crate) fn compact_native_previews(turn: &mut Turn) {
             if native.is_error || native.result.as_deref().is_none_or(str::is_empty) {
                 continue;
             }
-            if !matches!(native.name.as_str(), "bash" | "write" | "edit" | "agent") {
-                native.result = None;
-                continue;
-            }
             let raw = native.result.as_deref().unwrap_or_default();
             let header_suffix = native_header_suffix(&native.name, Some(raw));
             let encoded_field = match native.name.as_str() {
@@ -2561,7 +2627,7 @@ pub(crate) fn compact_native_previews(turn: &mut Turn) {
                 || body.as_ref().map_or(0, |body| body.lines.len()),
                 encoded_json_line_count,
             );
-            let range = native_preview_range(&native.name, total_lines, false);
+            let range = native_preview_range(&native.name, total_lines);
             let mut lines = Vec::with_capacity(range.len());
             if let Some(encoded) = encoded {
                 for_each_encoded_json_line(encoded, range.clone(), |_, line| lines.push(line));
@@ -2583,10 +2649,7 @@ pub(crate) fn compact_native_previews(turn: &mut Turn) {
     }
 }
 
-fn native_preview_range(name: &str, total: usize, verbose: bool) -> std::ops::Range<usize> {
-    if verbose {
-        return 0..total;
-    }
+fn native_preview_range(name: &str, total: usize) -> std::ops::Range<usize> {
     let shown = total.min(PREVIEW_LINES);
     let start = if name == "bash" {
         total.saturating_sub(shown)
@@ -2828,10 +2891,61 @@ impl Component for ExecBlockBranch<'_> {
 impl ExecBlockBranch<'_> {
     fn render_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> RenderWindow {
         let t = cx.theme;
-        let w = cx.width;
         let working = !self.nt.done && cx.active_turn;
-        let mut out = RenderWindow::new(range);
         let exec_cont = if self.is_last { "  " } else { "│ " };
+        let key = DetailKey::NativeTool {
+            parent: self.parent,
+            id: self.nt.id,
+        };
+        let expanded = cx.app.expanded_details.contains_key(&key);
+        let body = self
+            .nt
+            .result
+            .as_deref()
+            .filter(|result| !result.is_empty())
+            .map(|_| native_body(self.nt));
+        let mut lines = body.as_ref().map_or_else(
+            || {
+                self.nt
+                    .preview
+                    .as_ref()
+                    .map_or_else(Vec::new, |preview| preview.lines.clone())
+            },
+            |body| body.lines.clone(),
+        );
+        if let Some(body) = &body {
+            if body.numbered {
+                for (index, line) in lines.iter_mut().enumerate() {
+                    *line = format!("{:>4} {line}", body.start_line + index);
+                }
+            }
+            if let Some(notice) = &body.notice {
+                lines.push(notice.clone());
+            }
+        } else if let Some(notice) = self
+            .nt
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.notice.as_ref())
+        {
+            lines.push(notice.clone());
+        }
+        let total = body.as_ref().map_or_else(
+            || {
+                self.nt
+                    .preview
+                    .as_ref()
+                    .map_or(lines.len(), |preview| preview.total_lines)
+            },
+            |body| body.lines.len(),
+        );
+        let detail_deco = vec![
+            Span::raw("  "),
+            Span::styled(exec_cont, Style::new().fg(t.subtle)),
+            Span::raw("  "),
+        ];
+        let visual_total = detail_row_count(&lines, cx.width, &detail_deco);
+        let has_detail = visual_total > 0 && lines.iter().any(|line| !line.is_empty());
 
         let mut content = vec![
             Span::styled("Tool ", Style::new().fg(t.muted)),
@@ -2855,6 +2969,12 @@ impl ExecBlockBranch<'_> {
         if let Some(note) = header_suffix {
             content.push(Span::styled(format!(" {note}"), Style::new().fg(t.subtle)));
         }
+        if self.nt.done && has_detail {
+            content.push(Span::styled(
+                format!(" {}", detail_marker(expanded)),
+                Style::new().fg(t.subtle),
+            ));
+        }
         let header_deco = vec![
             Span::raw("  "),
             Span::styled(
@@ -2863,204 +2983,34 @@ impl ExecBlockBranch<'_> {
             ),
             prim::status_icon(t, working, self.nt.is_error, cx.spinner()),
         ];
-        let name_w = 5 + self.nt.name.chars().count(); // "Tool " + name
+        let name_w = 5 + self.nt.name.chars().count();
         let cont_deco = vec![
             Span::raw("  "),
             Span::styled(exec_cont, Style::new().fg(t.subtle)),
             Span::raw(" ".repeat(name_w)),
         ];
-        out.extend(prim::rline_wrapped(header_deco, &cont_deco, content, w));
-
-        if let Some(preview) = &self.nt.preview {
-            let indent = 2 + 2 + 2;
-            let lw = preview.total_lines.to_string().len().max(3);
-            let avail = w
-                .saturating_sub(indent)
-                .saturating_sub(if preview.numbered { lw + 1 } else { 0 });
-            let body_fg = if self.nt.is_error { t.error } else { t.muted };
-            let blank_n = " ".repeat(lw + 1);
-            let base_deco = vec![
-                Span::raw("  "),
-                Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                Span::styled("│ ", Style::new().fg(t.subtle)),
-            ];
-            for (i, line) in preview.lines.iter().enumerate() {
-                let logical = preview.preview_start + i;
-                let n = format!("{:>lw$} ", preview.start_line + logical, lw = lw);
-                let style = if preview.is_diff {
-                    match line.chars().next() {
-                        Some('-') => Style::new().fg(t.error),
-                        Some('+') => Style::new().fg(t.success),
-                        _ => Style::new().fg(t.muted),
-                    }
-                } else if preview.numbered {
-                    Style::new().fg(t.fg)
-                } else {
-                    Style::new().fg(body_fg)
-                };
-                for (row, seg) in prim::wrap_pre(line, avail).into_iter().enumerate() {
-                    let mut deco = base_deco.clone();
-                    if preview.numbered {
-                        deco.push(if row == 0 {
-                            Span::styled(n.clone(), Style::new().fg(t.subtle))
-                        } else {
-                            Span::styled(blank_n.clone(), Style::new().fg(t.subtle))
-                        });
-                    }
-                    out.push(prim::rline(deco, vec![Span::styled(seg, style)]));
-                }
-            }
-            let hidden = preview.total_lines.saturating_sub(preview.lines.len());
-            if hidden > 0 {
-                out.push(prim::rline(
-                    vec![
-                        Span::raw("  "),
-                        Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                        Span::styled("… ", Style::new().fg(t.subtle)),
-                    ],
-                    vec![Span::styled(
-                        format!("({hidden} lines hidden)"),
-                        Style::new().fg(t.subtle),
-                    )],
-                ));
-            }
-            if let Some(notice) = &preview.notice {
-                out.push(prim::rline(
-                    vec![
-                        Span::raw("  "),
-                        Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                        Span::styled("… ", Style::new().fg(t.subtle)),
-                    ],
-                    vec![Span::styled(notice.clone(), Style::new().fg(t.subtle))],
-                ));
-            }
-            return out;
-        }
-
-        let Some(result) = &self.nt.result else {
-            return out;
-        };
-        if result.is_empty() {
-            return out;
-        }
-        // In non-verbose mode, hide read-only results for a cleaner
-        // transcript — file reads/greps/finds/ls clutter the view. Mutating
-        // tools (bash, write, edit) keep their result so the user sees the
-        // outcome of an action; errors stay visible regardless so a failure
-        // is never silently swallowed.
-        if !cx.app.verbose
-            && !matches!(self.nt.name.as_str(), "bash" | "write" | "edit" | "agent")
-            && !self.nt.is_error
-        {
-            return out;
-        }
-
-        let indent = 2 + 2 + 2; // left gutter + exec-rail column + own rail
-        let raw = result.as_str();
-        let encoded_field = match self.nt.name.as_str() {
-            "bash" => Some("output"),
-            "write" | "read" | "view" | "bash_read" => Some("content"),
-            _ => None,
-        };
-        let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
-        let body = encoded.is_none().then(|| native_body(self.nt));
-        let numbered = body.as_ref().is_some_and(|body| body.numbered)
-            || matches!(self.nt.name.as_str(), "read" | "view" | "bash_read");
-        let start = body.as_ref().map_or_else(
-            || {
-                if numbered {
-                    json_u64_field(raw, "start_line").unwrap_or(1) as usize
-                } else {
-                    1
-                }
-            },
-            |body| body.start_line,
-        );
-        let total = encoded.map_or_else(
-            || body.as_ref().map_or(0, |body| body.lines.len()),
-            encoded_json_line_count,
-        );
-        let lw = total.to_string().len().max(3);
-        let avail = w
-            .saturating_sub(indent)
-            .saturating_sub(if numbered { lw + 1 } else { 0 });
-        let preview = native_preview_range(&self.nt.name, total, cx.app.verbose);
-        let hidden = total.saturating_sub(preview.len());
-        let body_fg = if self.nt.is_error { t.error } else { t.muted };
-        let blank_n = " ".repeat(lw + 1);
-        let num_style = Style::new().fg(t.subtle);
-        let numbered_style = Style::new().fg(t.fg);
-        let plain_style = Style::new().fg(body_fg);
-        let diff_del = Style::new().fg(t.error);
-        let diff_add = Style::new().fg(t.success);
-        let diff_ctx = Style::new().fg(t.muted);
-        let base_deco = vec![
-            Span::raw("  "),
-            Span::styled(exec_cont, Style::new().fg(t.subtle)),
-            Span::styled("│ ", Style::new().fg(t.subtle)),
-        ];
-        let emit_line = |logical: usize, line: &str, out: &mut RenderWindow| {
-            let n = format!("{:>lw$} ", start + logical, lw = lw);
-            let content_style = if body.as_ref().is_some_and(|body| body.is_diff) {
-                match line.chars().next() {
-                    Some('-') => diff_del,
-                    Some('+') => diff_add,
-                    _ => diff_ctx,
-                }
-            } else if numbered {
-                numbered_style
-            } else {
-                plain_style
-            };
-            let local_start = out.range.start.saturating_sub(out.total);
-            let local_end = out.range.end.saturating_sub(out.total);
-            let (rows, segments) = prim::wrap_pre_window(line, avail, local_start..local_end);
-            let base = out.total;
-            for (j, seg) in segments.into_iter().enumerate() {
-                let row = local_start + j;
-                let mut deco = base_deco.clone();
-                if numbered {
-                    deco.push(if row == 0 {
-                        Span::styled(n.clone(), num_style)
-                    } else {
-                        Span::styled(blank_n.clone(), num_style)
-                    });
-                }
-                out.lines
-                    .push(prim::rline(deco, vec![Span::styled(seg, content_style)]));
-            }
-            out.total = base.saturating_add(rows);
-        };
-        if let Some(encoded) = encoded {
-            for_each_encoded_json_line(encoded, preview.clone(), |i, line| {
-                emit_line(i, &line, &mut out);
-            });
-        } else if let Some(body) = body.as_ref() {
-            for (i, line) in body.lines[preview.clone()].iter().enumerate() {
-                emit_line(preview.start + i, line, &mut out);
+        let mut rendered = prim::rline_wrapped(header_deco, &cont_deco, content, cx.width);
+        if self.nt.done && has_detail {
+            for line in &mut rendered {
+                line.detail = Some(super::prim::DetailTarget {
+                    key: key.clone(),
+                    total: visual_total.max(total),
+                    tail: self.nt.name == "bash",
+                    row: None,
+                });
             }
         }
-        if hidden > 0 {
-            let cap = format!("({hidden} lines hidden)");
-            out.push(prim::rline(
-                vec![
-                    Span::raw("  "),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                    Span::styled("… ", Style::new().fg(t.subtle)),
-                ],
-                vec![Span::styled(cap, Style::new().fg(t.subtle))],
-            ));
-        }
-        if let Some(notice) = body.and_then(|body| body.notice) {
-            out.push(prim::rline(
-                vec![
-                    Span::raw("  "),
-                    Span::styled(exec_cont, Style::new().fg(t.subtle)),
-                    Span::styled("… ", Style::new().fg(t.subtle)),
-                ],
-                vec![Span::styled(notice, Style::new().fg(t.subtle))],
-            ));
-        }
+        rendered.extend(detail_box(
+            &lines,
+            &key,
+            self.nt.name == "bash",
+            false,
+            cx,
+            &detail_deco,
+            Style::new().fg(if self.nt.is_error { t.error } else { t.muted }),
+        ));
+        let mut out = RenderWindow::new(range);
+        out.extend(rendered);
         out
     }
 }
@@ -3088,6 +3038,7 @@ impl Component for ToolLine<'_> {
 }
 
 struct UserShellLine<'a> {
+    id: u64,
     command: &'a str,
     output: &'a str,
     exit_code: Option<i32>,
@@ -3123,38 +3074,15 @@ impl Component for UserShellLine<'_> {
             ));
         }
 
-        let lines: Vec<&str> = self.output.trim_end_matches('\n').split('\n').collect();
-        let limit = if cx.app.verbose {
-            lines.len()
-        } else {
-            PREVIEW_LINES
-        };
-        let rail = vec![
+        let lines = split_lines(self.output);
+        let key = DetailKey::UserShell(self.id);
+        let expanded = cx.app.expanded_details.contains_key(&key);
+        let deco = vec![
             Span::raw("  "),
-            Span::styled("│ ", Style::new().fg(t.subtle)),
+            Span::styled("  ", Style::new().fg(t.subtle)),
         ];
-        if !self.output.is_empty() {
-            let body_style = Style::new().fg(if failed { t.error } else { t.muted });
-            for raw in lines.iter().take(limit) {
-                for seg in prim::wrap_pre(raw, cx.width.saturating_sub(4)) {
-                    out.push(prim::rline(
-                        rail.clone(),
-                        vec![Span::styled(seg, body_style)],
-                    ));
-                }
-            }
-            let hidden = lines.len().saturating_sub(limit);
-            if hidden > 0 {
-                out.push(prim::rline(
-                    rail,
-                    vec![Span::styled(
-                        format!("… ({hidden} lines hidden)"),
-                        Style::new().fg(t.subtle),
-                    )],
-                ));
-            }
-        }
-
+        let total = detail_row_count(&lines, cx.width, &deco);
+        let has_detail = !self.output.is_empty();
         let mut status = if self.cancelled {
             "Cancelled".to_string()
         } else if let Some(signal) = self.signal {
@@ -3169,7 +3097,14 @@ impl Component for UserShellLine<'_> {
         if self.exclude_from_context {
             status.push_str(" · not in context");
         }
-        out.push(prim::rline(
+        let mut content = vec![Span::styled(status, Style::new().fg(t.fg))];
+        if has_detail {
+            content.push(Span::styled(
+                format!(" {}", detail_marker(expanded)),
+                Style::new().fg(t.subtle),
+            ));
+        }
+        let mut header = prim::rline(
             vec![
                 Span::raw("  "),
                 Span::styled("└ ", Style::new().fg(t.subtle)),
@@ -3178,8 +3113,23 @@ impl Component for UserShellLine<'_> {
                     Style::new().fg(status_color),
                 ),
             ],
-            vec![Span::styled(status, Style::new().fg(t.fg))],
-        ));
+            content,
+        );
+        if has_detail {
+            header = header.with_detail(key.clone(), total, true);
+        }
+        out.push(header);
+        if has_detail {
+            out.extend(detail_box(
+                &lines,
+                &key,
+                true,
+                false,
+                cx,
+                &deco,
+                Style::new().fg(if failed { t.error } else { t.muted }),
+            ));
+        }
         out
     }
 }
@@ -3325,53 +3275,57 @@ impl Component for TurnCancelled {
     }
 }
 
-/// Compaction marker: `◇ Compacted N messages · kept M` in the muted tint,
-/// appended to a turn when `/compact` (or the auto-trigger) folds the
-/// older history into a summary. Under `/verbose` the folded summary text
-/// is expanded below the marker (soft-wrapped, muted) so the fold can be
-/// inspected without leaving the transcript.
-struct CompactionLine {
+/// Compaction marker appended when `/compact` or the automatic trigger folds
+/// older history into a summary.
+struct CompactionLine<'a> {
+    id: u64,
     summarized: usize,
     kept: usize,
-    summary: String,
+    summary: &'a str,
 }
 
-impl Component for CompactionLine {
+impl Component for CompactionLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
+        let key = DetailKey::Compaction(self.id);
+        let expanded = cx.app.expanded_details.contains_key(&key);
+        let lines = split_lines(self.summary);
+        let deco = vec![Span::raw("    ")];
+        let total = detail_row_count(&lines, cx.width, &deco);
+        let has_detail = !self.summary.is_empty();
         let body = format!(
             "Compacted {} messages · kept {}",
             self.summarized, self.kept
         );
-        let marker = prim::render(
+        let mut content = vec![Span::styled(body, Style::new().fg(t.muted))];
+        if has_detail {
+            content.push(Span::styled(
+                format!(" {}", detail_marker(expanded)),
+                Style::new().fg(t.subtle),
+            ));
+        }
+        let mut marker = prim::render(
             vec![
                 Span::raw("  "),
                 Span::styled("◇ ", Style::new().fg(t.subtle)),
             ],
-            vec![Span::styled(body, Style::new().fg(t.muted))],
+            content,
             vec![],
         );
+        if has_detail {
+            marker = marker.with_detail(key.clone(), total, false);
+        }
         let mut out = vec![marker];
-        if cx.app.verbose {
-            let text = self.summary.trim();
-            if !text.is_empty() {
-                let indent = "    ";
-                let content_w = cx.width.saturating_sub(indent.len());
-                for raw in text.split('\n') {
-                    let line = raw.trim_end();
-                    if line.is_empty() {
-                        out.push(prim::rblank());
-                    } else {
-                        for seg in prim::wrap(line, content_w) {
-                            out.push(prim::render(
-                                vec![Span::raw(indent)],
-                                vec![Span::styled(seg, Style::new().fg(t.muted))],
-                                vec![],
-                            ));
-                        }
-                    }
-                }
-            }
+        if has_detail {
+            out.extend(detail_box(
+                &lines,
+                &key,
+                false,
+                false,
+                cx,
+                &deco,
+                Style::new().fg(t.muted),
+            ));
         }
         out
     }
@@ -3593,10 +3547,9 @@ mod tests {
 
     #[test]
     fn bash_preview_keeps_tail_while_other_tools_keep_head() {
-        assert_eq!(native_preview_range("bash", 10, false), 7..10);
-        assert_eq!(native_preview_range("read", 10, false), 0..3);
-        assert_eq!(native_preview_range("bash", 2, false), 0..2);
-        assert_eq!(native_preview_range("bash", 10, true), 0..10);
+        assert_eq!(native_preview_range("bash", 10), 7..10);
+        assert_eq!(native_preview_range("read", 10), 0..3);
+        assert_eq!(native_preview_range("bash", 2), 0..2);
     }
 
     #[test]
