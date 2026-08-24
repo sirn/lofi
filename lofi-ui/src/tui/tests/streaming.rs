@@ -89,7 +89,7 @@ fn turn_height_matches_emitted_line_count() {
                 let mut blocks = Vec::new();
                 if has_thinking {
                     blocks.push(Block::Thinking(ThinkingBlock {
-                        text: "reasoning about the answer".to_string(),
+                                text: "reasoning about the answer".to_string(),
                         start: Instant::now(),
                         elapsed: Some(Duration::from_millis(1200)),
                     }));
