@@ -512,7 +512,7 @@ struct CollapsedBlockMeta {
 
 /// Load selected events for collapsed transcript rendering without allocating
 /// payloads that the collapsed renderer never reads. Full errors and visible
-/// mutating-tool previews remain lossless; verbose rendering uses the ordinary
+/// mutating-tool previews remain lossless. Expanded rows use the ordinary
 /// complete-event loader instead.
 pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     use std::collections::HashSet;

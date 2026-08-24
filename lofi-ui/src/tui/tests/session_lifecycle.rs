@@ -232,7 +232,7 @@ fn tool_input_and_end_land_under_matching_id() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
+fn round_commit_releases_hidden_exec_result() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("round-commit.jsonl");
     std::fs::write(
@@ -338,20 +338,6 @@ fn round_commit_releases_only_hidden_exec_result_and_verbose_restores_it() {
         tool.native[0].result.as_deref(),
         Some("native result stays resident")
     );
-
-    a.toggle_verbose();
-    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
-        panic!("exec block preserved")
-    };
-    assert_eq!(tool.result.as_deref(), Some(durable_result));
-    assert_eq!(a.turns[0].prompt, "go");
-    assert_eq!(a.turns[0].blocks.len(), block_count);
-
-    a.toggle_verbose();
-    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
-        panic!("exec block preserved")
-    };
-    assert!(tool.result.is_none());
 }
 
 #[test]
