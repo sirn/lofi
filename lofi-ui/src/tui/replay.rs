@@ -90,6 +90,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         });
         return;
     }
+    let turn_index = turns.len().saturating_sub(1);
     let Some(turn) = turns.last_mut() else {
         return;
     };
@@ -109,7 +110,9 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                     return;
                 }
             }
+            let id = detail_block_id(turn_index, turn.blocks.len());
             turn.blocks.push(Block::Thinking(ThinkingBlock {
+                id,
                 text: delta,
                 start: Instant::now(),
                 elapsed: None,

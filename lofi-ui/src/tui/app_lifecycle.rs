@@ -62,7 +62,7 @@ impl App {
             pinned: true,
             top_line: 0,
             last_base: 0,
-            verbose: false,
+            expanded_details: HashMap::new(),
             debug_after_draw: None,
             debug: None,
             should_quit: false,
@@ -97,6 +97,7 @@ impl App {
             log_rect: Rect::default(),
             input_rect: Rect::default(),
             log_vis: Vec::new(),
+            log_details: Vec::new(),
             log_off: 0,
             input_scroll: 0,
             sel: None,
@@ -120,8 +121,6 @@ impl App {
             collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
             frozen_heights: Vec::new(),
             frozen_heights_estimated: Vec::new(),
-            frozen_heights_other_mode: Vec::new(),
-            frozen_heights_other_mode_estimated: Vec::new(),
             turn_byte_ranges: Vec::new(),
             turn_event_offsets: Vec::new(),
             render_epoch: 0,
@@ -220,9 +219,7 @@ impl App {
                         if let Block::Tool(tool) = block {
                             if tool.name == "exec" && tool.done && !tool.is_error {
                                 tool.result_committed = true;
-                                if !self.verbose {
-                                    tool.result = None;
-                                }
+                                tool.result = None;
                             }
                         }
                     }
@@ -318,12 +315,32 @@ impl App {
             }
             _ => {}
         }
+        let updates_thinking = matches!(&ev, AgentEvent::Thinking(_));
+        let ends_thinking = matches!(&ev, AgentEvent::ThinkingEnd { .. });
         let starts_standalone_turn = matches!(&ev, AgentEvent::UserShell { .. });
         if starts_standalone_turn {
             self.freeze_previous_file_backed_turn();
         }
         let previous_turns = self.turns.len();
         apply_event_to_turns(&mut self.turns, ev);
+        if updates_thinking || ends_thinking {
+            let turn_index = self.turns.len().saturating_sub(1);
+            if let Some(Block::Thinking(thinking)) = self
+                .turns
+                .last()
+                .and_then(|turn| turn.blocks.last())
+            {
+                let key = DetailKey::Thinking(thinking.id);
+                if updates_thinking {
+                    self.expanded_details.entry(key).or_insert(DetailState {
+                        turn: turn_index,
+                        scroll: None,
+                    });
+                } else {
+                    self.expanded_details.remove(&key);
+                }
+            }
+        }
         if starts_standalone_turn {
             debug_assert_eq!(self.turns.len(), previous_turns + 1);
             self.turn_byte_ranges.push(None);
@@ -375,19 +392,10 @@ impl App {
 
     pub(super) fn bump_render_epoch(&mut self) {
         self.render_epoch = self.render_epoch.wrapping_add(1);
-        self.frozen_heights_other_mode.clear();
     }
 
-    pub(super) fn switch_verbose_layout(&mut self) {
-        self.frozen_render.clear();
-        std::mem::swap(
-            &mut self.frozen_heights,
-            &mut self.frozen_heights_other_mode,
-        );
-        std::mem::swap(
-            &mut self.frozen_heights_estimated,
-            &mut self.frozen_heights_other_mode_estimated,
-        );
+    pub(super) fn turn_has_expanded_detail(&self, idx: usize) -> bool {
+        self.expanded_details.values().any(|state| state.turn == idx)
     }
 
     fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
@@ -396,59 +404,6 @@ impl App {
                 Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
                 None => (byte_start, byte_end),
             });
-        }
-    }
-
-    pub(super) fn restore_last_committed_exec_results(&mut self) {
-        let Some((start, end)) = self.turn_byte_ranges.last().copied().flatten() else {
-            return;
-        };
-        let Some(cursor) = self.session.cursor.as_ref() else {
-            return;
-        };
-        let Ok(events) = cursor.events_in_range(start, end) else {
-            return;
-        };
-        let mut results = std::collections::HashMap::new();
-        for event in events {
-            if let SessionEventKind::Message(message) = event.kind {
-                for block in message.blocks {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error: false,
-                        ..
-                    } = block
-                    {
-                        results.insert(tool_use_id, content);
-                    }
-                }
-            }
-        }
-        let Some(turn) = self.turns.last_mut() else {
-            return;
-        };
-        for block in &mut turn.blocks {
-            if let Block::Tool(tool) = block {
-                if tool.name == "exec" && tool.result_committed && tool.result.is_none() {
-                    if let Some(result) = results.remove(&tool.id) {
-                        tool.result = Some(result);
-                    }
-                }
-            }
-        }
-    }
-
-    pub(super) fn release_last_committed_exec_results(&mut self) {
-        let Some(turn) = self.turns.last_mut() else {
-            return;
-        };
-        for block in &mut turn.blocks {
-            if let Block::Tool(tool) = block {
-                if tool.name == "exec" && tool.result_committed && !tool.is_error {
-                    tool.result = None;
-                }
-            }
         }
     }
 
@@ -489,7 +444,7 @@ impl App {
             }
         }
         let materialize_started = Instant::now();
-        if !self.verbose {
+        if !self.turn_has_expanded_detail(idx) {
             if let Some(turn) = self.collapsed_turns.borrow_mut().get(idx) {
                 return turn;
             }
@@ -509,7 +464,7 @@ impl App {
         };
         let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
         let mut events = if let Some(offsets) = selected_offsets {
-            let loaded = if self.verbose {
+            let loaded = if self.turn_has_expanded_detail(idx) {
                 cursor.events_at(offsets)
             } else {
                 cursor.collapsed_events_at(offsets)
@@ -534,8 +489,8 @@ impl App {
             // exec call ids from assistant messages, then discard only their
             // matching hidden result bodies. Results of other tools and all
             // errors remain intact because their collapsed previews are
-            // visible. Verbose mode reparses the exact durable content.
-            if !self.verbose {
+            // visible. Expanded rows reparse the exact durable content.
+            if !self.turn_has_expanded_detail(idx) {
                 if let SessionEventKind::Message(message) = &mut event.kind {
                     if message.role == Role::Assistant {
                         exec_ids.extend(message.blocks.iter().filter_map(|block| match block {
@@ -568,11 +523,16 @@ impl App {
             turns_from_session_events(&events)
         };
         let mut turn = turns.into_iter().next().unwrap_or(empty);
-        if !self.verbose {
+        for (block_index, block) in turn.blocks.iter_mut().enumerate() {
+            if let Block::Thinking(thinking) = block {
+                thinking.id = detail_block_id(idx, block_index);
+            }
+        }
+        if !self.turn_has_expanded_detail(idx) {
             view::blocks::compact_native_previews(&mut turn);
         }
         let turn = Arc::new(turn);
-        if !self.verbose {
+        if !self.turn_has_expanded_detail(idx) {
             let mut cache = self.collapsed_turns.borrow_mut();
             cache.insert(idx, &turn);
             cache.finish_materialize(materialize_started.elapsed().as_micros());
@@ -639,9 +599,7 @@ impl App {
             self.frozen_render.clear();
             self.frozen_heights.clear();
             self.frozen_heights_estimated.clear();
-            self.frozen_heights_other_mode.clear();
-            self.frozen_heights_other_mode_estimated.clear();
-            self.frozen_epoch = self.render_epoch;
+                self.frozen_epoch = self.render_epoch;
             self.frozen_width = width;
             self.height_remeasure_from = None;
         } else if width_changed {
@@ -652,9 +610,7 @@ impl App {
             // thumb stay put, and re-measure incrementally (visible window
             // now, the rest on the tick loop) instead of stalling this frame.
             self.frozen_render.clear();
-            self.frozen_heights_other_mode.clear();
-            self.frozen_heights_other_mode_estimated.clear();
-            self.frozen_width = width;
+                self.frozen_width = width;
             // Stale heights are estimates at the new width: the tick loop
             // re-measures them.
             for estimated in &mut self.frozen_heights_estimated {
@@ -687,7 +643,7 @@ impl App {
         let seed = self.frozen_heights.is_empty();
         while self.frozen_heights.len() < target {
             // Heights are the compact permanent index. Measuring a newly
-            // frozen verbose turn must not materialize its complete styled
+            // A frozen turn must not materialize its complete styled
             // output; the viewport pass renders only rows it needs.
             let idx = self.frozen_heights.len();
             let estimate = seed && self.turn_byte_ranges.get(idx).copied().flatten().is_some();

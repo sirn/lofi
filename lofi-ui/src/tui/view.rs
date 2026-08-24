@@ -28,7 +28,7 @@ use modals::{
 
 #[allow(unused_imports)] // used by tests and render harnesses
 pub(crate) use prim::RawLine;
-pub(crate) use prim::RenderLine;
+pub(crate) use prim::{DetailTarget, RenderLine};
 pub(crate) use prim::VisLine;
 pub(crate) use prim::{width, wrap};
 
@@ -170,6 +170,7 @@ fn feed_segment(
     want: &mut usize,
     vis: &mut Vec<Line<'static>>,
     visv: &mut Vec<VisLine>,
+    details: &mut Vec<Option<DetailTarget>>,
     links: &mut Vec<Vec<prim::Hyperlink>>,
 ) {
     if *want == 0 {
@@ -189,6 +190,7 @@ fn feed_segment(
             content: rl.content,
             raw: rl.raw.clone(),
         });
+        details.push(rl.detail.clone());
         links.push(rl.links.clone());
         *pos += 1;
         *want -= 1;
@@ -363,6 +365,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let blank = prim::rblank();
     let mut vis: Vec<Line<'static>> = Vec::with_capacity(height);
     let mut visv: Vec<VisLine> = Vec::with_capacity(height);
+    let mut details: Vec<Option<DetailTarget>> = Vec::with_capacity(height);
     let mut links: Vec<Vec<prim::Hyperlink>> = Vec::with_capacity(height);
     let mut pos = 0usize;
     let mut want = height;
@@ -374,6 +377,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             &mut want,
             &mut vis,
             &mut visv,
+            &mut details,
             &mut links,
         );
     } else {
@@ -386,6 +390,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     &mut want,
                     &mut vis,
                     &mut visv,
+                    &mut details,
                     &mut links,
                 );
                 if want == 0 {
@@ -400,7 +405,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     let turn_start = pos;
                     if let Some(lines) = app.frozen_render.get(i) {
                         feed_segment(
-                            lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                            lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut details, &mut links,
                         );
                     } else {
                         let start = off.saturating_sub(turn_start);
@@ -410,7 +415,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         app.render_profile.frozen_window_us += phase_started.elapsed().as_micros();
                         pos = turn_start + start;
                         feed_segment(
-                            &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                            &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut details, &mut links,
                         );
                     }
                 }
@@ -433,7 +438,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                     app.render_profile.live_window_us += phase_started.elapsed().as_micros();
                     pos = turn_start + start;
                     feed_segment(
-                        &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut links,
+                        &lines, &mut pos, off, &mut want, &mut vis, &mut visv, &mut details, &mut links,
                     );
                 }
             }
@@ -443,6 +448,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     app.log_vis = visv;
+    app.log_details = details;
     app.render_profile.log_total_us = log_started.elapsed().as_micros();
 
     if let Some(sel) = &app.sel {
@@ -661,8 +667,7 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Mode-badge strip. The bottom row carries the ` policy: … ` chip (while
 /// `/policy` set a non-default approval mode), the running-jobs badge, the
-/// ` verbose ` tag (while tool detail is expanded), and the mode chip
-/// (` INPUT ` / ` NAV `) on the right,
+/// mode chip (` INPUT ` / ` NAV `) on the right,
 /// and one notification badge on the left (quit > yank > retry > queue >
 /// transient status/error). A long notification wraps across up to
 /// [`NOTIFY_MAX_LINES`] rows above the chips instead of truncating to one,
@@ -702,13 +707,7 @@ fn render_mode_line(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(bold),
         ));
     }
-    if app.verbose {
-        right.push(Span::styled(
-            " verbose ",
-            Style::new().fg(t.muted).add_modifier(bold),
-        ));
-    }
-    // State chips stay lowercase (verbose, jobs, policy); the mode chip is
+    // State chips stay lowercase (jobs, policy); the mode chip is
     // the lone uppercase control indicator. INPUT is the default state, so
     // render it quietly; NAV/SELECT keep the accent chip so a modal shift
     // pops.
