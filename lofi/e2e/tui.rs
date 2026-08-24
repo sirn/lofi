@@ -268,6 +268,10 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.clear_output();
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
+    // The debug line and its status column contribution.
+    tui.wait_for("Debug", WAIT);
+    tui.wait_for("Peak", WAIT);
+    tui.wait_for("Measured", WAIT);
     tui.submit("/verbose");
     tui.wait_for(" verbose ", WAIT);
 
