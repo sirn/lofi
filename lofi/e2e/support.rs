@@ -1314,12 +1314,13 @@ enum ParseState {
     Osc(bool),
 }
 
-/// One rendered grid cell with its SGR background, so the tests can identify
-/// rows by their tint (the Navigate cursor line fills its whole width).
+/// One rendered grid cell with its SGR background and italics, so the tests
+/// can observe the TUI's surface styles.
 #[derive(Clone, Copy, PartialEq)]
 struct ScreenCell {
     ch: char,
     bg: Option<ScreenBg>,
+    italic: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1328,7 +1329,11 @@ enum ScreenBg {
     Indexed(u8),
 }
 
-const BLANK_CELL: ScreenCell = ScreenCell { ch: ' ', bg: None };
+const BLANK_CELL: ScreenCell = ScreenCell {
+    ch: ' ',
+    bg: None,
+    italic: false,
+};
 
 struct TerminalScreen {
     cells: Vec<Vec<ScreenCell>>,
@@ -1338,6 +1343,7 @@ struct TerminalScreen {
     saved: (usize, usize),
     state: ParseState,
     bg: Option<ScreenBg>,
+    italic: bool,
     utf8: Vec<u8>,
     utf8_remaining: usize,
 }
@@ -1352,6 +1358,7 @@ impl TerminalScreen {
             saved: (0, 0),
             state: ParseState::Ground,
             bg: None,
+            italic: false,
             utf8: Vec::new(),
             utf8_remaining: 0,
         }
@@ -1435,7 +1442,11 @@ impl TerminalScreen {
             self.line_feed();
         }
         if self.row < TERMINAL_ROWS && self.col < TERMINAL_COLS {
-            self.cells[self.row][self.col] = ScreenCell { ch, bg: self.bg };
+            self.cells[self.row][self.col] = ScreenCell {
+                ch,
+                bg: self.bg,
+                italic: self.italic,
+            };
         }
         let width = unicode_width::UnicodeWidthChar::width(ch)
             .unwrap_or(0)
@@ -1445,6 +1456,7 @@ impl TerminalScreen {
                 self.cells[self.row][self.col + offset] = ScreenCell {
                     ch: ' ',
                     bg: self.bg,
+                    italic: self.italic,
                 };
             }
         }
@@ -1515,17 +1527,22 @@ impl TerminalScreen {
         }
     }
 
-    // SGR tracking: only the background matters to the tests (the Navigate
-    // cursor line), and only enough to distinguish it from the reset state.
     fn apply_sgr(&mut self, params: &[usize]) {
         let mut i = 0;
         if params.is_empty() {
             self.bg = None;
+            self.italic = false;
             return;
         }
         while i < params.len() {
             match params[i] {
-                0 | 49 => self.bg = None,
+                0 => {
+                    self.bg = None;
+                    self.italic = false;
+                }
+                49 => self.bg = None,
+                3 => self.italic = true,
+                23 => self.italic = false,
                 38 | 48 => {
                     let is_bg = params[i] == 48;
                     match params.get(i + 1).copied() {
@@ -1600,21 +1617,32 @@ impl TerminalScreen {
     /// to the log band: the header (row 0) and the footer block carry their
     /// own full-width chrome.
     fn tinted_row_text(&self) -> Option<String> {
+        self.tinted_row_index().map(|index| {
+            self.cells[index]
+                .iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+        })
+    }
+
+    fn tinted_row_index(&self) -> Option<usize> {
         self.cells[2..self.cells.len().saturating_sub(6)]
             .iter()
-            .find_map(|row| {
-                let mut counts: std::collections::HashMap<ScreenBg, usize> =
-                    std::collections::HashMap::new();
-                for cell in row {
-                    if let Some(bg) = cell.bg {
-                        *counts.entry(bg).or_default() += 1;
-                    }
-                }
-                counts
-                    .values()
-                    .any(|count| *count * 2 >= TERMINAL_COLS)
-                    .then(|| row.iter().map(|cell| cell.ch).collect::<String>())
+            .position(|row| {
+                row.iter()
+                    .any(|cell| cell.bg == Some(ScreenBg::Indexed(234)))
             })
+            .map(|index| index + 2)
+    }
+
+    fn select_cursor_row_text(&self) -> Option<String> {
+        self.cells[2..self.cells.len().saturating_sub(6)]
+            .iter()
+            .find(|row| {
+                row.iter()
+                    .any(|cell| cell.bg == Some(ScreenBg::Indexed(60)))
+            })
+            .map(|row| row.iter().map(|cell| cell.ch).collect())
     }
 }
 
@@ -1781,6 +1809,57 @@ impl Tui {
     /// off screen.
     pub fn tinted_row_text(&self) -> Option<String> {
         self.output.lock().unwrap().screen.tinted_row_text()
+    }
+
+    pub fn tinted_row_index(&self) -> Option<usize> {
+        self.output.lock().unwrap().screen.tinted_row_index()
+    }
+
+    /// Text of the row containing the Select cursor cell in the transcript log.
+    pub fn select_cursor_row_text(&self) -> Option<String> {
+        self.output.lock().unwrap().screen.select_cursor_row_text()
+    }
+
+    pub fn screen_text(&self) -> String {
+        self.output.lock().unwrap().screen.text()
+    }
+
+    pub fn wait_for_screen(&self, needle: &str, timeout: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.screen_text().contains(needle) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {needle:?} on the visible screen; screen:\n{}",
+            self.screen_text()
+        );
+    }
+
+    pub fn row_has_raised_background(&self, needle: &str) -> bool {
+        let output = self.output.lock().unwrap();
+        output.screen.cells.iter().any(|row| {
+            row.iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+                .contains(needle)
+                && row
+                    .iter()
+                    .any(|cell| cell.bg == Some(ScreenBg::Indexed(235)))
+        })
+    }
+
+    pub fn row_has_italic_text(&self, needle: &str) -> bool {
+        let output = self.output.lock().unwrap();
+        output.screen.cells.iter().any(|row| {
+            let text = row.iter().map(|cell| cell.ch).collect::<String>();
+            text.contains(needle)
+                && row
+                    .iter()
+                    .any(|cell| !cell.ch.is_whitespace() && cell.italic)
+        })
     }
 
     pub fn screen_row(&self, needle: &str) -> Option<String> {
