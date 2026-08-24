@@ -34,6 +34,7 @@ impl App {
     pub(super) fn enter_input(&mut self) {
         self.mode = Mode::Input;
         self.sel = None;
+        self.detail_focus = None;
     }
 
     /// Snap the viewport to the bottom (latest) transcript line. Used when
@@ -45,6 +46,11 @@ impl App {
 
     pub(super) fn enter_select(&mut self) {
         self.mode = Mode::Select;
+        if let Some(focus) = &mut self.detail_focus {
+            focus.anchor = Some((focus.cursor, focus.col));
+            self.sel = None;
+            return;
+        }
         self.select_anchor = (self.nav_cursor, self.nav_col);
         self.sel = Some(self.select_sel());
     }
@@ -61,16 +67,162 @@ impl App {
         Selection { start: s, end: e }
     }
 
-    /// Content char range [cstart, cend] of the cursor line (absolute char
-    /// indices), from the last render's visible window. Valid because
-    /// `nav_show_cursor` keeps the cursor on screen between events.
-    pub(super) fn cursor_content_range(&self) -> (usize, usize) {
-        let rel = self.nav_cursor.saturating_sub(self.log_off);
+    fn detail_target(&self, key: &DetailKey) -> Option<view::DetailTarget> {
+        self.log_details
+            .iter()
+            .flatten()
+            .find(|target| target.key == *key)
+            .cloned()
+    }
+
+    fn focused_detail_target(&self) -> Option<view::DetailTarget> {
+        let focus = self.detail_focus.as_ref()?;
+        self.detail_target(&focus.key)
+    }
+
+    pub(super) fn focused_detail_row_index(&self, row: usize) -> Option<usize> {
+        let focus = self.detail_focus.as_ref()?;
+        self.log_details.iter().position(|target| {
+            target
+                .as_ref()
+                .is_some_and(|target| target.key == focus.key && target.row == Some(row))
+        })
+    }
+
+    pub(super) fn focused_detail_content_range(&self) -> Option<(usize, usize)> {
+        let focus = self.detail_focus.as_ref()?;
+        let rel = self.focused_detail_row_index(focus.cursor)?;
+        self.log_vis.get(rel).map(|line| line.content)
+    }
+
+    fn rendered_content_range(&self, line: usize) -> (usize, usize) {
+        let rel = line.saturating_sub(self.log_off);
         self.log_vis.get(rel).map_or((0, 0), |v| v.content)
+    }
+
+    /// Content char range [cstart, cend] of the cursor line (absolute char
+    /// indices), from the last render's visible window.
+    pub(super) fn cursor_content_range(&self) -> (usize, usize) {
+        if let Some(range) = self.focused_detail_content_range() {
+            return range;
+        }
+        self.rendered_content_range(self.nav_cursor)
+    }
+
+    fn cursor_detail(&self) -> Option<view::DetailTarget> {
+        let rel = self.nav_cursor.checked_sub(self.log_off)?;
+        self.log_details.get(rel)?.clone()
+    }
+
+    fn cursor_turn(&self) -> usize {
+        let mut turn = 0;
+        for idx in 0..self.turns.len() {
+            if self.turn_start_line(idx) <= self.nav_cursor {
+                turn = idx;
+            } else {
+                break;
+            }
+        }
+        turn
+    }
+
+    fn invalidate_detail_layout(&mut self, turn: usize) {
+        self.collapsed_turns.get_mut().remove(turn);
+        self.frozen_render.clear();
+        if let Some(height) = self.frozen_heights_estimated.get_mut(turn) {
+            *height = true;
+            self.height_remeasure_from = Some(
+                self.height_remeasure_from
+                    .unwrap_or_default()
+                    .max(turn.saturating_add(1)),
+            );
+        }
+    }
+
+    pub(super) fn set_cursor_detail_expanded(&mut self, expanded: bool) -> bool {
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let is_expanded = self.expanded_details.contains_key(&target.key);
+        if expanded == is_expanded {
+            return false;
+        }
+        let turn = self.cursor_turn();
+        if expanded {
+            self.expanded_details
+                .insert(target.key, DetailState { turn, scroll: None });
+        } else {
+            self.expanded_details.remove(&target.key);
+        }
+        self.invalidate_detail_layout(turn);
+        true
+    }
+
+    pub(super) fn toggle_cursor_detail(&mut self) -> bool {
+        if let Some(focus) = self.detail_focus.take() {
+            let Some(state) = self.expanded_details.remove(&focus.key) else {
+                self.mode = Mode::Navigate;
+                self.sel = None;
+                return false;
+            };
+            self.mode = Mode::Navigate;
+            self.sel = None;
+            self.invalidate_detail_layout(state.turn);
+            return true;
+        }
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let expanded = !self.expanded_details.contains_key(&target.key);
+        if !self.set_cursor_detail_expanded(expanded) {
+            return false;
+        }
+        if expanded {
+            self.detail_focus = Some(DetailFocus {
+                cursor: if target.tail {
+                    target.total.saturating_sub(1)
+                } else {
+                    0
+                },
+                col: 0,
+                key: target.key,
+                anchor: None,
+            });
+        }
+        true
+    }
+
+    pub(super) fn scroll_cursor_detail(&mut self, delta: i32) -> bool {
+        let Some(target) = self.cursor_detail() else {
+            return false;
+        };
+        let turn = {
+            let Some(state) = self.expanded_details.get_mut(&target.key) else {
+                return false;
+            };
+            let max = target.total.saturating_sub(DETAIL_VIEW_ROWS);
+            let current = state.scroll.unwrap_or(if target.tail { max } else { 0 });
+            state.scroll = Some(if delta > 0 {
+                current.saturating_add(delta as usize).min(max)
+            } else {
+                current.saturating_sub(delta.unsigned_abs() as usize)
+            });
+            state.turn
+        };
+        self.invalidate_detail_layout(turn);
+        true
     }
 
     pub(super) fn nav_col_delta(&mut self, delta: i32) {
         let (cstart, cend) = self.cursor_content_range();
+        if let Some(focus) = &mut self.detail_focus {
+            focus.col = if delta > 0 {
+                focus.col.saturating_add(1).min(cend)
+            } else {
+                focus.col.saturating_sub(1).max(cstart)
+            };
+            return;
+        }
         let raw = if delta > 0 {
             self.nav_col.saturating_add(1)
         } else {
@@ -84,27 +236,26 @@ impl App {
 
     pub(super) fn nav_set_col(&mut self, target: usize) {
         let (cstart, cend) = self.cursor_content_range();
-        self.nav_col = if cend > cstart {
+        let col = if cend > cstart {
             target.clamp(cstart, cend - 1)
         } else {
             cstart
         };
+        if let Some(focus) = &mut self.detail_focus {
+            focus.col = col;
+            return;
+        }
+        self.nav_col = col;
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
         }
     }
 
-    pub(super) fn first_nonblank_col(&self) -> usize {
-        let (cstart, cend) = self.cursor_content_range();
+    fn first_nonblank_col_in(text: &str, cstart: usize, cend: usize) -> usize {
         if cend <= cstart {
             return cstart;
         }
-        let rel = self.nav_cursor.saturating_sub(self.log_off);
-        let Some(s) = self.log_vis.get(rel) else {
-            return cstart;
-        };
-        let s = &s.rendered;
-        for (i, c) in s.chars().enumerate() {
+        for (i, c) in text.chars().enumerate() {
             if i >= cend {
                 break;
             }
@@ -115,19 +266,43 @@ impl App {
         cstart
     }
 
+    pub(super) fn first_nonblank_col(&self) -> usize {
+        let (cstart, cend) = self.cursor_content_range();
+        if let Some(focus) = &self.detail_focus {
+            let Some(rel) = self.focused_detail_row_index(focus.cursor) else {
+                return cstart;
+            };
+            let Some(line) = self.log_vis.get(rel) else {
+                return cstart;
+            };
+            return Self::first_nonblank_col_in(&line.rendered, cstart, cend);
+        }
+        let rel = self.nav_cursor.saturating_sub(self.log_off);
+        let Some(line) = self.log_vis.get(rel) else {
+            return cstart;
+        };
+        Self::first_nonblank_col_in(&line.rendered, cstart, cend)
+    }
+
     pub(super) fn nav_word_target(&self, motion: WordMotion) -> usize {
         let (cstart, cend) = self.cursor_content_range();
         if cend <= cstart {
             return cstart;
         }
-        let rel = self.nav_cursor.saturating_sub(self.log_off);
-        let Some(vl) = self.log_vis.get(rel) else {
+        let Some((vl, current_col)) = (if let Some(focus) = &self.detail_focus {
+            self.focused_detail_row_index(focus.cursor)
+                .and_then(|rel| self.log_vis.get(rel))
+                .map(|line| (line, focus.col))
+        } else {
+            let rel = self.nav_cursor.saturating_sub(self.log_off);
+            self.log_vis.get(rel).map(|line| (line, self.nav_col))
+        }) else {
             return cstart;
         };
         let chars: Vec<char> = vl.rendered.chars().collect();
         let content = &chars[cstart..cend];
         let n = content.len();
-        let p = self.nav_col.clamp(cstart, cend - 1) - cstart;
+        let p = current_col.clamp(cstart, cend - 1) - cstart;
         let class = |c: char, big: bool| -> u8 {
             if c.is_whitespace() {
                 0
@@ -186,7 +361,54 @@ impl App {
         self.nav_set_col(target);
     }
 
+    fn move_focused_detail(&mut self, delta: i32) -> bool {
+        let Some(target) = self.focused_detail_target() else {
+            return false;
+        };
+        let key = target.key.clone();
+        let last = target.total.saturating_sub(1);
+        let next = {
+            let Some(focus) = &mut self.detail_focus else {
+                return false;
+            };
+            let step = delta.unsigned_abs() as usize;
+            focus.cursor = if delta > 0 {
+                focus.cursor.saturating_add(step).min(last)
+            } else {
+                focus.cursor.saturating_sub(step)
+            };
+            focus.cursor
+        };
+        let (scroll_changed, turn) = {
+            let Some(state) = self.expanded_details.get_mut(&key) else {
+                return false;
+            };
+            let max = target.total.saturating_sub(DETAIL_VIEW_ROWS);
+            let start = state.scroll.unwrap_or(if target.tail { max } else { 0 });
+            let desired = if next < start {
+                next
+            } else if next >= start + DETAIL_VIEW_ROWS {
+                next.saturating_add(1).saturating_sub(DETAIL_VIEW_ROWS)
+            } else {
+                start
+            }
+            .min(max);
+            let changed = state.scroll != Some(desired) && start != desired;
+            if changed {
+                state.scroll = Some(desired);
+            }
+            (changed, state.turn)
+        };
+        if scroll_changed {
+            self.invalidate_detail_layout(turn);
+        }
+        true
+    }
+
     pub(super) fn nav_move(&mut self, delta: i32) {
+        if self.detail_focus.is_some() && self.move_focused_detail(delta) {
+            return;
+        }
         let max = self.log_total.saturating_sub(1);
         let step = delta.unsigned_abs() as usize;
         self.nav_cursor = if delta > 0 {
@@ -201,6 +423,9 @@ impl App {
     }
 
     pub(super) fn nav_top(&mut self) {
+        if self.detail_focus.is_some() && self.move_focused_detail(i32::MIN) {
+            return;
+        }
         self.nav_cursor = 0;
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
@@ -209,6 +434,9 @@ impl App {
     }
 
     pub(super) fn nav_bottom(&mut self) {
+        if self.detail_focus.is_some() && self.move_focused_detail(i32::MAX) {
+            return;
+        }
         self.nav_cursor = self.log_total.saturating_sub(1);
         if self.mode == Mode::Select {
             self.sel = Some(self.select_sel());
@@ -409,6 +637,9 @@ impl App {
                 self.top_line = self.top_line.saturating_sub(h);
                 self.pinned = false;
             }
+            Mode::Navigate | Mode::Select if self.detail_focus.is_some() => {
+                self.nav_move(-i32::try_from(DETAIL_VIEW_ROWS).unwrap_or(i32::MAX));
+            }
             Mode::Navigate | Mode::Select => self.nav_move(-step),
         }
     }
@@ -430,11 +661,75 @@ impl App {
                     self.pinned = false;
                 }
             }
+            Mode::Navigate | Mode::Select if self.detail_focus.is_some() => {
+                self.nav_move(i32::try_from(DETAIL_VIEW_ROWS).unwrap_or(i32::MAX));
+            }
             Mode::Navigate | Mode::Select => self.nav_move(step),
         }
     }
 
+    fn detail_visible_content(&self, row: usize) -> Option<String> {
+        let rel = self.focused_detail_row_index(row)?;
+        let line = self.log_vis.get(rel)?;
+        let (start, end) = line.content;
+        Some(
+            line.rendered
+                .chars()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect(),
+        )
+    }
+
+    fn detail_selection_text(&self) -> Option<String> {
+        let focus = self.detail_focus.as_ref()?;
+        let anchor = focus.anchor?;
+        let cursor = (focus.cursor, focus.col);
+        let ((sr, sc), (er, ec)) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        let mut out = String::new();
+        for row in sr..=er {
+            let Some(line) = self.detail_visible_content(row) else {
+                continue;
+            };
+            let (cstart, _) = self
+                .focused_detail_row_index(row)
+                .and_then(|rel| self.log_vis.get(rel))
+                .map_or((0, 0), |v| v.content);
+            let start = if row == sr {
+                sc.saturating_sub(cstart)
+            } else {
+                0
+            };
+            let end = if row == er {
+                ec.saturating_sub(cstart).saturating_add(1)
+            } else {
+                line.chars().count()
+            };
+            if start < end {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(
+                    &line
+                        .chars()
+                        .skip(start)
+                        .take(end.saturating_sub(start))
+                        .collect::<String>(),
+                );
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     pub(super) fn yank_selection(&mut self) {
+        if let Some(text) = self.detail_selection_text() {
+            self.yank_text(&text);
+            return;
+        }
         if let Some(text) = self.selection_text() {
             self.save_yank_cursor();
             self.yank_text(&text);
@@ -442,6 +737,12 @@ impl App {
     }
 
     pub(super) fn yank_line(&mut self) {
+        if let Some(focus) = &self.detail_focus {
+            if let Some(text) = self.detail_visible_content(focus.cursor) {
+                self.yank_text(&text);
+            }
+            return;
+        }
         if let Some(text) = self.current_line_text() {
             self.save_yank_cursor();
             self.yank_text(&text);
@@ -648,6 +949,8 @@ impl App {
 
     pub(super) fn clear_log(&mut self) {
         self.turns.clear();
+        self.expanded_details.clear();
+        self.detail_focus = None;
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();

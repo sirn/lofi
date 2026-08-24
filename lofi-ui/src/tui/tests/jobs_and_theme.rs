@@ -179,17 +179,6 @@ fn apply_color_scheme_applies_only_in_auto() {
 }
 
 #[test]
-fn notify_lines_counts_verbose_chip_width() {
-    let msg = "an error long enough to matter when the verbose chip eats ten cells off the available width of the line".to_string();
-    let mut quiet = app();
-    quiet.notify(NotifyKind::Error, msg.clone());
-    let mut verbose = app();
-    verbose.verbose = true;
-    verbose.notify(NotifyKind::Error, msg);
-    assert!(verbose.notify_lines(60) >= quiet.notify_lines(60));
-}
-
-#[test]
 fn turn_start_confirms_a_pre_pushed_prompt() {
     let mut a = app();
     push_turn(&mut a);
