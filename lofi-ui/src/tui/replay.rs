@@ -110,6 +110,7 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
                 }
             }
             turn.blocks.push(Block::Thinking(ThinkingBlock {
+                id: next_detail_id(),
                 text: delta,
                 start: Instant::now(),
                 elapsed: None,
