@@ -223,8 +223,7 @@ impl App {
                 .flatten()
                 .map(|offsets| offsets.capacity() * size_of::<u64>())
                 .sum::<usize>()
-            + (self.frozen_heights.capacity() + self.frozen_heights_other_mode.capacity())
-                * size_of::<usize>();
+            + self.frozen_heights.capacity() * size_of::<usize>();
         let estimated_total = history_bytes
             + turns_bytes
             + render_cache_bytes
@@ -519,7 +518,7 @@ impl DebugState {
                 "context_tokens": context_tokens,
                 "context_limit": app.ctx_limit,
                 "compacted": app.compacted,
-                "verbose": app.verbose,
+                "expanded_details": app.expanded_details.len(),
             }
         });
         serde_json::to_writer(&mut *file, &record)?;
