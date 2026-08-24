@@ -3,8 +3,376 @@ use serde_json::Value;
 
 use crate::support::{
     delayed_text_response, delayed_tool_response, process_is_alive, spawned_pid, text_response,
-    tool_response, transcript_text, wait_for_process_exit, Fixture, MockServer, ProcessGuard, WAIT,
+    thinking_tool_response, tool_response, transcript_text, wait_for_process_exit, Fixture,
+    MockServer, ProcessGuard, Tui, WAIT,
 };
+
+fn enter_navigation(tui: &mut Tui) {
+    tui.send(b"\t");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
+fn wait_tinted_row(tui: &Tui, needle: &str) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
+        if tui
+            .tinted_row_text()
+            .as_deref()
+            .is_some_and(|row| row.contains(needle))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "could not focus {needle:?}; current: {:?}; screen:\n{}",
+        tui.tinted_row_text(),
+        tui.screen_text()
+    );
+}
+
+fn wait_select_cursor_row(tui: &Tui, needle: &str) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
+        if tui
+            .select_cursor_row_text()
+            .as_deref()
+            .is_some_and(|row| row.contains(needle))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "could not focus select cursor on {needle:?}; current: {:?}; screen:\n{}",
+        tui.select_cursor_row_text(),
+        tui.screen_text()
+    );
+}
+
+fn select_transcript_row(tui: &mut Tui, needle: &str) {
+    for _ in 0..40 {
+        let current = tui.tinted_row_text();
+        if current.as_deref().is_some_and(|row| row.contains(needle)) {
+            return;
+        }
+        let rows = tui.screen_text();
+        let rows = rows.lines().collect::<Vec<_>>();
+        let target = rows.iter().position(|row| row.contains(needle));
+        if let Some((target, current)) = target.zip(tui.tinted_row_index()) {
+            tui.send(if target < current { b"k" } else { b"j" });
+        } else {
+            tui.send(b"k");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "could not select transcript row {needle:?}; current: {:?}; screen:\n{}",
+        tui.tinted_row_text(),
+        tui.screen_text()
+    );
+}
+
+#[test]
+fn expanded_transcript_details_are_independent_adaptive_and_styled() {
+    let server = MockServer::start(vec![
+        thinking_tool_response(
+            "thinking-detail-one\nthinking-detail-two",
+            "detail-e2e-call",
+            r#"await lofi.bash({ cmd: "printf 'left-%s\\nright-%s\\n' 1 2" });
+return "detail-executive-one\\ndetail-executive-two";"#,
+        ),
+        text_response("detail first answer marker"),
+        text_response("detail freezing answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("detail e2e prompt");
+    tui.wait_for("detail first answer marker", WAIT);
+    tui.submit("freeze the detail e2e turn");
+    tui.wait_for("detail freezing answer marker", WAIT);
+
+    for row in ["Exec", "Tool bash", "Succeed"] {
+        tui.screen_row(row)
+            .unwrap_or_else(|| panic!("missing {row} row; screen:\n{}", tui.screen_text()));
+    }
+
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    tui.wait_for("await lofi.bash", WAIT);
+    tui.send(b"\r");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    select_transcript_row(&mut tui, "Tool bash");
+    tui.send(b"\r");
+    tui.wait_for_screen("left-1", WAIT);
+    tui.wait_for_screen("right-2", WAIT);
+
+    let screen = tui.screen_text();
+    let rows = screen.lines().collect::<Vec<_>>();
+    let bash = rows
+        .iter()
+        .position(|row| row.contains("Tool bash"))
+        .unwrap();
+    let result = rows.iter().position(|row| row.contains("Succeed")).unwrap();
+    assert_eq!(
+        result - bash,
+        3,
+        "a two-line native detail must render exactly two rows:\n{screen}"
+    );
+    assert!(tui.row_has_raised_background("left-1"));
+    let detail_rows = rows
+        .iter()
+        .filter(|row| row.contains("left-1") || row.contains("right-2"))
+        .collect::<Vec<_>>();
+    assert_eq!(detail_rows.len(), 2);
+    assert!(detail_rows.iter().all(|row| !row.contains('┌')));
+    assert!(detail_rows.iter().all(|row| !row.contains('└')));
+    assert!(detail_rows.iter().all(|row| {
+        let start = row.find("left-").or_else(|| row.find("right-")).unwrap();
+        !row[start..].contains('│')
+    }));
+    tui.send(b"\r");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    tui.wait_for_screen("thinking-detail-one", WAIT);
+    assert!(
+        tui.screen_row("thinking-detail-one")
+            .is_some_and(|row| !row.contains('▸')),
+        "thinking must stay inline without expansion; screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(
+        !tui.row_has_raised_background("thinking-detail-one"),
+        "thinking must stay on the transcript background; screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(tui.row_has_italic_text("thinking-detail-one"));
+}
+
+#[test]
+fn expanded_detail_is_modal_and_bounded_to_ten_rows() {
+    let detail_code = r#"
+// mini-exec-00
+// mini-exec-01
+// mini-exec-02
+// mini-exec-03
+// mini-exec-04
+// mini-exec-05
+// mini-exec-06
+// mini-exec-07
+// mini-exec-08
+// mini-exec-09
+// mini-exec-10
+// mini-exec-11
+// mini-exec-12
+// mini-exec-13
+// mini-exec-14
+return "mini-done";
+    "#
+    .trim();
+    let server = MockServer::start(vec![
+        tool_response("mini-detail-call", detail_code),
+        text_response("mini detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("expand a mini detail");
+    tui.wait_for("mini detail answer marker", WAIT);
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "mini-exec-00");
+    assert!(
+        !tui.screen_text().contains("mini-exec-10"),
+        "screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(
+        tui.select_cursor_row_text()
+            .as_deref()
+            .is_some_and(|row| row.contains("mini-exec-00")),
+        "a head detail marks its cursor cell on the first row: {:?}",
+        tui.select_cursor_row_text()
+    );
+
+    tui.send(b"j");
+    wait_tinted_row(&tui, "mini-exec-01");
+    tui.send(b"\x1b[6~");
+    wait_tinted_row(&tui, "mini-exec-11");
+    assert!(tui.screen_text().contains("mini-exec-10"));
+    assert!(
+        !tui.screen_text().contains("mini-exec-00"),
+        "screen:\n{}",
+        tui.screen_text()
+    );
+    tui.send(b"\x1b[1;2B");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(tui
+        .tinted_row_text()
+        .as_deref()
+        .is_some_and(|row| row.contains("mini-exec-11")));
+    tui.send(b"v");
+    tui.send(b"j");
+    wait_select_cursor_row(&tui, "mini-exec-12");
+    tui.send(b"\r");
+    let deadline = std::time::Instant::now() + WAIT;
+    while tui.screen_text().contains("mini-exec-12") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    wait_tinted_row(&tui, "Exec");
+    assert!(!tui.screen_text().contains("mini-exec-12"));
+}
+
+#[test]
+fn tail_detail_expansion_focuses_its_last_row_and_esc_collapses_it() {
+    let lines = (0..20)
+        .map(|n| format!("tail-res-{n:02}"))
+        .collect::<Vec<_>>()
+        .join("\\n");
+    let server = MockServer::start(vec![
+        tool_response("tail-detail-call", &format!("return \"{lines}\";")),
+        text_response("tail detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("expand a tail detail");
+    tui.wait_for("tail detail answer marker", WAIT);
+    assert!(
+        !tui.screen_text().contains("\u{25b8}"),
+        "screen:\n{}",
+        tui.screen_text()
+    );
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Succeed");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "tail-res-19");
+    assert!(
+        tui.select_cursor_row_text()
+            .as_deref()
+            .is_some_and(|row| row.contains("tail-res-19")),
+        "a tail detail marks its cursor cell on the last row: {:?}",
+        tui.select_cursor_row_text()
+    );
+    assert!(!tui.screen_text().contains("tail-res-00"));
+
+    tui.send(b"i");
+    let deadline = std::time::Instant::now() + WAIT;
+    while tui.screen_text().contains("tail-res-19") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !tui.screen_text().contains("tail-res-19"),
+        "leaving for the input area must collapse the detail:\n{}",
+        tui.screen_text()
+    );
+}
+
+#[test]
+fn yanking_a_detail_selection_collapses_the_expansion() {
+    let server = MockServer::start(vec![
+        tool_response("yank-detail-call", "// yank-detail-one\n// yank-detail-two"),
+        text_response("yank detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("expand a yank detail");
+    tui.wait_for("yank detail answer marker", WAIT);
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "yank-detail-one");
+    tui.send(b"vj");
+    wait_select_cursor_row(&tui, "yank-detail-two");
+    tui.send(b"y");
+    tui.wait_for("Copied to clipboard", WAIT);
+    assert!(
+        !tui.screen_text().contains("yank-detail-one"),
+        "copy-to-input must collapse the detail:\n{}",
+        tui.screen_text()
+    );
+}
+
+#[test]
+fn expanded_detail_copy_uses_transcript_selection_content() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "copy-detail-call",
+            "// copy-detail-one
+// copy-detail-two",
+        ),
+        text_response("copy detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("copy an expanded detail");
+    tui.wait_for("copy detail answer marker", WAIT);
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "copy-detail-one");
+    tui.clear_output();
+
+    tui.send(b"vj$y");
+    tui.wait_for("Copied to clipboard", WAIT);
+
+    let output = tui.output();
+    assert!(
+        output.contains("\x1b]52;c;Ly8gY29weS1kZXRhaWwtb25lCi8vIGNvcHktZGV0YWlsLXR3bw==\x07"),
+        "terminal output: {output:?}"
+    );
+}
+
+#[test]
+fn reloaded_details_stay_collapsed_before_any_expansion() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "reloaded-detail-call",
+            r#"await lofi.read("reloaded-hidden-detail.txt");
+return "exec-result-reload-one\nexec-result-reload-two";"#,
+        ),
+        text_response("reloaded detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.workspace.join("reloaded-hidden-detail.txt"),
+        "reloaded-hidden-first\nreloaded-hidden-second\n",
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("persist a reloaded detail prompt");
+    tui.wait_for("reloaded detail answer marker", WAIT);
+    tui.submit("/exit");
+    tui.wait_exit();
+
+    let mut reloaded = fixture.spawn(&["--continue"]);
+    reloaded.wait_for_screen("persist a reloaded detail prompt", WAIT);
+    reloaded.wait_for_screen("Tool read", WAIT);
+    for row in ["Tool read", "Succeed"] {
+        reloaded
+            .screen_row(row)
+            .unwrap_or_else(|| panic!("missing {row} row; screen:\n{}", reloaded.screen_text()));
+    }
+    assert!(!reloaded.screen_text().contains("exec-result-reload-one"));
+    assert!(!reloaded.screen_text().contains("reloaded-hidden-first"));
+
+    enter_navigation(&mut reloaded);
+    select_transcript_row(&mut reloaded, "Succeed");
+    reloaded.send(b"\r");
+    reloaded.wait_for_screen("exec-result-reload-one", WAIT);
+    reloaded.wait_for_screen("exec-result-reload-two", WAIT);
+    assert!(
+        !reloaded.screen_text().contains("reloaded-hidden-first"),
+        "expanding Succeed must not reveal the read detail"
+    );
+}
 
 #[test]
 fn user_shell_context_marker_controls_the_next_model_request() {
@@ -255,7 +623,7 @@ fn no_session_mode_runs_without_writing_a_transcript() {
 }
 
 #[test]
-fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
+fn diagnostics_recall_clear_and_exit_commands_work() {
     let server = MockServer::start(vec![
         text_response("command history answer marker"),
         text_response("command history follow-up answer"),
@@ -268,8 +636,6 @@ fn diagnostics_verbose_recall_clear_and_exit_commands_work() {
     tui.clear_output();
     tui.submit("/debug");
     tui.wait_for("Debug mode activated", WAIT);
-    tui.submit("/verbose");
-    tui.wait_for(" verbose ", WAIT);
 
     tui.clear_output();
     tui.submit("/recall command history prompt marker");

@@ -437,6 +437,7 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
         kind: lofi_types::PromptKind::User,
         prompt: "run it".to_string(),
         blocks: vec![Block::Tool(ToolCall {
+            detail_id: 0,
             id: "exec-1".to_string(),
             name: "exec".to_string(),
             input: r#"await lofi.bash({ cmd: "printf test" })"#.to_string(),
@@ -457,6 +458,7 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
                 done: true,
             }],
             result: Some("{\"value\":null}".to_string()),
+            result_availability: ResultAvailability::Available,
             result_committed: true,
             is_error: false,
             done: true,

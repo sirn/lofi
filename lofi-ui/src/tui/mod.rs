@@ -148,6 +148,22 @@ const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 /// the task is aborted so an uninterruptible tool cannot pin the process.
 const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
+const DETAIL_VIEW_ROWS: usize = 10;
+
+fn detail_block_id(turn: usize, block: usize) -> u64 {
+    ((turn as u64) << 32) | block as u64
+}
+
+fn assign_detail_ids(turn: &mut Turn, turn_index: usize) {
+    for (block_index, block) in turn.blocks.iter_mut().enumerate() {
+        let id = detail_block_id(turn_index, block_index);
+        match block {
+            Block::Tool(tool) => tool.detail_id = id,
+            Block::UserShell { id: block_id, .. } => *block_id = id,
+            _ => {}
+        }
+    }
+}
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the transcript log"),
@@ -166,8 +182,43 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/service", "switch the service tier"),
     ("/theme", "switch color scheme for this session"),
     ("/thinking", "switch the thinking level"),
-    ("/verbose", "toggle tool detail"),
 ];
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub(crate) enum DetailKey {
+    Exec(u64),
+    ExecResult(u64),
+    NativeTool { parent: u64, id: u64 },
+    UserShell(u64),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DetailState {
+    turn: usize,
+    scroll: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct DetailFocus {
+    key: DetailKey,
+    cursor: usize,
+    col: usize,
+}
+
+impl DetailFocus {
+    fn on(target: &view::DetailTarget, col: usize) -> Self {
+        Self {
+            key: target.key.clone(),
+            // A released result leaves the collapsed header's total stale, so
+            // a tail detail cannot know its last row yet. usize::MAX defers
+            // the clamp to the next render, which sees the expanded layout.
+            cursor: target
+                .row
+                .unwrap_or(if target.tail { usize::MAX } else { 0 }),
+            col,
+        }
+    }
+}
 
 /// A native tool call (`lofi.bash`/`lofi.read`/…) observed inside an `exec`
 /// block, surfaced so the UI can render each one under its parent exec.
@@ -194,14 +245,25 @@ struct NativeTool {
     done: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+enum ResultAvailability {
+    #[default]
+    None,
+    Available,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCall {
+    #[serde(skip)]
+    detail_id: u64,
     id: String,
     name: String,
     input: String,
     label: Option<String>,
     native: Vec<NativeTool>,
     result: Option<String>,
+    #[serde(default)]
+    result_availability: ResultAvailability,
     result_committed: bool,
     is_error: bool,
     done: bool,
@@ -228,6 +290,8 @@ enum Block {
     Thinking(ThinkingBlock),
     Tool(ToolCall),
     UserShell {
+        #[serde(skip)]
+        id: u64,
         command: String,
         output: String,
         exit_code: Option<i32>,
@@ -695,13 +759,18 @@ impl Popover for SlashComplete {
 // historical TreeEntry name for its picker state.
 use lofi_core::session::tree::TreeRow as TreeEntry;
 
-/// Retains compressed, width-independent display models so resizing a resumed
-/// transcript does not rescan its JSONL file. Successful native results are
-/// reduced to their collapsed previews before insertion; per-turn compression
-/// avoids retaining the full Rust object graph. A hard budget preserves bounded
-/// memory for transcripts whose visible content itself is unusually large.
+/// Retains compressed, width-independent display models so scrolling back
+/// into a resumed transcript does not rescan its JSONL file. Successful
+/// native results are reduced to their collapsed previews before insertion;
+/// per-turn compression avoids retaining the full Rust object graph. Entries
+/// are evicted least-recently-used past a hard budget, viewport-driven
+/// materializations being the only inserts — background height re-measure
+/// parses without caching, so the cache stays proportional to what the user
+/// has actually looked at, not to the whole transcript.
 struct CollapsedTurnCache {
     map: HashMap<usize, Box<[u8]>>,
+    /// LRU order: front is the least recently used turn index.
+    order: VecDeque<usize>,
     retained_bytes: usize,
     frame_hits: usize,
     frame_misses: usize,
@@ -709,11 +778,15 @@ struct CollapsedTurnCache {
 }
 
 impl CollapsedTurnCache {
-    const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
+    /// A single entry above this size is never retained; it reparses from the
+    /// transcript on demand instead of flushing everyone else.
+    const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 
     fn new() -> Self {
         Self {
             map: HashMap::new(),
+            order: VecDeque::new(),
             retained_bytes: 0,
             frame_hits: 0,
             frame_misses: 0,
@@ -726,10 +799,17 @@ impl CollapsedTurnCache {
             lz4_flex::decompress_size_prepended(data)
                 .ok()
                 .and_then(|json| serde_json::from_slice(&json).ok())
-                .map(Arc::new)
+                .map(|mut turn| {
+                    assign_detail_ids(&mut turn, idx);
+                    Arc::new(turn)
+                })
         });
         if turn.is_some() {
             self.frame_hits += 1;
+            if let Some(pos) = self.order.iter().position(|entry| *entry == idx) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(idx);
         } else {
             self.frame_misses += 1;
         }
@@ -755,15 +835,34 @@ impl CollapsedTurnCache {
         };
         let data = lz4_flex::compress_prepend_size(&json).into_boxed_slice();
         let bytes = data.len();
-        if bytes > Self::MAX_RETAINED_BYTES.saturating_sub(self.retained_bytes) {
+        if bytes > Self::MAX_ENTRY_BYTES {
             return;
         }
         self.retained_bytes += bytes;
+        self.order.push_back(idx);
         self.map.insert(idx, data);
+        while self.retained_bytes > Self::MAX_RETAINED_BYTES {
+            let Some(victim) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(data) = self.map.remove(&victim) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(data.len());
+            }
+        }
+    }
+
+    fn remove(&mut self, idx: usize) {
+        if let Some(data) = self.map.remove(&idx) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(data.len());
+            if let Some(pos) = self.order.iter().position(|entry| *entry == idx) {
+                self.order.remove(pos);
+            }
+        }
     }
 
     fn clear(&mut self) {
         self.map.clear();
+        self.order.clear();
         self.retained_bytes = 0;
         self.reset_frame_profile();
     }
@@ -917,7 +1016,8 @@ pub(crate) struct App {
     pinned: bool,
     top_line: usize,
     last_base: usize,
-    verbose: bool,
+    expanded_details: HashMap<DetailKey, DetailState>,
+    detail_focus: Option<DetailFocus>,
     debug_after_draw: Option<&'static str>,
     debug: Option<debug_stats::DebugState>,
     should_quit: bool,
@@ -963,6 +1063,7 @@ pub(crate) struct App {
     log_rect: Rect,
     input_rect: Rect,
     log_vis: Vec<view::VisLine>,
+    log_details: Vec<Option<view::DetailTarget>>,
     log_off: usize,
     input_scroll: usize,
     sel: Option<Selection>,
@@ -1003,8 +1104,6 @@ pub(crate) struct App {
     /// seed estimates for every historical turn so the first frame paints
     /// without re-reading the whole session file.
     frozen_heights_estimated: Vec<bool>,
-    frozen_heights_other_mode: Vec<usize>,
-    frozen_heights_other_mode_estimated: Vec<bool>,
     render_epoch: u64,
     frozen_epoch: u64,
     /// Viewport width the frozen cache was last built at. A resize changes
@@ -1032,6 +1131,8 @@ impl App {
     ) -> Result<()> {
         self.lifecycle.restore_history(cursor, index)?;
         self.turns.clear();
+        self.expanded_details.clear();
+        self.detail_focus = None;
         self.collapsed_turns.get_mut().clear();
         self.turn_byte_ranges.clear();
         self.turn_event_offsets.clear();
@@ -1040,6 +1141,9 @@ impl App {
         self.total_out = 0;
         self.reset_compaction_gauges();
         replay_indexed_session(self, cursor, index, file_size)?;
+        // Replay parses the whole transcript and drops most of it again; the
+        // freed heap sits in the arena otherwise.
+        lofi_core::malloc_trim::release_freed_memory();
         restore_compaction_from_index(self, cursor, index);
         Ok(())
     }
