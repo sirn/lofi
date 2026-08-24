@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn collapsed_loader_skips_only_invisible_success_bodies() {
+    fn collapsed_loader_keeps_native_preview_bodies_and_projects_exec_results() {
         let (_guard, store) = isolated_store();
         let path = store
             .create(Path::new("/tmp/collapsed-projection"), &"p/m".into())
@@ -1699,7 +1699,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(natives[0].result.is_empty());
+        assert_eq!(natives[0].result, large);
         assert_eq!(natives[1].result, "visible write result");
         assert_eq!(natives[2].result, "visible error");
         let full_read = complete.iter().find_map(|event| match &event.kind {

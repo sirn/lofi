@@ -1,67 +1,6 @@
 use super::*;
 
 #[test]
-fn verbose_toggles() {
-    let mut a = app();
-    assert!(!a.verbose);
-    let before = a.turns.len();
-    a.frozen_heights = vec![3, 5, 8];
-    a.toggle_verbose();
-    assert!(a.verbose);
-    assert_eq!(a.debug_after_draw, Some("verbose"));
-    assert!(a.frozen_heights.is_empty());
-    assert_eq!(a.frozen_heights_other_mode, vec![3, 5, 8]);
-    assert_eq!(a.turns.len(), before);
-    a.debug_after_draw = None;
-    a.frozen_heights = vec![30, 50, 80];
-    a.toggle_verbose();
-    assert!(!a.verbose);
-    assert_eq!(a.debug_after_draw, Some("verbose"));
-    assert_eq!(a.frozen_heights, vec![3, 5, 8]);
-    assert_eq!(a.frozen_heights_other_mode, vec![30, 50, 80]);
-    assert_eq!(a.turns.len(), before);
-}
-#[test]
-fn verbose_expands_compaction_summary() {
-    use crate::tui::view::blocks::render_turns;
-    let summary = "## Session Goal\nBuild a coding agent.\n## Decisions\n- Use Rust.";
-    let mut a = app();
-    a.turns.push(Turn {
-        kind: lofi_types::PromptKind::User,
-        prompt: "p".to_string(),
-        blocks: vec![Block::Compaction {
-            summarized: 7,
-            kept: 2,
-            summary: summary.to_string(),
-        }],
-    });
-
-    let collapsed = render_turns(&a, 80);
-    let collapsed_s = join_rendered(&collapsed);
-    assert!(
-        collapsed_s.contains("Compacted 7 messages"),
-        "collapsed: {collapsed_s}"
-    );
-    assert!(
-        !collapsed_s.contains("Build a coding agent"),
-        "collapsed leaked summary: {collapsed_s}"
-    );
-
-    a.toggle_verbose();
-    let expanded = render_turns(&a, 80);
-    let expanded_s = join_rendered(&expanded);
-    assert!(expanded_s.contains("Compacted 7 messages"));
-    assert!(
-        expanded_s.contains("Build a coding agent"),
-        "expanded missing summary: {expanded_s}"
-    );
-    assert!(
-        expanded_s.contains("Use Rust."),
-        "expanded missing summary: {expanded_s}"
-    );
-}
-
-#[test]
 fn turn_failed_wraps_error_below_header() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -196,6 +135,13 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
         is_error: false,
         elapsed_ms: 0,
     });
+    a.expanded_details.insert(
+        DetailKey::NativeTool { parent: 0, id: 0 },
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
     let turn = &a.turns[0];
     let cx = Cx {
         app: &a,

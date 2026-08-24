@@ -481,16 +481,6 @@ struct CollapsedEventMeta {
     #[serde(default)]
     role: Option<lofi_types::Role>,
     #[serde(default)]
-    parent: String,
-    #[serde(default)]
-    call_id: u64,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    args: String,
-    #[serde(default)]
-    is_error: bool,
-    #[serde(default)]
     blocks: Vec<CollapsedBlockMeta>,
     #[serde(default)]
     summarized: usize,
@@ -510,10 +500,11 @@ struct CollapsedBlockMeta {
     is_error: bool,
 }
 
-/// Load selected events for collapsed transcript rendering without allocating
-/// payloads that the collapsed renderer never reads. Full errors and visible
-/// mutating-tool previews remain lossless; verbose rendering uses the ordinary
-/// complete-event loader instead.
+/// Load selected events for collapsed transcript rendering. Successful exec
+/// result bodies stay projected away because their nested native-tool rows are
+/// the visible account of the work. Native-tool bodies must remain complete so
+/// the TUI preview compactor can preserve carets, labels, and bounded previews.
+/// Expanded rows use the ordinary complete-event loader.
 pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
     use std::collections::HashSet;
     use std::io::{BufReader, Seek, SeekFrom};
@@ -530,9 +521,6 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
                 path.display()
             )));
         };
-        let hidden_native = meta.kind_type == "native_tool"
-            && !meta.is_error
-            && !matches!(meta.name.as_str(), "bash" | "write" | "edit" | "agent");
         let hidden_exec_result = meta.kind_type == "message"
             && matches!(
                 meta.role,
@@ -544,20 +532,7 @@ pub(super) fn load_collapsed_events_at(path: &Path, offsets: &[u64]) -> Result<V
                     && !block.is_error
                     && exec_ids.contains(&block.tool_use_id)
             });
-        let event = if hidden_native {
-            SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(lofi_types::NativeToolRecord {
-                    parent: meta.parent,
-                    call_id: meta.call_id,
-                    name: meta.name,
-                    args: meta.args,
-                    result: String::new(),
-                    is_error: false,
-                }),
-            }
-        } else if hidden_exec_result {
+        let event = if hidden_exec_result {
             let role = meta.role.unwrap_or(lofi_types::Role::Tool);
             SessionEvent {
                 id: String::new(),

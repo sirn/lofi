@@ -89,6 +89,7 @@ fn turn_height_matches_emitted_line_count() {
                 let mut blocks = Vec::new();
                 if has_thinking {
                     blocks.push(Block::Thinking(ThinkingBlock {
+                        id: detail_block_id(0, 0),
                         text: "reasoning about the answer".to_string(),
                         start: Instant::now(),
                         elapsed: Some(Duration::from_millis(1200)),
@@ -96,6 +97,7 @@ fn turn_height_matches_emitted_line_count() {
                 }
                 blocks.push(Block::Text(long_text.clone()));
                 blocks.push(Block::Tool(ToolCall {
+                    detail_id: 0,
                     id: "exec-1".to_string(),
                     name: "exec".to_string(),
                     input: "await lofi.bash({ cmd: \"seq 1 40\" })".to_string(),
@@ -120,6 +122,7 @@ fn turn_height_matches_emitted_line_count() {
                             .collect::<Vec<_>>()
                             .join("\n"),
                     ),
+                    result_availability: ResultAvailability::Available,
                     result_committed: false,
                     is_error: false,
                     done: true,
@@ -374,7 +377,7 @@ fn notify_lines_is_one_without_notification() {
 
 #[test]
 fn notify_lines_grows_with_a_long_message_and_caps_at_max() {
-    let mut a = app(); // mode INPUT, verbose off; " INPUT " is 7 cells
+    let mut a = app(); // mode INPUT; " INPUT " is 7 cells
     a.notify(
         NotifyKind::Error,
         "quite a long error message that absolutely refuses to fit on a single line of a reasonably wide terminal".to_string(),
