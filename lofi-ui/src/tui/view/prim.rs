@@ -7,6 +7,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::theme::{active_indicator, Theme};
+use crate::tui::DetailKey;
 use crate::tui::SPINNER;
 
 /// Display width of `s` in terminal cells: wide chars (CJK, emoji) count as
@@ -120,6 +121,16 @@ pub struct RenderLine {
     pub content: (usize, usize),
     pub raw: Option<RawLine>,
     pub links: Vec<Hyperlink>,
+    pub detail: Option<DetailTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DetailTarget {
+    pub key: DetailKey,
+    pub total: usize,
+    pub tail: bool,
+    /// Local visual row inside the expanded body; headers use `None`.
+    pub row: Option<usize>,
 }
 
 impl RenderLine {
@@ -137,6 +148,26 @@ impl RenderLine {
 
     pub fn with_links(mut self, links: Vec<Hyperlink>) -> Self {
         self.links = links;
+        self
+    }
+
+    pub fn with_detail(mut self, key: DetailKey, total: usize, tail: bool) -> Self {
+        self.detail = Some(DetailTarget {
+            key,
+            total,
+            tail,
+            row: None,
+        });
+        self
+    }
+
+    pub fn with_detail_row(mut self, key: DetailKey, total: usize, tail: bool, row: usize) -> Self {
+        self.detail = Some(DetailTarget {
+            key,
+            total,
+            tail,
+            row: Some(row),
+        });
         self
     }
 }
@@ -179,6 +210,7 @@ pub fn render(
         content: (start, end),
         raw: None,
         links: Vec::new(),
+        detail: None,
     }
 }
 
@@ -192,6 +224,7 @@ pub fn rblank() -> RenderLine {
         content: (0, 0),
         raw: None,
         links: Vec::new(),
+        detail: None,
     }
 }
 
@@ -304,7 +337,7 @@ fn osc8_symbol(url: &str, symbol: &str, opening: bool, closing: bool) -> String 
     out
 }
 
-fn span_width(spans: &[Span<'static>]) -> usize {
+pub fn span_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| width(&s.content)).sum()
 }
 pub fn truncate(s: &str, max_w: usize) -> String {
@@ -357,25 +390,10 @@ pub fn wrap(s: &str, max_w: usize) -> Vec<String> {
 /// continuation rows start flush (matching [`wrap_line_styled`]). A blank or
 /// empty source line yields one empty row so a line-number rail stays visible.
 pub fn wrap_pre(s: &str, max_w: usize) -> Vec<String> {
-    wrap_pre_window(s, max_w, 0..usize::MAX).1
-}
-
-pub fn wrap_pre_window(
-    s: &str,
-    max_w: usize,
-    range: std::ops::Range<usize>,
-) -> (usize, Vec<String>) {
-    let mut total = 0usize;
-    let mut out = Vec::with_capacity(range.end.saturating_sub(range.start).min(256));
-    let mut emit = |value: String| {
-        if range.contains(&total) {
-            out.push(value);
-        }
-        total = total.saturating_add(1);
-    };
+    let mut out = Vec::new();
     for line in s.split('\n') {
         if max_w == 0 || line.is_empty() {
-            emit(line.to_string());
+            out.push(line.to_string());
             continue;
         }
         let indent_len = line
@@ -386,18 +404,18 @@ pub fn wrap_pre_window(
         let body = &line[indent_len..];
         let content_w = max_w.saturating_sub(width(indent));
         if content_w == 0 {
-            emit(line.to_string());
+            out.push(line.to_string());
             continue;
         }
         let cells: Vec<(char, Style)> = body.chars().map(|c| (c, Style::default())).collect();
         for group in wrap_cells(&cells, content_w) {
-            emit(format!(
+            out.push(format!(
                 "{indent}{}",
                 group.iter().map(|(c, _)| *c).collect::<String>()
             ));
         }
     }
-    (total, out)
+    out
 }
 
 fn wrap_cells(cells: &[(char, Style)], max_w: usize) -> Vec<&[(char, Style)]> {
