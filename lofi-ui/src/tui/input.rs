@@ -37,11 +37,10 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Escape is the interrupt key: it dismisses completion and an expanded
-    // detail first, then aborts an active stream. Ctrl-C is deliberately not
-    // a bare interrupt alias; it first peels away the editor/nav state (see
-    // handle_ctrl_c) so it only cancels a turn from a clean, empty prompt.
-    if k.code == KeyCode::Esc && app.detail_focus.is_some() {
+    // Tab and Escape peel a focused detail before their outer action: Tab
+    // does not drop to the input area and Escape does not abort the run
+    // while an expansion is open.
+    if matches!(k.code, KeyCode::Tab | KeyCode::Esc) && app.detail_focus.is_some() {
         app.collapse_detail_focus();
         return;
     }

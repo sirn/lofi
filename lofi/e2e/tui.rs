@@ -361,6 +361,37 @@ fn esc_collapses_an_expanded_detail_without_cancelling_the_turn() {
 }
 
 #[test]
+fn tab_collapses_an_expanded_detail_without_leaving_navigation() {
+    let server = MockServer::start(vec![
+        tool_response("tab-detail-call", "return \"tab-detail-payload\";"),
+        text_response("tab detail answer marker"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("expand a detail");
+    tui.wait_for("tab detail answer marker", WAIT);
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "tab-detail-payload");
+
+    tui.send(b"\t");
+    let deadline = std::time::Instant::now() + WAIT;
+    while tui.screen_text().contains("tab-detail-payload") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !tui.screen_text().contains("tab-detail-payload"),
+        "Tab must collapse the focused detail:\n{}",
+        tui.screen_text()
+    );
+    // Nav keys still work, so the session stayed in Navigate mode.
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "tab-detail-payload");
+}
+
+#[test]
 fn reloaded_details_stay_collapsed_before_any_expansion() {
     let server = MockServer::start(vec![
         tool_response(
