@@ -278,8 +278,8 @@ fn map_response_completed(v: &Value) -> StreamingEvent {
 }
 
 /// # Errors
-/// Returns [`Error::Provider`] for `response.failed`, `response.incomplete`,
-/// or `error` events so a provider-reported failure fails the round trip.
+/// Returns [`Error::Provider`] for `response.failed` or `error` events so a
+/// provider-reported failure fails the round trip.
 fn map_openai_responses_event(
     v: &Value,
     state: &mut ResponsesMapperState,
@@ -362,11 +362,16 @@ fn map_openai_responses_event(
                 out.extend(map_completed_output_item(item, state));
             }
         }
-        "response.completed" => {
+        // `response.incomplete` is the canonical end-of-stream event for a
+        // truncated turn (e.g. max_output_tokens), with the same payload shape
+        // as `response.completed`; both map through map_response_completed and
+        // continue the turn rather than hard-failing on a state the run loop
+        // knows how to recover from.
+        "response.completed" | "response.incomplete" => {
             state.saw_completed = true;
             out.push(map_response_completed(v));
         }
-        "response.failed" | "response.incomplete" | "error" => {
+        "response.failed" | "error" => {
             return Err(Error::Provider(format!("provider stream error: {v}")));
         }
         _ => {}
@@ -822,6 +827,28 @@ mod tests {
         let ev = json!({"type":"response.failed","error":{"message":"boom"}});
         let r = map_openai_responses_event(&ev, &mut ResponsesMapperState::default());
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn incomplete_event_maps_reason_into_done_instead_of_erroring() {
+        for (reason, expected) in [
+            ("max_output_tokens", lofi_types::StopReason::MaxTokens),
+            ("max_tool_calls", lofi_types::StopReason::MaxTokens),
+            ("content_filter", lofi_types::StopReason::Other),
+        ] {
+            let ev = json!({
+                "type": "response.incomplete",
+                "response": {"status": "incomplete", "incomplete_details": {"reason": reason}}
+            });
+            let mut state = ResponsesMapperState::default();
+            let done = map_openai_responses_event(&ev, &mut state).unwrap();
+            let StreamingEvent::Done { stop_reason, .. } = done.into_iter().next().unwrap() else {
+                panic!("expected Done");
+            };
+            assert_eq!(stop_reason, Some(expected), "reason {reason}");
+            // The event is terminal: the EOF guard must accept it.
+            assert!(OpenAiResponsesIr::on_eof(&state).is_ok());
+        }
     }
 
     #[test]
