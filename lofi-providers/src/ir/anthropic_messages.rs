@@ -106,8 +106,20 @@ fn anthropic_tool_result_content(text: &str, images: &[lofi_types::ToolResultIma
 
 fn block_to_anthropic(b: &ContentBlock) -> Value {
     match b {
+        // The API rejects empty text blocks; dropping them can only shrink
+        // an assistant message, and a message that empties out is skipped
+        // by the caller.
+        ContentBlock::Text { text } if text.is_empty() => Value::Null,
         ContentBlock::Text { text } => json!({"type": "text", "text": text}),
         ContentBlock::ToolUse { id, name, input } => {
+            // The Messages API requires `input` to be a JSON object; sessions
+            // recorded before the assembler normalized empty inputs can still
+            // carry `null` from the durable log.
+            let input = if input.is_object() {
+                input.clone()
+            } else {
+                json!({})
+            };
             json!({"type": "tool_use", "id": id, "name": name, "input": input})
         }
         ContentBlock::ToolResult {
@@ -125,18 +137,23 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             text: _,
             signature,
             redacted: true,
-        } => json!({
-            "type": "redacted_thinking",
-            "data": signature.as_deref().unwrap_or(""),
-        }),
+        } => match signature.as_deref().filter(|data| !data.is_empty()) {
+            Some(data) => json!({
+                "type": "redacted_thinking",
+                "data": data,
+            }),
+            None => Value::Null,
+        },
         ContentBlock::Thinking {
             text, signature, ..
         } => {
-            let mut obj = json!({"type": "thinking", "thinking": text});
-            if let Some(sig) = signature {
-                obj["signature"] = json!(sig);
-            }
-            obj
+            // `ThinkingBlockParam.signature` is required; a thinking block
+            // from a stream cancelled before `signature_delta` can never
+            // validate, so it is dropped from the replay.
+            let Some(sig) = signature.as_deref().filter(|sig| !sig.is_empty()) else {
+                return Value::Null;
+            };
+            json!({"type": "thinking", "thinking": text, "signature": sig})
         }
         ContentBlock::PartSignature { .. } => Value::Null,
         ContentBlock::Image { bytes, media_type } => json!({
@@ -619,6 +636,79 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn unsigned_thinking_is_dropped_from_the_replay() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                lofi_types::ContentBlock::Thinking {
+                    text: "cut before signature_delta".to_string(),
+                    signature: None,
+                    redacted: false,
+                },
+                lofi_types::ContentBlock::Text {
+                    text: "visible answer".to_string(),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let blocks = req["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], json!("text"));
+    }
+
+    #[test]
+    fn redacted_thinking_without_data_is_dropped_from_the_replay() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![lofi_types::ContentBlock::Thinking {
+                text: String::new(),
+                signature: Some(String::new()),
+                redacted: true,
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        // The message empties out and wholesale vanishes.
+        assert_eq!(req["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn empty_text_blocks_are_dropped_from_the_replay() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![
+                lofi_types::ContentBlock::Text {
+                    text: String::new(),
+                },
+                lofi_types::ContentBlock::Text {
+                    text: "real text".to_string(),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let blocks = req["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"], json!("real text"));
+    }
+
+    #[test]
+    fn tool_use_with_null_input_serializes_an_empty_object() {
+        let msgs = [Message {
+            role: Role::Assistant,
+            blocks: vec![lofi_types::ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "exec".to_string(),
+                input: Value::Null,
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        assert_eq!(req["messages"][0]["content"][0]["input"], json!({}));
     }
 
     #[test]
