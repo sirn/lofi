@@ -37,10 +37,14 @@ pub(super) fn handle_event(
         return;
     }
 
-    // Escape is the interrupt key: it dismisses completion first, then aborts
-    // an active stream. Ctrl-C is deliberately not a bare interrupt alias; it
-    // first peels away the editor/nav state (see handle_ctrl_c) so it only
-    // cancels a turn from a clean, empty prompt.
+    // Escape is the interrupt key: it dismisses completion and an expanded
+    // detail first, then aborts an active stream. Ctrl-C is deliberately not
+    // a bare interrupt alias; it first peels away the editor/nav state (see
+    // handle_ctrl_c) so it only cancels a turn from a clean, empty prompt.
+    if k.code == KeyCode::Esc && app.detail_focus.is_some() {
+        app.collapse_detail_focus();
+        return;
+    }
     if k.code == KeyCode::Esc
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())

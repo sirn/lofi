@@ -330,6 +330,37 @@ fn expanded_detail_copy_uses_transcript_selection_content() {
 }
 
 #[test]
+fn esc_collapses_an_expanded_detail_without_cancelling_the_turn() {
+    // The second response arrives late so the turn is still running while the
+    // first tool result is expanded; Escape must peel the detail, not abort.
+    let server = MockServer::start(vec![
+        tool_response("esc-detail-call", "return \"esc-detail-payload\";"),
+        delayed_text_response("esc detail survived", std::time::Duration::from_secs(3)),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("expand a detail while the turn runs");
+    tui.wait_for("Succeed", WAIT);
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"\r");
+    wait_tinted_row(&tui, "esc-detail-payload");
+
+    tui.send(b"\x1b");
+    let deadline = std::time::Instant::now() + WAIT;
+    while tui.screen_text().contains("esc-detail-payload") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !tui.screen_text().contains("esc-detail-payload"),
+        "Escape must collapse the focused detail first:\n{}",
+        tui.screen_text()
+    );
+    tui.wait_for("esc detail survived", WAIT);
+}
+
+#[test]
 fn reloaded_details_stay_collapsed_before_any_expansion() {
     let server = MockServer::start(vec![
         tool_response(
