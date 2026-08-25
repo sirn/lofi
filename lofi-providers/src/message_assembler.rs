@@ -193,11 +193,15 @@ impl MessageAssembler {
                 }
                 Slot::Tool(i) => {
                     let t = &self.tools[i];
-                    let input = if t.input.is_empty() {
-                        Value::Null
-                    } else {
-                        serde_json::from_str(&t.input).unwrap_or(Value::Null)
-                    };
+                    // Tool inputs are JSON objects by protocol; Anthropic
+                    // rejects `null`. An empty buffer is a no-argument call
+                    // and an unparseable buffer is a call cut mid-stream -
+                    // both replay as `{}` so the retained assistant message
+                    // stays sendable.
+                    let input = serde_json::from_str(&t.input)
+                        .ok()
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| serde_json::json!({}));
                     blocks.push(ContentBlock::ToolUse {
                         id: t.id.clone(),
                         name: t.name.clone(),
@@ -371,7 +375,7 @@ mod tests {
             panic!("expected tool_use");
         };
         assert_eq!(id, "tu_0");
-        assert_eq!(input, &serde_json::json!(null));
+        assert_eq!(input, &serde_json::json!({}));
     }
 
     #[test]
@@ -434,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_tool_input_becomes_null() {
+    fn empty_tool_input_becomes_an_empty_object() {
         let events = [StreamingEvent::ToolUseStart {
             id: "t".to_string(),
             name: "exec".to_string(),
@@ -443,7 +447,26 @@ mod tests {
         let ContentBlock::ToolUse { input, .. } = &m.blocks[0] else {
             panic!("expected tool_use");
         };
-        assert_eq!(input, &Value::Null);
+        assert_eq!(input, &serde_json::json!({}));
+    }
+
+    #[test]
+    fn cut_tool_input_becomes_an_empty_object() {
+        let events = [
+            StreamingEvent::ToolUseStart {
+                id: "t".to_string(),
+                name: "exec".to_string(),
+            },
+            StreamingEvent::ToolUseInputDelta {
+                id: "t".to_string(),
+                delta: r#"{"code":"#.to_string(),
+            },
+        ];
+        let m = assemble_message(&events);
+        let ContentBlock::ToolUse { input, .. } = &m.blocks[0] else {
+            panic!("expected tool_use");
+        };
+        assert_eq!(input, &serde_json::json!({}));
     }
 
     #[test]
