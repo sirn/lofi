@@ -2,6 +2,7 @@ use std::io::Write;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use serde_json::json;
 
 use crate::support::{
     anthropic_text_response, anthropic_text_response_with_usage, anthropic_truncated_text_response,
@@ -1489,6 +1490,36 @@ fn responses_truncated_response_continues_the_turn_once() {
         .as_str()
         .unwrap()
         .contains("token limit"));
+}
+
+#[test]
+fn responses_incomplete_event_continues_the_turn_once() {
+    // `response.incomplete` is the canonical terminal streaming event for a
+    // max_output_tokens cut; it must continue the turn like the nested
+    // `incomplete_details` shape does, not hard-fail it.
+    let partial = json!({ "type": "response.output_text.delta", "delta": "responses partial" });
+    let incomplete = json!({
+        "type": "response.incomplete",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "usage": { "input_tokens": 7, "output_tokens": 5 },
+        },
+    });
+    let server = MockServer::start(vec![
+        MockResponse::sse(format!(
+            "data: {partial}\n\ndata: {incomplete}\n\ndata: [DONE]\n\n"
+        )),
+        responses_response("responses reasoning", "responses continued"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    tui.submit("answer in full");
+    tui.wait_for("responses continued", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    assert_eq!(server.requests().len(), 2);
 }
 
 #[test]
