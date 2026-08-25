@@ -175,7 +175,15 @@ fn assistant_parts(blocks: &[ContentBlock], model: &Model) -> Vec<Value> {
                 }
             }
             ContentBlock::ToolUse { id, name, input } => {
-                let mut call = json!({"name": name, "args": input});
+                // `functionCall.args` must be a Struct; sessions recorded
+                // before the assembler normalized empty inputs can carry
+                // `null` from the durable log.
+                let args = if input.is_object() {
+                    input.clone()
+                } else {
+                    json!({})
+                };
+                let mut call = json!({"name": name, "args": args});
                 if requires_tool_call_id(&model.id) {
                     call["id"] = json!(normalize_tool_id(id));
                 }
@@ -293,6 +301,17 @@ fn map_event(data: &Value, state: &mut GoogleMapperState) -> Result<Vec<Streamin
             .and_then(Value::as_str)
             .unwrap_or("Google API error");
         return Err(Error::Provider(message.to_string()));
+    }
+
+    // A prompt the safety filter rejects carries no candidate and no finish
+    // reason; surface the block reason instead of the generic EOF error.
+    if let Some(reason) = data
+        .pointer("/promptFeedback/blockReason")
+        .and_then(Value::as_str)
+    {
+        return Err(Error::Provider(format!(
+            "Google blocked the prompt: {reason}"
+        )));
     }
 
     update_usage(data.get("usageMetadata"), &mut state.usage);
@@ -541,6 +560,39 @@ mod tests {
         assert_eq!(
             request["generationConfig"]["thinkingConfig"]["includeThoughts"],
             true
+        );
+    }
+
+    #[test]
+    fn prompt_feedback_block_reason_fails_with_the_reason() {
+        let mut state = GoogleMapperState::default();
+        let err = map_event(
+            &json!({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}),
+            &mut state,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Provider(message) if message.contains("PROHIBITED_CONTENT")));
+    }
+
+    #[test]
+    fn function_call_with_null_args_serializes_an_empty_object() {
+        let request = build_request(
+            &model("gemini-3.7-flash"),
+            &[Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "exec".into(),
+                    input: Value::Null,
+                }],
+                kind: PromptKind::default(),
+            }],
+            &[],
+        );
+
+        assert_eq!(
+            request["contents"][0]["parts"][0]["functionCall"]["args"],
+            json!({})
         );
     }
 
