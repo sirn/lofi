@@ -708,6 +708,113 @@ async fn repeated_tool_results_notify_after_pairing_and_recover_once() {
     );
 }
 
+/// A solo tool round with a distinct result, so the tool-result loop detector
+/// stays quiet: distinct results are forward progress, not a repeated cycle.
+fn progress_round(id: usize) -> Vec<StreamingEvent> {
+    vec![
+        StreamingEvent::ToolUseStart {
+            id: format!("t{id}"),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: format!("t{id}"),
+            delta: serde_json::json!({ "code": format!("return {id}") }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: format!("t{id}"),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ]
+}
+
+fn final_round() -> Vec<StreamingEvent> {
+    vec![
+        StreamingEvent::TextDelta("final answer".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn forward_progress_resets_the_recovery_round_budget() {
+    let dir = tempdir().unwrap();
+    let progressed = agent_run::MAX_RECOVERY_ROUNDS + 10;
+    let mut rounds: Vec<_> = (0..progressed).map(progress_round).collect();
+    rounds.push(final_round());
+    let agent = agent_with(rounds, dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8192);
+    let mut messages = Vec::new();
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut notices = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Notice(text) = event {
+            notices.push(text);
+        }
+    }
+    let final_answer = messages.iter().rev().find(|message| {
+        message.role == Role::Assistant
+            && message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "final answer"))
+    });
+    assert!(
+        final_answer.is_some(),
+        "turn must run past the round limit and reach the scripted final round"
+    );
+    assert!(
+        notices.iter().all(|text| !text.contains("recovery rounds")),
+        "long productive turns must not trip the recovery-round limit: {notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_resets_the_recovery_round_budget_after_progress() {
+    let dir = tempdir().unwrap();
+    let progressed = agent_run::MAX_RECOVERY_ROUNDS + 10;
+    let mut rounds: Vec<_> = (0..progressed).map(progress_round).collect();
+    rounds.push(final_round());
+    let agent = agent_with(rounds, dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8192);
+    agent.run("go".into(), tx).await.unwrap();
+
+    let mut notices = Vec::new();
+    let mut reached_final = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::Notice(text) => notices.push(text),
+            AgentEvent::Text(text) if text == "final answer" => reached_final = true,
+            _ => {}
+        }
+    }
+    assert!(
+        reached_final,
+        "run must run past the round limit and stream the scripted final round"
+    );
+    assert!(
+        notices.iter().all(|text| !text.contains("recovery rounds")),
+        "long productive turns must not trip the recovery-round limit: {notices:?}"
+    );
+}
+
 #[tokio::test]
 async fn repeated_thinking_notifies_agent_and_allows_one_recovery() {
     let dir = tempdir().unwrap();
