@@ -169,15 +169,7 @@ impl Agent {
             if tx.is_closed() {
                 return Ok(());
             }
-            recovery_rounds += 1;
-            if recovery_rounds > MAX_RECOVERY_ROUNDS {
-                let _ = emit(
-                    Some(&tx),
-                    AgentEvent::Notice(format!(
-                        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
-                    )),
-                )
-                .await;
+            if recovery_round_exceeded(&tx, &mut recovery_rounds).await {
                 return Ok(());
             }
             let outcome = match self
@@ -408,15 +400,7 @@ impl Agent {
             // Feed the prior round's context fill back in so the next request
             // clips its output cap against the remaining context window.
             let prev_input = Some(stats.usage.context_tokens());
-            recovery_rounds += 1;
-            if recovery_rounds > MAX_RECOVERY_ROUNDS {
-                let _ = emit(
-                    Some(&tx),
-                    AgentEvent::Notice(format!(
-                        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
-                    )),
-                )
-                .await;
+            if recovery_round_exceeded(&tx, &mut recovery_rounds).await {
                 finished_normally = true;
                 break;
             }
@@ -1645,6 +1629,24 @@ enum LoopAction {
     None,
     Continue,
     Stop,
+}
+
+/// Count one more recovery round. Returns true (after noticing the
+/// user) when the consecutive-recovery budget is spent, so the caller ends
+/// the turn instead of retrying forever.
+async fn recovery_round_exceeded(tx: &Sender<AgentEvent>, recovery_rounds: &mut usize) -> bool {
+    *recovery_rounds += 1;
+    if *recovery_rounds <= MAX_RECOVERY_ROUNDS {
+        return false;
+    }
+    let _ = emit(
+        Some(tx),
+        AgentEvent::Notice(format!(
+            "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
+        )),
+    )
+    .await;
+    true
 }
 
 async fn handle_loop_detection(
