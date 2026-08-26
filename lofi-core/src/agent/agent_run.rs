@@ -8,7 +8,10 @@ const THINKING_LOOP_MAX_PERIOD_BYTES: usize = 2 * 1024;
 const THINKING_LOOP_HISTORY_BYTES: usize = 24 * 1024;
 const TOOL_LOOP_REPETITIONS: usize = 5;
 const TOOL_LOOP_MAX_CYCLE: usize = 5;
-const MAX_PROVIDER_ROUNDS: usize = 100;
+// Bounds consecutive automatic-recovery rounds only; a round that runs a
+// tool and continues normally resets the count, so long productive turns
+// (one model round per tool call) never trip the limit.
+pub(super) const MAX_RECOVERY_ROUNDS: usize = 100;
 const LOOP_RECOVERY_PROMPT: &str = "A potential loop was detected in your repeated reasoning or tool results. Stop repeating the same approach. Review the latest result, choose a different concrete action, and continue only if it makes forward progress.";
 
 #[derive(Default)]
@@ -161,17 +164,17 @@ impl Agent {
         }
         let mut loop_detector = LoopDetector::default();
         let mut loop_recovered = false;
-        let mut provider_rounds = 0usize;
+        let mut recovery_rounds = 0usize;
         loop {
             if tx.is_closed() {
                 return Ok(());
             }
-            provider_rounds += 1;
-            if provider_rounds > MAX_PROVIDER_ROUNDS {
+            recovery_rounds += 1;
+            if recovery_rounds > MAX_RECOVERY_ROUNDS {
                 let _ = emit(
                     Some(&tx),
                     AgentEvent::Notice(format!(
-                        "agent stopped after the {MAX_PROVIDER_ROUNDS}-round safety limit"
+                        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
                     )),
                 )
                 .await;
@@ -211,6 +214,9 @@ impl Agent {
             if outcome.finished || tx.is_closed() {
                 return Ok(());
             }
+            // The round ran its tools and the turn continues: reset the
+            // recovery budget. Only consecutive recovery rounds are capped.
+            recovery_rounds = 0;
         }
     }
 
@@ -389,10 +395,11 @@ impl Agent {
         let mut omit_notice_sent = false;
         // All automatic recovery paths share one per-turn budget so a broken
         // provider template or repeated token cap cannot loop unattended.
+        // A round that made forward progress resets the budget.
         let mut auto_continued = false;
         let mut loop_recovered = false;
         let mut loop_detector = LoopDetector::default();
-        let mut provider_rounds = 0usize;
+        let mut recovery_rounds = 0usize;
         loop {
             if tx.is_closed() {
                 detached = true;
@@ -401,12 +408,12 @@ impl Agent {
             // Feed the prior round's context fill back in so the next request
             // clips its output cap against the remaining context window.
             let prev_input = Some(stats.usage.context_tokens());
-            provider_rounds += 1;
-            if provider_rounds > MAX_PROVIDER_ROUNDS {
+            recovery_rounds += 1;
+            if recovery_rounds > MAX_RECOVERY_ROUNDS {
                 let _ = emit(
                     Some(&tx),
                     AgentEvent::Notice(format!(
-                        "agent stopped after the {MAX_PROVIDER_ROUNDS}-round safety limit"
+                        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
                     )),
                 )
                 .await;
@@ -531,6 +538,11 @@ impl Agent {
                         detached = true;
                         break;
                     }
+                    // The round ran its tools and the turn continues: reset
+                    // the recovery budget. Only consecutive recovery rounds
+                    // (loop detection, truncation, lost tool calls) count
+                    // toward the safety limit.
+                    recovery_rounds = 0;
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
                     // tool cycle that compaction keeps verbatim). Stop before
