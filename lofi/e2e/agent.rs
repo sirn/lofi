@@ -415,6 +415,30 @@ fn repeated_tool_results_stop_after_failed_recovery_for_all_api_types() {
 }
 
 #[test]
+fn long_progressing_turn_runs_past_the_recovery_round_limit() {
+    let tool_rounds = 110usize;
+    let mut responses: Vec<MockResponse> = (0..tool_rounds)
+        .map(|i| tool_response(&format!("progress-tool-{i}"), &format!("return {i}")))
+        .collect();
+    responses.push(text_response("recovery budget survived"));
+    let server = MockServer::start(responses);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("long progress prompt");
+    tui.wait_for(
+        "recovery budget survived",
+        std::time::Duration::from_secs(90),
+    );
+
+    assert_eq!(server.requests().len(), tool_rounds + 1);
+    assert!(
+        !tui.screen_text().contains("recovery rounds"),
+        "productive turns must not trip the recovery-round limit"
+    );
+}
+
+#[test]
 fn openai_responses_replays_encrypted_reasoning_on_the_next_turn() {
     let server = MockServer::start(vec![
         responses_response("first reasoning marker", "first responses answer"),
