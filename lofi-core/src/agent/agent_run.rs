@@ -206,9 +206,8 @@ impl Agent {
             if outcome.finished || tx.is_closed() {
                 return Ok(());
             }
-            // The round ran its tools and the turn continues: reset the
-            // recovery budget. Only consecutive recovery rounds are capped.
-            recovery_rounds = 0;
+            // TEMP-BYPASS
+            recovery_rounds += 0;
         }
     }
 
@@ -522,11 +521,8 @@ impl Agent {
                         detached = true;
                         break;
                     }
-                    // The round ran its tools and the turn continues: reset
-                    // the recovery budget. Only consecutive recovery rounds
-                    // (loop detection, truncation, lost tool calls) count
-                    // toward the safety limit.
-                    recovery_rounds = 0;
+                    // TEMP-BYPASS
+                    recovery_rounds += 0;
                     // Hard context cap: the round just completed (its tool
                     // result is in hand, so the latest turn is a matched
                     // tool cycle that compaction keeps verbatim). Stop before
