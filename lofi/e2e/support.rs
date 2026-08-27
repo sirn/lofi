@@ -1321,6 +1321,7 @@ struct ScreenCell {
     ch: char,
     bg: Option<ScreenBg>,
     italic: bool,
+    crossed_out: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1333,6 +1334,7 @@ const BLANK_CELL: ScreenCell = ScreenCell {
     ch: ' ',
     bg: None,
     italic: false,
+    crossed_out: false,
 };
 
 struct TerminalScreen {
@@ -1344,6 +1346,7 @@ struct TerminalScreen {
     state: ParseState,
     bg: Option<ScreenBg>,
     italic: bool,
+    crossed_out: bool,
     utf8: Vec<u8>,
     utf8_remaining: usize,
 }
@@ -1359,6 +1362,7 @@ impl TerminalScreen {
             state: ParseState::Ground,
             bg: None,
             italic: false,
+            crossed_out: false,
             utf8: Vec::new(),
             utf8_remaining: 0,
         }
@@ -1446,6 +1450,7 @@ impl TerminalScreen {
                 ch,
                 bg: self.bg,
                 italic: self.italic,
+                crossed_out: self.crossed_out,
             };
         }
         let width = unicode_width::UnicodeWidthChar::width(ch)
@@ -1457,6 +1462,7 @@ impl TerminalScreen {
                     ch: ' ',
                     bg: self.bg,
                     italic: self.italic,
+                    crossed_out: self.crossed_out,
                 };
             }
         }
@@ -1532,6 +1538,7 @@ impl TerminalScreen {
         if params.is_empty() {
             self.bg = None;
             self.italic = false;
+            self.crossed_out = false;
             return;
         }
         while i < params.len() {
@@ -1539,10 +1546,13 @@ impl TerminalScreen {
                 0 => {
                     self.bg = None;
                     self.italic = false;
+                    self.crossed_out = false;
                 }
                 49 => self.bg = None,
                 3 => self.italic = true,
                 23 => self.italic = false,
+                9 => self.crossed_out = true,
+                29 => self.crossed_out = false,
                 38 | 48 => {
                     let is_bg = params[i] == 48;
                     match params.get(i + 1).copied() {
@@ -1859,6 +1869,17 @@ impl Tui {
                 && row
                     .iter()
                     .any(|cell| !cell.ch.is_whitespace() && cell.italic)
+        })
+    }
+
+    pub fn row_has_crossed_out_text(&self, needle: &str) -> bool {
+        let output = self.output.lock().unwrap();
+        output.screen.cells.iter().any(|row| {
+            let text = row.iter().map(|cell| cell.ch).collect::<String>();
+            text.contains(needle)
+                && row
+                    .iter()
+                    .any(|cell| !cell.ch.is_whitespace() && cell.crossed_out)
         })
     }
 
