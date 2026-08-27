@@ -1614,11 +1614,56 @@ struct MappedSpan {
     link: Option<Arc<str>>,
 }
 
+/// `pulldown-cmark` treats single and double tildes as strikethrough.
+/// Agent prose commonly uses single tildes as literals, so this adapter
+/// preserves them and permits strikethrough only for `~~` spans.
+struct DoubleTildeOnly<'a> {
+    src: &'a str,
+    inner: pulldown_cmark::OffsetIter<'a>,
+    literal: Vec<bool>,
+}
+
+impl<'a> DoubleTildeOnly<'a> {
+    fn new(src: &'a str) -> Self {
+        Self {
+            src,
+            inner: MdParser::new_ext(src, MdOptions::ENABLE_STRIKETHROUGH).into_offset_iter(),
+            literal: Vec::new(),
+        }
+    }
+}
+
+impl<'a> Iterator for DoubleTildeOnly<'a> {
+    type Item = (Event<'a>, std::ops::Range<usize>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (event, range) = self.inner.next()?;
+        match event {
+            Event::Start(MdTag::Strikethrough) => {
+                if self.src[range.start..].starts_with("~~") {
+                    self.literal.push(false);
+                    Some((Event::Start(MdTag::Strikethrough), range))
+                } else {
+                    self.literal.push(true);
+                    Some((Event::Text("~".into()), range.start..range.start + 1))
+                }
+            }
+            Event::End(TagEnd::Strikethrough) => {
+                if self.literal.pop().unwrap_or(false) {
+                    Some((Event::Text("~".into()), range.end - 1..range.end))
+                } else {
+                    Some((Event::End(TagEnd::Strikethrough), range))
+                }
+            }
+            other => Some((other, range)),
+        }
+    }
+}
+
 /// Render one source line to styled spans with source-offset tracking, using
 /// `pulldown-cmark` for `CommonMark` inline parsing. Unterminated markers stay
-/// literal (the parser emits them as text until a closer exists), so a
-/// still-growing streamed line keeps the same laid-out width until its span
-/// closes — the marker characters, never a reflow of settled rows.
+/// literal, so a still-growing streamed line keeps the same laid-out width
+/// until its span closes.
 fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
     let code_style = Style::new().fg(t.info).bg(t.inline_bg);
     let mut out: Vec<MappedSpan> = Vec::new();
@@ -1639,8 +1684,7 @@ fn inline_spans_mapped(line: &str, t: Theme, base: Style) -> Vec<MappedSpan> {
         fmt_stack.first().map_or(fallback, |(open, _, _)| *open)
     };
 
-    let parser = MdParser::new_ext(line, MdOptions::ENABLE_STRIKETHROUGH);
-    for (event, range) in parser.into_offset_iter() {
+    for (event, range) in DoubleTildeOnly::new(line) {
         match event {
             Event::Start(tag) => {
                 let (modifier, link) = match &tag {
@@ -3379,6 +3423,58 @@ mod tests {
             rendered_text("before <input> after"),
             ["before <input> after"]
         );
+    }
+
+    fn para_spans(src: &str) -> Vec<(String, Style)> {
+        let blocks = analyze_blocks(src);
+        match &blocks[0] {
+            MdBlock::Paragraph { spans, .. } => spans
+                .iter()
+                .map(|m| (m.span.content.to_string(), m.span.style))
+                .collect(),
+            other => panic!(
+                "expected paragraph, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    use ratatui::style::Modifier;
+
+    #[test]
+    fn single_tilde_renders_verbatim() {
+        let src = "So your ~$250 ballpark is right — call it **~$240–250/mo**.";
+        let spans = para_spans(src);
+        let text: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(text, src, "single tildes must survive verbatim");
+        assert!(
+            spans
+                .iter()
+                .all(|(_, style)| !style.add_modifier.contains(Modifier::CROSSED_OUT)),
+            "a wide single-tilde pair must not strike the text between"
+        );
+    }
+
+    #[test]
+    fn double_tilde_still_strikes_through() {
+        let spans = para_spans("a ~~gone~~ word");
+        let struck: Vec<&str> = spans
+            .iter()
+            .filter(|(_, style)| style.add_modifier.contains(Modifier::CROSSED_OUT))
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(struck, ["gone"]);
+    }
+
+    #[test]
+    fn single_tilde_inside_double_tilde_stays_struck() {
+        let spans = para_spans("a ~~b ~c~ d~~ e");
+        let struck: String = spans
+            .iter()
+            .filter(|(_, style)| style.add_modifier.contains(Modifier::CROSSED_OUT))
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(struck, "b ~c~ d");
     }
 
     #[test]

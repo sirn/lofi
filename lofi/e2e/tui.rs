@@ -437,6 +437,46 @@ return "exec-result-reload-one\nexec-result-reload-two";"#,
 }
 
 #[test]
+fn markdown_strikethrough_uses_double_tildes_only() {
+    let server = MockServer::start(vec![
+        // Single tildes are literal text (~$250), not strikethrough. The
+        // closing tilde sits after ** so GFM flanking accepts the pair —
+        // pre-fix this whole span rendered struck.
+        text_response("So your ~$250 ballpark is right — call it **~$240–250/mo**."),
+        // Separate lines: the row-level style probe cannot split one row.
+        text_response("plain-marker tail\n~~double-tilde-marker~~"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("single tilde prompt marker");
+    tui.wait_for("$250 ballpark", WAIT);
+    assert!(
+        !tui.row_has_crossed_out_text("$250 ballpark"),
+        "a wide single-tilde pair must not strike the text between; screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(
+        !tui.row_has_crossed_out_text("$240"),
+        "the closing single tilde must not strike; screen:\n{}",
+        tui.screen_text()
+    );
+
+    tui.submit("double tilde prompt marker");
+    tui.wait_for("double-tilde-marker", WAIT);
+    assert!(
+        tui.row_has_crossed_out_text("double-tilde-marker"),
+        "~~ must still strike through; screen:\n{}",
+        tui.screen_text()
+    );
+    assert!(
+        !tui.row_has_crossed_out_text("plain-marker"),
+        "text outside the ~~ span must not strike; screen:\n{}",
+        tui.screen_text()
+    );
+}
+
+#[test]
 fn user_shell_context_marker_controls_the_next_model_request() {
     let server = MockServer::start(vec![text_response("shell context answer marker")]);
     let fixture = Fixture::new(&server);
