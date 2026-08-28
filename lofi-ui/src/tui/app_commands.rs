@@ -281,7 +281,7 @@ impl App {
         lines.push(info_section("Navigate"));
         lines.push(info_kv(t, "j/k ↑↓", "scroll"));
         lines.push(info_kv(t, "h/l ←→", "move column"));
-        lines.push(info_kv(t, "Enter/Space", "toggle / close detail"));
+        lines.push(info_kv(t, "Enter/Space", "open detail / enter scroll"));
         lines.push(info_kv(t, "j/k PgUp/PgDn", "move in focused detail"));
         lines.push(info_kv(t, "0 ^ $", "start / first non-blank / end"));
         lines.push(info_kv(t, "w b e", "next / prev word"));
@@ -294,7 +294,7 @@ impl App {
         lines.push(info_section("Select"));
         lines.push(info_kv(t, "move", "extends selection"));
         lines.push(info_kv(t, "y", "yank → Input"));
-        lines.push(info_kv(t, "Enter/Space", "close focused detail"));
+        lines.push(info_kv(t, "Enter/Space", "leave focused detail"));
         lines.push(info_kv(t, "Tab / Esc", "back"));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_section("Commands"));

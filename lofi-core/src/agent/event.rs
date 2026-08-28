@@ -25,6 +25,19 @@ pub enum AgentEvent {
         cancelled: bool,
         exclude_from_context: bool,
     },
+    /// Live-only: a direct `!cmd` has started. Opens the standalone turn so
+    /// its output can stream as it is produced; the finished command still
+    /// records (and replays as) [`UserShell`](Self::UserShell), so this event
+    /// is never persisted.
+    UserShellStart {
+        command: String,
+        exclude_from_context: bool,
+    },
+    /// Live-only: an ANSI-stripped, UTF-8-safe output chunk of the running
+    /// `!cmd`. The final [`UserShell`](Self::UserShell) event replaces the
+    /// accumulated chunks with the bounded captured tail, so nothing depends
+    /// on these besides the live view.
+    UserShellDelta(String),
     Text(String),
     /// A chunk of the model's reasoning / chain-of-thought trace. Surfaced
     /// separately from [`Text`](Self::Text) so the UI can fold it while
