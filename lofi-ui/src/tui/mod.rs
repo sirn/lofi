@@ -192,6 +192,12 @@ pub(crate) enum DetailKey {
     UserShell(u64),
 }
 
+impl DetailKey {
+    fn retains_expansion(&self) -> bool {
+        matches!(self, Self::UserShell(_))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct DetailState {
     turn: usize,
@@ -299,6 +305,11 @@ enum Block {
         duration: Duration,
         truncated: bool,
         cancelled: bool,
+        /// Live-only: the command is still running and `output` is the
+        /// stream accumulated so far. Default `false` (finished) matches any
+        /// value serialized before the field existed.
+        #[serde(default)]
+        running: bool,
         exclude_from_context: bool,
     },
     Error(String),
