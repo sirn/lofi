@@ -333,6 +333,17 @@ impl App {
             debug_assert_eq!(self.turns.len(), previous_turns + 1);
             self.turn_byte_ranges.push(None);
             self.turn_event_offsets.push(None);
+            // The output of a direct `!cmd` is the point of running it:
+            // show it expanded instead of hiding it behind a detail toggle.
+            // Covers the live event and the file-backed replay paths, both
+            // of which flow through here.
+            self.expanded_details.insert(
+                DetailKey::UserShell(detail_block_id(previous_turns, 0)),
+                DetailState {
+                    turn: previous_turns,
+                    scroll: None,
+                },
+            );
         }
     }
 

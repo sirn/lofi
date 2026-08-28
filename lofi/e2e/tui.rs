@@ -501,6 +501,18 @@ fn user_shell_context_marker_controls_the_next_model_request() {
 }
 
 #[test]
+fn user_shell_output_is_expanded_by_default() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // Joined at runtime, so the marker only matches rendered command output,
+    // never the echoed `$ ` command line itself.
+    tui.submit("!printf 'shell-out''put-expanded-marker'");
+    tui.wait_for("shell-output-expanded-marker", WAIT);
+}
+
+#[test]
 fn slash_commands_autocomplete_and_information_modals_work() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
