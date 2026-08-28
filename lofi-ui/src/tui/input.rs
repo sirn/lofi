@@ -411,16 +411,38 @@ pub(super) fn spawn_user_shell(
         let _ = sink.cursor_or_create(&run_model, &app.system_prompt);
     }
     app.session.refresh_cursor();
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    // Deltas can arrive per pipe drain; 1 would turn every chunk into a
+    // round trip against the event loop.
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_run = Arc::clone(&cancel);
     let handle = tokio::task::spawn_local(async move {
+        let _ = tx
+            .send(AgentEvent::UserShellStart {
+                command: command_for_run.clone(),
+                exclude_from_context,
+            })
+            .await;
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let delta_forward = tx.clone();
+        let forwarder = tokio::task::spawn_local(async move {
+            while let Some(delta) = delta_rx.recv().await {
+                if delta_forward
+                    .send(AgentEvent::UserShellDelta(delta))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let event = match Box::pin(lofi_core::run_user_shell_command(
             &cwd,
             command_for_run.clone(),
             cancel_for_run,
+            Some(delta_tx),
         ))
         .await
         {
@@ -445,6 +467,9 @@ pub(super) fn spawn_user_shell(
                 exclude_from_context,
             },
         };
+        // Drain every queued delta before the finishing event so the block
+        // finalizes the accumulated stream, not the other way around.
+        let _ = forwarder.await;
         let _ = tx.send(event).await;
     });
     install_run(
