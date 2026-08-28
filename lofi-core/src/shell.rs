@@ -74,19 +74,6 @@ impl UserShellResult {
     }
 }
 
-#[must_use]
-pub fn cancelled_user_shell(command: String, duration_ms: u64) -> UserShellResult {
-    UserShellResult {
-        command,
-        output: String::new(),
-        exit_code: None,
-        signal: None,
-        duration_ms,
-        truncated: false,
-        cancelled: true,
-    }
-}
-
 /// Run a direct `!` shell command and adapt the process output into the
 /// session result recorded by core.
 ///
@@ -96,6 +83,7 @@ pub async fn run_user_shell_command(
     root: &Path,
     command: String,
     cancel: Arc<AtomicBool>,
+    output_tx: Option<lofi_code::user_shell::OutputSender>,
 ) -> Result<UserShellResult> {
     let UserShellOutput {
         output,
@@ -104,7 +92,7 @@ pub async fn run_user_shell_command(
         duration_ms,
         truncated,
         cancelled,
-    } = Box::pin(run_user_shell(root, &command, cancel)).await?;
+    } = Box::pin(run_user_shell(root, &command, cancel, output_tx)).await?;
     Ok(UserShellResult {
         command,
         output,

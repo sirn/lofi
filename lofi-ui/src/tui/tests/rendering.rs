@@ -435,6 +435,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
             duration: Duration::from_millis(1_100),
             truncated: false,
             cancelled: false,
+            running: false,
             exclude_from_context: false,
         }],
     });
@@ -482,6 +483,63 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
 }
 
 #[test]
+fn focused_user_shell_detail_accentuates_its_scrollbar() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: String::new(),
+        blocks: vec![Block::UserShell {
+            id: 0,
+            command: "seq 1 30".to_string(),
+            output: (1..=30)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            exit_code: Some(0),
+            signal: None,
+            duration: Duration::from_millis(1),
+            truncated: false,
+            cancelled: false,
+            running: false,
+            exclude_from_context: false,
+        }],
+    });
+    let key = DetailKey::UserShell(0);
+    a.expanded_details.insert(
+        key.clone(),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+
+    let thumb_fg = |a: &App| {
+        let cx = Cx {
+            app: a,
+            theme: a.theme,
+            width: 80,
+            active_turn: false,
+        };
+        render_turn_lines(&cx, &a.turns[0])
+            .iter()
+            .flat_map(|line| line.line.spans.iter())
+            .find(|span| span.content.as_ref() == "┃")
+            .and_then(|span| span.style.fg)
+    };
+
+    assert_eq!(thumb_fg(&a), Some(a.theme.subtle));
+    a.detail_focus = Some(crate::tui::DetailFocus {
+        key,
+        cursor: 0,
+        col: 0,
+    });
+    assert_eq!(thumb_fg(&a), Some(a.theme.user));
+}
+
+#[test]
 fn user_shell_nonzero_exit_is_visible_and_error_colored() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -499,6 +557,7 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
             duration: Duration::from_millis(900),
             truncated: false,
             cancelled: false,
+            running: false,
             exclude_from_context: false,
         }],
     });

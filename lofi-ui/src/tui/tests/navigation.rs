@@ -697,6 +697,50 @@ fn detail_keys_focus_and_scroll_the_expanded_row() {
 }
 
 #[test]
+fn user_shell_detail_enters_and_leaves_scroll_without_closing() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.mode = Mode::Navigate;
+    a.log_off = 0;
+    a.log_total = 1;
+    a.log_view_h = 1;
+    a.nav_cursor = 0;
+    let key = DetailKey::UserShell(0);
+    a.log_details = vec![Some(view::DetailTarget {
+        key: key.clone(),
+        total: 12,
+        tail: true,
+        row: None,
+    })];
+    a.expanded_details.insert(
+        key.clone(),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+    let mut run = None;
+
+    // Enter on the open box enters scroll mode instead of closing it.
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_some());
+
+    // Esc exits scroll mode; the default expansion stays open.
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_none());
+
+    // Re-entering and releasing with Enter behaves the same.
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(a.detail_focus.is_some());
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+    assert!(a.expanded_details.contains_key(&key));
+    assert!(a.detail_focus.is_none());
+    assert_eq!(a.mode, Mode::Navigate);
+}
+
+#[test]
 fn tail_result_expansion_focuses_its_last_row() {
     let mut a = app();
     push_turn(&mut a);
