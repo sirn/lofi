@@ -501,6 +501,18 @@ fn user_shell_context_marker_controls_the_next_model_request() {
 }
 
 #[test]
+fn user_shell_output_is_expanded_by_default() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // Joined at runtime, so the marker only matches rendered command output,
+    // never the echoed `$ ` command line itself.
+    tui.submit("!printf 'shell-out''put-expanded-marker'");
+    tui.wait_for("shell-output-expanded-marker", WAIT);
+}
+
+#[test]
 fn slash_commands_autocomplete_and_information_modals_work() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
@@ -869,6 +881,149 @@ fn escape_clears_input_and_ctrl_d_exits() {
     assert_eq!(server.request_count(), 0);
     tui.send(b"\x04");
     tui.wait_exit();
+}
+
+#[test]
+fn user_shell_output_streams_while_running() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // The marker must render long before the command exits; a flush-on-done
+    // pipeline would only show it after the 30s sleep, past WAIT.
+    tui.submit("!printf 'stream-live-marker'; sleep 30");
+    tui.wait_for("stream-live-marker", WAIT);
+    tui.wait_for("Running", WAIT);
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
+}
+
+#[test]
+fn user_shell_cancel_keeps_the_output_streamed_so_far() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("!printf cancel-keeps-marker; sleep 30");
+    tui.wait_for("cancel-keeps-marker", WAIT);
+    tui.wait_for("Running", WAIT);
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
+    assert!(
+        tui.screen_row("cancel-keeps-marker").is_some(),
+        "cancel must keep the streamed output: {}",
+        tui.screen_text()
+    );
+
+    let event = fixture
+        .events()
+        .into_iter()
+        .find(|event| event["type"] == "user_shell")
+        .unwrap();
+    assert_eq!(event["cancelled"], true);
+    assert!(
+        event["output"]
+            .as_str()
+            .unwrap()
+            .contains("cancel-keeps-marker"),
+        "{event}"
+    );
+}
+
+#[test]
+fn user_shell_stream_stays_ansi_stripped_and_utf8_safe_across_reads() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // Enough volume that pipe reads split escape sequences and multi-byte
+    // characters across chunk boundaries.
+    tui.submit(
+        "!i=0; while [ $i -lt 2000 ]; do printf '\\033[32mstrip-live-%d\\033[0m \\303\\274n\\303\\257c\\303\\266d\\303\\251-\\342\\234\\223-row\\n' $i; i=$((i+1)); done; sleep 30",
+    );
+    tui.wait_for("strip-live-199", WAIT);
+    tui.wait_for("Running", WAIT);
+    let live = tui.screen_text();
+    assert!(
+        !live.contains('\u{1b}') && !live.contains('\u{FFFD}'),
+        "live stream must render without escapes or mangled characters: {live:?}"
+    );
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
+    let event = fixture
+        .events()
+        .into_iter()
+        .find(|event| event["type"] == "user_shell")
+        .unwrap();
+    let output = event["output"].as_str().unwrap();
+    assert!(output.contains("strip-live-1999"), "output: {output:?}");
+    assert!(output.contains("ünïcödé-✓-row"), "output: {output:?}");
+    assert!(!output.contains('\u{1b}'), "output: {output:?}");
+}
+
+#[test]
+fn user_shell_running_detail_follows_the_streaming_tail() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit(
+        "!i=1; while [ $i -le 25 ]; do printf 'tail-follow-%02d\\n' $i; i=$((i+1)); done; printf 'TAIL-FOLLOW-''LAST\\n'; sleep 30",
+    );
+    tui.wait_for("TAIL-FOLLOW-LAST", WAIT);
+    tui.wait_for("Running", WAIT);
+    assert!(
+        tui.screen_row("tail-follow-01").is_none() && tui.screen_row("tail-follow-16").is_none(),
+        "early rows must scroll off the tail view: {}",
+        tui.screen_text()
+    );
+    assert!(tui
+        .screen_row("tail-follow-25")
+        .is_some_and(|row| !row.contains('%')));
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
+}
+
+#[test]
+fn user_shell_session_persists_only_the_finished_event() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("!printf persistence-shell-marker; printf ' and-second-line'");
+    tui.wait_for("Exit 0", WAIT);
+    tui.send(b"\x04");
+    tui.wait_exit();
+
+    let events = fixture.events();
+    let types = events
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types.iter().filter(|kind| **kind == "user_shell").count(),
+        1
+    );
+    assert!(
+        !types
+            .iter()
+            .any(|kind| *kind == "user_shell_start" || *kind == "user_shell_delta"),
+        "live-only events must never be persisted: {types:?}"
+    );
+    let shell = events
+        .iter()
+        .find(|event| event["type"] == "user_shell")
+        .unwrap();
+    assert_eq!(shell["exit_code"], 0);
+    let output = shell["output"].as_str().unwrap();
+    assert!(
+        output.contains("persistence-shell-marker and-second-line"),
+        "{output:?}"
+    );
 }
 
 #[test]
