@@ -299,6 +299,11 @@ enum Block {
         duration: Duration,
         truncated: bool,
         cancelled: bool,
+        /// Live-only: the command is still running and `output` is the
+        /// stream accumulated so far. Default `false` (finished) matches any
+        /// value serialized before the field existed.
+        #[serde(default)]
+        running: bool,
         exclude_from_context: bool,
     },
     Error(String),

@@ -435,6 +435,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
             duration: Duration::from_millis(1_100),
             truncated: false,
             cancelled: false,
+            running: false,
             exclude_from_context: false,
         }],
     });
@@ -499,6 +500,7 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
             duration: Duration::from_millis(900),
             truncated: false,
             cancelled: false,
+            running: false,
             exclude_from_context: false,
         }],
     });
