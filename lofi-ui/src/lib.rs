@@ -366,6 +366,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::TurnStart { .. }
                 | AgentEvent::TurnContinue
                 | AgentEvent::Compaction { .. }
+                | AgentEvent::UserShellStart { .. }
+                | AgentEvent::UserShellDelta(_)
                 | AgentEvent::UserShell { .. } => Ok(()),
                 AgentEvent::ContextPressure { .. } => {
                     context_pressure = true;

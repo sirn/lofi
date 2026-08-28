@@ -47,6 +47,52 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
 }
 
 #[test]
+fn user_shell_streams_into_one_turn_and_finalizes_in_place() {
+    let mut a = app();
+    a.apply_event(AgentEvent::UserShellStart {
+        command: "top".into(),
+        exclude_from_context: false,
+    });
+    a.apply_event(AgentEvent::UserShellDelta("first\n".into()));
+    a.apply_event(AgentEvent::UserShellDelta("second\n".into()));
+    a.apply_event(AgentEvent::UserShell {
+        command: "top".into(),
+        output: "first\nsecond".into(),
+        exit_code: Some(1),
+        signal: None,
+        duration_ms: 5,
+        truncated: false,
+        cancelled: false,
+        exclude_from_context: false,
+    });
+
+    assert_eq!(a.turns.len(), 1);
+    assert_eq!(a.turn_byte_ranges.len(), 1);
+    assert_eq!(a.turn_event_offsets.len(), 1);
+    // Streaming inserts the expansion at `UserShellStart`; finalize must
+    // keep the same detail id so the output stays expanded.
+    assert!(a
+        .expanded_details
+        .contains_key(&DetailKey::UserShell(crate::tui::detail_block_id(0, 0))));
+    let Some(Block::UserShell {
+        id,
+        output,
+        exit_code,
+        duration,
+        running,
+        ..
+    }) = a.turns[0].blocks.first()
+    else {
+        panic!("expected a user-shell block");
+    };
+    assert_eq!(*id, crate::tui::detail_block_id(0, 0));
+    assert_eq!(output, "first\nsecond");
+    assert_eq!(*exit_code, Some(1));
+    assert_eq!(*duration, Duration::from_millis(5));
+    assert!(!running);
+}
+
+#[test]
 fn resume_picker_attaches_selected_cursor_to_sink_and_ui() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = Path::new("/workspace");
