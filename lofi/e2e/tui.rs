@@ -501,6 +501,18 @@ fn user_shell_context_marker_controls_the_next_model_request() {
 }
 
 #[test]
+fn user_shell_output_is_expanded_by_default() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // Joined at runtime, so the marker only matches rendered command output,
+    // never the echoed `$ ` command line itself.
+    tui.submit("!printf 'shell-out''put-expanded-marker'");
+    tui.wait_for("shell-output-expanded-marker", WAIT);
+}
+
+#[test]
 fn slash_commands_autocomplete_and_information_modals_work() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);
@@ -869,6 +881,22 @@ fn escape_clears_input_and_ctrl_d_exits() {
     assert_eq!(server.request_count(), 0);
     tui.send(b"\x04");
     tui.wait_exit();
+}
+
+#[test]
+fn user_shell_output_streams_while_running() {
+    let server = MockServer::start(Vec::new());
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    // The marker must render long before the command exits; a flush-on-done
+    // pipeline would only show it after the 30s sleep, past WAIT.
+    tui.submit("!printf 'stream-live-marker'; sleep 30");
+    tui.wait_for("stream-live-marker", WAIT);
+    tui.wait_for("Running", WAIT);
+
+    tui.send(b"\x03");
+    tui.wait_for("Cancelled", WAIT);
 }
 
 #[test]

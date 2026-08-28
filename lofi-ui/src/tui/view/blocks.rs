@@ -91,7 +91,20 @@ fn detail_box(
     let visible_rows = total.min(DETAIL_VIEW_ROWS);
     let visible = &rows[start..total.min(start + visible_rows)];
     let raised = style.bg(cx.theme.surface);
-    let scroll = Style::new().fg(cx.theme.subtle).bg(cx.theme.surface);
+    // The scrollbar is the box's state signal: prominent while the detail
+    // holds the scroll focus, subtle otherwise.
+    let focused = cx
+        .app
+        .detail_focus
+        .as_ref()
+        .is_some_and(|focus| focus.key == *key);
+    let scroll = Style::new()
+        .fg(if focused {
+            cx.theme.user
+        } else {
+            cx.theme.subtle
+        })
+        .bg(cx.theme.surface);
     let mut out = Vec::with_capacity(visible_rows);
     for (row, visual) in visible.iter().enumerate() {
         let used = prim::width(&visual.text);
@@ -219,6 +232,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 duration,
                 truncated,
                 cancelled,
+                running,
                 exclude_from_context,
             } => stack.push(UserShellLine {
                 id: *id,
@@ -229,6 +243,7 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
                 duration: *duration,
                 truncated: *truncated,
                 cancelled: *cancelled,
+                running: *running,
                 exclude_from_context: *exclude_from_context,
             }),
             Block::Error(msg) => stack.push(ErrorLine { msg }),
@@ -3096,6 +3111,7 @@ impl Component for ToolLine<'_> {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // view mirror of Block::UserShell's status flags
 struct UserShellLine<'a> {
     id: u64,
     command: &'a str,
@@ -3105,14 +3121,15 @@ struct UserShellLine<'a> {
     duration: Duration,
     truncated: bool,
     cancelled: bool,
+    running: bool,
     exclude_from_context: bool,
 }
 
 impl Component for UserShellLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        let failed =
-            self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0);
+        let failed = !self.running
+            && (self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0));
         let status_color = if failed { t.error } else { t.success };
         let command_style = Style::new().fg(t.fg);
         let mut out = Vec::new();
@@ -3141,29 +3158,39 @@ impl Component for UserShellLine<'_> {
         ];
         let total = detail_row_count(&lines, cx.width, &deco);
         let has_detail = !self.output.is_empty();
-        let mut status = if self.cancelled {
-            "Cancelled".to_string()
-        } else if let Some(signal) = self.signal {
-            format!("Signal {signal}")
+        let status = if self.running {
+            "Running".to_string()
         } else {
-            format!("Exit {}", self.exit_code.unwrap_or(0))
+            let mut status = if self.cancelled {
+                "Cancelled".to_string()
+            } else if let Some(signal) = self.signal {
+                format!("Signal {signal}")
+            } else {
+                format!("Exit {}", self.exit_code.unwrap_or(0))
+            };
+            let _ = write!(status, ", took {}", prim::fmt_duration(self.duration));
+            if self.truncated {
+                status.push_str(" · truncated");
+            }
+            if self.exclude_from_context {
+                status.push_str(" · not in context");
+            }
+            status
         };
-        let _ = write!(status, ", took {}", prim::fmt_duration(self.duration));
-        if self.truncated {
-            status.push_str(" · truncated");
-        }
-        if self.exclude_from_context {
-            status.push_str(" · not in context");
-        }
         let content = vec![Span::styled(status, Style::new().fg(t.fg))];
+        let corner = if self.running {
+            prim::status_icon(t, true, false, cx.spinner())
+        } else {
+            Span::styled(
+                if failed { "✗ " } else { "✓ " },
+                Style::new().fg(status_color),
+            )
+        };
         let mut header = prim::rline(
             vec![
                 Span::raw("  "),
                 Span::styled("└ ", Style::new().fg(t.subtle)),
-                Span::styled(
-                    if failed { "✗ " } else { "✓ " },
-                    Style::new().fg(status_color),
-                ),
+                corner,
             ],
             content,
         );
