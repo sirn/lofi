@@ -37,15 +37,22 @@ impl App {
         self.collapse_detail_focus();
     }
 
-    /// Collapse the focused detail and return the cursor to its header. The
-    /// expanded area only exists while it is focused; leaving it (to the
-    /// input area or elsewhere in the transcript) closes it.
+    /// Release the focused detail and return the cursor to its header. A
+    /// detail the focus opened exists only while it is focused; leaving it
+    /// (to the input area or elsewhere in the transcript) closes it. A
+    /// default-expanded user-shell output belongs to the block, not the
+    /// focus, so leaving only drops back out of scroll mode.
     pub(super) fn collapse_detail_focus(&mut self) {
         let header = self.focused_detail_header_line();
         let Some(focus) = self.detail_focus.take() else {
             return;
         };
-        let Some(state) = self.expanded_details.remove(&focus.key) else {
+        let state = if focus.key.retains_expansion() {
+            self.expanded_details.get(&focus.key).copied()
+        } else {
+            self.expanded_details.remove(&focus.key)
+        };
+        let Some(state) = state else {
             return;
         };
         if let Some(header) = header {
@@ -205,7 +212,12 @@ impl App {
     pub(super) fn toggle_cursor_detail(&mut self) -> bool {
         let header = self.focused_detail_header_line();
         if let Some(focus) = self.detail_focus.take() {
-            let Some(state) = self.expanded_details.remove(&focus.key) else {
+            let state = if focus.key.retains_expansion() {
+                self.expanded_details.get(&focus.key).copied()
+            } else {
+                self.expanded_details.remove(&focus.key)
+            };
+            let Some(state) = state else {
                 self.mode = Mode::Navigate;
                 self.sel = None;
                 return false;
@@ -221,13 +233,15 @@ impl App {
         let Some(target) = self.cursor_detail() else {
             return false;
         };
-        let expanded = !self.expanded_details.contains_key(&target.key);
-        if !self.set_cursor_detail_expanded(expanded) {
+        if !self.expanded_details.contains_key(&target.key)
+            && !self.set_cursor_detail_expanded(true)
+        {
             return false;
         }
-        if expanded {
-            self.detail_focus = Some(DetailFocus::on(&target, 0));
-        }
+        // Expand a closed detail, or enter an already-open one: pressing
+        // Enter on an expanded box (e.g. default-expanded user-shell output)
+        // hands it the scroll cursor instead of closing it.
+        self.detail_focus = Some(DetailFocus::on(&target, 0));
         true
     }
 
