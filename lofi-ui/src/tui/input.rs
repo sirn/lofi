@@ -33,7 +33,7 @@ pub(super) fn handle_event(
     }
 
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-        handle_ctrl_c(app, agent, current_run);
+        handle_ctrl_c(app, current_run);
         return;
     }
 
@@ -48,7 +48,7 @@ pub(super) fn handle_event(
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())
     {
-        interrupt_run(app, agent, current_run);
+        interrupt_run(app, current_run);
         return;
     }
 
@@ -411,16 +411,38 @@ pub(super) fn spawn_user_shell(
         let _ = sink.cursor_or_create(&run_model, &app.system_prompt);
     }
     app.session.refresh_cursor();
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    // Deltas can arrive per pipe drain; 1 would turn every chunk into a
+    // round trip against the event loop.
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
     let cwd = app.session.cwd.clone();
     let command_for_run = command.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_run = Arc::clone(&cancel);
     let handle = tokio::task::spawn_local(async move {
+        let _ = tx
+            .send(AgentEvent::UserShellStart {
+                command: command_for_run.clone(),
+                exclude_from_context,
+            })
+            .await;
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let delta_forward = tx.clone();
+        let forwarder = tokio::task::spawn_local(async move {
+            while let Some(delta) = delta_rx.recv().await {
+                if delta_forward
+                    .send(AgentEvent::UserShellDelta(delta))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let event = match Box::pin(lofi_core::run_user_shell_command(
             &cwd,
             command_for_run.clone(),
             cancel_for_run,
+            Some(delta_tx),
         ))
         .await
         {
@@ -445,6 +467,9 @@ pub(super) fn spawn_user_shell(
                 exclude_from_context,
             },
         };
+        // Drain every queued delta before the finishing event so the block
+        // finalizes the accumulated stream, not the other way around.
+        let _ = forwarder.await;
         let _ = tx.send(event).await;
     });
     install_run(
@@ -522,37 +547,20 @@ pub(super) fn restore_queued_prompts(app: &mut App) {
     app.refresh_slash_complete();
 }
 
-fn interrupt_run(
-    app: &mut App,
-    agent: Option<&lofi_core::Agent>,
-    current_run: &mut Option<RunHandle>,
-) {
+fn interrupt_run(app: &mut App, current_run: &mut Option<RunHandle>) {
     if let Some(r) = current_run.as_mut() {
         if r.user_shell.is_none() {
             // Restore steering/follow-up messages to the editor when a
             // stream is aborted instead of submitting them automatically.
             restore_queued_prompts(app);
         }
-        let user_shell = r.user_shell.clone();
-        // Agent runs must settle cooperatively: the engine checkpoints each
-        // completed round, flushes the partial current response, and writes a
-        // TurnCancelled marker before its channel closes. Aborting the task
-        // here skips that cleanup and makes cancelled output disappear.
+        // All runs must settle cooperatively: cancel only raises the flag.
+        // A user shell then finishes by returning what its pipes captured so
+        // far — aborting here would discard the streamed output — and an
+        // agent run checkpoints each completed round, flushes the partial
+        // current response, and writes a TurnCancelled marker before its
+        // channel closes. Both paths finish through the event loop.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some((command, exclude_from_context)) = user_shell {
-            let Some(r) = current_run.take() else {
-                return;
-            };
-            r.handle.abort();
-            let result =
-                lofi_core::cancelled_user_shell(command, app.run_elapsed().as_millis() as u64);
-            finish_user_shell(app, result, exclude_from_context);
-            app.run_finished();
-            if let Some(queued) = app.prompt_queue.first().cloned() {
-                app.prompt_queue.remove(0);
-                spawn_prompt(app, agent, current_run, queued.text, queued.kind);
-            }
-        }
         app.ctrl_c_at = None;
     }
 }
@@ -565,11 +573,7 @@ pub(super) fn request_quit(app: &mut App, current_run: &mut Option<RunHandle>) {
     }
 }
 
-pub(super) fn handle_ctrl_c(
-    app: &mut App,
-    agent: Option<&lofi_core::Agent>,
-    current_run: &mut Option<RunHandle>,
-) {
+pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
     // Navigate/Select: Ctrl-C is a "give me the prompt" key, not a cancel. It
     // drops the user onto the newest transcript line and focuses the editor
     // without ever interrupting the current turn.
@@ -588,7 +592,7 @@ pub(super) fn handle_ctrl_c(
         return;
     }
     if current_run.is_some() {
-        interrupt_run(app, agent, current_run);
+        interrupt_run(app, current_run);
         app.ctrl_c_at = None;
         return;
     }

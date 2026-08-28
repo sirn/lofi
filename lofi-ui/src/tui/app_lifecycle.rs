@@ -323,7 +323,13 @@ impl App {
             }
             _ => {}
         }
-        let starts_standalone_turn = matches!(&ev, AgentEvent::UserShell { .. });
+        // `UserShellStart` (live) opens the standalone turn; a finished
+        // `UserShell` does too unless it finalizes an already-streamed one.
+        let starts_standalone_turn = match &ev {
+            AgentEvent::UserShellStart { .. } => true,
+            AgentEvent::UserShell { .. } => !user_shell_running(&self.turns),
+            _ => false,
+        };
         if starts_standalone_turn {
             self.freeze_previous_file_backed_turn();
         }
@@ -333,6 +339,17 @@ impl App {
             debug_assert_eq!(self.turns.len(), previous_turns + 1);
             self.turn_byte_ranges.push(None);
             self.turn_event_offsets.push(None);
+            // The output of a direct `!cmd` is the point of running it:
+            // show it expanded instead of hiding it behind a detail toggle.
+            // Covers the live event and the file-backed replay paths, both
+            // of which flow through here.
+            self.expanded_details.insert(
+                DetailKey::UserShell(detail_block_id(previous_turns, 0)),
+                DetailState {
+                    turn: previous_turns,
+                    scroll: None,
+                },
+            );
         }
     }
 
