@@ -96,6 +96,7 @@ pub async fn run_user_shell_command(
     root: &Path,
     command: String,
     cancel: Arc<AtomicBool>,
+    deltas: Option<lofi_code::user_shell::DeltaSender>,
 ) -> Result<UserShellResult> {
     let UserShellOutput {
         output,
@@ -104,7 +105,7 @@ pub async fn run_user_shell_command(
         duration_ms,
         truncated,
         cancelled,
-    } = Box::pin(run_user_shell(root, &command, cancel)).await?;
+    } = Box::pin(run_user_shell(root, &command, cancel, deltas)).await?;
     Ok(UserShellResult {
         command,
         output,
