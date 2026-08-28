@@ -13,6 +13,19 @@ pub(super) use lofi_core::session::replay::{
     replay_selected_session_events, replay_session_events,
 };
 
+/// Byte budget for live user-shell accumulation in [`apply_event_to_turns`];
+/// mirrors core's 64 KiB capture tail.
+const LIVE_TAIL_BYTES: usize = 64 * 1024;
+
+/// The last turn ends in a still-running user-shell block (live streaming
+/// only — replay and finalize-in-place never leave one behind).
+pub(super) fn user_shell_running(turns: &[Turn]) -> bool {
+    matches!(
+        turns.last().and_then(|turn| turn.blocks.last()),
+        Some(Block::UserShell { running: true, .. })
+    )
+}
+
 pub(super) fn finalize_open_thinking(turn: &mut Turn) {
     if let Some(Block::Thinking(t)) = turn.blocks.last_mut() {
         if t.elapsed.is_none() {
@@ -63,6 +76,49 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         });
         return;
     }
+    if let AgentEvent::UserShellStart {
+        command,
+        exclude_from_context,
+    } = ev
+    {
+        turns.push(Turn {
+            prompt: String::new(),
+            kind: lofi_types::PromptKind::User,
+            blocks: vec![Block::UserShell {
+                id: detail_block_id(turns.len(), 0),
+                command,
+                output: String::new(),
+                exit_code: None,
+                signal: None,
+                duration: Duration::ZERO,
+                truncated: false,
+                cancelled: false,
+                running: true,
+                exclude_from_context,
+            }],
+        });
+        return;
+    }
+    if let AgentEvent::UserShellDelta(delta) = ev {
+        if let Some(Block::UserShell {
+            output,
+            running: true,
+            ..
+        }) = turns.last_mut().and_then(|turn| turn.blocks.last_mut())
+        {
+            output.push_str(&delta);
+            // Bound live accumulation the way the final event's captured
+            // tail does: past this size only the newest bytes stay visible.
+            if output.len() > LIVE_TAIL_BYTES {
+                let mut cut = output.len() - LIVE_TAIL_BYTES;
+                while !output.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                output.drain(..cut);
+            }
+        }
+        return;
+    }
     if let AgentEvent::UserShell {
         command,
         output,
@@ -74,21 +130,47 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         exclude_from_context,
     } = ev
     {
-        turns.push(Turn {
-            prompt: String::new(),
-            kind: lofi_types::PromptKind::User,
-            blocks: vec![Block::UserShell {
-                id: detail_block_id(turns.len(), 0),
-                command,
-                output,
-                exit_code,
-                signal,
-                duration: Duration::from_millis(duration_ms),
-                truncated,
-                cancelled,
-                exclude_from_context,
-            }],
-        });
+        if user_shell_running(turns) {
+            // Live stream finalize: same turn, same detail id. The captured
+            // tail replaces the accumulated chunks so the rendered block
+            // matches what the session file records.
+            if let Some(Block::UserShell {
+                output: block_output,
+                exit_code: block_exit_code,
+                signal: block_signal,
+                duration: block_duration,
+                truncated: block_truncated,
+                cancelled: block_cancelled,
+                running,
+                ..
+            }) = turns.last_mut().and_then(|turn| turn.blocks.last_mut())
+            {
+                *block_output = output;
+                *block_exit_code = exit_code;
+                *block_signal = signal;
+                *block_duration = Duration::from_millis(duration_ms);
+                *block_truncated = truncated;
+                *block_cancelled = cancelled;
+                *running = false;
+            }
+        } else {
+            turns.push(Turn {
+                prompt: String::new(),
+                kind: lofi_types::PromptKind::User,
+                blocks: vec![Block::UserShell {
+                    id: detail_block_id(turns.len(), 0),
+                    command,
+                    output,
+                    exit_code,
+                    signal,
+                    duration: Duration::from_millis(duration_ms),
+                    truncated,
+                    cancelled,
+                    running: false,
+                    exclude_from_context,
+                }],
+            });
+        }
         return;
     }
     let turn_index = turns.len().saturating_sub(1);
@@ -273,6 +355,8 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::TurnStart { .. }
+        | AgentEvent::UserShellStart { .. }
+        | AgentEvent::UserShellDelta(_)
         | AgentEvent::UserShell { .. }
         | AgentEvent::TurnContinue
         | AgentEvent::Notice(_)
