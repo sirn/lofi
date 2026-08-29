@@ -118,10 +118,16 @@ fn detail_box(
             vec![Span::styled(visual.text.clone(), raised)],
             vec![
                 Span::styled(" ".repeat(inner.saturating_sub(used)), raised),
-                Span::styled(
-                    if thumb_row == Some(row) { "┃" } else { "│" },
-                    if thumb_row == Some(row) { thumb } else { track },
-                ),
+                // No track when the whole box is visible; the column keeps
+                // the box geometry stable but stays blank.
+                if max == 0 {
+                    Span::styled(" ", raised)
+                } else {
+                    Span::styled(
+                        if thumb_row == Some(row) { "┃" } else { "│" },
+                        if thumb_row == Some(row) { thumb } else { track },
+                    )
+                },
                 // Margin between the box and the outer scrollbar gutter:
                 // plain background so the raised box visibly ends here.
                 Span::raw(" "),
