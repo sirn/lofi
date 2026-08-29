@@ -187,15 +187,20 @@ impl Agent {
                 Err(Error::Cancelled) => return Ok(()),
                 Err(e) => return Err(e),
             };
-            match handle_loop_detection(
+            let plan = handle_loop_detection(
                 outcome.loop_detail.as_deref(),
                 outcome.interrupted_thinking_index,
                 &mut loop_recovered,
-                &mut messages,
                 &tx,
             )
-            .await
-            {
+            .await;
+            if let Some(index) = plan.removed {
+                messages.remove(index);
+            }
+            if let Some(message) = plan.recovery {
+                messages.push(message);
+            }
+            match plan.action {
                 LoopAction::Continue => continue,
                 LoopAction::Stop => return Ok(()),
                 LoopAction::None => {}
@@ -311,7 +316,7 @@ impl Agent {
         if let Some(prompt) = turn_start {
             // Persist the user prompt before TurnStart so a closed consumer
             // cannot drop a submitted turn. Later checkpoints skip this suffix.
-            commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
+            commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await;
             if !emit(
                 Some(&tx),
                 AgentEvent::TurnStart {
@@ -444,19 +449,35 @@ impl Agent {
                         cancelled = true;
                         break;
                     }
-                    let loop_action = handle_loop_detection(
+                    let plan = handle_loop_detection(
                         outcome.loop_detail.as_deref(),
                         outcome.interrupted_thinking_index,
                         &mut loop_recovered,
-                        messages,
                         &tx,
                     )
                     .await;
+                    // What streamed must reach the transcript before it
+                    // leaves the model history.
+                    if let Some(index) = plan.removed {
+                        record_round_removal(
+                            recorder.as_mut(),
+                            messages,
+                            prev_len,
+                            &stats,
+                            &tx,
+                            &plan.detail,
+                        )
+                        .await;
+                        messages.remove(index);
+                    }
+                    if let Some(message) = plan.recovery {
+                        messages.push(message);
+                    }
                     // Loop handling can replace an interrupted, unsigned
                     // reasoning message with a provider-valid recovery prompt.
                     // Persist only after that correction reaches its final form.
-                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await?;
-                    match loop_action {
+                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await;
+                    match plan.action {
                         LoopAction::Continue => continue,
                         LoopAction::Stop => {
                             if tx.is_closed() {
@@ -571,6 +592,15 @@ impl Agent {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
                         if messages.last().is_some_and(|m| m.role == Role::Assistant) {
+                            record_round_removal(
+                                recorder.as_mut(),
+                                messages,
+                                prev_len,
+                                &stats,
+                                &tx,
+                                &format!("discarding partial response before retry: {e}"),
+                            )
+                            .await;
                             messages.pop();
                         }
                         let _ = tx
@@ -1543,29 +1573,79 @@ impl Agent {
     }
 }
 
+/// Checkpoint the turn suffix; a write failure is notified, not fatal.
+/// The recorder keeps its counts, so the same suffix is retried by the
+/// next checkpoint or the final flush.
 async fn commit_progress(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
     stats: &TurnStats,
     tx: &Sender<AgentEvent>,
-) -> Result<()> {
+) {
     let Some(recorder) = recorder else {
-        return Ok(());
+        return;
     };
     let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
-    if let Some((byte_start, byte_end)) =
-        recorder.checkpoint(messages, &stats.summary(elapsed_ms))?
-    {
-        if !tx.is_closed() {
-            let _ = tx
-                .send(AgentEvent::RoundCommitted {
-                    byte_start,
-                    byte_end,
-                })
-                .await;
+    match recorder.checkpoint(messages, &stats.summary(elapsed_ms)) {
+        Ok(Some((byte_start, byte_end))) => {
+            if !tx.is_closed() {
+                let _ = tx
+                    .send(AgentEvent::RoundCommitted {
+                        byte_start,
+                        byte_end,
+                    })
+                    .await;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = emit(
+                Some(tx),
+                AgentEvent::Notice(format!(
+                    "transcript write failed (will retry on the next round): {error}"
+                )),
+            )
+            .await;
         }
     }
-    Ok(())
+}
+
+/// Make a round the engine is dropping from the model history durable
+/// before the caller removes it, and stamp the boundary that keeps it
+/// out of context. Write failures are notified, not fatal.
+async fn record_round_removal(
+    recorder: Option<&mut SessionRecorder>,
+    messages: &[Message],
+    prev_len: usize,
+    stats: &TurnStats,
+    tx: &Sender<AgentEvent>,
+    reason: &str,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
+    let suffix = messages.get(prev_len..).unwrap_or_default();
+    if let Err(error) = recorder.checkpoint(suffix, &stats.summary(elapsed_ms)) {
+        let _ = emit(
+            Some(tx),
+            AgentEvent::Notice(format!("transcript write failed: {error}")),
+        )
+        .await;
+        return;
+    }
+    // The checkpoint just counted the round the caller is about to remove;
+    // without this credit, later slices would skip the first recovery
+    // message — also on a boundary-write failure, since the checkpoint
+    // already made the round durable.
+    recorder.note_displaced(1);
+    if let Err(error) = recorder.discard_round(reason) {
+        let _ = emit(
+            Some(tx),
+            AgentEvent::Notice(format!("discard boundary write failed: {error}")),
+        )
+        .await;
+    }
 }
 
 /// Result of a single provider round: whether the turn is finished (no
@@ -1637,19 +1717,30 @@ async fn recovery_round_exceeded(tx: &Sender<AgentEvent>, recovery_rounds: &mut 
     true
 }
 
+/// Plan for one detected loop, computed without touching history so the
+/// caller can arrange durability before the memory drop.
+struct LoopPlan {
+    action: LoopAction,
+    /// Human-readable reason: durable discard marker, replayed as a notice.
+    detail: String,
+    removed: Option<usize>,
+    recovery: Option<Message>,
+}
+
 async fn handle_loop_detection(
     detail: Option<&str>,
     interrupted_thinking_index: Option<usize>,
     recovered: &mut bool,
-    messages: &mut Vec<Message>,
     tx: &Sender<AgentEvent>,
-) -> LoopAction {
+) -> LoopPlan {
     let Some(detail) = detail else {
-        return LoopAction::None;
+        return LoopPlan {
+            action: LoopAction::None,
+            detail: String::new(),
+            removed: None,
+            recovery: None,
+        };
     };
-    if let Some(index) = interrupted_thinking_index {
-        messages.remove(index);
-    }
     if *recovered {
         let _ = emit(
             Some(tx),
@@ -1658,21 +1749,26 @@ async fn handle_loop_detection(
             )),
         )
         .await;
-        return LoopAction::Stop;
+        return LoopPlan {
+            action: LoopAction::Stop,
+            detail: format!("agent stopped after loop recovery failed: {detail}"),
+            removed: interrupted_thinking_index,
+            recovery: None,
+        };
     }
     *recovered = true;
-    messages.push(loop_recovery_message(detail));
-    if emit(
-        Some(tx),
-        AgentEvent::Notice(format!(
-            "potential agent loop detected; requesting a different approach: {detail}"
-        )),
-    )
-    .await
-    {
-        LoopAction::Continue
-    } else {
-        LoopAction::Stop
+    let notice =
+        format!("potential agent loop detected; requesting a different approach: {detail}");
+    let steady = emit(Some(tx), AgentEvent::Notice(notice.clone())).await;
+    LoopPlan {
+        action: if steady {
+            LoopAction::Continue
+        } else {
+            LoopAction::Stop
+        },
+        detail: notice,
+        removed: interrupted_thinking_index,
+        recovery: Some(loop_recovery_message(detail)),
     }
 }
 
