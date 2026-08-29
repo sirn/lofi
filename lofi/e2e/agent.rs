@@ -264,6 +264,11 @@ fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
             "{api}"
         );
         assert!(!requests[1].body.contains(&pattern), "{api}");
+        // Nothing that streamed may vanish from the transcript.
+        assert!(
+            event_types(&fixture.events()).contains(&"round_discarded"),
+            "{api}"
+        );
         let transcript = transcript_text(&fixture.events());
         assert!(
             transcript.contains("A potential loop was detected"),
@@ -486,7 +491,7 @@ fn openai_responses_omits_reasoning_request_when_thinking_is_off() {
 }
 
 #[test]
-fn truncated_responses_stream_retries_without_persisting_partial_output() {
+fn truncated_stream_retry_keeps_the_partial_durable_but_out_of_context() {
     let server = MockServer::start(vec![
         eof_cut_responses_response("discarded partial marker"),
         responses_response("retry reasoning marker", "complete response marker"),
@@ -498,10 +503,24 @@ fn truncated_responses_stream_retries_without_persisting_partial_output() {
     tui.wait_for("complete response marker", WAIT);
 
     assert_eq!(server.request_count(), 2);
+    // The streamed partial stays durable, marked discarded, out of context.
     let transcript = transcript_text(&fixture.events());
-    assert!(!transcript.contains("discarded partial marker"));
+    assert!(
+        transcript.contains("discarded partial marker"),
+        "a streamed partial must never vanish from the transcript"
+    );
+    assert!(
+        transcript.contains("discarding partial response before retry"),
+        "the discard boundary is present"
+    );
     assert!(transcript.contains("complete response marker"));
     assert!(event_types(&fixture.events()).contains(&"turn_end"));
+    assert!(
+        !server.requests()[1]
+            .body
+            .contains("discarded partial marker"),
+        "the re-rolled round left the discarded partial out of the context"
+    );
 }
 
 #[test]
