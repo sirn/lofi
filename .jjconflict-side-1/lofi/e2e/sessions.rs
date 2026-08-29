@@ -1077,6 +1077,8 @@ fn new_session_kills_jobs_and_drops_old_job_notices() {
 
     tui.submit("start the old session job");
     tui.wait_for("new session job started", WAIT);
+    // `/new` is refused while a run settles; settle the turn first.
+    fixture.wait_for_event_count("turn_end", 1);
     let pid = spawned_pid(&fixture);
     let mut job = ProcessGuard::new(pid);
     assert!(process_is_alive(pid));

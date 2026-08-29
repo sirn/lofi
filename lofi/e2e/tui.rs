@@ -392,6 +392,25 @@ fn tab_collapses_an_expanded_detail_without_leaving_navigation() {
 }
 
 #[test]
+fn quit_persists_queued_prompts_instead_of_dropping_them() {
+    // The queue is memory-only until a run drains it.
+    let server = MockServer::start(vec![text_response("slow first answer marker")
+        .with_delay(std::time::Duration::from_millis(1500))]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("first prompt marker");
+    tui.submit("queued while running marker");
+    tui.wait_for_screen("Queue: queued while running marker", WAIT);
+    tui.submit("/exit");
+    tui.wait_exit();
+
+    let reloaded = fixture.spawn(&["--continue"]);
+    reloaded.wait_for_screen("first prompt marker", WAIT);
+    reloaded.wait_for_screen("queued while running marker", WAIT);
+}
+
+#[test]
 fn reloaded_details_stay_collapsed_before_any_expansion() {
     let server = MockServer::start(vec![
         tool_response(
