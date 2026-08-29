@@ -37,6 +37,14 @@ impl App {
         self.collapse_detail_focus();
     }
 
+    fn release_focused_detail(&mut self, key: &DetailKey) -> Option<DetailState> {
+        if key.retains_expansion() {
+            self.expanded_details.get(key).copied()
+        } else {
+            self.expanded_details.remove(key)
+        }
+    }
+
     /// Release the focused detail and return the cursor to its header. A
     /// detail the focus opened exists only while it is focused; leaving it
     /// (to the input area or elsewhere in the transcript) closes it. A
@@ -47,12 +55,7 @@ impl App {
         let Some(focus) = self.detail_focus.take() else {
             return;
         };
-        let state = if focus.key.retains_expansion() {
-            self.expanded_details.get(&focus.key).copied()
-        } else {
-            self.expanded_details.remove(&focus.key)
-        };
-        let Some(state) = state else {
+        let Some(state) = self.release_focused_detail(&focus.key) else {
             return;
         };
         if let Some(header) = header {
@@ -212,12 +215,7 @@ impl App {
     pub(super) fn toggle_cursor_detail(&mut self) -> bool {
         let header = self.focused_detail_header_line();
         if let Some(focus) = self.detail_focus.take() {
-            let state = if focus.key.retains_expansion() {
-                self.expanded_details.get(&focus.key).copied()
-            } else {
-                self.expanded_details.remove(&focus.key)
-            };
-            let Some(state) = state else {
+            let Some(state) = self.release_focused_detail(&focus.key) else {
                 self.mode = Mode::Navigate;
                 self.sel = None;
                 return false;
