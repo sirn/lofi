@@ -144,9 +144,12 @@ const NOTIFY_MAX_LINES: usize = 3;
 const JOB_LOG_WINDOW_BYTES: usize = 128 * 1024;
 const MAX_INPUT_LINES: usize = 8;
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
-/// How long quit waits for the agent to flush the current turn. After this
-/// the task is aborted so an uninterruptible tool cannot pin the process.
-const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long quit waits for the agent to flush the current turn. Far beyond
+/// any healthy settle: provider rounds are bounded by the cancel flag and
+/// the stream idle timeout, and the final flush is local disk IO. Quitting
+/// by abort is the one sanctioned transcript loss (the process giving up),
+/// so the budget errs toward waiting it out.
+const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
 const DETAIL_VIEW_ROWS: usize = 10;
 
@@ -1107,6 +1110,12 @@ pub(crate) struct App {
     log_view_h: usize,
     frozen_render: FrozenCache,
     collapsed_turns: Box<RefCell<CollapsedTurnCache>>,
+    /// First durable-transcript read failure seen while rendering. Set from
+    /// interior-mutability paths that only hold `&App`; surfaced as a
+    /// notification after the frame so a turn silently rendering as an
+    /// empty shell gets a visible explanation instead of looking like
+    /// lost transcript.
+    transcript_alert: RefCell<Option<String>>,
     /// Line count per frozen turn (all of them), so the viewport can be
     /// located and `total` computed without fetching rendered lines. Synced
     /// to the file-backed prefix (which may be all turns) for the active mode.
@@ -1164,11 +1173,16 @@ impl App {
 }
 
 /// Cancel an in-flight run and wait for its recorder to flush. Aborting the
-/// task skips that flush and drops the current turn.
-async fn settle_run_for_quit(run: RunHandle, timeout: Duration) {
+/// task skips that flush and drops the current turn, so the deadline is
+/// deliberately far beyond any healthy provider round (the engine also
+/// honors the cancel flag and the stream idle timeout, which bound the
+/// wait on their own). A miss is reported: quitting must not silently
+/// lose the un-flushed suffix of a turn.
+async fn settle_run_for_quit(run: RunHandle, timeout: Duration) -> bool {
     run.cancel.store(true, Ordering::Relaxed);
     let RunHandle { handle, mut rx, .. } = run;
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut aborted_by_deadline = false;
     loop {
         tokio::select! {
             ev = rx.recv() => {
@@ -1176,13 +1190,17 @@ async fn settle_run_for_quit(run: RunHandle, timeout: Duration) {
                     break;
                 }
             }
-            () = tokio::time::sleep_until(deadline) => break,
+            () = tokio::time::sleep_until(deadline) => {
+                aborted_by_deadline = true;
+                break;
+            },
         }
     }
     if !handle.is_finished() {
         handle.abort();
     }
     let _ = handle.await;
+    aborted_by_deadline
 }
 
 struct RunHandle {
@@ -1513,7 +1531,12 @@ async fn run_loop(
             if let Some(event) = app.debug_after_draw.take() {
                 app.debug_sample(event);
             }
-            dirty = false;
+            dirty = if let Some(alert) = app.take_transcript_alert() {
+                app.notify(NotifyKind::Error, alert);
+                true
+            } else {
+                false
+            };
         }
 
         tokio::select! {
@@ -1852,8 +1875,14 @@ async fn run_loop(
 
         if app.should_quit {
             if let Some(r) = current_run.take() {
-                settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await;
+                if settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await {
+                    last_err =
+                        Some("quit: run aborted before its final transcript write".to_string());
+                }
             }
+            // Queued prompts were never sent; quit must not silently drop
+            // typed input.
+            persist_unsent_prompts(&mut app);
             break;
         }
     }

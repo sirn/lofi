@@ -380,6 +380,13 @@ impl App {
     }
 
     pub(super) fn start_new_session(&mut self) {
+        if self.run_active() {
+            self.notify(
+                NotifyKind::Warn,
+                "wait for the running turn to finish before starting a new session",
+            );
+            return;
+        }
         self.reset_session_jobs();
         if let Err(error) = self.lifecycle.clear_history() {
             self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
@@ -571,6 +578,16 @@ impl App {
 
     pub(super) fn picker_confirm_inner(&mut self, picker: PickerState) {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
+        // An active run keeps recording to its own cursor; switching the
+        // session under it would book the run into the wrong transcript and
+        // read committed ranges through the new cursor.
+        if self.run_active() {
+            self.notify(
+                NotifyKind::Warn,
+                "wait for the running turn to finish before switching sessions",
+            );
+            return;
+        }
         let entry = picker.entries.into_iter().nth(picker.selected);
         let Some(entry) = entry else {
             return;
@@ -1184,6 +1201,13 @@ impl App {
     }
 
     pub(super) fn tree_picker_confirm_inner(&mut self, picker: &TreePickerState) {
+        if self.run_active() {
+            self.notify(
+                NotifyKind::Warn,
+                "wait for the running turn to finish before rolling back",
+            );
+            return;
+        }
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
         self.release_tree_snapshot();
         self.tree_picker_pending.clear();
