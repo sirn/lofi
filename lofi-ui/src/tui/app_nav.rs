@@ -37,6 +37,17 @@ impl App {
         self.collapse_detail_focus();
     }
 
+    /// Release the expansion owned by a focused detail unless it is sticky
+    /// (default-expanded): a sticky detail belongs to its block, so leaving
+    /// only drops back out of scroll mode.
+    fn release_focused_detail(&mut self, key: &DetailKey) -> Option<DetailState> {
+        if key.sticky() {
+            self.expanded_details.get(key).copied()
+        } else {
+            self.expanded_details.remove(key)
+        }
+    }
+
     /// Release the focused detail and return the cursor to its header. A
     /// detail the focus opened exists only while it is focused; leaving it
     /// (to the input area or elsewhere in the transcript) closes it. A
@@ -47,12 +58,7 @@ impl App {
         let Some(focus) = self.detail_focus.take() else {
             return;
         };
-        let state = if focus.key.sticky() {
-            self.expanded_details.get(&focus.key).copied()
-        } else {
-            self.expanded_details.remove(&focus.key)
-        };
-        let Some(state) = state else {
+        let Some(state) = self.release_focused_detail(&focus.key) else {
             return;
         };
         if let Some(header) = header {
@@ -214,12 +220,7 @@ impl App {
         if let Some(focus) = self.detail_focus.take() {
             // A sticky (default-expanded) detail stays open and only drops
             // out of scroll mode; any other detail the focus opened closes.
-            let state = if focus.key.sticky() {
-                self.expanded_details.get(&focus.key).copied()
-            } else {
-                self.expanded_details.remove(&focus.key)
-            };
-            let Some(state) = state else {
+            let Some(state) = self.release_focused_detail(&focus.key) else {
                 self.mode = Mode::Navigate;
                 self.sel = None;
                 return false;
