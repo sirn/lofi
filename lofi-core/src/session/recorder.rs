@@ -62,8 +62,8 @@ pub enum SessionRecord<'a> {
         counts: CompactionCounts,
         system_prompt: &'a str,
     },
-    /// Durable mid-turn boundary: the round immediately before this marker
-    /// was dropped from the model history but stays visible on the lineage.
+    /// Durable mid-turn boundary: the round it ends was dropped from the
+    /// model history but stays visible on the lineage.
     RoundDiscarded {
         detail: &'a str,
     },
@@ -81,10 +81,9 @@ pub struct TurnBatch<'a> {
 }
 
 impl store::SessionCursor {
-    /// Persist a queued prompt the app dropped without running (quit
-    /// drain). It takes the durable shape of a turn the process died
-    /// before serving: the prompt message with no terminal marker, so
-    /// resume shows it and later history keeps it.
+    /// Persist a queued prompt the app dropped without running, as a turn
+    /// the process died before serving: the prompt message with no
+    /// terminal marker.
     ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
@@ -247,11 +246,9 @@ pub struct SessionRecorder {
     model: RunModel,
     flushed: bool,
     message_count: usize,
-    /// Messages the recorder already counted but the engine later
-    /// removed from the in-memory history (durability beats context: the
-    /// events stay in the transcript). The suffix slice start is adjusted
-    /// by this many, so a removal committed to disk cannot shift what the
-    /// next checkpoint records.
+    /// Counted messages the engine later removed from the in-memory
+    /// history: the suffix slice start is reduced by this many so a
+    /// durable removal cannot shift what later checkpoints record.
     displaced: usize,
     native_tool_count: usize,
     thinking_timing_count: usize,
@@ -277,10 +274,8 @@ impl SessionRecorder {
         }
     }
 
-    /// Stamp the durable boundary for a round that has been checkpointed
-    /// and is now being dropped from the model history. The messages stay
-    /// on the visible lineage; context rebuild skips the assistant
-    /// message(s) directly before the marker.
+    /// Stamp the durable boundary for a checkpointed round being dropped
+    /// from the model history.
     ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
@@ -290,9 +285,7 @@ impl SessionRecorder {
         Ok(())
     }
 
-    /// Account for a message already recorded by this recorder that the
-    /// engine removed from the in-memory history. Keeps later checkpoints
-    /// slicing the true un-recorded suffix.
+    /// Account for a counted message the engine removed from memory.
     pub fn note_displaced(&mut self, removed: usize) {
         self.displaced += removed;
     }

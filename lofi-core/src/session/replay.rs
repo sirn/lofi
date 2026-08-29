@@ -404,10 +404,9 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
     let mut out: Vec<(String, Message)> = Vec::new();
     let mut skipping = false;
-    // A discarded round ends at its marker; the walk is leaf-first, so the
-    // flag skips the assistant messages it ends with (older than the
-    // marker) until a non-assistant message resumes the walk. Consecutive
-    // markers keep the flag armed.
+    // A discarded round ends at its marker: the leaf-first walk skips the
+    // assistant messages older than it until a non-assistant message
+    // resumes. Consecutive markers keep the flag armed.
     let mut discarding_assistant = false;
     // The compaction summary is captured when the Compaction marker is seen
     // and prepended to the result so it leads the history. Held aside because

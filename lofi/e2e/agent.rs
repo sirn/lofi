@@ -264,9 +264,7 @@ fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
             "{api}"
         );
         assert!(!requests[1].body.contains(&pattern), "{api}");
-        // The interrupted round persists as a discarded-round boundary:
-        // nothing that streamed may vanish from the transcript, even
-        // though the recovery request carries none of it.
+        // Nothing that streamed may vanish from the transcript.
         assert!(
             event_types(&fixture.events()).contains(&"round_discarded"),
             "{api}"
@@ -508,8 +506,7 @@ fn truncated_stream_retry_keeps_the_partial_durable_but_out_of_context() {
     tui.wait_for("complete response marker", WAIT);
 
     assert_eq!(server.request_count(), 2);
-    // The partial streamed to the live view must stay durable, marked as a
-    // discarded round, and kept out of the retried request context.
+    // The streamed partial stays durable, marked discarded, out of context.
     let transcript = transcript_text(&fixture.events());
     assert!(
         transcript.contains("discarded partial marker"),
@@ -517,7 +514,7 @@ fn truncated_stream_retry_keeps_the_partial_durable_but_out_of_context() {
     );
     assert!(
         transcript.contains("discarding partial response before retry"),
-        "the discard boundary explains why the partial is not in context"
+        "the discard boundary is present"
     );
     assert!(transcript.contains("complete response marker"));
     assert!(event_types(&fixture.events()).contains(&"turn_end"));

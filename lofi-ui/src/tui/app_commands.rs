@@ -578,9 +578,8 @@ impl App {
 
     pub(super) fn picker_confirm_inner(&mut self, picker: PickerState) {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
-        // An active run keeps recording to its own cursor; switching the
-        // session under it would book the run into the wrong transcript and
-        // read committed ranges through the new cursor.
+        // Switching under an active run would book its records into the
+        // wrong transcript.
         if self.run_active() {
             self.notify(
                 NotifyKind::Warn,

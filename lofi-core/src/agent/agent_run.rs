@@ -461,8 +461,8 @@ impl Agent {
                         &tx,
                     )
                     .await;
-                    // What streamed to the live view must reach the
-                    // transcript before it leaves the model history.
+                    // What streamed must reach the transcript before it
+                    // leaves the model history.
                     if let Some(index) = plan.removed {
                         record_round_removal(
                             recorder.as_mut(),
@@ -1582,11 +1582,9 @@ impl Agent {
     }
 }
 
-/// Checkpoint the turn suffix asynchronously to the round loop: a write
-/// failure is notified, not fatal. The recorder keeps its counts on
-/// failure, so the same suffix is retried by the next checkpoint or the
-/// final flush — a transient transcript outage never aborts the turn and
-/// never loses the in-flight suffix.
+/// Checkpoint the turn suffix; a write failure is notified, not fatal.
+/// The recorder keeps its counts, so the same suffix is retried by the
+/// next checkpoint or the final flush.
 async fn commit_progress(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
@@ -1621,11 +1619,9 @@ async fn commit_progress(
     }
 }
 
-/// Make a round the engine is dropping from the model history (loop
-/// detection, retry re-roll) durable before the caller removes it: the
-/// round is checkpointed, its displacement accounted, and a
-/// `RoundDiscarded` boundary stamped so context rebuild skips it. Write
-/// failures are notified, not fatal.
+/// Make a round the engine is dropping from the model history durable
+/// before the caller removes it, and stamp the boundary that keeps it
+/// out of context. Write failures are notified, not fatal.
 async fn record_round_removal(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
@@ -1648,9 +1644,9 @@ async fn record_round_removal(
         return;
     }
     // The checkpoint just counted the round the caller is about to remove;
-    // without this credit, every later slice would skip the first recovery
-    // message. Runs even when the boundary write below fails, because the
-    // checkpoint already made the round durable.
+    // without this credit, later slices would skip the first recovery
+    // message — also on a boundary-write failure, since the checkpoint
+    // already made the round durable.
     recorder.note_displaced(1);
     if let Err(error) = recorder.discard_round(reason) {
         let _ = emit(
@@ -1733,14 +1729,11 @@ async fn recovery_round_exceeded(tx: &Sender<AgentEvent>, recovery_rounds: &mut 
     true
 }
 
-/// Plan for one detected loop. Computed without touching history so the
-/// caller can arrange durability before the memory drop: `removed` is the
-/// absolute index of the interrupted round's assistant message, and
-/// `recovery` is the prompt that replaces it in the model context.
+/// Plan for one detected loop, computed without touching history so the
+/// caller can arrange durability before the memory drop.
 struct LoopPlan {
     action: LoopAction,
-    /// Full human-readable reason, used as the durable discard marker and
-    /// replayed as a notice.
+    /// Human-readable reason: durable discard marker, replayed as a notice.
     detail: String,
     removed: Option<usize>,
     recovery: Option<Message>,
