@@ -130,9 +130,11 @@ return "detail-executive-one\\ndetail-executive-two";"#,
     assert_eq!(detail_rows.len(), 2);
     assert!(detail_rows.iter().all(|row| !row.contains('┌')));
     assert!(detail_rows.iter().all(|row| !row.contains('└')));
+    // The box fits on screen, so no scrollbar line is drawn: no track (│)
+    // and no border; the box look comes from the raised background alone.
     assert!(detail_rows.iter().all(|row| {
         let start = row.find("left-").or_else(|| row.find("right-")).unwrap();
-        !row[start..].contains('│')
+        !row[start..].contains('│') && !row[start..].contains('┃')
     }));
     tui.send(b"\r");
     std::thread::sleep(std::time::Duration::from_millis(50));
