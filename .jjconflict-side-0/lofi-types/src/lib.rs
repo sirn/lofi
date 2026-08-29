@@ -575,6 +575,13 @@ pub enum SessionEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<StopReason>,
     },
+    /// A mid-turn round the engine dropped from the model history (loop
+    /// detection, retry re-roll). Its messages were already streamed, so
+    /// they stay visible while context rebuild skips the assistant
+    /// message(s) this marker ends with.
+    RoundDiscarded {
+        detail: String,
+    },
     /// A turn that ended in a non-retryable provider/runtime failure.
     /// Its partial messages stay on the visible lineage, but context rebuilds
     /// skip them so retrying begins from the preceding successful checkpoint.
