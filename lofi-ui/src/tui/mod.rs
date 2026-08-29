@@ -1173,11 +1173,10 @@ impl App {
 }
 
 /// Cancel an in-flight run and wait for its recorder to flush. Aborting the
-/// task skips that flush and drops the current turn, so the deadline is
-/// deliberately far beyond any healthy provider round (the engine also
-/// honors the cancel flag and the stream idle timeout, which bound the
-/// wait on their own). A miss is reported: quitting must not silently
-/// lose the un-flushed suffix of a turn.
+/// task skips that flush, so the deadline sits far beyond any healthy
+/// round; the engine's cancel flag and idle timeout bound the wait on
+/// their own. Returns true when aborted by deadline — quitting must not
+/// silently lose the un-flushed suffix.
 async fn settle_run_for_quit(run: RunHandle, timeout: Duration) -> bool {
     run.cancel.store(true, Ordering::Relaxed);
     let RunHandle { handle, mut rx, .. } = run;

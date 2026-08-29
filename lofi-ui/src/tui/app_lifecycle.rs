@@ -449,10 +449,9 @@ impl App {
         self.turn_event_offsets.insert(idx, None);
     }
 
-    /// Remember the first durable-transcript read failure seen this frame.
-    /// Rendering paths hold `&App`, so the note waits in interior
-    /// mutability; the event loop surfaces it as a notification after the
-    /// draw instead of an empty turn shell masquerading as lost transcript.
+    /// Remember the first durable-transcript read failure seen this frame;
+    /// rendering holds `&App`, so interior mutability defers the notify to
+    /// the event loop.
     fn note_transcript_failure(&self, message: String) {
         let mut alert = self.transcript_alert.borrow_mut();
         if alert.is_none() {

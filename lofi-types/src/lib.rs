@@ -575,13 +575,10 @@ pub enum SessionEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<StopReason>,
     },
-    /// A mid-turn round the engine dropped from the model history (a
-    /// loop-detected response, or a partial response discarded for a retry).
-    /// Its messages were already streamed to the live view, so they stay on
-    /// the visible lineage and the transcript never loses what was shown,
-    /// while context rebuild skips the assistant message(s) immediately
-    /// preceding this marker. The detail is the human-readable reason,
-    /// replayed as a notice.
+    /// A mid-turn round the engine dropped from the model history (loop
+    /// detection, retry re-roll). Its messages were already streamed, so
+    /// they stay visible while context rebuild skips the assistant
+    /// message(s) this marker ends with.
     RoundDiscarded {
         detail: String,
     },
