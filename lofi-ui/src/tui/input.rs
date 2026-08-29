@@ -247,6 +247,37 @@ mod user_shell_tests {
 /// Start a new run with a queued prompt (FIFO pop at turn end). Shares
 /// the session-file creation and turn-freezing logic with the Enter
 /// handler but skips UI-only concerns (history nav, slash completion).
+/// The prompt queue is memory-only until a run spawns it. On quit, the
+/// app would silently drop every typed-but-unstarted prompt; persist each
+/// one as the durable shape of a turn the process died before serving:
+/// the prompt message, no terminal marker. Resume then shows it and later
+/// history keeps it.
+pub(super) fn persist_unsent_prompts(app: &mut App) {
+    if app.prompt_queue.is_empty() {
+        return;
+    }
+    let run_model = app.run_model();
+    let system_prompt = app.system_prompt.clone();
+    for queued in std::mem::take(&mut app.prompt_queue) {
+        if queued.text.trim().is_empty() {
+            continue;
+        }
+        let Some(sink) = app.session.sink_mut() else {
+            continue;
+        };
+        let recorded = sink
+            .cursor_or_create(&run_model, &system_prompt)
+            .and_then(|cursor| cursor.record_unrun_prompt(&queued.text, queued.kind));
+        if let Err(error) = recorded {
+            app.notify(
+                NotifyKind::Error,
+                format!("could not save queued prompt: {error}"),
+            );
+        }
+    }
+    app.session.refresh_cursor();
+}
+
 pub(super) fn finish_user_shell(
     app: &mut App,
     result: lofi_core::UserShellResult,
@@ -266,15 +297,24 @@ pub(super) fn finish_user_shell(
     // Recording the command is a core-owned session write — the UI hands the
     // finished result to the sink rather than assembling/appending an event.
     let run_model = app.run_model();
-    let byte_range = app.session.sink_mut().and_then(|sink| {
-        sink.record_user_shell(
+    // A failed durable write must be loud: the command output stays
+    // visible live, but nothing is more silent than a transcript that
+    // quietly lost it.
+    let mut byte_range = None;
+    if let Some(sink) = app.session.sink_mut() {
+        match sink.record_user_shell(
             &result,
             exclude_from_context,
             &run_model,
             &app.system_prompt,
-        )
-        .ok()
-    });
+        ) {
+            Ok(range) => byte_range = Some(range),
+            Err(error) => app.notify(
+                NotifyKind::Error,
+                format!("transcript write failed: {error}"),
+            ),
+        }
+    }
     app.session.refresh_cursor();
     app.apply_event(AgentEvent::UserShell {
         command: result.command,
