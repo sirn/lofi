@@ -107,10 +107,10 @@ fn detail_box(
             cx.theme.muted
         })
         .bg(cx.theme.surface);
+    let thumb_row = (start * visible_rows.saturating_sub(1)).checked_div(max);
     let mut out = Vec::with_capacity(visible_rows);
     for (row, visual) in visible.iter().enumerate() {
         let used = prim::width(&visual.text);
-        let thumb_row = (start * visible_rows.saturating_sub(1)).checked_div(max);
         let mut line_deco = deco.to_vec();
         line_deco.push(Span::styled(" ", raised));
         let detail_span = prim::render(
