@@ -91,18 +91,20 @@ fn detail_box(
     let visible_rows = total.min(DETAIL_VIEW_ROWS);
     let visible = &rows[start..total.min(start + visible_rows)];
     let raised = style.bg(cx.theme.surface);
-    // The scrollbar is the box's state signal: prominent while the detail
-    // holds the scroll focus, subtle otherwise.
+    // The scrollbar is the box's state signal: the thumb takes the user
+    // color while the detail holds the scroll focus, matching every other
+    // active scrollbar.
     let focused = cx
         .app
         .detail_focus
         .as_ref()
         .is_some_and(|focus| focus.key == *key);
-    let scroll = Style::new()
+    let track = Style::new().fg(cx.theme.subtle).bg(cx.theme.surface);
+    let thumb = Style::new()
         .fg(if focused {
             cx.theme.user
         } else {
-            cx.theme.subtle
+            cx.theme.muted
         })
         .bg(cx.theme.surface);
     let mut out = Vec::with_capacity(visible_rows);
@@ -116,8 +118,19 @@ fn detail_box(
             vec![Span::styled(visual.text.clone(), raised)],
             vec![
                 Span::styled(" ".repeat(inner.saturating_sub(used)), raised),
-                Span::styled(if thumb_row == Some(row) { "┃" } else { " " }, scroll),
-                Span::styled(" ", raised),
+                // No track when the whole box is visible; the column keeps
+                // the box geometry stable but stays blank.
+                if max == 0 {
+                    Span::styled(" ", raised)
+                } else {
+                    Span::styled(
+                        if thumb_row == Some(row) { "┃" } else { "│" },
+                        if thumb_row == Some(row) { thumb } else { track },
+                    )
+                },
+                // Margin between the box and the outer scrollbar gutter:
+                // plain background so the raised box visibly ends here.
+                Span::raw(" "),
             ],
         )
         .with_raw(visual.raw.clone());
