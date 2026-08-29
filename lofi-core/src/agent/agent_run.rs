@@ -461,12 +461,10 @@ impl Agent {
                         &tx,
                     )
                     .await;
-                    // The dropped round was already streamed to the live
-                    // view, so make it durable (and excluded from context
-                    // via the discard boundary) before removing it from
-                    // history: the transcript never loses what was shown.
+                    // What streamed to the live view must reach the
+                    // transcript before it leaves the model history.
                     if let Some(index) = plan.removed {
-                        if record_round_removal(
+                        record_round_removal(
                             recorder.as_mut(),
                             messages,
                             prev_len,
@@ -474,12 +472,7 @@ impl Agent {
                             &tx,
                             &plan.detail,
                         )
-                        .await
-                        {
-                            if let Some(recorder) = recorder.as_mut() {
-                                recorder.note_displaced(1);
-                            }
-                        }
+                        .await;
                         messages.remove(index);
                     }
                     if let Some(message) = plan.recovery {
@@ -608,11 +601,7 @@ impl Agent {
                         retry_attempt += 1;
                         let delay = retry.delay_for(retry_attempt);
                         if messages.last().is_some_and(|m| m.role == Role::Assistant) {
-                            // The failed round's partial response was
-                            // streamed to the live view, so retire it
-                            // durably (visible, excluded from context)
-                            // instead of silently dropping it, then re-roll.
-                            if record_round_removal(
+                            record_round_removal(
                                 recorder.as_mut(),
                                 messages,
                                 prev_len,
@@ -620,12 +609,7 @@ impl Agent {
                                 &tx,
                                 &format!("discarding partial response before retry: {e}"),
                             )
-                            .await
-                            {
-                                if let Some(recorder) = recorder.as_mut() {
-                                    recorder.note_displaced(1);
-                                }
-                            }
+                            .await;
                             messages.pop();
                         }
                         let _ = tx
@@ -1637,15 +1621,11 @@ async fn commit_progress(
     }
 }
 
-/// Durably retire a round the engine is dropping from the model history
-/// (loop detection, retry re-roll). The round was already streamed to the
-/// live view, so it is checkpointed and stamped with a `RoundDiscarded`
-/// boundary before the caller removes it from memory: the transcript
-/// keeps what was shown, while context rebuild skips it. Returns true when
-/// the round and its boundary are durable, so the caller can keep the
-/// recorder in sync with the memory drop. Transcript write failures are
-/// notified, not fatal: the recorder keeps its counts, so a later
-/// checkpoint retries the suffix.
+/// Make a round the engine is dropping from the model history (loop
+/// detection, retry re-roll) durable before the caller removes it: the
+/// round is checkpointed, its displacement accounted, and a
+/// `RoundDiscarded` boundary stamped so context rebuild skips it. Write
+/// failures are notified, not fatal.
 async fn record_round_removal(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
@@ -1653,31 +1633,32 @@ async fn record_round_removal(
     stats: &TurnStats,
     tx: &Sender<AgentEvent>,
     reason: &str,
-) -> bool {
+) {
     let Some(recorder) = recorder else {
-        return false;
+        return;
     };
     let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
     let suffix = messages.get(prev_len..).unwrap_or_default();
     if let Err(error) = recorder.checkpoint(suffix, &stats.summary(elapsed_ms)) {
         let _ = emit(
             Some(tx),
-            AgentEvent::Notice(format!(
-                "transcript write failed (will retry on the next round): {error}"
-            )),
-        )
-        .await;
-        return false;
-    }
-    if let Err(error) = recorder.discard_round(reason) {
-        let _ = emit(
-            Some(tx),
             AgentEvent::Notice(format!("transcript write failed: {error}")),
         )
         .await;
-        return false;
+        return;
     }
-    true
+    // The checkpoint just counted the round the caller is about to remove;
+    // without this credit, every later slice would skip the first recovery
+    // message. Runs even when the boundary write below fails, because the
+    // checkpoint already made the round durable.
+    recorder.note_displaced(1);
+    if let Err(error) = recorder.discard_round(reason) {
+        let _ = emit(
+            Some(tx),
+            AgentEvent::Notice(format!("discard boundary write failed: {error}")),
+        )
+        .await;
+    }
 }
 
 /// Result of a single provider round: whether the turn is finished (no
