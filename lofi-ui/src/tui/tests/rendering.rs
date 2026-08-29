@@ -578,6 +578,56 @@ fn focused_user_shell_detail_accentuates_its_scrollbar() {
 }
 
 #[test]
+fn short_detail_box_omits_the_scrollbar_line() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: String::new(),
+        blocks: vec![Block::UserShell {
+            id: 0,
+            command: "printf".to_string(),
+            output: "one\ntwo".to_string(),
+            exit_code: Some(0),
+            signal: None,
+            duration: Duration::from_millis(1),
+            truncated: false,
+            cancelled: false,
+            running: false,
+            exclude_from_context: false,
+        }],
+    });
+    a.expanded_details.insert(
+        DetailKey::UserShell(0),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let spans = render_turn_lines(&cx, &a.turns[0])
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .filter(|span| {
+            let s = span.content.as_ref();
+            s == "│" || s == "┃"
+        })
+        .count();
+    assert!(
+        spans == 0,
+        "a fully visible detail box draws no scrollbar line"
+    );
+}
+
+#[test]
 fn user_shell_nonzero_exit_is_visible_and_error_colored() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
