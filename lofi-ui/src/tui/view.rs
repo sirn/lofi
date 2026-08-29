@@ -637,7 +637,10 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let para = Paragraph::new(vis).scroll((0, 0));
     f.render_widget(para, content);
     prim::apply_hyperlinks(f.buffer_mut(), content, &app.log_vis, &links);
-    draw_scrollbar(f, scroll_area.gutter, off, height, total, app.theme);
+    let active = matches!(app.mode, Mode::Navigate | Mode::Select)
+        && app.detail_focus.is_none()
+        && !app.modal_open();
+    draw_scrollbar(f, scroll_area.gutter, off, height, total, app.theme, active);
 }
 
 fn draw_scrollbar(
@@ -647,8 +650,10 @@ fn draw_scrollbar(
     visible: usize,
     total: usize,
     t: crate::tui::theme::Theme,
+    active: bool,
 ) {
-    prim::render_scrollbar(f, gutter, off, visible, total, t.subtle, t.muted);
+    let thumb = if active { t.user } else { t.muted };
+    prim::render_scrollbar(f, gutter, off, visible, total, t.subtle, thumb);
 }
 
 fn render_working(f: &mut Frame, area: Rect, app: &App) {
@@ -711,6 +716,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         content.height as usize,
         total,
         t,
+        active,
     );
 }
 
