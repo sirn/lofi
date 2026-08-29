@@ -7,7 +7,9 @@
 
 use std::{collections::HashSet, path::Path};
 
-use lofi_types::{Message, NativeToolRecord, RunModel, SessionEvent, SessionEventKind, Usage};
+use lofi_types::{
+    Message, NativeToolRecord, Role, RunModel, SessionEvent, SessionEventKind, Usage,
+};
 
 use crate::session::store::{self, CompactionCounts};
 use crate::shell::UserShellResult;
@@ -60,6 +62,11 @@ pub enum SessionRecord<'a> {
         counts: CompactionCounts,
         system_prompt: &'a str,
     },
+    /// Durable mid-turn boundary: the round it ends was dropped from the
+    /// model history but stays visible on the lineage.
+    RoundDiscarded {
+        detail: &'a str,
+    },
     /// Incremental turn suffix. Built only by [`SessionRecorder`].
     Turn(TurnBatch<'a>),
 }
@@ -74,6 +81,30 @@ pub struct TurnBatch<'a> {
 }
 
 impl store::SessionCursor {
+    /// Persist a queued prompt the app dropped without running, as a turn
+    /// the process died before serving: the prompt message with no
+    /// terminal marker.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn record_unrun_prompt(&self, prompt: &str, kind: lofi_types::PromptKind) -> Result<()> {
+        let message = Message {
+            role: Role::User,
+            blocks: vec![lofi_types::ContentBlock::Text {
+                text: prompt.to_string(),
+            }],
+            kind,
+        };
+        let batch = TurnBatch {
+            messages: std::slice::from_ref(&message),
+            native_tools: &[],
+            tool_elapsed: Vec::new(),
+            thinking_elapsed: &[],
+            terminal: None,
+        };
+        self.record(SessionRecord::Turn(batch)).map(|_| ())
+    }
+
     /// Record a job acquisition and return its durable event id. The id owns
     /// the corresponding release marker and remains stable across branch
     /// switches.
@@ -100,12 +131,22 @@ impl store::SessionCursor {
         Ok(())
     }
 
-    /// Persist one ordinary [`SessionRecord`].
+    /// Persist one ordinary session record.
     ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
         match record {
+            SessionRecord::RoundDiscarded { detail } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::RoundDiscarded {
+                        detail: detail.to_string(),
+                    },
+                }];
+                self.append_events(&mut events)
+            }
             SessionRecord::System { prompt } => self.append_system(prompt),
             SessionRecord::UserShell {
                 result,
@@ -205,6 +246,7 @@ pub struct SessionRecorder {
     model: RunModel,
     flushed: bool,
     message_count: usize,
+    recorded_messages_removed: usize,
     native_tool_count: usize,
     thinking_timing_count: usize,
     tool_timing_ids: HashSet<String>,
@@ -220,12 +262,28 @@ impl SessionRecorder {
             model,
             flushed: false,
             message_count: 0,
+            recorded_messages_removed: 0,
             native_tool_count: 0,
             thinking_timing_count: 0,
             tool_timing_ids: HashSet::new(),
             byte_start: None,
             byte_end: None,
         }
+    }
+
+    /// Stamp the durable boundary for a checkpointed round being dropped
+    /// from the model history.
+    ///
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn discard_round(&mut self, detail: &str) -> Result<()> {
+        self.cursor
+            .record(SessionRecord::RoundDiscarded { detail })
+            .map(|_| ())
+    }
+
+    pub fn note_recorded_messages_removed(&mut self, count: usize) {
+        self.recorded_messages_removed += count;
     }
 
     /// Append everything completed since the previous checkpoint, without a
@@ -292,7 +350,10 @@ impl SessionRecorder {
         summary: &TurnSummary,
         terminal: Option<SessionEventKind>,
     ) -> Result<Option<(u64, u64)>> {
-        let new_messages = messages.get(self.message_count..).unwrap_or_default();
+        let slice_from = self
+            .message_count
+            .saturating_sub(self.recorded_messages_removed);
+        let new_messages = messages.get(slice_from..).unwrap_or_default();
         let new_native = summary
             .native_tools
             .get(self.native_tool_count..)
@@ -322,6 +383,7 @@ impl SessionRecorder {
             return Ok(None);
         }
         self.message_count = messages.len();
+        self.recorded_messages_removed = 0;
         self.native_tool_count = summary.native_tools.len();
         self.thinking_timing_count = summary.thinking_elapsed.len();
         self.tool_timing_ids.extend(new_tool_ids);
@@ -541,6 +603,83 @@ mod tests {
             events.last().map(|event| &event.kind),
             Some(SessionEventKind::TurnEnd { .. })
         ));
+    }
+
+    #[test]
+    fn unrun_prompt_takes_the_shape_of_a_turn_died_before_serving() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path.clone(), None);
+
+        cursor
+            .record_unrun_prompt("typed but never run", lofi_types::PromptKind::User)
+            .unwrap();
+
+        let events = cursor.load_events().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            SessionEventKind::Message(message) => {
+                assert_eq!(message.role, Role::User);
+                match &message.blocks[0] {
+                    lofi_types::ContentBlock::Text { text } => {
+                        assert_eq!(text, "typed but never run");
+                    }
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected message, got {other:?}"),
+        }
+        let rebuilt = crate::session::replay::messages_from_events(&events);
+        assert_eq!(rebuilt.len(), 1, "the unrun prompt rejoins the context");
+    }
+
+    #[test]
+    fn recorded_removal_never_loses_or_duplicates_messages() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+        let mut clean = summary(10);
+        clean.native_tools.clear();
+        clean.thinking_elapsed.clear();
+        clean.tool_elapsed.clear();
+
+        let mut messages = vec![user_msg("go"), assistant_text("loop round")];
+        rec.checkpoint(&messages, &clean).unwrap();
+        rec.discard_round("potential agent loop detected").unwrap();
+        messages.pop();
+        rec.note_recorded_messages_removed(1);
+        messages.push(assistant_text("recovery"));
+        rec.flush(&messages, &TurnOutcome::Finished, &clean)
+            .unwrap()
+            .expect("final suffix persisted");
+
+        let events = cursor.load_tree_events().unwrap();
+        let mut texts = Vec::new();
+        let mut saw_discard_marker = false;
+        for event in &events {
+            match &event.kind {
+                SessionEventKind::Message(message) => {
+                    if let lofi_types::ContentBlock::Text { text } = &message.blocks[0] {
+                        texts.push(text.clone());
+                    }
+                }
+                SessionEventKind::RoundDiscarded { detail } => {
+                    saw_discard_marker = true;
+                    assert!(detail.contains("loop"));
+                }
+                SessionEventKind::TurnEnd { .. } => {}
+                other => panic!("unexpected event in test: {other:?}"),
+            }
+        }
+        assert!(saw_discard_marker);
+        let expected = vec!["go", "loop round", "recovery"];
+        assert_eq!(
+            texts, expected,
+            "discarded round stays durable and recovery answer is not lost"
+        );
     }
 
     #[test]
