@@ -407,9 +407,11 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
         if index == 0 || index + 1 == lines.len() {
             assert!(line.line.spans.iter().all(|span| span.style.bg.is_none()));
         } else {
-            assert!(line
-                .line
-                .spans
+            let spans = &line.line.spans;
+            let (margin, body) = spans.split_last().expect("detail row has a margin");
+            assert_eq!(margin.content.as_ref(), " ");
+            assert!(margin.style.bg.is_none(), "margin stays plain");
+            assert!(body
                 .iter()
                 .skip(2)
                 .all(|span| span.style.bg == Some(a.theme.surface)));
@@ -483,6 +485,42 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
 }
 
 #[test]
+fn log_scrollbar_thumb_tracks_scroll_input_ownership() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut a = app();
+    for n in 0..40 {
+        a.apply_event(AgentEvent::TurnStart {
+            kind: lofi_types::PromptKind::User,
+            prompt: format!("prompt {n}"),
+        });
+        a.apply_event(AgentEvent::Text(format!("line {n}")));
+    }
+
+    let thumb_fg = |a: &mut App| {
+        let mut term = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        term.draw(|f| crate::tui::view::render(f, a)).unwrap();
+        let buf = term.backend().buffer();
+        (0..16u16)
+            .filter(|y| buf[(39, *y)].symbol() == "┃")
+            .map(|y| buf[(39, y)].fg)
+            .next()
+    };
+    assert_eq!(
+        thumb_fg(&mut a),
+        Some(a.theme.muted),
+        "Input mode: the transcript scrollbar is passive"
+    );
+    a.mode = Mode::Navigate;
+    assert_eq!(
+        thumb_fg(&mut a),
+        Some(a.theme.user),
+        "Navigate mode: the transcript scrollbar owns scroll input"
+    );
+}
+
+#[test]
 fn focused_user_shell_detail_accentuates_its_scrollbar() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
@@ -530,13 +568,63 @@ fn focused_user_shell_detail_accentuates_its_scrollbar() {
             .and_then(|span| span.style.fg)
     };
 
-    assert_eq!(thumb_fg(&a), Some(a.theme.subtle));
+    assert_eq!(thumb_fg(&a), Some(a.theme.muted));
     a.detail_focus = Some(crate::tui::DetailFocus {
         key,
         cursor: 0,
         col: 0,
     });
     assert_eq!(thumb_fg(&a), Some(a.theme.user));
+}
+
+#[test]
+fn short_detail_box_omits_the_scrollbar_line() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    a.turns.push(Turn {
+        kind: lofi_types::PromptKind::User,
+        prompt: String::new(),
+        blocks: vec![Block::UserShell {
+            id: 0,
+            command: "printf".to_string(),
+            output: "one\ntwo".to_string(),
+            exit_code: Some(0),
+            signal: None,
+            duration: Duration::from_millis(1),
+            truncated: false,
+            cancelled: false,
+            running: false,
+            exclude_from_context: false,
+        }],
+    });
+    a.expanded_details.insert(
+        DetailKey::UserShell(0),
+        DetailState {
+            turn: 0,
+            scroll: None,
+        },
+    );
+
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: false,
+    };
+    let spans = render_turn_lines(&cx, &a.turns[0])
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .filter(|span| {
+            let s = span.content.as_ref();
+            s == "│" || s == "┃"
+        })
+        .count();
+    assert_eq!(
+        spans, 0,
+        "a fully visible detail box draws no scrollbar line"
+    );
 }
 
 #[test]
@@ -750,16 +838,8 @@ fn expanded_detail_height_scales_to_its_content() {
     };
     let lines = render_turn_lines(&cx, &a.turns[0]);
     assert_eq!(lines.len(), collapsed.len() + 2);
-    assert!(lines[3]
-        .line
-        .to_string()
-        .trim_end()
-        .ends_with("short detail one"));
-    assert!(lines[4]
-        .line
-        .to_string()
-        .trim_end()
-        .ends_with("short detail two"));
+    assert!(lines[3].line.to_string().contains("short detail one"));
+    assert!(lines[4].line.to_string().contains("short detail two"));
 }
 
 #[test]
@@ -834,7 +914,8 @@ fn expanded_detail_caps_at_ten_rows_and_keeps_a_right_margin() {
     );
     assert_eq!(
         first.line.spans.last().and_then(|span| span.style.bg),
-        Some(a.theme.surface)
+        None,
+        "the right margin stays outside the raised detail box"
     );
 }
 
