@@ -74,19 +74,6 @@ impl UserShellResult {
     }
 }
 
-#[must_use]
-pub fn cancelled_user_shell(command: String, duration_ms: u64) -> UserShellResult {
-    UserShellResult {
-        command,
-        output: String::new(),
-        exit_code: None,
-        signal: None,
-        duration_ms,
-        truncated: false,
-        cancelled: true,
-    }
-}
-
 /// Run a direct `!` shell command and adapt the process output into the
 /// session result recorded by core.
 ///

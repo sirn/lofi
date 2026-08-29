@@ -33,7 +33,7 @@ pub(super) fn handle_event(
     }
 
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-        handle_ctrl_c(app, agent, current_run);
+        handle_ctrl_c(app, current_run);
         return;
     }
 
@@ -48,7 +48,7 @@ pub(super) fn handle_event(
         && current_run.is_some()
         && (app.mode != Mode::Input || app.slash_complete.is_none())
     {
-        interrupt_run(app, agent, current_run);
+        interrupt_run(app, current_run);
         return;
     }
 
@@ -547,37 +547,20 @@ pub(super) fn restore_queued_prompts(app: &mut App) {
     app.refresh_slash_complete();
 }
 
-fn interrupt_run(
-    app: &mut App,
-    agent: Option<&lofi_core::Agent>,
-    current_run: &mut Option<RunHandle>,
-) {
+fn interrupt_run(app: &mut App, current_run: &mut Option<RunHandle>) {
     if let Some(r) = current_run.as_mut() {
         if r.user_shell.is_none() {
             // Restore steering/follow-up messages to the editor when a
             // stream is aborted instead of submitting them automatically.
             restore_queued_prompts(app);
         }
-        let user_shell = r.user_shell.clone();
-        // Agent runs must settle cooperatively: the engine checkpoints each
-        // completed round, flushes the partial current response, and writes a
-        // TurnCancelled marker before its channel closes. Aborting the task
-        // here skips that cleanup and makes cancelled output disappear.
+        // All runs must settle cooperatively: cancel only raises the flag.
+        // A user shell then finishes by returning what its pipes captured so
+        // far — aborting here would discard the streamed output — and an
+        // agent run checkpoints each completed round, flushes the partial
+        // current response, and writes a TurnCancelled marker before its
+        // channel closes. Both paths finish through the event loop.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some((command, exclude_from_context)) = user_shell {
-            let Some(r) = current_run.take() else {
-                return;
-            };
-            r.handle.abort();
-            let result =
-                lofi_core::cancelled_user_shell(command, app.run_elapsed().as_millis() as u64);
-            finish_user_shell(app, result, exclude_from_context);
-            app.run_finished();
-            if let Some(queued) = app.prompt_queue.first().cloned() {
-                app.prompt_queue.remove(0);
-                spawn_prompt(app, agent, current_run, queued.text, queued.kind);
-            }
-        }
         app.ctrl_c_at = None;
     }
 }
@@ -590,11 +573,7 @@ pub(super) fn request_quit(app: &mut App, current_run: &mut Option<RunHandle>) {
     }
 }
 
-pub(super) fn handle_ctrl_c(
-    app: &mut App,
-    agent: Option<&lofi_core::Agent>,
-    current_run: &mut Option<RunHandle>,
-) {
+pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) {
     // Navigate/Select: Ctrl-C is a "give me the prompt" key, not a cancel. It
     // drops the user onto the newest transcript line and focuses the editor
     // without ever interrupting the current turn.
@@ -613,7 +592,7 @@ pub(super) fn handle_ctrl_c(
         return;
     }
     if current_run.is_some() {
-        interrupt_run(app, agent, current_run);
+        interrupt_run(app, current_run);
         app.ctrl_c_at = None;
         return;
     }
