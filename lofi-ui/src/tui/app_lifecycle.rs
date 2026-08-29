@@ -120,6 +120,7 @@ impl App {
             log_view_h: 0,
             frozen_render: FrozenCache::new(),
             collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
+            transcript_alert: RefCell::new(None),
             frozen_heights: Vec::new(),
             frozen_heights_estimated: Vec::new(),
             turn_byte_ranges: Vec::new(),
@@ -448,6 +449,20 @@ impl App {
         self.turn_event_offsets.insert(idx, None);
     }
 
+    /// Remember the first durable-transcript read failure seen this frame;
+    /// rendering holds `&App`, so interior mutability defers the notify to
+    /// the event loop.
+    fn note_transcript_failure(&self, message: String) {
+        let mut alert = self.transcript_alert.borrow_mut();
+        if alert.is_none() {
+            *alert = Some(message);
+        }
+    }
+
+    pub(super) fn take_transcript_alert(&mut self) -> Option<String> {
+        self.transcript_alert.get_mut().take()
+    }
+
     fn restore_result_availability(
         turn: &mut Turn,
         available_exec_results: &std::collections::HashSet<String>,
@@ -516,19 +531,22 @@ impl App {
             return Arc::new(empty);
         };
         let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
-        let mut events = if let Some(offsets) = selected_offsets {
-            let loaded = cursor.events_at(offsets);
-            match loaded {
-                Ok(events) => events,
-                Err(_) => return Arc::new(empty),
-            }
+        let events = if let Some(offsets) = selected_offsets {
+            cursor.events_at(offsets)
         } else {
             let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
                 return Arc::new(empty);
             };
-            match cursor.events_in_range(start, end) {
-                Ok(events) => events,
-                Err(_) => return Arc::new(empty),
+            cursor.events_in_range(start, end)
+        };
+        let mut events = match events {
+            Ok(events) => events,
+            Err(error) => {
+                self.note_transcript_failure(format!(
+                    "transcript read failed (turn {}): {error}",
+                    idx + 1
+                ));
+                return Arc::new(empty);
             }
         };
         let mut exec_ids = std::collections::HashSet::new();
