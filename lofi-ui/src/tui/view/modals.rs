@@ -251,7 +251,7 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
             view_h,
             total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
@@ -349,7 +349,7 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
             content_rows.height as usize,
             total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
@@ -449,7 +449,7 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
             actual_view_h,
             total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
@@ -512,7 +512,7 @@ fn render_pick_modal(
             frame.content.height as usize,
             total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
@@ -724,7 +724,7 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
             view_h,
             total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
@@ -876,7 +876,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
             app.confirm_view_h,
             app.confirm_total,
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 
@@ -1017,7 +1017,7 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
                         body_h,
                         total,
                         t.subtle,
-                        t.muted,
+                        t.user,
                     );
                 }
             }
@@ -1107,7 +1107,7 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
             rows.content.height as usize,
             jobs.len(),
             t.subtle,
-            t.muted,
+            t.user,
         );
     }
 }
