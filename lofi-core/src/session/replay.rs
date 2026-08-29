@@ -280,6 +280,9 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 cancelled: *cancelled,
                 exclude_from_context: *exclude_from_context,
             }),
+            SessionEventKind::RoundDiscarded { detail } => {
+                emit(AgentEvent::Notice(detail.clone()));
+            }
             SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
             | SessionEventKind::ThinkingTiming { .. }
@@ -401,6 +404,10 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
     let mut out: Vec<(String, Message)> = Vec::new();
     let mut skipping = false;
+    // A discarded round ends at its marker: the leaf-first walk skips the
+    // assistant messages older than it until a non-assistant message
+    // resumes. Consecutive markers keep the flag armed.
+    let mut discarding_assistant = false;
     // The compaction summary is captured when the Compaction marker is seen
     // and prepended to the result so it leads the history. Held aside because
     // the walk is leaf-first; injecting it inline would place the summary
@@ -437,10 +444,19 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
             SessionEventKind::TurnEnd { .. } => {
                 skipping = false;
             }
+            SessionEventKind::RoundDiscarded { .. } => {
+                discarding_assistant = true;
+            }
             SessionEventKind::Message(_) | SessionEventKind::UserShell { .. } if !skipping => {
                 let Some(message) = agent_message_for_event(&events[i].kind) else {
                     continue;
                 };
+                if discarding_assistant {
+                    if message.role == Role::Assistant {
+                        continue;
+                    }
+                    discarding_assistant = false;
+                }
                 let boundary_hit = boundary.as_ref().is_some_and(|b| b == &events[i].id);
                 out.push((events[i].id.clone(), message));
                 if boundary_hit {
@@ -734,6 +750,101 @@ mod tests {
             parent_id: None,
             kind: SessionEventKind::JobFinished { job_id: id },
         }
+    }
+
+    fn assistant_msg(t: &str) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text { text: t.into() }],
+                kind: PromptKind::default(),
+            }),
+        }
+    }
+
+    fn round_discarded(detail: &str) -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::RoundDiscarded {
+                detail: detail.to_string(),
+            },
+        }
+    }
+
+    fn turn_end() -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 0,
+                cost: 0.0,
+                usage: Usage::default(),
+                stop_reason: None,
+            },
+        }
+    }
+
+    #[test]
+    fn round_discarded_keeps_content_visible_but_excludes_it_from_context() {
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("repeating reasoning"),
+            round_discarded("potential agent loop detected"),
+            user_msg_with_kind("try again differently", lofi_types::PromptKind::Notice),
+            assistant_msg("recovery answer"),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let visible = visible_event_indices(&events);
+        assert_eq!(
+            visible.len(),
+            events.len(),
+            "the discarded round stays visible"
+        );
+
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(texts, ["go", "try again differently", "recovery answer"]);
+    }
+
+    #[test]
+    fn consecutive_round_discards_chain() {
+        let mut events = vec![
+            user_msg("go"),
+            assistant_msg("first loop"),
+            round_discarded("first discard"),
+            user_msg_with_kind("notice", lofi_types::PromptKind::Notice),
+            assistant_msg("second loop"),
+            assistant_msg("still looping"),
+            round_discarded("second discard"),
+            user_msg_with_kind("notice2", lofi_types::PromptKind::Notice),
+            assistant_msg("done answer"),
+            turn_end(),
+        ];
+        chain(&mut events);
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            ["go", "notice", "notice2", "done answer"],
+            "each marker drops the assistant messages it ends with"
+        );
     }
 
     #[test]
