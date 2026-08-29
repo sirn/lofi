@@ -399,7 +399,7 @@ fn quit_persists_queued_prompts_instead_of_dropping_them() {
     // queued prompt must persist it as an un-run turn, not drop it.
     let server =
         MockServer::start(vec![text_response("slow first answer marker")
-            .with_delay(std::time::Duration::from_millis(800))]);
+            .with_delay(std::time::Duration::from_millis(1500))]);
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
 

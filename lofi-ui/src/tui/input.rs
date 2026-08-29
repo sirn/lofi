@@ -235,23 +235,9 @@ mod user_shell_tests {
     }
 }
 
-/// Ctrl+C: cancel an active run; otherwise clear a non-empty draft, or quit
-/// on a double press within [`QUIT_DOUBLE_PRESS`] when the prompt is empty.
-/// Mode-independent — works the same in Input, Navigate, and Select.
-/// Kick off a silent force-continue after a hard-cap force-compact.
-/// Mirrors the submit path in [`handle_event`] but appends no user prompt:
-/// it seeds the run from the (just-compacted) history, which ends in a tool
-/// result, so the model resumes the turn. The engine emits `TurnContinue`,
-/// which the UI handles by appending to the current turn rather than pushing
-/// a new one. No-op when no model is configured.
-/// Start a new run with a queued prompt (FIFO pop at turn end). Shares
-/// the session-file creation and turn-freezing logic with the Enter
-/// handler but skips UI-only concerns (history nav, slash completion).
-/// The prompt queue is memory-only until a run spawns it. On quit, the
-/// app would silently drop every typed-but-unstarted prompt; persist each
-/// one as the durable shape of a turn the process died before serving:
-/// the prompt message, no terminal marker. Resume then shows it and later
-/// history keeps it.
+/// The prompt queue is memory-only until a run spawns it. Quitting would
+/// silently drop every typed-but-unstarted prompt: persist each as a turn
+/// the process died before serving — prompt message, no terminal marker.
 pub(super) fn persist_unsent_prompts(app: &mut App) {
     if app.prompt_queue.is_empty() {
         return;
