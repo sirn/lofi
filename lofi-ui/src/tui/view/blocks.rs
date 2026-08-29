@@ -91,24 +91,23 @@ fn detail_box(
     let visible_rows = total.min(DETAIL_VIEW_ROWS);
     let visible = &rows[start..total.min(start + visible_rows)];
     let raised = style.bg(cx.theme.surface);
-    // The scrollbar is the box's state signal: prominent while the detail
-    // holds the scroll focus, subtle otherwise.
     let focused = cx
         .app
         .detail_focus
         .as_ref()
         .is_some_and(|focus| focus.key == *key);
-    let scroll = Style::new()
+    let track = Style::new().fg(cx.theme.subtle).bg(cx.theme.surface);
+    let thumb = Style::new()
         .fg(if focused {
             cx.theme.user
         } else {
-            cx.theme.subtle
+            cx.theme.muted
         })
         .bg(cx.theme.surface);
+    let thumb_row = (start * visible_rows.saturating_sub(1)).checked_div(max);
     let mut out = Vec::with_capacity(visible_rows);
     for (row, visual) in visible.iter().enumerate() {
         let used = prim::width(&visual.text);
-        let thumb_row = (start * visible_rows.saturating_sub(1)).checked_div(max);
         let mut line_deco = deco.to_vec();
         line_deco.push(Span::styled(" ", raised));
         let detail_span = prim::render(
@@ -116,8 +115,15 @@ fn detail_box(
             vec![Span::styled(visual.text.clone(), raised)],
             vec![
                 Span::styled(" ".repeat(inner.saturating_sub(used)), raised),
-                Span::styled(if thumb_row == Some(row) { "┃" } else { " " }, scroll),
-                Span::styled(" ", raised),
+                if max == 0 {
+                    Span::styled(" ", raised)
+                } else {
+                    Span::styled(
+                        if thumb_row == Some(row) { "┃" } else { "│" },
+                        if thumb_row == Some(row) { thumb } else { track },
+                    )
+                },
+                Span::raw(" "),
             ],
         )
         .with_raw(visual.raw.clone());
