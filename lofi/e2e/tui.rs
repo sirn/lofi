@@ -132,7 +132,7 @@ return "detail-executive-one\\ndetail-executive-two";"#,
     assert!(detail_rows.iter().all(|row| !row.contains('└')));
     assert!(detail_rows.iter().all(|row| {
         let start = row.find("left-").or_else(|| row.find("right-")).unwrap();
-        !row[start..].contains('│')
+        !row[start..].contains('│') && !row[start..].contains('┃')
     }));
     tui.send(b"\r");
     std::thread::sleep(std::time::Duration::from_millis(50));
