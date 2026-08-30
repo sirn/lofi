@@ -318,6 +318,7 @@ fn install_run(
     rx: Receiver<AgentEvent>,
     cancel: Arc<AtomicBool>,
     preempt: Arc<AtomicBool>,
+    session_cursor: Arc<std::sync::Mutex<Option<store::SessionCursor>>>,
     user_shell: Option<(String, bool)>,
 ) {
     *current_run = Some(RunHandle {
@@ -325,6 +326,7 @@ fn install_run(
         rx,
         cancel,
         preempt,
+        session_cursor,
         user_shell,
     });
     app.run = Some(0);
@@ -340,22 +342,15 @@ fn spawn_agent_run(
     prompt: Option<String>,
     prompt_kind: lofi_types::PromptKind,
 ) {
-    // Session creation/writes are core-owned: ask the sink for the cursor,
-    // creating the session file on first use, then mirror it for reads.
     let run_model = app.run_model();
-    // Ask the sink for the cursor; on brand-new lineage birth it pins the
-    // system prompt as the first event (compact-style boundary write, never
-    // detected by scanning). A reused/resumed lineage skips the pin — restore
-    // re-reads the system event already on the log.
-    let cursor = app
-        .session
-        .sink_mut()
-        .and_then(|sink| sink.cursor_or_create(&run_model, &app.system_prompt).ok());
+    let system_prompt = app.system_prompt.clone();
+    let mut session_sink = app.session.sink.clone();
+    let session_cursor = Arc::new(std::sync::Mutex::new(app.session.cursor.clone()));
+    let worker_cursor = Arc::clone(&session_cursor);
     // Mirror the lineage-birth pin into the live history so the first request
     // carries the system prompt; resume has already rebuilt history from the
     // log, so seed_system is a no-op there.
     let _ = app.lifecycle.seed_system(&app.system_prompt);
-    app.session.refresh_cursor();
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let history = app.lifecycle.shared_history();
     let agent = agent.clone();
@@ -377,45 +372,74 @@ fn spawn_agent_run(
     } else {
         std::mem::take(&mut app.startup_notices)
     };
-    let handle = tokio::task::spawn_local(async move {
-        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        for notice in &startup_notices {
-            messages.push(lofi_types::Message {
-                role: lofi_types::Role::User,
-                blocks: vec![lofi_types::ContentBlock::Text {
-                    text: notice.clone(),
-                }],
-                kind: lofi_types::PromptKind::Notice,
-            });
-        }
-        let result = std::panic::AssertUnwindSafe(agent.run_continuation(
-            &mut messages,
-            prompt,
-            prompt_kind,
-            tx,
-            cursor.as_ref(),
-            continuation,
-            Some(cancel_clone),
-            Some(preempt_clone),
-        ))
-        .catch_unwind()
-        .await;
-        if let Ok(mut stored) = history.lock() {
-            *stored = messages;
-        }
-        let error = match result {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(payload) => Some(format!(
-                "agent task panicked: {}",
-                panic_message(payload.as_ref())
-            )),
-        };
-        if let Some(error) = error {
-            let _ = err_tx.send(AgentEvent::Error(error)).await;
+    // Agent orchestration performs durable transcript syncs. Its own runtime
+    // keeps those blocking writes off the current-thread TUI runtime.
+    let handle = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let result = runtime.map_err(|error| format!("start agent runtime: {error}"));
+        let result = result.and_then(|runtime| {
+            runtime.block_on(async move {
+                let cursor = session_sink
+                    .as_mut()
+                    .map(|sink| sink.cursor_or_create(&run_model, &system_prompt))
+                    .transpose()
+                    .map_err(|error| format!("create session: {error}"))?;
+                if let Some(cursor) = cursor.as_ref() {
+                    *worker_cursor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cursor.clone());
+                }
+                let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+                for notice in &startup_notices {
+                    messages.push(lofi_types::Message {
+                        role: lofi_types::Role::User,
+                        blocks: vec![lofi_types::ContentBlock::Text {
+                            text: notice.clone(),
+                        }],
+                        kind: lofi_types::PromptKind::Notice,
+                    });
+                }
+                let result = std::panic::AssertUnwindSafe(agent.run_continuation(
+                    &mut messages,
+                    prompt,
+                    prompt_kind,
+                    tx,
+                    cursor.as_ref(),
+                    continuation,
+                    Some(cancel_clone),
+                    Some(preempt_clone),
+                ))
+                .catch_unwind()
+                .await;
+                if let Ok(mut stored) = history.lock() {
+                    *stored = messages;
+                }
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(payload) => Err(format!(
+                        "agent task panicked: {}",
+                        panic_message(payload.as_ref())
+                    )),
+                }
+            })
+        });
+        if let Err(error) = result {
+            let _ = err_tx.blocking_send(AgentEvent::Error(error));
         }
     });
-    install_run(app, current_run, handle, rx, cancel, preempt, None);
+    install_run(
+        app,
+        current_run,
+        handle,
+        rx,
+        cancel,
+        preempt,
+        session_cursor,
+        None,
+    );
 }
 
 pub(super) fn spawn_user_shell(
@@ -499,6 +523,7 @@ pub(super) fn spawn_user_shell(
         rx,
         cancel,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(std::sync::Mutex::new(app.session.cursor.clone())),
         Some((command, exclude_from_context)),
     );
 }
