@@ -11,7 +11,7 @@ use lofi_types::RunModel;
 use super::store::{self, SessionCursor, SessionStore};
 use crate::shell::UserShellResult;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionSink {
     store: SessionStore,
     cwd: PathBuf,
