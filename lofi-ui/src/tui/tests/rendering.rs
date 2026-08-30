@@ -823,6 +823,10 @@ fn expanded_detail_height_scales_to_its_content() {
         active_turn: false,
     };
     let collapsed = render_turn_lines(&collapsed_cx, &a.turns[0]);
+    assert_eq!(
+        collapsed[2].detail.as_ref().map(|detail| detail.total),
+        Some(0)
+    );
     a.expanded_details.insert(
         DetailKey::Exec(id),
         DetailState {
@@ -838,6 +842,7 @@ fn expanded_detail_height_scales_to_its_content() {
     };
     let lines = render_turn_lines(&cx, &a.turns[0]);
     assert_eq!(lines.len(), collapsed.len() + 2);
+    assert_eq!(lines[2].detail.as_ref().map(|detail| detail.total), Some(2));
     assert!(lines[3].line.to_string().contains("short detail one"));
     assert!(lines[4].line.to_string().contains("short detail two"));
 }
