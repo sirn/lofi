@@ -999,9 +999,12 @@ fn user_shell_running_detail_follows_the_streaming_tail() {
         "early rows must scroll off the tail view: {}",
         tui.screen_text()
     );
-    assert!(tui
-        .screen_row("tail-follow-25")
-        .is_some_and(|row| !row.contains('%')));
+    assert!(
+        tui.screen_row("tail-follow-25")
+            .is_some_and(|row| !row.contains('%')),
+        "tail row must show command output: {}",
+        tui.screen_text()
+    );
 
     tui.send(b"\x03");
     tui.wait_for("Cancelled", WAIT);
