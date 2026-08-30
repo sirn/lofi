@@ -1484,15 +1484,23 @@ impl Agent {
                 jobs: self.jobs.clone(),
                 on_job_acquired: on_job_acquired.clone(),
             };
-            let outcome = exec(
+            // Run the guest off the host thread: compile and execute on the
+            // sandbox worker so a heavy or stuck program cannot freeze the
+            // UI loop; cancel still reaches it through the flag.
+            let outcome = match self.sandbox_worker().exec(
                 &code,
-                &exec_ctx,
-                &ExecOptions {
+                exec_ctx,
+                ExecOptions {
                     timeout: lofi_code::DEFAULT_GUEST_TIMEOUT,
                     cancel: cancel.cloned(),
                 },
-            )
-            .await;
+            ) {
+                Ok(done) => match done.await {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(Error::Sandbox("sandbox worker dropped the request".into())),
+                },
+                Err(error) => Err(error),
+            };
             let captured = lock(&native_completed).drain(..).collect::<Vec<_>>();
             if let Some(s) = stats.as_deref_mut() {
                 s.native_tools.extend(captured);
