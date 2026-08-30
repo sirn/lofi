@@ -431,12 +431,14 @@ fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<
         "docs",
         Function::new(
             ctx.clone(),
-            Async(move |name: Opt<String>| {
-                let val = match &name.0 {
-                    Some(n) => crate::docs::docs_entry(n),
+            Async(move |name: Opt<String>| async move {
+                let val = tokio::task::spawn_blocking(move || match name.0 {
+                    Some(n) => crate::docs::docs_entry(&n),
                     None => crate::docs::docs_index(),
-                };
-                async move { Ok::<JsonV, rquickjs::Error>(JsonV(val)) }
+                })
+                .await
+                .map_err(|_| rquickjs::Error::Unknown)?;
+                Ok::<JsonV, rquickjs::Error>(JsonV(val))
             }),
         )?,
     )?;
@@ -445,9 +447,11 @@ fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<
         "docsSearch",
         Function::new(
             ctx.clone(),
-            Async(move |query: String| {
-                let val = crate::docs::docs_search(&query);
-                async move { Ok::<JsonV, rquickjs::Error>(JsonV(val)) }
+            Async(move |query: String| async move {
+                let val = tokio::task::spawn_blocking(move || crate::docs::docs_search(&query))
+                    .await
+                    .map_err(|_| rquickjs::Error::Unknown)?;
+                Ok::<JsonV, rquickjs::Error>(JsonV(val))
             }),
         )?,
     )?;
