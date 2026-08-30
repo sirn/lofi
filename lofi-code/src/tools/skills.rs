@@ -18,9 +18,14 @@ const MAX_SKILL_FILE_BYTES: usize = 1024 * 1024;
 impl BuiltinTools {
     /// # Errors
     /// Returns an error when a configured skill root cannot be scanned safely.
-    #[allow(clippy::unused_async)]
     pub async fn skills(&self, search: Option<&str>) -> Result<Value> {
-        let entries = self.scan_skills(search)?;
+        // The scan walks two skill trees on the thread that runs it; keep it
+        // off the sandbox worker so job pipe pumps are not stalled during it.
+        let this = self.clone();
+        let search = search.map(str::to_string);
+        let entries = tokio::task::spawn_blocking(move || this.scan_skills(search.as_deref()))
+            .await
+            .map_err(|e| Error::Tool(format!("skills scan join: {e}")))??;
         Ok(json!({ "ok": true, "skills": entries }))
     }
 
@@ -29,10 +34,15 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] if the skill is not found or the file cannot
     /// be read.
-    #[allow(clippy::unused_async)]
     pub async fn skill(&self, name: &str) -> Result<Value> {
-        let (path, source) = self.resolve_skill_path(name)?;
-        Self::read_skill_file(&path, name, SKILL_FILE, source)
+        let this = self.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let (path, source) = this.resolve_skill_path(&name)?;
+            Self::read_skill_file(&path, &name, SKILL_FILE, source)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("skill read join: {e}")))?
     }
 
     fn resolve_skill_path(&self, name: &str) -> Result<(PathBuf, &'static str)> {
