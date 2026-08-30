@@ -2316,19 +2316,22 @@ impl ExecBlock<'_> {
             t.success
         };
         let key = DetailKey::Exec(self.tool.detail_id);
-        let code = self
-            .tool
-            .input
-            .trim_end_matches('\n')
-            .split('\n')
-            .map(str::to_string)
-            .collect::<Vec<_>>();
         let code_deco = vec![
             Span::raw("  "),
             Span::styled("│ ", Style::new().fg(t.subtle)),
         ];
-        let total = detail_row_count(&code, cx.width, &code_deco);
         let has_detail = !self.tool.input.is_empty();
+        let code = cx.app.expanded_details.contains_key(&key).then(|| {
+            self.tool
+                .input
+                .trim_end_matches('\n')
+                .split('\n')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+        let total = code
+            .as_deref()
+            .map_or(0, |code| detail_row_count(code, cx.width, &code_deco));
         let content = vec![Span::styled(
             header,
             Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
@@ -2344,7 +2347,7 @@ impl ExecBlock<'_> {
             header = header.with_detail(key.clone(), total, false);
         }
         out.push(header);
-        if has_detail {
+        if let Some(code) = code {
             out.extend(detail_box(
                 &code,
                 &key,

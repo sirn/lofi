@@ -377,42 +377,50 @@ fn spawn_agent_run(
     } else {
         std::mem::take(&mut app.startup_notices)
     };
-    let handle = tokio::task::spawn_local(async move {
-        let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-        for notice in &startup_notices {
-            messages.push(lofi_types::Message {
-                role: lofi_types::Role::User,
-                blocks: vec![lofi_types::ContentBlock::Text {
-                    text: notice.clone(),
-                }],
-                kind: lofi_types::PromptKind::Notice,
-            });
-        }
-        let result = std::panic::AssertUnwindSafe(agent.run_continuation(
-            &mut messages,
-            prompt,
-            prompt_kind,
-            tx,
-            cursor.as_ref(),
-            continuation,
-            Some(cancel_clone),
-            Some(preempt_clone),
-        ))
-        .catch_unwind()
-        .await;
-        if let Ok(mut stored) = history.lock() {
-            *stored = messages;
-        }
-        let error = match result {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(payload) => Some(format!(
-                "agent task panicked: {}",
-                panic_message(payload.as_ref())
-            )),
-        };
-        if let Some(error) = error {
-            let _ = err_tx.send(AgentEvent::Error(error)).await;
+    let handle = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let result = runtime.map_err(|error| format!("start agent runtime: {error}"));
+        let result = result.and_then(|runtime| {
+            runtime.block_on(async move {
+                let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
+                for notice in &startup_notices {
+                    messages.push(lofi_types::Message {
+                        role: lofi_types::Role::User,
+                        blocks: vec![lofi_types::ContentBlock::Text {
+                            text: notice.clone(),
+                        }],
+                        kind: lofi_types::PromptKind::Notice,
+                    });
+                }
+                let result = std::panic::AssertUnwindSafe(agent.run_continuation(
+                    &mut messages,
+                    prompt,
+                    prompt_kind,
+                    tx,
+                    cursor.as_ref(),
+                    continuation,
+                    Some(cancel_clone),
+                    Some(preempt_clone),
+                ))
+                .catch_unwind()
+                .await;
+                if let Ok(mut stored) = history.lock() {
+                    *stored = messages;
+                }
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(payload) => Err(format!(
+                        "agent task panicked: {}",
+                        panic_message(payload.as_ref())
+                    )),
+                }
+            })
+        });
+        if let Err(error) = result {
+            let _ = err_tx.blocking_send(AgentEvent::Error(error));
         }
     });
     install_run(app, current_run, handle, rx, cancel, preempt, None);
