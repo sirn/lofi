@@ -200,6 +200,76 @@ pub struct ExecCtx {
     pub on_job_acquired: Option<crate::JobAcquireFn>,
 }
 
+/// Long-lived owner of the sandbox thread. Guest execution is synchronous
+/// from the caller's perspective (`compile_ts`, interpreter ticks, native
+/// calls between awaits), so on a single-threaded host runtime a heavy
+/// guest run would freeze every other task — the UI included. The worker
+/// owns a dedicated thread and runtime for the agent's lifetime and runs
+/// one guest program at a time there. Background jobs' pipe pumps spawn on
+/// the same runtime, which stays driven while the worker idles, so a job
+/// outliving its `exec` keeps streaming.
+#[derive(Clone)]
+pub struct ExecWorker {
+    tx: tokio::sync::mpsc::UnboundedSender<ExecJob>,
+}
+
+struct ExecJob {
+    code: String,
+    ctx: ExecCtx,
+    opts: ExecOptions,
+    done: tokio::sync::oneshot::Sender<Result<ExecResult>>,
+}
+
+/// Spawn the sandbox worker thread. The thread exits when every clone of
+/// the returned handle is dropped.
+#[must_use]
+pub fn exec_worker() -> ExecWorker {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecJob>();
+    std::thread::spawn(move || {
+        // The worker needs its own runtime: the sandbox's tools use
+        // `spawn_blocking` and timers, and awaiting `rx` inside
+        // `block_on` keeps the spawned tasks (job pipes) driven between
+        // guest programs.
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            rt.block_on(async {
+                while let Some(job) = rx.recv().await {
+                    let done = job.done;
+                    let _ = done.send(exec(&job.code, &job.ctx, &job.opts).await);
+                }
+            });
+        }
+    });
+    ExecWorker { tx }
+}
+
+impl ExecWorker {
+    /// Queue one guest program and return the receiver holding its outcome.
+    /// Fails only when the worker thread is gone (agent dropped mid-queue).
+    ///
+    /// # Errors
+    /// Returns a sandbox error when the worker channel is closed.
+    pub fn exec(
+        &self,
+        code: &str,
+        ctx: ExecCtx,
+        opts: ExecOptions,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<ExecResult>>> {
+        let (done, done_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ExecJob {
+                code: code.to_string(),
+                ctx,
+                opts,
+                done,
+            })
+            .map_err(|_| Error::Sandbox("sandbox worker is gone".to_string()))?;
+        Ok(done_rx)
+    }
+}
+
 impl std::fmt::Debug for ExecCtx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecCtx")
@@ -343,11 +413,11 @@ async fn install_cpu_guard(
         let now = Instant::now();
         let delta = now.saturating_duration_since(last_tick);
         last_tick = now;
-        if delta < SUSPEND_THRESHOLD {
-            cpu_accumulated += delta;
-        } else {
-            cpu_accumulated = Duration::ZERO;
-        }
+        // A gap at least this long means the guest was suspended awaiting
+        // the host, so the gap is charged only up to the threshold: the
+        // budget pauses across suspensions without resetting, so a guest
+        // alternating CPU bursts with short awaits cannot evade the cap.
+        cpu_accumulated += delta.min(SUSPEND_THRESHOLD);
         if cpu_accumulated >= budget {
             intr_clone.store(INTR_TIMEOUT, Ordering::Relaxed);
             return true;
