@@ -11,7 +11,7 @@ use lofi_types::RunModel;
 use super::store::{self, SessionCursor, SessionStore};
 use crate::shell::UserShellResult;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionSink {
     store: SessionStore,
     cwd: PathBuf,
@@ -224,4 +224,5 @@ impl SessionSink {
     pub fn submit_io(&self, job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>) {
         super::io::submit(self.store.root().to_path_buf(), job);
     }
+
 }

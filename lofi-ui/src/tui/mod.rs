@@ -383,7 +383,10 @@ impl SessionState {
     /// Sync `cursor` from the sink after any sink-side mutation. The sink owns
     /// cursor creation and branch moves; this mirror exists only for reads.
     fn refresh_cursor(&mut self) {
-        self.cursor = self.sink.as_ref().and_then(|s| s.cursor().cloned());
+        self.cursor = self
+            .sink
+            .as_ref()
+            .and_then(lofi_core::session::sink::SessionSink::cursor);
     }
 
     /// Borrow the sink for a core-side session mutation. Returns `None` in
@@ -1545,6 +1548,9 @@ async fn run_loop(
             } => {
                 match ev {
                     Some(e) => {
+                        if app.session.cursor.is_none() {
+                            app.session.refresh_cursor();
+                        }
                         if let AgentEvent::UserShell {
                             command, output, exit_code, signal, duration_ms,
                             truncated, cancelled, exclude_from_context,
