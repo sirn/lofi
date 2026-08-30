@@ -200,6 +200,58 @@ pub struct ExecCtx {
     pub on_job_acquired: Option<crate::JobAcquireFn>,
 }
 
+/// Long-lived owner of the sandbox thread.
+#[derive(Clone)]
+pub struct ExecWorker {
+    tx: tokio::sync::mpsc::UnboundedSender<ExecJob>,
+}
+
+struct ExecJob {
+    code: String,
+    ctx: ExecCtx,
+    opts: ExecOptions,
+    done: tokio::sync::oneshot::Sender<Result<ExecResult>>,
+}
+
+impl ExecWorker {
+    /// Spawn a worker that exits when all handles are dropped.
+    #[must_use]
+    pub fn spawn() -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecJob>();
+        std::thread::spawn(move || {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(async {
+                    while let Some(job) = rx.recv().await {
+                        let _ = job.done.send(exec(&job.code, &job.ctx, &job.opts).await);
+                    }
+                });
+            }
+        });
+        Self { tx }
+    }
+
+    ///
+    /// # Errors
+    /// Returns a sandbox error when the worker cannot run the request.
+    pub async fn exec(&self, code: &str, ctx: ExecCtx, opts: ExecOptions) -> Result<ExecResult> {
+        let (done, done_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ExecJob {
+                code: code.to_string(),
+                ctx,
+                opts,
+                done,
+            })
+            .map_err(|_| Error::Sandbox("sandbox worker is gone".to_string()))?;
+        done_rx
+            .await
+            .map_err(|_| Error::Sandbox("sandbox worker dropped the request".to_string()))?
+    }
+}
+
 impl std::fmt::Debug for ExecCtx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecCtx")
@@ -312,15 +364,10 @@ pub fn compile_ts(src: &str) -> Result<String> {
     Ok(code)
 }
 
-// CPU-budget interrupt handler. QuickJS calls the handler every ~256
-// bytecode instructions. During continuous execution the gap between calls is
-// microseconds; when the guest `await`s a tool the interpreter suspends and
-// the gap is the tool's duration (milliseconds to hours). We accumulate only
-// the sub-threshold gaps as CPU time and reset on larger ones, so long-running
-// awaited tools don't count toward the budget. This is the only mechanism
-// that can break a synchronous tight loop blocking inside native `ctx.eval`
-// — tokio's task abort cannot preempt it because the loop never reaches an
-// `.await` point.
+// QuickJS runs the interrupt handler during bytecode execution. Awaited host
+// work creates long gaps between ticks, so each gap is capped before it is
+// charged. The accumulated budget is preserved across suspensions because
+// resetting it would let repeated CPU bursts evade the limit.
 async fn install_cpu_guard(
     rt: &AsyncRuntime,
     budget: Duration,
@@ -343,11 +390,7 @@ async fn install_cpu_guard(
         let now = Instant::now();
         let delta = now.saturating_duration_since(last_tick);
         last_tick = now;
-        if delta < SUSPEND_THRESHOLD {
-            cpu_accumulated += delta;
-        } else {
-            cpu_accumulated = Duration::ZERO;
-        }
+        cpu_accumulated += delta.min(SUSPEND_THRESHOLD);
         if cpu_accumulated >= budget {
             intr_clone.store(INTR_TIMEOUT, Ordering::Relaxed);
             return true;
@@ -363,11 +406,9 @@ async fn install_cpu_guard(
 ///   aborts with a JS exception instead of exhausting the host.
 /// - **CPU budget** — the `QuickJS` interrupt handler (installed via
 ///   `set_interrupt_handler`) is called on every interpreter tick. It
-///   measures *CPU time*, not wall-clock time: gaps between handler calls
-///   that are shorter than [`SUSPEND_THRESHOLD`] (microseconds during
-///   continuous execution) are accumulated; larger gaps (the interpreter
-///   was suspended inside an `await`ed tool) reset the accumulator. When
-///   the accumulated CPU time exceeds `opts.timeout` the handler returns
+///   approximates CPU time rather than wall-clock time by capping gaps between
+///   handler calls at [`SUSPEND_THRESHOLD`]. When the accumulated time exceeds
+///   `opts.timeout` the handler returns
 ///   *abort*, breaking out of synchronous tight loops (`while (true) {}`)
 ///   that the cooperative `tokio` runtime cannot preempt.
 /// - **Cancellation** — if `opts.cancel` is provided, setting it to `true`
@@ -1075,11 +1116,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_awaited_tool_does_not_consume_cpu_budget() {
-        // A slow `bash` call (sleep 1s) repeated many times must not accumulate
-        // CPU budget — the interpreter is suspended during each `await`, so
-        // the gap resets the accumulator. With a 500ms CPU budget and 3 rounds
-        // of 1s sleep (3s wall-clock), this would fail if the budget were
-        // wall-clock but succeeds because only JS computation counts.
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),
