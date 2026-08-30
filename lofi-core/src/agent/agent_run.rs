@@ -1492,15 +1492,17 @@ impl Agent {
                 jobs: self.jobs.clone(),
                 on_job_acquired: on_job_acquired.clone(),
             };
-            let outcome = exec(
-                &code,
-                &exec_ctx,
-                &ExecOptions {
-                    timeout: lofi_code::DEFAULT_GUEST_TIMEOUT,
-                    cancel: cancel.cloned(),
-                },
-            )
-            .await;
+            let outcome = self
+                .sandbox_worker()
+                .exec(
+                    &code,
+                    exec_ctx,
+                    ExecOptions {
+                        timeout: lofi_code::DEFAULT_GUEST_TIMEOUT,
+                        cancel: cancel.cloned(),
+                    },
+                )
+                .await;
             let captured = lock(&native_completed).drain(..).collect::<Vec<_>>();
             if let Some(s) = stats.as_deref_mut() {
                 s.native_tools.extend(captured);
