@@ -3,15 +3,8 @@
 //! context. The engine checkpoints each round through the cursor, while
 //! `--continue`/`--resume` rebuild only the indexed active lineage and the
 //! `/resume` picker can switch files mid-run.
-//! ## The `!Send` agent future
-//! `Agent::run` is not `Send`: the code-mode sandbox holds an `rquickjs`
-//! `AsyncContext` which is `!Send`/`!Sync`. The agent future cannot be
-//! `tokio::spawn`'d on the multi-thread runtime, so the whole loop runs inside
-//! a `tokio::task::LocalSet` on the current worker thread: the agent is driven
-//! by `spawn_local`, and the TUI event loop runs alongside it on the same
-//! thread. The history mutex is a `std::sync::Mutex` (never held across an
-//! await — the task clones out, runs, and writes back in two brief locks) so
-//! the sync handler can also read it.
+//! Agent runs own a separate Tokio runtime thread. Provider work and durable
+//! transcript syncs therefore cannot block terminal input or drawing.
 
 mod app_commands;
 mod app_input;
@@ -1193,10 +1186,11 @@ async fn settle_run_for_quit(run: RunHandle, timeout: Duration) -> bool {
             },
         }
     }
-    if !handle.is_finished() {
+    if aborted_by_deadline {
         handle.abort();
+    } else {
+        let _ = handle.await;
     }
-    let _ = handle.await;
     aborted_by_deadline
 }
 
@@ -1209,7 +1203,22 @@ struct RunHandle {
     /// queued prompt at the earliest opportunity — between rounds, not after
     /// the entire multi-round turn.
     preempt: Arc<AtomicBool>,
+    session_cursor: Arc<std::sync::Mutex<Option<store::SessionCursor>>>,
     user_shell: Option<(String, bool)>,
+}
+
+fn attach_run_cursor(app: &mut App, run: &RunHandle) {
+    if app.session.cursor.is_some() {
+        return;
+    }
+    let cursor = run
+        .session_cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(cursor) = cursor {
+        app.session.attach_cursor(cursor);
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1545,6 +1554,9 @@ async fn run_loop(
             } => {
                 match ev {
                     Some(e) => {
+                        if let Some(run) = current_run.as_ref() {
+                            attach_run_cursor(&mut app, run);
+                        }
                         if let AgentEvent::UserShell {
                             command, output, exit_code, signal, duration_ms,
                             truncated, cancelled, exclude_from_context,
@@ -1572,6 +1584,7 @@ async fn run_loop(
                     }
                     None => {
                         if let Some(r) = current_run.take() {
+                            attach_run_cursor(&mut app, &r);
                             let was_user_shell = r.user_shell.is_some();
                             if let Err(error) = r.handle.await {
                                 app.apply_event(AgentEvent::Error(format!(

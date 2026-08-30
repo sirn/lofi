@@ -312,6 +312,7 @@ async fn ctrl_d_on_empty_cancels_run_without_aborting() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
@@ -339,6 +340,7 @@ async fn settle_run_for_quit_waits_for_flush_then_joins() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     };
 
@@ -380,6 +382,7 @@ async fn escape_interrupts_run_and_restores_queue_like_pi() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
@@ -404,6 +407,7 @@ async fn escape_dismisses_completion_before_interrupting_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
@@ -426,6 +430,7 @@ async fn ctrl_c_in_nav_does_not_interrupt_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
@@ -448,6 +453,7 @@ async fn ctrl_c_clears_draft_without_interrupting_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
@@ -468,6 +474,7 @@ async fn ctrl_c_on_empty_input_interrupts_run() {
         rx,
         cancel: cancel.clone(),
         preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
         user_shell: None,
     });
 
