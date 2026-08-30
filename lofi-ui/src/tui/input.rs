@@ -356,7 +356,7 @@ fn spawn_agent_run(
     } else {
         std::mem::take(&mut app.startup_notices)
     };
-    // Agent orchestration performs durable transcript syncs. Its own runtime
+    // The agent run loop performs durable transcript syncs. Its own runtime
     // keeps those blocking writes off the current-thread TUI runtime.
     let handle = tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
