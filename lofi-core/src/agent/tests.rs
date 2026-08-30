@@ -139,6 +139,7 @@ fn model() -> Model {
 
 fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent {
     Agent {
+        exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
         provider: Arc::new(MockProvider {
             rounds: std::sync::Mutex::new(rounds),
         }),
@@ -1687,6 +1688,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         ]
     };
     let agent = Agent {
+        exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
         provider: Arc::new(MockProvider {
             rounds: std::sync::Mutex::new(vec![tool_round(10), tool_round(500)]),
         }),
@@ -1761,6 +1763,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         ]]),
     });
     let agent = Agent {
+        exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
         provider: provider.clone(),
         model: {
             let mut m = model();

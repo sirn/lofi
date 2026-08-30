@@ -16,7 +16,7 @@ use crate::models::ModelRegistry;
 use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use lofi_code::policy::ResolvedPolicy;
-use lofi_code::{exec, BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
+use lofi_code::{BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
 use lofi_providers::MessageAssembler;
 use lofi_providers::ToolSchema;
@@ -201,6 +201,10 @@ pub struct Agent {
     /// spawned in one round is visible to the next. The host shuts down
     /// survivors when the session ends.
     jobs: lofi_code::tools::JobRegistry,
+    /// Session-shared sandbox thread, born with the first exec. Guest work
+    /// on the single-threaded host runtime would freeze the UI; the worker
+    /// keeps the sandbox off it for the agent's lifetime.
+    exec_worker: std::sync::Arc<std::sync::OnceLock<lofi_code::ExecWorker>>,
 }
 
 impl Agent {
@@ -247,6 +251,7 @@ impl Agent {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
+            exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -280,6 +285,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            exec_worker: self.exec_worker.clone(),
         }
     }
 
@@ -303,6 +309,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            exec_worker: self.exec_worker.clone(),
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
@@ -329,6 +336,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir,
             jobs: self.jobs.clone(),
+            exec_worker: self.exec_worker.clone(),
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
@@ -344,6 +352,11 @@ impl Agent {
             confirm_tx: Some(confirm_tx),
             ..self.clone()
         }
+    }
+
+    /// The session's sandbox thread, created with the first guest program.
+    fn sandbox_worker(&self) -> &lofi_code::ExecWorker {
+        self.exec_worker.get_or_init(lofi_code::exec_worker)
     }
 
     #[must_use]
