@@ -54,6 +54,11 @@ pub trait Provider: Send + Sync {
 /// # Errors
 /// Returns [`Error::Http`] if the shared HTTP client cannot be constructed.
 pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
+    if cfg.stream_idle_timeout_ms == 0 {
+        return Err(Error::Config(
+            "stream_idle_timeout_ms must be greater than zero".to_string(),
+        ));
+    }
     let base_url = cfg
         .base_url
         .as_deref()
@@ -467,6 +472,16 @@ mod tests {
             c.api_type = Some(api);
             assert!(open(api, &c).is_ok());
         }
+    }
+
+    #[test]
+    fn open_rejects_zero_stream_idle_timeout() {
+        let mut c = cfg();
+        c.stream_idle_timeout_ms = 0;
+        let Err(error) = open(Api::OpenAiCompletions, &c) else {
+            panic!("zero stream idle timeout should fail");
+        };
+        assert!(matches!(error, Error::Config(message) if message.contains("greater than zero")));
     }
 
     #[test]
