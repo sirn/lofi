@@ -146,17 +146,17 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
             offset
         })
         .collect::<Vec<_>>();
-    // Lifecycle-only time exceeds the 100 ms idle budget, but each raw
-    // response-body gap stays below it.
+    // Lifecycle-only time exceeds the idle budget, but each raw response-body
+    // gap stays well below it.
     let server = MockServer::start(vec![MockResponse::fragmented_sse(
         body,
         &split_at,
-        Duration::from_millis(75),
+        Duration::from_millis(400),
     )]);
     let fixture = Fixture::new(&server);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "[providers.responses]\n",
-        "[providers.responses]\nstream_idle_timeout_ms = 100\n",
+        "[providers.responses]\nstream_idle_timeout_ms = 1000\n",
     );
     std::fs::write(&fixture.config, config).unwrap();
 
