@@ -187,11 +187,9 @@ async fn collect_text(
 ) -> Result<String> {
     let mut text = String::new();
     loop {
-        let ev = match tokio::time::timeout(super::DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await
-        {
-            Ok(Some(ev)) => ev,
-            Ok(None) => break,
-            Err(_) => return Err(Error::Provider("stream idle timeout".into())),
+        let ev = match stream.next().await {
+            Some(ev) => ev,
+            None => break,
         };
         match ev {
             Ok(lofi_types::StreamingEvent::TextDelta(d)) => text.push_str(&d),
