@@ -260,13 +260,17 @@ impl App {
             "scroll page (Input); move cursor page (Nav)",
         ));
         lines.push(info_kv(t, "Tab", "switch mode: Input ↔ Navigate"));
-        lines.push(info_kv(t, "Esc", "clear input"));
+        lines.push(info_kv(t, "Esc", "cancel run; otherwise clear input"));
         lines.push(info_kv(
             t,
             "Ctrl+C",
-            "cancel · clear · 2× quit (Input); back (Nav)",
+            "clear · cancel · 2× quit (Input); back (Nav)",
         ));
-        lines.push(info_kv(t, "Ctrl+D", "delete char; quit on empty"));
+        lines.push(info_kv(
+            t,
+            "Ctrl+D",
+            "delete char; cancel run or quit on empty",
+        ));
         lines.push(info_kv(
             t,
             "!command",

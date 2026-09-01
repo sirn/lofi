@@ -21,11 +21,7 @@ type RaceInner = std::result::Result<
 type RaceOutcome = std::result::Result<RaceInner, tokio::time::error::Elapsed>;
 
 impl BuiltinTools {
-    /// Output is tail-truncated to 4 KB / 20 lines (whichever is hit
-    /// first), keeping the end where errors and final results land. When
-    /// truncated, the full captured output is written to a temp file under
-    /// the session tmp dir and its absolute path is included in the notice
-    /// so the model can `lofi.read` it in pages (the tmp dir is a read root).
+    /// Evaluate the command against the configured and session shell policy.
     /// Auto-mode emits an evaluating confirmation request immediately and
     /// races its decision against a manual response. Presentation and timing
     /// policy belong to consumers of that event.
@@ -326,10 +322,11 @@ impl BuiltinTools {
         self.bash_result_json(&cmd, timeout_ms, started, guard, result)
     }
 
-    /// Tail-truncate `full` to 4 KB / 20 lines and, when truncation occurs,
-    /// write the full output to a temp file under the session tmp dir and append
-    /// a notice pointing at it. `pipe_capped` indicates the pipe-level safety cap
-    /// (8 MiB) was hit, in which case the temp file holds only what was captured.
+    /// Tail-truncate `full` to the configured visible-output cap and, when
+    /// truncation occurs, write the full output to a temp file under the session
+    /// tmp dir and append a notice pointing at it. `pipe_capped` indicates the
+    /// pipe-level safety cap (8 MiB) was hit, in which case the temp file holds
+    /// only what was captured.
     fn format_bash_output(&self, full: &str, pipe_capped: bool) -> String {
         // A command's conventional final newline terminates its last line; it
         // is not an additional blank line and must not consume one tail slot.
