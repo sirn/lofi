@@ -98,32 +98,28 @@ pub fn compact(events: &[SessionEvent], opts: &CompactOptions) -> Option<Compact
         None => 0,
     };
 
-    let mut live: Vec<LiveMessage> = Vec::new();
     let mut native_by_parent: HashMap<String, Vec<NativeToolRecord>> = HashMap::new();
-    let mut skipping = false;
-    for &i in &path[live_start..] {
-        match &events[i].kind {
-            SessionEventKind::TurnFailed { .. } => skipping = true,
-            SessionEventKind::TurnEnd { .. } => skipping = false,
-            SessionEventKind::Message(_) | SessionEventKind::UserShell { .. } if !skipping => {
-                if let Some(message) =
-                    crate::session::replay::agent_message_for_event(&events[i].kind)
-                {
-                    live.push(LiveMessage {
-                        event_id: events[i].id.clone(),
-                        message,
-                    });
-                }
-            }
-            SessionEventKind::NativeTool(rec) => {
-                native_by_parent
-                    .entry(rec.parent.clone())
-                    .or_default()
-                    .push(rec.clone());
-            }
-            _ => {}
+    for &index in &path[live_start..] {
+        if let SessionEventKind::NativeTool(record) = &events[index].kind {
+            native_by_parent
+                .entry(record.parent.clone())
+                .or_default()
+                .push(record.clone());
         }
     }
+
+    let mut filter = crate::session::replay::LeafFirstContextFilter::default();
+    let mut live: Vec<LiveMessage> = path[live_start..]
+        .iter()
+        .rev()
+        .filter_map(|&index| {
+            filter.push(&events[index].kind).map(|message| LiveMessage {
+                event_id: events[index].id.clone(),
+                message,
+            })
+        })
+        .collect();
+    live.reverse();
 
     // When there is a prior compaction on the active path, the on-disk
     // transcript stores the *original* unedited messages from the old kept
@@ -1774,24 +1770,53 @@ mod tests {
     }
     fn events_of(msgs: &[Message]) -> Vec<SessionEvent> {
         let mut out = Vec::with_capacity(msgs.len());
-        for (i, m) in msgs.iter().enumerate() {
-            out.push(SessionEvent {
-                id: format!("e{i}"),
-                parent_id: if i == 0 {
-                    None
-                } else {
-                    Some(format!("e{}", i - 1))
-                },
-                kind: SessionEventKind::Message(m.clone()),
-            });
+        for message in msgs {
+            push_event(&mut out, SessionEventKind::Message(message.clone()));
         }
         out
+    }
+
+    fn push_event(events: &mut Vec<SessionEvent>, kind: SessionEventKind) {
+        events.push(SessionEvent {
+            id: format!("e{}", events.len()),
+            parent_id: events.last().map(|event| event.id.clone()),
+            kind,
+        });
     }
 
     #[test]
     fn compact_returns_none_for_too_few() {
         let events = events_of(&[user("hi"), assistant("hello")]);
         assert!(compact(&events, &CompactOptions::default()).is_none());
+    }
+
+    #[test]
+    fn compact_counts_system_boundary_without_summarizing_it() {
+        let events = events_of(&[
+            Message {
+                role: Role::System,
+                blocks: vec![ContentBlock::Text {
+                    text: "instructions".into(),
+                }],
+                kind: PromptKind::default(),
+            },
+            user("prompt one"),
+            assistant("answer one"),
+            user("prompt two"),
+            assistant("answer two"),
+            user("latest prompt"),
+            assistant("latest answer"),
+        ]);
+
+        let compacted = compact(&events, &CompactOptions::default())
+            .expect("the system boundary contributes to the history guard");
+
+        assert_eq!(compacted.summarized_count, 5);
+        assert!(!compacted.summary.contains("instructions"));
+        assert_eq!(
+            compacted.kept_messages.first().map(user_text).as_deref(),
+            Some("latest prompt")
+        );
     }
 
     #[test]
@@ -1832,6 +1857,92 @@ mod tests {
         assert_eq!(compacted.summarized_count, 2);
         assert_eq!(compacted.represented_count, 7);
         assert_eq!(compacted.kept_count, 0);
+    }
+
+    #[test]
+    fn compact_excludes_failed_turn_without_dropping_the_next_success() {
+        let mut events = events_of(&[
+            user("baseline prompt one"),
+            assistant("baseline answer one"),
+            user("baseline prompt two"),
+            assistant("baseline answer two"),
+            assistant("baseline conclusion"),
+        ]);
+        push_event(
+            &mut events,
+            SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: lofi_types::Usage::default(),
+                stop_reason: None,
+            },
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(user("failed prompt")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(assistant("failed partial")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::TurnFailed {
+                model: "m".into(),
+                elapsed_ms: 1,
+                error: "boom".into(),
+                cost: 0.0,
+                usage: lofi_types::Usage::default(),
+            },
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(user("successful prompt")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(assistant("successful answer")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: lofi_types::Usage::default(),
+                stop_reason: None,
+            },
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(user("latest prompt")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::Message(assistant("latest answer")),
+        );
+        push_event(
+            &mut events,
+            SessionEventKind::TurnEnd {
+                model: "m".into(),
+                elapsed_ms: 1,
+                cost: 0.0,
+                usage: lofi_types::Usage::default(),
+                stop_reason: None,
+            },
+        );
+
+        let compacted = compact(&events, &CompactOptions::default()).expect("some compaction");
+
+        assert!(compacted.summary.contains("successful prompt"));
+        assert!(compacted.summary.contains("successful answer"));
+        assert!(!compacted.summary.contains("failed prompt"));
+        assert!(!compacted.summary.contains("failed partial"));
+        assert_eq!(
+            compacted.kept_messages.first().map(user_text).as_deref(),
+            Some("latest prompt")
+        );
     }
 
     #[test]

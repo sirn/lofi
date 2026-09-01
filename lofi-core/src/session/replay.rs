@@ -396,82 +396,140 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct LeafFirstContextFilter {
+    skipping_failed_turn: bool,
+    discarding_assistant: bool,
+}
+
+impl LeafFirstContextFilter {
+    pub(crate) fn push(&mut self, kind: &SessionEventKind) -> Option<Message> {
+        match kind {
+            SessionEventKind::Compaction { .. }
+            | SessionEventKind::TurnEnd { .. }
+            | SessionEventKind::TurnCancelled { .. } => {
+                self.skipping_failed_turn = false;
+                self.discarding_assistant = false;
+                None
+            }
+            SessionEventKind::TurnFailed { .. } => {
+                self.skipping_failed_turn = true;
+                self.discarding_assistant = false;
+                None
+            }
+            SessionEventKind::RoundDiscarded { .. } if !self.skipping_failed_turn => {
+                self.discarding_assistant = true;
+                None
+            }
+            SessionEventKind::Message(message) if message.role == Role::System => {
+                Some(message.clone())
+            }
+            SessionEventKind::Message(_) | SessionEventKind::UserShell { .. }
+                if !self.skipping_failed_turn =>
+            {
+                let message = agent_message_for_event(kind)?;
+                if self.discarding_assistant {
+                    if message.role == Role::Assistant {
+                        return None;
+                    }
+                    self.discarding_assistant = false;
+                }
+                Some(message)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Leaf-first durable-event projection into model context. Both complete
+/// in-memory replay and the bounded file-backed restore path use this state
+/// machine so compaction and system-message boundaries cannot diverge.
+#[derive(Default)]
+pub(crate) struct AgentHistoryProjection {
+    messages: Vec<Message>,
+    latest_system: Option<Message>,
+    summary: Option<Message>,
+    boundary: Option<String>,
+    filter: LeafFirstContextFilter,
+    done: bool,
+}
+
+impl AgentHistoryProjection {
+    pub(crate) fn push(&mut self, event: &SessionEvent) {
+        if self.done {
+            return;
+        }
+        if let SessionEventKind::Compaction {
+            summary,
+            first_kept_entry_id,
+            ..
+        } = &event.kind
+        {
+            // Checkpoint copies omit TurnEnd, so compaction must end a failed-turn skip.
+            self.filter.push(&event.kind);
+            if !summary.is_empty() && self.summary.is_none() {
+                self.summary = Some(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text {
+                        text: summary.clone(),
+                    }],
+                    kind: PromptKind::default(),
+                });
+            }
+            if first_kept_entry_id.is_empty() {
+                self.done = true;
+            } else {
+                self.boundary = Some(first_kept_entry_id.clone());
+            }
+            return;
+        }
+
+        let Some(message) = self.filter.push(&event.kind) else {
+            return;
+        };
+        if message.role == Role::System {
+            if self.latest_system.is_none() {
+                self.latest_system = Some(message);
+            }
+            return;
+        }
+        let boundary_hit = self
+            .boundary
+            .as_ref()
+            .is_some_and(|boundary| boundary == &event.id);
+        self.messages.push(message);
+        if boundary_hit {
+            self.done = true;
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn finish(mut self) -> Vec<Message> {
+        self.messages.reverse();
+        let mut messages = Vec::with_capacity(
+            self.messages.len()
+                + usize::from(self.latest_system.is_some())
+                + usize::from(self.summary.is_some()),
+        );
+        messages.extend(self.latest_system);
+        messages.extend(self.summary);
+        messages.extend(self.messages);
+        messages
+    }
+}
+
 /// Rebuild the agent-visible message history from the durable log along the
-/// selected leaf. Mirrors `compacted_history`: compaction summary first, then
-/// the kept tail, stopping at a `TurnFailed` boundary.
+/// selected leaf. Mirrors `compacted_history`: current system prompt first,
+/// then the compaction summary and retained tail. Failed and discarded rounds
+/// remain visible in the transcript but are excluded from this model context.
 #[must_use]
 pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     let path = store::active_path_from_leaf(events);
-    let mut out: Vec<(String, Message)> = Vec::new();
-    let mut skipping = false;
-    // A discarded round ends at its marker: the leaf-first walk skips the
-    // assistant messages older than it until a non-assistant message
-    // resumes. Consecutive markers keep the flag armed.
-    let mut discarding_assistant = false;
-    // The compaction summary is captured when the Compaction marker is seen
-    // and prepended to the result so it leads the history. Held aside because
-    // the walk is leaf-first; injecting it inline would place the summary
-    // after the kept tail once reversed, and mid-stream when a force-continued
-    // turn follows the marker.
-    let mut summary_msg: Option<Message> = None;
-    let mut boundary: Option<String> = None;
-    // Iterate leaf-first so the `TurnFailed` boundary is seen before its
-    // ancestors; `path` is root-first, so reverse.
-    for &i in path.iter().rev() {
-        match &events[i].kind {
-            SessionEventKind::Compaction {
-                summary,
-                first_kept_entry_id,
-                ..
-            } => {
-                if !summary.is_empty() {
-                    summary_msg = Some(Message {
-                        role: Role::User,
-                        blocks: vec![ContentBlock::Text {
-                            text: summary.clone(),
-                        }],
-                        kind: PromptKind::default(),
-                    });
-                }
-                if first_kept_entry_id.is_empty() {
-                    break;
-                }
-                boundary = Some(first_kept_entry_id.clone());
-            }
-            SessionEventKind::TurnFailed { .. } => {
-                skipping = true;
-            }
-            SessionEventKind::TurnEnd { .. } => {
-                skipping = false;
-            }
-            SessionEventKind::RoundDiscarded { .. } => {
-                discarding_assistant = true;
-            }
-            SessionEventKind::Message(_) | SessionEventKind::UserShell { .. } if !skipping => {
-                let Some(message) = agent_message_for_event(&events[i].kind) else {
-                    continue;
-                };
-                if discarding_assistant {
-                    if message.role == Role::Assistant {
-                        continue;
-                    }
-                    discarding_assistant = false;
-                }
-                let boundary_hit = boundary.as_ref().is_some_and(|b| b == &events[i].id);
-                out.push((events[i].id.clone(), message));
-                if boundary_hit {
-                    break;
-                }
-            }
-            _ => {}
-        }
+    let mut projection = AgentHistoryProjection::default();
+    for &index in path.iter().rev() {
+        projection.push(&events[index]);
     }
-    out.reverse();
-    let mut messages: Vec<Message> = out.into_iter().map(|(_, m)| m).collect();
-    if let Some(s) = summary_msg {
-        messages.insert(0, s);
-    }
-    messages
+    projection.finish()
 }
 
 /// Index-driven projections for resume and the status line. All operate on the
@@ -788,6 +846,33 @@ mod tests {
         }
     }
 
+    fn turn_failed() -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnFailed {
+                model: "m".into(),
+                elapsed_ms: 0,
+                error: "boom".into(),
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        }
+    }
+
+    fn turn_cancelled() -> SessionEvent {
+        SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::TurnCancelled {
+                model: "m".into(),
+                elapsed_ms: 0,
+                cost: 0.0,
+                usage: Usage::default(),
+            },
+        }
+    }
+
     #[test]
     fn round_discarded_keeps_content_visible_but_excludes_it_from_context() {
         let mut events = vec![
@@ -845,6 +930,57 @@ mod tests {
             ["go", "notice", "notice2", "done answer"],
             "each marker drops the assistant messages it ends with"
         );
+    }
+
+    #[test]
+    fn discarded_round_in_failed_turn_does_not_hide_prior_reply() {
+        let mut events = vec![
+            user_msg("previous prompt"),
+            assistant_msg("previous reply"),
+            turn_end(),
+            user_msg("failed prompt"),
+            assistant_msg("discarded attempt"),
+            round_discarded("loop"),
+            user_msg_with_kind("retry notice", lofi_types::PromptKind::Notice),
+            assistant_msg("failed partial"),
+            turn_failed(),
+        ];
+        chain(&mut events);
+
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+
+        assert_eq!(texts, ["previous prompt", "previous reply"]);
+    }
+
+    #[test]
+    fn failed_turn_does_not_hide_prior_cancelled_turn() {
+        let mut events = vec![
+            user_msg("cancelled prompt"),
+            assistant_msg("cancelled partial"),
+            turn_cancelled(),
+            user_msg("failed prompt"),
+            assistant_msg("failed partial"),
+            turn_failed(),
+        ];
+        chain(&mut events);
+
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+
+        assert_eq!(texts, ["cancelled prompt", "cancelled partial"]);
     }
 
     #[test]

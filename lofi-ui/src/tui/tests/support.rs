@@ -86,6 +86,19 @@ pub(super) fn assistant(text: &str) -> Message {
     }
 }
 
+pub(super) fn blank_events<I: IntoIterator<Item = SessionEventKind>>(
+    kinds: I,
+) -> Vec<SessionEvent> {
+    kinds
+        .into_iter()
+        .map(|kind| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        })
+        .collect()
+}
+
 pub(super) fn sev_chain<I: IntoIterator<Item = SessionEventKind>>(kinds: I) -> Vec<SessionEvent> {
     let mut out = Vec::new();
     let mut parent: Option<String> = None;

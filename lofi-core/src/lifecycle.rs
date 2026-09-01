@@ -396,71 +396,12 @@ impl AgentLifecycle {
 }
 
 fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Result<Vec<Message>> {
-    let mut messages = Vec::new();
-    let mut latest_system: Option<Message> = None;
-    let mut skipping_failed_turn = false;
-    let mut summary = None;
+    let mut projection = crate::session::replay::AgentHistoryProjection::default();
     cursor.visit_events(leaf_first_offsets, |event| {
-        match event.kind {
-            SessionEventKind::Compaction { summary: text, .. } if !text.is_empty() => {
-                summary = Some(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text { text }],
-                    kind: PromptKind::default(),
-                });
-            }
-            SessionEventKind::TurnFailed { .. } => skipping_failed_turn = true,
-            SessionEventKind::TurnEnd { .. } => skipping_failed_turn = false,
-            SessionEventKind::Message(message) if !skipping_failed_turn => {
-                // Leaf→root, the first (nearest) System event is the one in
-                // force for this context; hoist it to the head instead of
-                // leaving it inline. Older System events further up the chain
-                // are pre-compaction context — never re-surfaced.
-                if message.role == Role::System && latest_system.is_none() {
-                    latest_system = Some(message);
-                } else {
-                    messages.push(message);
-                }
-            }
-            SessionEventKind::UserShell {
-                command,
-                output,
-                exit_code,
-                signal,
-                duration_ms,
-                truncated,
-                cancelled,
-                exclude_from_context: false,
-            } if !skipping_failed_turn => {
-                let result = crate::UserShellResult::from_session(
-                    command,
-                    output,
-                    exit_code,
-                    signal,
-                    duration_ms,
-                    truncated,
-                    cancelled,
-                );
-                messages.push(Message {
-                    role: Role::User,
-                    blocks: vec![ContentBlock::Text {
-                        text: result.context_text(),
-                    }],
-                    kind: PromptKind::default(),
-                });
-            }
-            _ => {}
-        }
+        projection.push(&event);
         Ok(())
     })?;
-    messages.reverse();
-    if let Some(summary) = summary {
-        messages.insert(0, summary);
-    }
-    if let Some(system) = latest_system {
-        messages.insert(0, system);
-    }
-    Ok(messages)
+    Ok(projection.finish())
 }
 
 fn message_heap_bytes(message: &Message) -> usize {
@@ -727,6 +668,96 @@ mod tests {
             reconciliation.stale.is_empty(),
             "a job with a JobFinished marker elsewhere must not be stale: {:?}",
             reconciliation.stale
+        );
+    }
+
+    #[test]
+    fn restore_history_keeps_compacted_tail_before_failed_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let kept = vec![
+            Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text {
+                    text: "kept prompt".into(),
+                }],
+                kind: PromptKind::default(),
+            },
+            Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Text {
+                    text: "kept reply".into(),
+                }],
+                kind: PromptKind::default(),
+            },
+        ];
+        cursor
+            .append_compaction(
+                &kept,
+                "summary",
+                &[String::new(), String::new()],
+                CompactionCounts {
+                    summarized: 2,
+                    represented: 2,
+                    kept: 2,
+                },
+            )
+            .unwrap();
+        cursor.append_system("instructions").unwrap();
+        let mut failed = vec![
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::User,
+                    blocks: vec![ContentBlock::Text {
+                        text: "failed prompt".into(),
+                    }],
+                    kind: PromptKind::default(),
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Message(Message {
+                    role: Role::Assistant,
+                    blocks: vec![ContentBlock::Text {
+                        text: "failed partial".into(),
+                    }],
+                    kind: PromptKind::default(),
+                }),
+            },
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnFailed {
+                    model: "p/m".into(),
+                    elapsed_ms: 5,
+                    error: "boom".into(),
+                    cost: 0.0,
+                    usage: Usage::default(),
+                },
+            },
+        ];
+        cursor.append_events(&mut failed).unwrap();
+        let snapshot = cursor.snapshot().unwrap();
+        let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+
+        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+
+        let history = lifecycle.shared_history();
+        let messages = history.lock().unwrap();
+        let texts: Vec<String> = messages
+            .iter()
+            .map(|message| match &message.blocks[..] {
+                [ContentBlock::Text { text }] => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["instructions", "summary", "kept prompt", "kept reply"]
         );
     }
 

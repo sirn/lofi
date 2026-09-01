@@ -2,7 +2,7 @@
 
 Lofi's process-level test target is defined in `lofi/Cargo.toml` and implemented in `lofi/e2e/`. It runs the Cargo-built `lofi` binary in print mode or through a pseudo-terminal. Tests use temporary configuration, policy, state, and workspace directories plus a local mock model server. They do not need API keys or external network access.
 
-The current target contains 171 tests.
+The current target contains 172 tests.
 
 ## Run the suite
 
@@ -52,10 +52,10 @@ The counts below come from the current Cargo test target.
 | `configuration` | 7 | Automatic approval, resolved and redacted environment values, model discovery and cache fallback, recovery policy, shell-policy modes, and filesystem secret boundaries. |
 | `native_tools` | 16 | File, search, docs, skill, recall, result, image, and background-job APIs, including interactive terminal jobs, typed input, key sequences, signals, EOF, dimensions, and idle reporting. |
 | `providers` | 11 | All four provider transports, fragmented SSE, custom headers, no-auth requests, premature EOF, response-body idle timeout and retry, lifecycle keepalive chunks, stream errors, tiers, images, and signed reasoning. |
-| `sessions` | 51 | Creation, resume, branches, job ownership, failed and cancelled turns, compaction, truncation recovery, transcript repair, state permissions, temporary leases, large transcripts, and restored navigation. |
+| `sessions` | 52 | Creation, resume, branches, job ownership, failed and cancelled turns, compaction, truncation recovery, transcript repair, state permissions, temporary leases, large transcripts, and restored navigation. |
 | `tools` | 10 | Native tool cycles for all providers, parallel and interleaved calls, malformed arguments, thinking signatures, cache breakpoints, compaction, and resume. |
 | `tui` | 39 | Transcript details, slash commands, pickers, policy dialogs, queued prompts, user-shell streaming and cancellation, selection and copy, resize, shutdown, and terminal restoration. |
-| **Total** | **171** | Real-binary behavior in print mode and pseudo-terminals. |
+| **Total** | **172** | Real-binary behavior in print mode and pseudo-terminals. |
 
 ### Provider and stream coverage
 

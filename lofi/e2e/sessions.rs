@@ -297,6 +297,87 @@ fn tree_rollback_excludes_future_turns_and_preserves_the_old_branch() {
     assert!(transcript.contains("rollback replacement prompt"));
 }
 
+#[test]
+fn tree_rollback_after_compacted_failure_keeps_retained_context() {
+    let server = MockServer::start(vec![
+        text_response("tree compact answer one"),
+        text_response("tree compact answer two"),
+        text_response("tree compact answer three"),
+        text_response("tree compact retained answer"),
+        MockResponse::error(401, "tree compact failed turn"),
+        text_response("tree compact n+8 answer"),
+        text_response("tree compact n+9 answer"),
+        text_response("tree compact rollback answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    for (prompt, answer) in [
+        ("tree compact prompt one", "tree compact answer one"),
+        ("tree compact prompt two", "tree compact answer two"),
+        ("tree compact prompt three", "tree compact answer three"),
+        (
+            "tree compact retained prompt",
+            "tree compact retained answer",
+        ),
+    ] {
+        tui.submit(prompt);
+        tui.wait_for(answer, WAIT);
+        tui.clear_output();
+    }
+    tui.submit("/compact");
+    tui.wait_for("Compacted", WAIT);
+
+    tui.submit("tree compact failed prompt");
+    tui.wait_for("tree compact failed turn", WAIT);
+    fixture.wait_for_event_count("turn_failed", 1);
+    tui.submit("tree compact n+8 prompt");
+    tui.wait_for("tree compact n+8 answer", WAIT);
+    tui.submit("tree compact n+9 prompt");
+    tui.wait_for("tree compact n+9 answer", WAIT);
+
+    tui.clear_output();
+    tui.submit("/tree");
+    tui.wait_for("Roll back to a turn", WAIT);
+    tui.wait_for("tree compact n+8 prompt", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    tui.send(b"\x1b[A\x1b[A\x1b[A\r");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.send(b"\r");
+    tui.wait_for("tree compact rollback answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 8);
+    let request: serde_json::Value = serde_json::from_str(&requests.last().unwrap().body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    for expected in [
+        "tree compact retained prompt",
+        "tree compact retained answer",
+        "tree compact n+8 prompt",
+    ] {
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["content"] == expected),
+            "missing {expected:?} from rollback request: {messages:?}"
+        );
+    }
+    for abandoned in ["tree compact failed prompt", "tree compact n+9 prompt"] {
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["content"] == abandoned),
+            "rollback request retained {abandoned:?}: {messages:?}"
+        );
+    }
+    assert!(messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("This summary captures work done"))
+    }));
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn resuming_a_large_transcript_releases_replay_memory() {
