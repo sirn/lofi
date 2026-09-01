@@ -12,9 +12,20 @@ Any configuration value can be overridden per invocation with an environment var
 LOFI__RETRY__MAX_RETRIES=0 LOFI__CREDENTIAL__TIMEOUT_MS=1000 lofi
 ```
 
-The `[credential] timeout_ms` setting controls how long a `!command` credential helper may run before it is rejected (default: 30000).
+The `[credential] timeout_ms` setting controls how long a `!command` credential helper may run before it is rejected (default: 30000). Credential helper output is bounded and a timeout or failure kills the helper's process group.
 
 When `config.toml` is absent, lofi falls back to built-in OpenAI Responses, Anthropic Messages, and Google Generative AI definitions. They become available when `$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, or `$GEMINI_API_KEY` is set. An explicit config file replaces that built-in provider tree.
+
+## UI theme
+
+Set `[ui] theme` to `auto`, `light`, or `dark`:
+
+```toml
+[ui]
+theme = "auto"
+```
+
+The default is `auto`. It queries the terminal background with OSC 11 and selects a matching palette. If the terminal does not reply, Lofi uses the dark palette. The `/theme` command changes the palette only for the current session.
 
 ## Minimal configuration
 
@@ -83,7 +94,7 @@ Provider used when no model is selected on the command line. Its first available
 
 Default model as `provider/id`. This takes precedence over `default_provider`.
 
-`--model provider/id[:level]` overrides both values for one invocation.
+`--model provider/id[:level][@tier]` overrides both values for one invocation. The provider qualifier is required. The thinking and service-tier suffixes are optional.
 
 ```toml
 default_provider = "anthropic"
@@ -191,6 +202,10 @@ Each `[providers.<name>]` table defines authentication, protocol routing, and it
 | `service_tier` | string | inherited | Provider-level service-tier default. |
 | `service_tiers` | string array | empty | Provider capability metadata. Declare supported tiers on each static model. |
 | `pricing_convention` | string | `per_token` | Remote pricing is `per_token` or `per_million`. |
+| `pricing_field_mappings` | table | standard `pricing.*` paths | Dot paths for discovered input, output, cache, and per-request prices. |
+| `api_types` | table | empty | Per-protocol endpoint paths and optional pricing mappings for a shared host. |
+| `auto_models` | table | none | Remote model discovery configuration. |
+| `auto_continue` | table | inherited | Provider-level `lost_tool_call` and `intent` overrides. |
 
 Supported protocols are:
 
@@ -279,6 +294,7 @@ output_price = 10.00
 | `cache_read_price` | number | USD per million cache-read tokens. |
 | `cache_write_price` | number | USD per million cache-write tokens. |
 | `per_request_price` | number | Flat USD cost per request. |
+| `auto_continue` | table | Model-level `lost_tool_call` and `intent` overrides. |
 
 ### OpenAI Chat Completions example
 
@@ -627,6 +643,44 @@ Each rule has a required `match` string and one of these matching modes:
 | `prefix` | Match the beginning of the command at a word boundary. |
 | `substring` | Match a contiguous token sequence anywhere in the command. |
 | `args` | Match a command prefix and required argument tokens. |
+
+### Command wrappers
+
+The evaluator extracts commands nested inside common wrappers such as `sh -c`, `env`, `xargs`, and `podman run`. Add a wrapper when a project-specific command carries another command as an argument:
+
+```toml
+[[wrappers]]
+name = "project-shell"
+kind = "shell_c"
+```
+
+Supported `kind` values are:
+
+| Kind | Inner command |
+| --- | --- |
+| `shell_c` | The argument after `-c`. |
+| `utility_operand` | The first non-option operand and all following arguments. |
+| `env` | The command after options and environment assignments. |
+| `xargs` | The command operand and all following arguments. |
+| `docker_run` | The container command after `run`, `exec`, or `create`; also applies to compatible tools such as Podman. |
+
+Built-in wrappers already cover common shells, privilege and utility wrappers, `env`, `xargs`, Docker, and Podman. Custom entries extend that set.
+
+### Redirects and heredocs
+
+Redirect and heredoc decisions are independent from command matching. Their default action is `ask`:
+
+```toml
+[redirects]
+action = "ask"
+safe_targets = ["/dev/null"]
+allow_fd_dup = false
+
+[heredocs]
+action = "ask"
+```
+
+`action` is `allow`, `ask`, or `deny`. A redirect to a string in `safe_targets` bypasses the redirect action. Set `allow_fd_dup = true` to permit descriptor duplication such as `2>&1`. Heredoc bodies use the separate `heredocs.action` value. Bare `&`, `nohup`, `setsid`, and `disown` are always denied; use `lofi.jobSpawn` for background work.
 
 ### Automatic approval
 
