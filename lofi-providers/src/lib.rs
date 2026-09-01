@@ -52,7 +52,8 @@ pub trait Provider: Send + Sync {
 /// `base_url`; per-model endpoint URLs are resolved earlier by the model
 /// registry. An unknown `api` is a config error rather than a transport one.
 /// # Errors
-/// Returns [`Error::Http`] if the shared HTTP client cannot be constructed.
+/// Returns [`Error::Config`] for an invalid stream timeout or [`Error::Http`]
+/// if the shared HTTP client cannot be constructed.
 pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
     if cfg.stream_idle_timeout_ms == 0 {
         return Err(Error::Config(
