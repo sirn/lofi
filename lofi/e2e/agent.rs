@@ -186,15 +186,29 @@ fn every_supported_thinking_level_reaches_the_provider_request() {
 
 #[test]
 fn openai_responses_streams_reasoning_text_and_usage_through_the_tui() {
-    let server = MockServer::start(vec![responses_response(
-        "responses thinking marker",
-        "responses answer marker",
-    )]);
+    let lifecycle = serde_json::json!({ "type": "response.in_progress" });
+    let response = responses_response("responses thinking marker", "responses answer marker")
+        .with_sse_prefix_pause(
+            format!("data: {lifecycle}\n\n"),
+            std::time::Duration::from_secs(31),
+        );
+    let server = MockServer::start(vec![response]);
     let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "[providers.responses]\n",
+        "[providers.responses]\nresponse_start_timeout_ms = 2000\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
     let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
 
+    let started = std::time::Instant::now();
     tui.submit("responses prompt marker");
-    tui.wait_for("responses answer marker", WAIT);
+    tui.wait_for(
+        "responses answer marker",
+        std::time::Duration::from_secs(45),
+    );
+
+    assert!(started.elapsed() >= std::time::Duration::from_secs(30));
 
     let requests = server.requests();
     assert_eq!(requests.len(), 1);

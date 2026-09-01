@@ -114,6 +114,14 @@ impl MockResponse {
         response
     }
 
+    pub fn with_sse_prefix_pause(mut self, prefix: String, delay: Duration) -> Self {
+        let suffix = std::mem::take(&mut self.body);
+        self.body = format!("{prefix}{suffix}");
+        self.chunks = Some(vec![prefix.into_bytes(), suffix.into_bytes()]);
+        self.chunk_delay = delay;
+        self
+    }
+
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
@@ -129,6 +137,7 @@ pub struct MockServer {
     addr: SocketAddr,
     responses: Arc<Mutex<VecDeque<MockResponse>>>,
     requests: Arc<Mutex<Vec<MockRequest>>>,
+    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -140,9 +149,11 @@ impl MockServer {
         let addr = listener.local_addr().unwrap();
         let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let workers = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_responses = Arc::clone(&responses);
         let thread_requests = Arc::clone(&requests);
+        let thread_workers = Arc::clone(&workers);
         let thread_stop = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
@@ -151,16 +162,15 @@ impl MockServer {
                         if thread_stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        thread_requests
-                            .lock()
-                            .unwrap()
-                            .push(read_request(&mut stream));
+                        let request = read_request(&mut stream);
+                        thread_requests.lock().unwrap().push(request);
                         let response = thread_responses
                             .lock()
                             .unwrap()
                             .pop_front()
                             .unwrap_or_else(|| MockResponse::error(500, "unexpected mock request"));
-                        write_response(&mut stream, &response);
+                        let worker = thread::spawn(move || write_response(&mut stream, &response));
+                        thread_workers.lock().unwrap().push(worker);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -173,6 +183,7 @@ impl MockServer {
             addr,
             responses,
             requests,
+            workers,
             stop,
             thread: Some(thread),
         }
@@ -201,6 +212,10 @@ impl Drop for MockServer {
         let _ = TcpStream::connect(self.addr);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        let workers = std::mem::take(&mut *self.workers.lock().unwrap());
+        for worker in workers {
+            let _ = worker.join();
         }
     }
 }
@@ -256,6 +271,7 @@ fn read_request(stream: &mut TcpStream) -> MockRequest {
 }
 
 fn write_response(stream: &mut TcpStream, response: &MockResponse) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     thread::sleep(response.delay);
     let reason = match response.status {
         200 => "OK",

@@ -1063,8 +1063,8 @@ pub struct ProviderConfig {
     pub auto_models: Option<AutoModelsConfig>,
     #[serde(default)]
     pub no_auth: bool,
-    #[serde(default = "default_stream_idle_timeout_ms")]
-    pub stream_idle_timeout_ms: u64,
+    #[serde(default = "default_response_start_timeout_ms")]
+    pub response_start_timeout_ms: u64,
     #[serde(default)]
     pub thinking_level: Option<ThinkingLevel>,
     #[serde(default)]
@@ -1077,7 +1077,7 @@ pub struct ProviderConfig {
     pub auto_continue: AutoContinueConfig,
 }
 
-fn default_stream_idle_timeout_ms() -> u64 {
+fn default_response_start_timeout_ms() -> u64 {
     90_000
 }
 
@@ -2028,7 +2028,7 @@ mod tests {
                 },
                 auto_models: None,
                 no_auth: false,
-                stream_idle_timeout_ms: 90_000,
+                response_start_timeout_ms: 90_000,
                 thinking_level: None,
                 thinking_levels: Vec::new(),
                 service_tier: None,

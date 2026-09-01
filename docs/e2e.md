@@ -51,15 +51,15 @@ The counts below come from the current Cargo test target.
 | `cli` | 13 | Help and version, print mode, informational commands, environment injection, startup failures, session listing, model errors, signals, and reasoning replay. |
 | `configuration` | 7 | Automatic approval, resolved and redacted environment values, model discovery and cache fallback, recovery policy, shell-policy modes, and filesystem secret boundaries. |
 | `native_tools` | 16 | File, search, docs, skill, recall, result, image, and background-job APIs, including interactive terminal jobs, typed input, key sequences, signals, EOF, dimensions, and idle reporting. |
-| `providers` | 11 | All four provider transports, fragmented SSE, custom headers, no-auth requests, premature EOF, response-body idle timeout and retry, lifecycle keepalive chunks, stream errors, tiers, images, and signed reasoning. |
+| `providers` | 13 | All four provider transports, fragmented SSE, custom headers, no-auth requests, premature EOF, silent long-running response bodies, lifecycle events, retry reset after progress, stream errors, tiers, images, and signed reasoning. |
 | `sessions` | 52 | Creation, resume, branches, job ownership, failed and cancelled turns, compaction, truncation recovery, transcript repair, state permissions, temporary leases, large transcripts, and restored navigation. |
 | `tools` | 10 | Native tool cycles for all providers, parallel and interleaved calls, malformed arguments, thinking signatures, cache breakpoints, compaction, and resume. |
 | `tui` | 39 | Transcript details, slash commands, pickers, policy dialogs, queued prompts, user-shell streaming and cancellation, selection and copy, resize, shutdown, and terminal restoration. |
-| **Total** | **172** | Real-binary behavior in print mode and pseudo-terminals. |
+| **Total** | **174** | Real-binary behavior in print mode and pseudo-terminals. |
 
 ### Provider and stream coverage
 
-The suite sends real local HTTP requests for all supported APIs. It checks text, reasoning, usage, tools, images, errors, terminal events, and replay data. Transport tests cover fragmented reads, protocol-specific premature ends, retries, and OpenAI Responses lifecycle events that do not map to visible model events. The configured SSE idle timeout resets on each response-body chunk and retries a body that becomes truly idle.
+The suite sends real local HTTP requests for all supported APIs. It checks text, reasoning, usage, tools, images, errors, terminal events, and replay data. Transport tests cover fragmented reads, protocol-specific premature ends, retry reset after stream progress, and OpenAI Responses lifecycle events that do not map to visible model output. Silent and progressing 31-second Responses streams verify that successful response bodies have no fixed Lofi deadline.
 
 ### Session and process coverage
 

@@ -52,12 +52,12 @@ pub trait Provider: Send + Sync {
 /// `base_url`; per-model endpoint URLs are resolved earlier by the model
 /// registry. An unknown `api` is a config error rather than a transport one.
 /// # Errors
-/// Returns [`Error::Config`] for an invalid stream timeout or [`Error::Http`]
+/// Returns [`Error::Config`] for an invalid response-start timeout or [`Error::Http`]
 /// if the shared HTTP client cannot be constructed.
 pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
-    if cfg.stream_idle_timeout_ms == 0 {
+    if cfg.response_start_timeout_ms == 0 {
         return Err(Error::Config(
-            "stream_idle_timeout_ms must be greater than zero".to_string(),
+            "response_start_timeout_ms must be greater than zero".to_string(),
         ));
     }
     let base_url = cfg
@@ -68,35 +68,35 @@ pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
         .to_string();
     let (api_key, headers) = effective_credentials(cfg);
     let client = http_client()?;
-    let stream_idle_timeout = std::time::Duration::from_millis(cfg.stream_idle_timeout_ms);
+    let response_start_timeout = std::time::Duration::from_millis(cfg.response_start_timeout_ms);
     let provider: Box<dyn Provider> = match api {
         Api::OpenAiCompletions => Box::new(OpenAiCompletionsProvider {
             base_url,
             api_key,
             headers,
             client,
-            stream_idle_timeout,
+            response_start_timeout,
         }),
         Api::OpenAiResponses => Box::new(OpenAiResponsesProvider {
             base_url,
             api_key,
             headers,
             client,
-            stream_idle_timeout,
+            response_start_timeout,
         }),
         Api::AnthropicMessages => Box::new(AnthropicMessagesProvider {
             base_url,
             api_key,
             headers,
             client,
-            stream_idle_timeout,
+            response_start_timeout,
         }),
         Api::GoogleGenerativeAi => Box::new(GoogleGenerativeAiProvider {
             base_url,
             api_key,
             headers,
             client,
-            stream_idle_timeout,
+            response_start_timeout,
         }),
     };
     Ok(provider)
@@ -133,17 +133,52 @@ pub fn effective_credentials(cfg: &ProviderConfig) -> (String, HashMap<String, S
     }
 }
 
-/// Only the connection establishment is bounded (30 s) — streaming responses
-/// are not. A flat `.timeout()` caps the *whole* response body, so a long
-/// reasoning-model turn (which can stream for several minutes) would be
-/// aborted mid-stream by reqwest even though bytes are still arriving.
-/// Stuck response bodies are instead caught by the SSE transport's per-chunk
-/// idle timeout, which still permits long turns while bytes keep arriving.
+pub(crate) fn provider_transport_error(
+    error: reqwest::Error,
+    phase: lofi_error::ProviderPhase,
+) -> Error {
+    let kind = if error.is_builder() {
+        lofi_error::ProviderTransportKind::RequestSetup
+    } else if error.is_redirect() {
+        lofi_error::ProviderTransportKind::Redirect
+    } else {
+        lofi_error::ProviderTransportKind::Network
+    };
+    Error::ProviderTransport {
+        kind,
+        phase,
+        detail: transport_error_detail(error),
+    }
+}
+
+fn transport_error_detail(error: reqwest::Error) -> String {
+    error.without_url().to_string()
+}
+
 fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Http(e.to_string()))
+    let builder = reqwest::Client::builder();
+    // Reqwest's 30-second TCP deadline can close a long provider stream
+    // independently of Lofi's response-start timeout.
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    let builder = builder.tcp_user_timeout(None);
+    builder.build().map_err(|e| Error::Http(e.to_string()))
+}
+
+pub(crate) async fn send_stream_request(
+    request: reqwest::RequestBuilder,
+    response_start_timeout: std::time::Duration,
+) -> Result<reqwest::Response> {
+    match tokio::time::timeout(response_start_timeout, request.send()).await {
+        Err(_) => Err(Error::ProviderTimeout {
+            phase: lofi_error::ProviderPhase::ResponseStart,
+            timeout_ms: response_start_timeout.as_millis() as u64,
+        }),
+        Ok(Err(error)) => Err(provider_transport_error(
+            error,
+            lofi_error::ProviderPhase::ResponseStart,
+        )),
+        Ok(Ok(response)) => ensure_ok(response, Some(response_start_timeout)).await,
+    }
 }
 
 #[allow(clippy::must_use_candidate, clippy::implicit_hasher)]
@@ -182,12 +217,11 @@ pub(crate) fn with_key_header(
     }
 }
 
-/// Convert a non-2xx [`reqwest::Response`] into an [`Error::Provider`] that
-/// carries the response body, so the caller sees the provider's error message
-/// (e.g. `OpenAI`'s `error.message`) rather than just the HTTP status code. On
-/// success the response is passed through unchanged.
-#[allow(clippy::missing_errors_doc)]
-pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
+// Model discovery uses its request deadline instead of a second body idle timeout.
+async fn ensure_ok(
+    resp: reqwest::Response,
+    idle_timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Response> {
     if resp.status().is_success() {
         return Ok(resp);
     }
@@ -199,10 +233,22 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else {
+    loop {
+        let next = match idle_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, stream.next())
+                .await
+                .map_err(|_| Error::ProviderTimeout {
+                    phase: lofi_error::ProviderPhase::ErrorResponseBody,
+                    timeout_ms: timeout.as_millis() as u64,
+                })?,
+            None => stream.next().await,
+        };
+        let Some(chunk) = next else {
             break;
         };
+        let chunk = chunk.map_err(|error| {
+            provider_transport_error(error, lofi_error::ProviderPhase::ErrorResponseBody)
+        })?;
         let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(buf.len());
         if remaining == 0 {
             truncated = true;
@@ -217,12 +263,16 @@ pub async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
     }
     let text = String::from_utf8_lossy(&buf).into_owned();
     let suffix = if truncated { " <truncated>" } else { "" };
-    let msg = match extract_error_detail(&text) {
-        Some(detail) => format!("HTTP {status} from {url}: {detail}{suffix}"),
-        None if text.is_empty() => format!("HTTP {status} from {url}"),
-        None => format!("HTTP {status} from {url}: {}{suffix}", truncate(&text, 500)),
+    let detail = match extract_error_detail(&text) {
+        Some(detail) => format!("{detail}{suffix}"),
+        None if text.is_empty() => "empty response body".to_string(),
+        None => format!("{}{suffix}", truncate(&text, 500)),
     };
-    Err(Error::Provider(msg))
+    Err(Error::ProviderStatus {
+        status: status.as_u16(),
+        endpoint: url,
+        detail,
+    })
 }
 
 const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -233,7 +283,12 @@ async fn read_json_capped(resp: reqwest::Response, max: usize) -> Result<Value> 
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| Error::Provider(format!("body read error: {e}")))?;
+        let chunk = chunk.map_err(|error| {
+            Error::Provider(format!(
+                "body read error: {}",
+                transport_error_detail(error)
+            ))
+        })?;
         if chunk.len() > max.saturating_sub(buf.len()) {
             return Err(Error::Provider(format!(
                 "response body exceeded {max} bytes"
@@ -299,8 +354,11 @@ pub async fn fetch_models(
     } else {
         req
     };
-    let resp = req.send().await.map_err(|e| Error::Http(e.to_string()))?;
-    let resp = ensure_ok(resp).await?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|error| Error::Http(transport_error_detail(error)))?;
+    let resp = ensure_ok(resp, None).await?;
     read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await
 }
 
@@ -384,6 +442,90 @@ mod tests {
         mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn transport_error_detail_removes_sensitive_urls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let secret = "query-secret-value";
+        let error = http_client()
+            .unwrap()
+            .get(format!(
+                "http://user:password@{addr}/v1/responses?api_key={secret}"
+            ))
+            .send()
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(error.url().is_some());
+
+        let detail = transport_error_detail(error);
+
+        assert!(!detail.contains("password"), "detail: {detail}");
+        assert!(!detail.contains(secret), "detail: {detail}");
+        assert!(!detail.contains("api_key"), "detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn request_setup_errors_are_typed_as_non_network_failures() {
+        let error = http_client()
+            .unwrap()
+            .get("http://127.0.0.1/")
+            .header("invalid\nheader", "value")
+            .send()
+            .await
+            .unwrap_err();
+
+        let error = provider_transport_error(error, lofi_error::ProviderPhase::ResponseStart);
+
+        assert!(matches!(
+            error,
+            Error::ProviderTransport {
+                kind: lofi_error::ProviderTransportKind::RequestSetup,
+                phase: lofi_error::ProviderPhase::ResponseStart,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_error_body_timeout_reports_its_phase() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        let request = http_client()
+            .unwrap()
+            .get(format!("http://{addr}/v1/responses"));
+
+        let error = send_stream_request(request, std::time::Duration::from_millis(20))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::ProviderTimeout {
+                phase: lofi_error::ProviderPhase::ErrorResponseBody,
+                timeout_ms: 20,
+            }
+        ));
+        server.join().unwrap();
+    }
+
     fn cfg() -> ProviderConfig {
         ProviderConfig {
             api_type: Some(Api::OpenAiCompletions),
@@ -407,7 +549,7 @@ mod tests {
             models: indexmap::IndexMap::new(),
             auto_models: None,
             no_auth: false,
-            stream_idle_timeout_ms: 90_000,
+            response_start_timeout_ms: 90_000,
             thinking_level: None,
             thinking_levels: Vec::new(),
             service_tier: None,
@@ -457,7 +599,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             headers: HashMap::from([("x-custom".to_string(), "yes".to_string())]),
             client: http_client().unwrap(),
-            stream_idle_timeout: std::time::Duration::from_secs(90),
+            response_start_timeout: std::time::Duration::from_secs(90),
         };
         assert_eq!(oc.base_url, "https://api.example.com");
     }
@@ -476,11 +618,11 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_zero_stream_idle_timeout() {
+    fn open_rejects_zero_response_start_timeout() {
         let mut c = cfg();
-        c.stream_idle_timeout_ms = 0;
+        c.response_start_timeout_ms = 0;
         let Err(error) = open(Api::OpenAiCompletions, &c) else {
-            panic!("zero stream idle timeout should fail");
+            panic!("zero response start timeout should fail");
         };
         assert!(matches!(error, Error::Config(message) if message.contains("greater than zero")));
     }

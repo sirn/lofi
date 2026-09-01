@@ -116,7 +116,7 @@ fn fragmented_sse_custom_headers_and_no_auth_work_for_every_provider() {
 }
 
 #[test]
-fn responses_lifecycle_events_keep_a_long_stream_alive() {
+fn responses_lifecycle_events_do_not_count_as_model_output() {
     let lifecycle = [
         json!({ "type": "response.created" }),
         json!({ "type": "response.queued" }),
@@ -155,7 +155,7 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
     let fixture = Fixture::new(&server);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "[providers.responses]\n",
-        "[providers.responses]\nstream_idle_timeout_ms = 1000\n",
+        "[providers.responses]\nresponse_start_timeout_ms = 1000\n",
     );
     std::fs::write(&fixture.config, config).unwrap();
 
@@ -176,22 +176,83 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
 }
 
 #[test]
-fn responses_idle_body_retries_with_the_configured_timeout() {
-    let lifecycle = json!({ "type": "response.created" });
-    let first_block = format!("data: {lifecycle}\n\n");
-    let delayed_body = format!("{first_block}{}", responses_body("late response"));
-    let server = MockServer::start(vec![
-        MockResponse::fragmented_sse(
-            delayed_body,
-            &[first_block.len()],
-            Duration::from_millis(900),
-        ),
-        MockResponse::sse(responses_body("answer after idle retry")),
-    ]);
+fn responses_active_thinking_stream_survives_past_thirty_seconds() {
+    let thinking_blocks = (0..31)
+        .map(|index| {
+            let event = json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "reasoning-1",
+                "delta": format!("thinking {index} "),
+            });
+            format!("data: {event}\n\n")
+        })
+        .collect::<Vec<_>>();
+    let text = json!({
+        "type": "response.output_text.delta",
+        "delta": "answer after thirty seconds of active thinking",
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "response": { "usage": { "input_tokens": 2, "output_tokens": 31 } },
+    });
+    let final_block = format!("data: {text}\n\ndata: {completed}\n\ndata: [DONE]\n\n");
+    let body = thinking_blocks
+        .iter()
+        .cloned()
+        .chain([final_block])
+        .collect::<String>();
+    let split_at = thinking_blocks
+        .iter()
+        .scan(0, |offset, block| {
+            *offset += block.len();
+            Some(*offset)
+        })
+        .collect::<Vec<_>>();
+    let server = MockServer::start(vec![MockResponse::fragmented_sse(
+        body,
+        &split_at,
+        Duration::from_secs(1),
+    )]);
     let fixture = Fixture::new(&server);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "[providers.responses]\n",
-        "[providers.responses]\nstream_idle_timeout_ms = 300\n",
+        "[providers.responses]\nresponse_start_timeout_ms = 2000\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+
+    let started = std::time::Instant::now();
+    let output = fixture.output(&[
+        "--model",
+        "responses/reasoning",
+        "--print",
+        "think continuously for more than thirty seconds",
+    ]);
+
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("answer after thirty seconds of active thinking"));
+    assert_eq!(server.request_count(), 1);
+}
+
+#[test]
+fn responses_silent_body_does_not_retry() {
+    let lifecycle = json!({ "type": "response.created" });
+    let first_block = format!("data: {lifecycle}\n\n");
+    let delayed_body = format!("{first_block}{}", responses_body("late response"));
+    let server = MockServer::start(vec![MockResponse::fragmented_sse(
+        delayed_body,
+        &[first_block.len()],
+        Duration::from_millis(900),
+    )]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "[providers.responses]\n",
+        "[providers.responses]\nresponse_start_timeout_ms = 300\n",
     );
     std::fs::write(&fixture.config, config).unwrap();
 
@@ -199,7 +260,7 @@ fn responses_idle_body_retries_with_the_configured_timeout() {
         "--model",
         "responses/reasoning",
         "--print",
-        "retry an idle response body",
+        "wait for a silent response body",
     ]);
 
     assert!(
@@ -208,9 +269,70 @@ fn responses_idle_body_retries_with_the_configured_timeout() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("answer after idle retry"), "{stdout}");
-    assert!(!stdout.contains("late response"), "{stdout}");
-    assert_eq!(server.request_count(), 2);
+    assert!(stdout.contains("late response"), "{stdout}");
+    assert_eq!(server.request_count(), 1);
+}
+
+#[test]
+fn responses_retries_reset_after_stream_progress_before_tool_execution() {
+    let tool = || {
+        responses_tool_response(
+            "timeout-reset-tool",
+            r#"return { marker: "tool executed after retry reset" };"#,
+        )
+    };
+    let progress = json!({
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "reasoning-1",
+        "delta": "partial reasoning before transport failure",
+    });
+    let partial = format!("data: {progress}\n\n");
+    let server = MockServer::start(vec![
+        tool().with_delay(Duration::from_millis(600)),
+        MockResponse::truncated_sse(partial, 100),
+        tool(),
+        responses_response("final thinking", "timeout retry reset final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("max_retries = 2", "max_retries = 1")
+        .replace(
+            "[providers.responses]\n",
+            "[providers.responses]\nresponse_start_timeout_ms = 200\n",
+        );
+    std::fs::write(&fixture.config, config).unwrap();
+
+    let output = fixture.output(&[
+        "--model",
+        "responses/reasoning",
+        "--print",
+        "run the tool after retrying independent failures",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("timeout retry reset final answer"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("provider retry 1/1 in 1ms: provider timeout after 200ms while waiting for connection and response headers"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("provider retry 1/1 in 1ms").count(),
+        2,
+        "stderr: {stderr}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let output_count = requests
+        .iter()
+        .filter(|request| request.body.contains("function_call_output"))
+        .count();
+    assert_eq!(output_count, 1, "requests: {requests:#?}");
 }
 
 #[test]

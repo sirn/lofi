@@ -141,75 +141,18 @@ impl Agent {
     /// Propagates [`Error`] from provider streaming, timeouts, or tool
     /// execution failures that cannot be surfaced as a `ToolResult`.
     pub async fn run(&self, user_prompt: String, tx: Sender<AgentEvent>) -> Result<()> {
-        let mut messages = vec![Message {
-            role: Role::User,
-            blocks: vec![ContentBlock::Text {
-                text: user_prompt.clone(),
-            }],
-            kind: lofi_types::PromptKind::User,
-        }];
-        if !emit(
-            Some(&tx),
-            AgentEvent::TurnStart {
-                prompt: user_prompt.clone(),
-                kind: lofi_types::PromptKind::User,
-            },
+        let mut messages = Vec::new();
+        self.run_continuation(
+            &mut messages,
+            user_prompt,
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
         )
         .await
-        {
-            return Ok(());
-        }
-        let mut loop_detector = LoopDetector::default();
-        let mut loop_recovered = false;
-        let mut recovery_rounds = 0usize;
-        loop {
-            if tx.is_closed() {
-                return Ok(());
-            }
-            if recovery_round_exceeded(&tx, &mut recovery_rounds).await {
-                return Ok(());
-            }
-            let outcome = match self
-                .run_once_inner(
-                    &mut messages,
-                    Some(&tx),
-                    None,
-                    RoundOpts {
-                        loop_detector: Some(&mut loop_detector),
-                        ..RoundOpts::default()
-                    },
-                )
-                .await
-            {
-                Ok(outcome) => outcome,
-                // A gone receiver is a graceful cancellation, not a provider
-                // error: stop the run cleanly instead of surfacing it.
-                Err(Error::Cancelled) => return Ok(()),
-                Err(e) => return Err(e),
-            };
-            let plan = handle_loop_detection(
-                outcome.loop_detail.as_deref(),
-                outcome.interrupted_thinking_index,
-                &mut loop_recovered,
-                &tx,
-            )
-            .await;
-            if let Some((index, _)) = plan.removal {
-                messages.remove(index);
-            }
-            if let Some(message) = plan.recovery {
-                messages.push(message);
-            }
-            match plan.action {
-                LoopAction::Continue => continue,
-                LoopAction::Stop => return Ok(()),
-                LoopAction::None => {}
-            }
-            if outcome.finished || tx.is_closed() {
-                return Ok(());
-            }
-            recovery_rounds = 0;
-        }
     }
 
     /// Unlike [`run`](Self::run), the message history is owned by the caller
@@ -380,8 +323,7 @@ impl Agent {
         let mut detached = false;
         let mut context_pressure = false;
         let mut err: Option<Error> = None;
-        let retry = self.retry;
-        let mut retry_attempt = 0u32;
+        let mut retry = crate::retry::RetrySession::new(self.retry);
         // The image-omit notice fires once per turn (on the first round),
         // not once per tool round.
         let mut omit_notice_sent = false;
@@ -404,6 +346,7 @@ impl Agent {
                 finished_normally = true;
                 break;
             }
+            let round_start = messages.len();
             let round = self
                 .run_once_inner(
                     &mut *messages,
@@ -421,15 +364,16 @@ impl Agent {
                 )
                 .await;
             omit_notice_sent = true;
-            if round.is_ok() && retry_attempt > 0 {
-                let _ = tx
-                    .send(AgentEvent::RetryEnd {
-                        success: true,
-                        attempt: retry_attempt,
-                        final_error: None,
-                    })
-                    .await;
-                retry_attempt = 0;
+            if round.is_ok() {
+                if let Some(attempt) = retry.reset_after_progress() {
+                    let _ = tx
+                        .send(AgentEvent::RetryEnd {
+                            success: true,
+                            attempt,
+                            final_error: None,
+                        })
+                        .await;
+                }
             }
             match round {
                 Ok(outcome) => {
@@ -463,6 +407,7 @@ impl Agent {
                             recorder.as_mut(),
                             messages,
                             prev_len,
+                            1,
                             &stats,
                             &tx,
                             &detail,
@@ -568,7 +513,10 @@ impl Agent {
                         }
                     }
                 }
-                Err(Error::Cancelled) => {
+                Err(RoundFailure {
+                    error: Error::Cancelled,
+                    ..
+                }) => {
                     // A set cancel flag is an explicit user interruption;
                     // a closed receiver is only a detached consumer. Keep
                     // those outcomes separate so Ctrl-C is durably recorded
@@ -580,7 +528,10 @@ impl Agent {
                     }
                     break;
                 }
-                Err(e) => {
+                Err(RoundFailure {
+                    error,
+                    provider_progress,
+                }) => {
                     // An oversized image payload stopped before send; route
                     // to the existing force-compact + continue recovery. The
                     // round never ran, so the partial-turn suffix is empty
@@ -588,37 +539,54 @@ impl Agent {
                     // the durable transcript untouched.
                     // Match the variant payload, not `Display`: `Provider`
                     // prefixes its message with "provider error: ".
-                    if matches!(&e, Error::Provider(m) if m == IMAGE_PRESSURE_SENTINEL) {
+                    if matches!(&error, Error::Provider(m) if m == IMAGE_PRESSURE_SENTINEL) {
                         context_pressure = true;
                         break;
                     }
-                    if retry.can_retry(retry_attempt) && crate::retry::is_retryable_error(&e) {
-                        retry_attempt += 1;
-                        let delay = retry.delay_for(retry_attempt);
-                        if messages.last().is_some_and(|m| m.role == Role::Assistant) {
-                            if let Err(error) = record_round_removal(
+                    if provider_progress {
+                        if let Some(attempt) = retry.reset_after_progress() {
+                            let _ = tx
+                                .send(AgentEvent::RetryEnd {
+                                    success: false,
+                                    attempt,
+                                    final_error: Some(error.to_string()),
+                                })
+                                .await;
+                        }
+                    }
+                    if let Some(plan) = retry.retry(&error) {
+                        if messages.len() > round_start {
+                            if let Err(record_error) = record_round_removal(
                                 recorder.as_mut(),
                                 messages,
                                 prev_len,
+                                messages.len() - round_start,
                                 &stats,
                                 &tx,
-                                &format!("discarding partial response before retry: {e}"),
+                                &format!("discarding partial response before retry: {error}"),
                             )
                             .await
                             {
-                                err = Some(error);
+                                err = Some(record_error);
                                 break;
                             }
-                            messages.pop();
+                            messages.truncate(round_start);
                         }
                         let _ = tx
                             .send(AgentEvent::RetryStart {
-                                attempt: retry_attempt,
-                                max_attempts: retry.max_retries,
-                                delay_ms: delay.as_millis() as u64,
-                                error: e.to_string(),
+                                attempt: plan.attempt,
+                                max_attempts: plan.max_retries,
+                                delay_ms: plan.delay.as_millis() as u64,
+                                error: error.to_string(),
                             })
                             .await;
+                        tracing::warn!(
+                            attempt = plan.attempt,
+                            max_retries = plan.max_retries,
+                            delay_ms = plan.delay.as_millis() as u64,
+                            error = %error,
+                            "provider request failed; retry scheduled"
+                        );
                         // Cancellable backoff: stop promptly for Ctrl-C or a
                         // closed consumer instead of waiting out the retry
                         // delay and issuing another provider request.
@@ -627,13 +595,13 @@ impl Agent {
                                 biased;
                                 () = wait_for_cancel(flag) => false,
                                 () = tx.closed() => false,
-                                () = tokio::time::sleep(delay) => true,
+                                () = tokio::time::sleep(plan.delay) => true,
                             }
                         } else {
                             tokio::select! {
                                 biased;
                                 () = tx.closed() => false,
-                                () = tokio::time::sleep(delay) => true,
+                                () = tokio::time::sleep(plan.delay) => true,
                             }
                         };
                         if !retry_ready {
@@ -646,16 +614,21 @@ impl Agent {
                         }
                         continue;
                     }
-                    if retry_attempt > 0 {
+                    if retry.consecutive_failures() > 0 {
+                        tracing::warn!(
+                            attempt = retry.consecutive_failures(),
+                            error = %error,
+                            "provider request failed; retry budget exhausted"
+                        );
                         let _ = tx
                             .send(AgentEvent::RetryEnd {
                                 success: false,
-                                attempt: retry_attempt,
-                                final_error: Some(e.to_string()),
+                                attempt: retry.consecutive_failures(),
+                                final_error: Some(error.to_string()),
                             })
                             .await;
                     }
-                    err = Some(e);
+                    err = Some(error);
                     break;
                 }
             }
@@ -815,7 +788,8 @@ impl Agent {
     pub async fn run_once(&self, messages: &mut Vec<Message>) -> Result<bool> {
         Ok(self
             .run_once_inner(messages, None, None, RoundOpts::default())
-            .await?
+            .await
+            .map_err(|failure| failure.error)?
             .finished)
     }
 
@@ -839,7 +813,7 @@ impl Agent {
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
         opts: RoundOpts<'_>,
-    ) -> Result<RoundOutcome> {
+    ) -> std::result::Result<RoundOutcome, RoundFailure> {
         let RoundOpts {
             recall,
             result,
@@ -857,7 +831,7 @@ impl Agent {
         // in-hand estimate of this request's input.
         model.max_tokens = self.clipped_max_tokens(prev_input_tokens);
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            return Err(Error::Cancelled);
+            return Err(Error::Cancelled.into());
         }
         // Send-time guard: a model that does not support images cannot
         // receive them, so replace each Image block with a text marker and
@@ -906,14 +880,14 @@ impl Agent {
                     )))
                     .await;
             }
-            return Err(Error::Provider(IMAGE_PRESSURE_SENTINEL.to_string()));
+            return Err(Error::Provider(IMAGE_PRESSURE_SENTINEL.to_string()).into());
         }
         let schemas = [schema];
         let stream = match cancel {
             Some(flag) => {
                 tokio::select! {
                     biased;
-                    () = wait_for_cancel(flag) => return Err(Error::Cancelled),
+                    () = wait_for_cancel(flag) => return Err(Error::Cancelled.into()),
                     stream = self.provider.stream(&model, send_messages, &schemas) => stream?,
                 }
             }
@@ -939,6 +913,7 @@ impl Agent {
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, CodePrefixDecoder> = HashMap::new();
         let mut round_loop_detail: Option<String> = None;
+        let mut provider_progress = false;
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
             loop {
@@ -956,6 +931,9 @@ impl Agent {
                     None => break,
                     Some(ev) => match ev {
                         Ok(e) => {
+                            if !matches!(e, StreamingEvent::Error(_)) {
+                                provider_progress = true;
+                            }
                             let terminal = matches!(e, StreamingEvent::Done { .. });
                             let is_thinking_ev = matches!(
                                 e,
@@ -1160,7 +1138,10 @@ impl Agent {
                 messages.push(partial);
             }
             close_orphaned_tool_uses(messages);
-            return Err(error);
+            return Err(RoundFailure {
+                error,
+                provider_progress,
+            });
         }
 
         // A tool use whose arguments never parse was cut off mid-stream.
@@ -1229,7 +1210,7 @@ impl Agent {
                 // 400s: "did not find any tool_result blocks"); a full failure
                 // later truncates the whole turn, making this a no-op there.
                 close_orphaned_tool_uses(messages);
-                return Err(error);
+                return Err(error.into());
             }
         };
 
@@ -1254,7 +1235,7 @@ impl Agent {
                 .await
                 {
                     close_orphaned_tool_uses(messages);
-                    return Err(Error::Cancelled);
+                    return Err(Error::Cancelled.into());
                 }
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
@@ -1267,7 +1248,7 @@ impl Agent {
                 // short iterator means the tool loop already failed.
                 let Some(r) = executed_iter.next() else {
                     close_orphaned_tool_uses(messages);
-                    return Err(Error::Provider("tool result count mismatch".into()));
+                    return Err(Error::Provider("tool result count mismatch".into()).into());
                 };
                 results.push(r);
             }
@@ -1620,6 +1601,7 @@ async fn record_round_removal(
     recorder: Option<&mut SessionRecorder>,
     messages: &[Message],
     prev_len: usize,
+    removed_count: usize,
     stats: &TurnStats,
     tx: &Sender<AgentEvent>,
     reason: &str,
@@ -1641,7 +1623,7 @@ async fn record_round_removal(
     // without this credit, later slices would skip the first recovery
     // message — also on a boundary-write failure, since the checkpoint
     // already made the round durable.
-    recorder.note_recorded_messages_removed(1);
+    recorder.note_recorded_messages_removed(removed_count);
     if let Err(error) = recorder.discard_round(reason) {
         let _ = emit(
             Some(tx),
@@ -1650,6 +1632,20 @@ async fn record_round_removal(
         .await;
     }
     Ok(())
+}
+
+struct RoundFailure {
+    error: Error,
+    provider_progress: bool,
+}
+
+impl From<Error> for RoundFailure {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            provider_progress: false,
+        }
+    }
 }
 
 /// Result of a single provider round: whether the turn is finished (no

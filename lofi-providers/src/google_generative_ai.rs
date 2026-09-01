@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use lofi_error::{Error, Result};
+use lofi_error::Result;
 use lofi_types::{Message, Model, StreamingEvent};
 
-use super::{apply_headers, with_key_header, ToolSchema};
+use super::{apply_headers, send_stream_request, with_key_header, ToolSchema};
 use crate::ir::{GoogleGenerativeAiIr, ProtocolIr};
 use crate::sse::{map_sse_response, IrSseMapper};
 
@@ -16,7 +16,7 @@ pub(crate) struct GoogleGenerativeAiProvider {
     pub(crate) api_key: String,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) client: reqwest::Client,
-    pub(crate) stream_idle_timeout: std::time::Duration,
+    pub(crate) response_start_timeout: std::time::Duration,
 }
 
 #[async_trait]
@@ -38,15 +38,10 @@ impl super::Provider for GoogleGenerativeAiProvider {
             ),
             &self.headers,
         );
-        let response = request
-            .send()
-            .await
-            .map_err(|error| Error::Http(error.to_string()))?;
-        let response = super::ensure_ok(response).await?;
+        let response = send_stream_request(request, self.response_start_timeout).await?;
         Ok(map_sse_response(
             response,
             IrSseMapper::<GoogleGenerativeAiIr>::new(model),
-            self.stream_idle_timeout,
         ))
     }
 }

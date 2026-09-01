@@ -53,6 +53,53 @@ impl RetryPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetryPlan {
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub delay: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetrySession {
+    policy: RetryPolicy,
+    consecutive_failures: u32,
+}
+
+impl RetrySession {
+    #[must_use]
+    pub fn new(policy: RetryPolicy) -> Self {
+        Self {
+            policy,
+            consecutive_failures: 0,
+        }
+    }
+
+    pub fn reset_after_progress(&mut self) -> Option<u32> {
+        let previous = self.consecutive_failures;
+        self.consecutive_failures = 0;
+        (previous > 0).then_some(previous)
+    }
+
+    #[must_use]
+    pub fn retry(&mut self, error: &Error) -> Option<RetryPlan> {
+        if !is_retryable_error(error) || !self.policy.can_retry(self.consecutive_failures) {
+            return None;
+        }
+        self.consecutive_failures += 1;
+        Some(RetryPlan {
+            attempt: self.consecutive_failures,
+            max_retries: self.policy.max_retries,
+            delay: self.policy.delay_for(self.consecutive_failures),
+        })
+    }
+
+    #[must_use]
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
 #[allow(clippy::expect_used)] // the patterns are compile-time constants; a build failure is a programmer error, not a runtime condition
 fn build_pattern(patterns: &[&str]) -> Regex {
     RegexBuilder::new(&patterns.join("|"))
@@ -141,11 +188,20 @@ fn error_text(e: &Error) -> String {
 
 #[must_use]
 pub fn is_retryable_error(e: &Error) -> bool {
-    if matches!(e, Error::Http(_)) {
-        return true;
-    }
-    if matches!(e, Error::Cancelled) {
-        return false;
+    match e {
+        Error::Http(_)
+        | Error::ProviderTimeout { .. }
+        | Error::ProviderTransport {
+            kind: lofi_error::ProviderTransportKind::Network,
+            ..
+        } => {
+            return true;
+        }
+        Error::ProviderTransport { .. } | Error::Cancelled => return false,
+        Error::ProviderStatus { status, .. } => {
+            return matches!(*status, 408 | 409 | 425 | 429 | 500..=599);
+        }
+        _ => {}
     }
     let text = error_text(e);
     if non_retryable().is_match(&text) {
@@ -165,9 +221,11 @@ mod tests {
         assert!(is_retryable_error(&Error::Provider(
             "HTTP 429 Too Many Requests".into()
         )));
-        assert!(is_retryable_error(&Error::Provider(
-            "HTTP 503 Service Unavailable from http://127.0.0.1:44037/v1/responses".into()
-        )));
+        assert!(is_retryable_error(&Error::ProviderStatus {
+            status: 503,
+            endpoint: "https://api.example/v1/responses".to_string(),
+            detail: "unavailable".to_string(),
+        }));
         assert!(is_retryable_error(&Error::Provider(
             "stream idle timeout".into()
         )));
@@ -193,9 +251,11 @@ mod tests {
         assert!(!is_retryable_error(&Error::Provider(
             "Invalid API key".into()
         )));
-        assert!(!is_retryable_error(&Error::Provider(
-            "401 Unauthorized".into()
-        )));
+        assert!(!is_retryable_error(&Error::ProviderStatus {
+            status: 401,
+            endpoint: "https://api.example/v1/responses".to_string(),
+            detail: "unauthorized".to_string(),
+        }));
         assert!(!is_retryable_error(&Error::Provider(
             "context length exceeded".into()
         )));
@@ -206,6 +266,15 @@ mod tests {
         assert!(is_retryable_error(&Error::Http(
             "error decoding response body".into()
         )));
+        assert!(is_retryable_error(&Error::ProviderTimeout {
+            phase: lofi_error::ProviderPhase::ResponseStart,
+            timeout_ms: 90_000,
+        }));
+        assert!(is_retryable_error(&Error::ProviderTransport {
+            kind: lofi_error::ProviderTransportKind::Network,
+            phase: lofi_error::ProviderPhase::ResponseBody,
+            detail: "connection reset".to_string(),
+        }));
     }
 
     #[test]
@@ -214,6 +283,16 @@ mod tests {
         assert!(!is_retryable_error(&Error::Tool(
             "some tool failure".into()
         )));
+        assert!(!is_retryable_error(&Error::ProviderTransport {
+            kind: lofi_error::ProviderTransportKind::RequestSetup,
+            phase: lofi_error::ProviderPhase::ResponseStart,
+            detail: "invalid header".to_string(),
+        }));
+        assert!(!is_retryable_error(&Error::ProviderTransport {
+            kind: lofi_error::ProviderTransportKind::Redirect,
+            phase: lofi_error::ProviderPhase::ResponseStart,
+            detail: "redirect loop".to_string(),
+        }));
     }
 
     #[test]
@@ -247,5 +326,21 @@ mod tests {
         assert_eq!(p.delay_for(5), Duration::from_secs(8));
         assert_eq!(p.delay_for(6), Duration::from_secs(10));
         assert!(!p.can_retry(5));
+    }
+
+    #[test]
+    fn session_resets_the_consecutive_failure_budget_after_progress() {
+        let policy = RetryPolicy {
+            max_retries: 1,
+            base_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(5),
+        };
+        let mut session = RetrySession::new(policy);
+        let error = Error::Provider("HTTP 500".to_string());
+
+        assert_eq!(session.retry(&error).unwrap().attempt, 1);
+        assert!(session.retry(&error).is_none());
+        assert_eq!(session.reset_after_progress(), Some(1));
+        assert_eq!(session.retry(&error).unwrap().attempt, 1);
     }
 }

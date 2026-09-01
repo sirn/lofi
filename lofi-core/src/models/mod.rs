@@ -351,7 +351,7 @@ mod tests {
             models,
             auto_models: None,
             no_auth: false,
-            stream_idle_timeout_ms: 90_000,
+            response_start_timeout_ms: 90_000,
             thinking_level: None,
             thinking_levels: Vec::new(),
             service_tier: None,

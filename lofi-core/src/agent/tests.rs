@@ -1878,7 +1878,39 @@ async fn run_once_tool_error_marks_result_error() {
 }
 
 #[tokio::test]
-async fn run_retries_transient_provider_errors() {
+async fn run_uses_the_centralized_retry_session() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![
+            vec![StreamingEvent::Error("HTTP 500 transient".into())],
+            final_round(),
+        ],
+        dir.path(),
+    )
+    .with_retry(crate::retry::RetryPolicy {
+        max_retries: 1,
+        base_delay: Duration::ZERO,
+        max_delay: Duration::ZERO,
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+
+    agent.run("go".to_string(), tx).await.unwrap();
+
+    let mut retry_starts = Vec::new();
+    let mut reached_final = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::RetryStart { attempt, .. } => retry_starts.push(attempt),
+            AgentEvent::Text(text) if text == "final answer" => reached_final = true,
+            _ => {}
+        }
+    }
+    assert_eq!(retry_starts, vec![1]);
+    assert!(reached_final);
+}
+
+#[tokio::test]
+async fn run_continuation_retries_transient_provider_errors() {
     let dir = tempdir().unwrap();
     let round1 = vec![StreamingEvent::Error("HTTP 429 Too Many Requests".into())];
     let round2 = vec![
@@ -2014,7 +2046,106 @@ async fn successful_provider_round_resets_retry_attempt_count() {
 }
 
 #[tokio::test]
-async fn run_does_not_retry_non_transient_errors() {
+async fn provider_progress_resets_retry_attempt_count_before_a_later_failure() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![
+            vec![StreamingEvent::Error("HTTP 500 before progress".into())],
+            vec![
+                StreamingEvent::TextDelta("partial response".into()),
+                StreamingEvent::Error("HTTP 500 after progress".into()),
+            ],
+            vec![
+                StreamingEvent::TextDelta("recovered".into()),
+                StreamingEvent::Done {
+                    usage: Usage::default(),
+                    stop_reason: None,
+                },
+            ],
+        ],
+        dir.path(),
+    )
+    .with_retry(crate::retry::RetryPolicy {
+        max_retries: 1,
+        base_delay: Duration::from_millis(1),
+        ..Default::default()
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let mut messages = vec![user_msg("go")];
+
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".to_string(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut starts = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let AgentEvent::RetryStart { attempt, .. } = event {
+            starts.push(attempt);
+        }
+    }
+    assert_eq!(starts, vec![1, 1]);
+}
+
+#[tokio::test]
+async fn provider_error_events_do_not_reset_retry_attempt_count() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![
+            vec![StreamingEvent::Error("HTTP 500 first".into())],
+            vec![StreamingEvent::Error("HTTP 500 second".into())],
+            vec![
+                StreamingEvent::TextDelta("must not be reached".into()),
+                StreamingEvent::Done {
+                    usage: Usage::default(),
+                    stop_reason: None,
+                },
+            ],
+        ],
+        dir.path(),
+    )
+    .with_retry(crate::retry::RetryPolicy {
+        max_retries: 1,
+        base_delay: Duration::from_millis(1),
+        ..Default::default()
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let mut messages = vec![user_msg("go")];
+
+    let result = agent
+        .run_continuation(
+            &mut messages,
+            "go".to_string(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
+
+    assert!(result.is_err());
+    let mut starts = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let AgentEvent::RetryStart { attempt, .. } = event {
+            starts.push(attempt);
+        }
+    }
+    assert_eq!(starts, vec![1]);
+}
+
+#[tokio::test]
+async fn run_continuation_does_not_retry_non_transient_errors() {
     let dir = tempdir().unwrap();
     let round1 = vec![StreamingEvent::Error("401 Unauthorized".into())];
     let round2 = vec![
@@ -2162,7 +2293,7 @@ fn provider(
         models,
         auto_models: None,
         no_auth: false,
-        stream_idle_timeout_ms: 90_000,
+        response_start_timeout_ms: 90_000,
         thinking_level,
         thinking_levels: Vec::new(),
         service_tier: None,

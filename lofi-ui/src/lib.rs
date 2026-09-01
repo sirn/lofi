@@ -361,7 +361,6 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
-                | AgentEvent::RetryStart { .. }
                 | AgentEvent::RetryEnd { .. }
                 | AgentEvent::TurnStart { .. }
                 | AgentEvent::TurnContinue
@@ -377,6 +376,15 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                         "error: context limit reached; use the interactive TUI to compact and continue"
                     )
                 }
+                AgentEvent::RetryStart {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error,
+                } => writeln!(
+                    stderr,
+                    "warning: provider retry {attempt}/{max_attempts} in {delay_ms}ms: {error}"
+                ),
                 AgentEvent::Notice(msg) => writeln!(stderr, "warning: {msg}"),
                 AgentEvent::Error(msg) => writeln!(stderr, "error: {msg}"),
                 AgentEvent::ToolStart { name, .. } => writeln!(stderr, "[{name}]"),
