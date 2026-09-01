@@ -130,6 +130,7 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
         "type": "response.completed",
         "response": { "usage": { "input_tokens": 2, "output_tokens": 4 } },
     });
+    let lifecycle_count = lifecycle.len();
     let blocks = lifecycle
         .into_iter()
         .chain([text, completed])
@@ -140,7 +141,7 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
     let mut offset = 0;
     let split_at = blocks
         .iter()
-        .take(blocks.len() - 1)
+        .take(lifecycle_count)
         .map(|block| {
             offset += block.len();
             offset
