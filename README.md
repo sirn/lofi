@@ -34,7 +34,7 @@ See [End-to-end testing](docs/e2e.md) for the current coverage map, architecture
 | `-p`, `--print <PROMPT>` | Run one non-interactive turn and stream assistant text to stdout. |
 | `--list-models` | Print `provider/id — name` lines and exit. |
 | `--list-sessions` | Print saved sessions for this workspace and exit. |
-| `--model <SPEC>` | Select the model as `provider/model[:level]`. |
+| `--model <SPEC>` | Select the model as `provider/model[:level][@tier]`. |
 | `-e`, `--env <NAME[=VALUE]>` | Set an environment variable for this instance (repeatable). A bare `NAME` forwards the parent shell's value. |
 | `-c`, `--continue` | Resume the most recent session for this workspace. |
 | `--resume <ID>` | Resume a specific session by id prefix. |
@@ -57,9 +57,9 @@ Model-generated shell commands run on the host through `sh -c`; QuickJS isolatio
 | `Up` / `Down` | Move between input lines; recall history at an edge. |
 | `PageUp` / `PageDown` | Scroll in Input mode; move by a page in Navigate mode. |
 | `Tab` | Switch between Input and Navigate modes. |
-| `Esc` | Clear input. |
-| `Ctrl+C` | Cancel, clear, or quit after a second press on empty input. |
-| `Ctrl+D` | Delete the next character, or quit on empty input. |
+| `Esc` | Cancel the active run; otherwise clear input. |
+| `Ctrl+C` | Clear input, cancel the active run, or quit after a second press when idle and empty. |
+| `Ctrl+D` | Delete the next character; cancel an active run or quit when input is empty. |
 
 ### Shell commands
 

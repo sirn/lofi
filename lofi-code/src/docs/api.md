@@ -2,20 +2,18 @@
 
 The agent's single tool is `exec`. Inside `exec` code, call async functions on
 the global `lofi` object. Use `await`. All file paths are resolved against the
-workspace root; paths that escape the root are rejected.
+workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmp_dir` and skill directories. Mutation paths that escape the workspace root are rejected.
 
 ## lofi.read(path, opts?)
 
 Read a file as UTF-8 with optional line range, or attach an image.
 
 **Parameters:**
-- `path` (string, required) — file path relative to workspace root.
-- `opts` (object, optional) — `{ offset?, limit? }`. `offset` is a 1-indexed
-  line to start from (default 1); `limit` caps the number of lines returned
-  (default 2000).
+- `path` (string, required) — a workspace-relative file path, or an absolute path under a registered read root. Tilde (`~`) is not expanded.
+- `opts` (object, optional) — `{ offset?, limit? }`. `offset` is a 1-indexed line to start from (default 1); `limit` selects at most that many source lines. Omit `limit` to read from `offset` to the end before visible-output truncation.
 
 **Returns (text):** `{ ok, content, start_line, total_lines, truncated }`.
-`content` is the requested lines (head-truncated to 2000 lines / 50 KB).
+`content` is head-truncated to the configured `[truncate] max_lines` and `max_bytes` values (defaults: 2000 lines and 50 KiB).
 `start_line` is the 1-indexed first line returned. `total_lines` is the file's
 line count. `truncated` is true when more lines remain below either cap. Page
 large files with a higher `offset`.
@@ -31,8 +29,7 @@ The image path ignores `offset`/`limit`.
 List entries under a directory.
 
 **Parameters:**
-- `dir` (string, optional) — directory relative to workspace root. Empty or
-  `.` means the root.
+- `dir` (string, optional) — a workspace-relative directory or an absolute directory under a registered read root. Empty or `.` means the workspace root.
 
 **Returns:** `{ ok, entries }` — a sorted array of relative paths. The result
 is always complete: if the directory has more than 50,000 entries the call
@@ -44,7 +41,7 @@ Recursive glob match.
 
 **Parameters:**
 - `glob` (string, required) — glob pattern.
-- `dir` (string, optional) — directory to search in (default root).
+- `dir` (string, optional) — a workspace-relative directory or an absolute directory under a registered read root (default: workspace root).
 - `filtered` (boolean, optional, default `true`) — when `true`, files ignored
   by `.gitignore`/`.ignore` and hidden (dot) files are pruned from the walk,
   like `rg`/`fd`. Pass `false` to traverse every file.
@@ -62,7 +59,7 @@ Search file contents with a regex.
   `{ regex, ic?, ctx?, filtered? }` (`ic` = case-insensitive, `ctx` = context
   lines around each match, `filtered` = prune ignored/hidden files, default
   `true`).
-- `path` (string, optional) — file or directory to search (default root).
+- `path` (string, optional) — a workspace-relative file or directory, or an absolute path under a registered read root (default: workspace root).
 
 **Returns:** `{ ok, matches, skipped }`. `matches` is an array of
 `{ file, line, content, matched }` (`matched` is false for context lines).
@@ -119,10 +116,7 @@ stderr are merged.
 **Returns:** `{ ok, output, code, command, directory, signal, duration_ms,
 status }`. `code` is the exit status (null on signal/timeout); `signal` is the
 Unix signal number (null unless killed by a signal); `duration_ms` is wall
-time; `status` is `"exited"`, `"signaled"`, or `"timeout"`. Output is
-tail-truncated to 20 lines / 4 KB (keeping the end where errors land); when
-truncated, the full output is saved to a file under `lofi.tmp_dir` and the
-notice names it — page through it with `lofi.read(path)`. The child env is
+time; `status` is `"exited"`, `"signaled"`, or `"timeout"`. Output is tail-truncated to the configured `[truncate] tail_lines` and `tail_bytes` values (defaults: 200 lines and 32 KiB), keeping the end where errors land. When truncated, the full output is saved to a file under `lofi.tmp_dir`; the notice names it so you can page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are
 present but their values are replaced with `[redacted]` in the output.
 
@@ -144,8 +138,7 @@ turn can continue.
   driven with `jobType` and `jobKeyPress`. The child gets its
   own session and controlling terminal, so Ctrl+C reaches it as SIGINT and
   `/dev/tty` works.
-- `cols`, `rows` (number, optional, defaults `120`, `40`) — the PTY window
-  size. Only meaningful when `tty: true`.
+- `cols`, `rows` (number, optional, defaults `120`, `40`) — the PTY window size. Each value is clamped to 1–1000. Only meaningful when `tty: true`.
 - `idleMs` (number, optional) — output-idle threshold. Clamped to a 500 ms
   floor. Defaults to 15000 for tty jobs; non-tty jobs default to no idle
   detection because silence is normal compute. When the output is unchanged
@@ -265,6 +258,8 @@ of how `changed` treated the intermediate ticks.
 Write literal bytes to a tty job's PTY input. Use this to answer a prompt;
 include a trailing newline or follow it with `jobKeyPress({ key: "Enter" })`.
 Errors with `ok: false` when the job is not a tty job.
+
+`text` is limited to 64 KiB per call.
 
 **Returns:** `{ ok, id, sent }`.
 
