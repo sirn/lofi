@@ -240,7 +240,41 @@ impl App {
         // Enter on an expanded box (e.g. default-expanded user-shell output)
         // hands it the scroll cursor instead of closing it.
         self.detail_focus = Some(DetailFocus::on(&target, 0));
+        self.seat_new_detail_focus(&target);
         true
+    }
+
+    /// Move the transcript cursor from a detail header to the body row that
+    /// receives focus. The next render chooses its viewport from this cursor;
+    /// leaving it on the header can omit a newly inserted body at the bottom
+    /// edge, so the later semantic-focus pass has no visible row to resolve.
+    fn seat_new_detail_focus(&mut self, target: &view::DetailTarget) {
+        if target.row.is_some() {
+            return;
+        }
+        let Some(rel) = self.nav_cursor.checked_sub(self.log_off) else {
+            return;
+        };
+        let header_rows = self.log_details[rel..]
+            .iter()
+            .take_while(|detail| {
+                detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.key == target.key && detail.row.is_none())
+            })
+            .count();
+        if header_rows == 0 {
+            return;
+        }
+        let body_row = if target.tail && target.total > 0 {
+            target.total.min(DETAIL_VIEW_ROWS).saturating_sub(1)
+        } else {
+            0
+        };
+        self.nav_cursor = self
+            .nav_cursor
+            .saturating_add(header_rows)
+            .saturating_add(body_row);
     }
 
     pub(super) fn scroll_cursor_detail(&mut self, delta: i32) -> bool {

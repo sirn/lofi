@@ -879,6 +879,42 @@ fn leaving_for_input_collapses_the_focused_detail() {
 }
 
 #[test]
+fn expanding_in_flight_exec_at_viewport_bottom_keeps_body_visible() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.run = Some(0);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "live-exec".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::ToolInput {
+        id: "live-exec".to_string(),
+        code: "in-flight exec body".to_string(),
+        label: None,
+    });
+    let mut term = Terminal::new(TestBackend::new(80, 11)).unwrap();
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    assert!(a.log_view_h > 0);
+
+    a.enter_nav();
+    assert!(a.log_vis[a.nav_cursor - a.log_off]
+        .rendered
+        .contains("Exec"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Char(' ')), &mut a, None, &mut run);
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+
+    assert!(
+        a.log_vis
+            .iter()
+            .any(|line| line.rendered.contains("in-flight exec body")),
+        "the focused body row must be brought into the viewport"
+    );
+}
+
+#[test]
 fn focused_detail_row_shows_a_cursor_cell_in_navigate() {
     let mut a = app();
     push_turn(&mut a);
