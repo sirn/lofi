@@ -947,18 +947,14 @@ impl Agent {
                         tokio::select! {
                             biased;
                             () = wait_for_cancel(flag) => return Err(Error::Cancelled),
-                            next = tokio::time::timeout(
-                                DEFAULT_STREAM_IDLE_TIMEOUT,
-                                stream.next(),
-                            ) => next,
+                            next = stream.next() => next,
                         }
                     }
-                    None => tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, stream.next()).await,
+                    None => stream.next().await,
                 };
                 match next {
-                    Err(_) => return Err(Error::Provider("stream idle timeout".into())),
-                    Ok(None) => break,
-                    Ok(Some(ev)) => match ev {
+                    None => break,
+                    Some(ev) => match ev {
                         Ok(e) => {
                             let terminal = matches!(e, StreamingEvent::Done { .. });
                             let is_thinking_ev = matches!(

@@ -143,6 +143,7 @@ fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
 /// Unfold state holding the upstream byte stream plus partial decodings.
 struct SseState<M> {
     bytes: std::pin::Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
+    idle_timeout: std::time::Duration,
     pending_bytes: Vec<u8>,
     pending_lines: String,
     /// A trailing `\r` carried across a chunk boundary so a split `\r\n`
@@ -159,10 +160,15 @@ struct SseState<M> {
     mapper: M,
 }
 
-pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M) -> EventStream {
+pub(crate) fn map_sse_response<M: SseMapper>(
+    resp: reqwest::Response,
+    mapper: M,
+    idle_timeout: std::time::Duration,
+) -> EventStream {
     let bytes = Box::pin(resp.bytes_stream());
     let state = SseState {
         bytes,
+        idle_timeout,
         pending_bytes: Vec::new(),
         pending_lines: String::new(),
         pending_cr: false,
@@ -189,10 +195,11 @@ async fn step<M: SseMapper>(
             state.exhausted = true;
             return None;
         }
-        match state.bytes.next().await {
-            Some(Ok(chunk)) => feed_chunk(&mut state, &chunk),
-            Some(Err(e)) => return Some((Err(Error::Http(e.to_string())), state)),
-            None => {
+        match tokio::time::timeout(state.idle_timeout, state.bytes.next()).await {
+            Err(_) => sse_error(&mut state, "stream idle timeout"),
+            Ok(Some(Ok(chunk))) => feed_chunk(&mut state, &chunk),
+            Ok(Some(Err(e))) => return Some((Err(Error::Http(e.to_string())), state)),
+            Ok(None) => {
                 state.exhausted = true;
                 flush_tail(&mut state);
                 if !state.done {
@@ -381,6 +388,8 @@ mod tests {
     use super::*;
     use lofi_types::StreamingEvent;
 
+    const DEFAULT_STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
     #[allow(clippy::needless_pass_by_value)]
     fn text_mapper(ev: SseEvent) -> Result<Vec<StreamingEvent>> {
         let v: serde_json::Value = serde_json::from_str(&ev.data)
@@ -396,6 +405,7 @@ mod tests {
         let byte_stream = futures::stream::iter(chunk_iter);
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
             pending_cr: false,
@@ -414,6 +424,7 @@ mod tests {
         let byte_stream = futures::stream::iter(chunk_iter);
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
             pending_cr: false,
@@ -503,6 +514,66 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn raw_chunks_reset_idle_timeout_without_model_events() {
+        let byte_stream = futures::stream::unfold(0, |index| async move {
+            if index == 3 {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+            Some((
+                Ok(Bytes::from_static(b"data: {\"type\":\"heartbeat\"}\n\n")),
+                index + 1,
+            ))
+        });
+        let state = SseState {
+            bytes: Box::pin(byte_stream),
+            idle_timeout: std::time::Duration::from_secs(10),
+            pending_bytes: Vec::new(),
+            pending_lines: String::new(),
+            pending_cr: false,
+            queued: std::collections::VecDeque::new(),
+            pending_done: None,
+            exhausted: false,
+            done: false,
+            mapper: text_mapper,
+        };
+
+        let started = tokio::time::Instant::now();
+        let events = futures::stream::unfold(state, step)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(events.is_empty());
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(27));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_response_body_returns_timeout_error() {
+        let state = SseState {
+            bytes: Box::pin(futures::stream::pending()),
+            idle_timeout: std::time::Duration::from_secs(10),
+            pending_bytes: Vec::new(),
+            pending_lines: String::new(),
+            pending_cr: false,
+            queued: std::collections::VecDeque::new(),
+            pending_done: None,
+            exhausted: false,
+            done: false,
+            mapper: text_mapper,
+        };
+
+        let events = futures::stream::unfold(state, step)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            Err(Error::Provider(message)) if message == "stream idle timeout"
+        ));
+    }
+
     #[tokio::test]
     async fn invalid_utf8_byte_rejected_immediately() {
         let out = run_decoder(vec![b"data: ", &[0xFF], b"\n\n"]).await;
@@ -585,6 +656,7 @@ mod tests {
         });
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
             pending_cr: false,
@@ -609,6 +681,7 @@ mod tests {
             futures::stream::once(async { Ok(Bytes::from_static(b"data: done\n\n")) });
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
             pending_cr: false,
@@ -633,6 +706,7 @@ mod tests {
                 .chain(futures::stream::pending());
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
             pending_cr: false,

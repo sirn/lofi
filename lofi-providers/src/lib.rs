@@ -52,8 +52,14 @@ pub trait Provider: Send + Sync {
 /// `base_url`; per-model endpoint URLs are resolved earlier by the model
 /// registry. An unknown `api` is a config error rather than a transport one.
 /// # Errors
-/// Returns [`Error::Http`] if the shared HTTP client cannot be constructed.
+/// Returns [`Error::Config`] for an invalid stream timeout or [`Error::Http`]
+/// if the shared HTTP client cannot be constructed.
 pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
+    if cfg.stream_idle_timeout_ms == 0 {
+        return Err(Error::Config(
+            "stream_idle_timeout_ms must be greater than zero".to_string(),
+        ));
+    }
     let base_url = cfg
         .base_url
         .as_deref()
@@ -62,30 +68,35 @@ pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
         .to_string();
     let (api_key, headers) = effective_credentials(cfg);
     let client = http_client()?;
+    let stream_idle_timeout = std::time::Duration::from_millis(cfg.stream_idle_timeout_ms);
     let provider: Box<dyn Provider> = match api {
         Api::OpenAiCompletions => Box::new(OpenAiCompletionsProvider {
             base_url,
             api_key,
             headers,
             client,
+            stream_idle_timeout,
         }),
         Api::OpenAiResponses => Box::new(OpenAiResponsesProvider {
             base_url,
             api_key,
             headers,
             client,
+            stream_idle_timeout,
         }),
         Api::AnthropicMessages => Box::new(AnthropicMessagesProvider {
             base_url,
             api_key,
             headers,
             client,
+            stream_idle_timeout,
         }),
         Api::GoogleGenerativeAi => Box::new(GoogleGenerativeAiProvider {
             base_url,
             api_key,
             headers,
             client,
+            stream_idle_timeout,
         }),
     };
     Ok(provider)
@@ -126,9 +137,8 @@ pub fn effective_credentials(cfg: &ProviderConfig) -> (String, HashMap<String, S
 /// are not. A flat `.timeout()` caps the *whole* response body, so a long
 /// reasoning-model turn (which can stream for several minutes) would be
 /// aborted mid-stream by reqwest even though bytes are still arriving.
-/// Stuck connections are instead caught by the agent's stream timeout in
-/// `run_once_inner`, which is overall rather than per-byte and at least
-/// tolerates a long-but-productive turn.
+/// Stuck response bodies are instead caught by the SSE transport's per-chunk
+/// idle timeout, which still permits long turns while bytes keep arriving.
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -397,6 +407,7 @@ mod tests {
             models: indexmap::IndexMap::new(),
             auto_models: None,
             no_auth: false,
+            stream_idle_timeout_ms: 90_000,
             thinking_level: None,
             thinking_levels: Vec::new(),
             service_tier: None,
@@ -446,6 +457,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             headers: HashMap::from([("x-custom".to_string(), "yes".to_string())]),
             client: http_client().unwrap(),
+            stream_idle_timeout: std::time::Duration::from_secs(90),
         };
         assert_eq!(oc.base_url, "https://api.example.com");
     }
@@ -461,6 +473,16 @@ mod tests {
             c.api_type = Some(api);
             assert!(open(api, &c).is_ok());
         }
+    }
+
+    #[test]
+    fn open_rejects_zero_stream_idle_timeout() {
+        let mut c = cfg();
+        c.stream_idle_timeout_ms = 0;
+        let Err(error) = open(Api::OpenAiCompletions, &c) else {
+            panic!("zero stream idle timeout should fail");
+        };
+        assert!(matches!(error, Error::Config(message) if message.contains("greater than zero")));
     }
 
     #[test]
