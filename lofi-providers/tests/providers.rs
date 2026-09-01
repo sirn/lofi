@@ -58,6 +58,7 @@ fn cfg(api: Api, base_url: String) -> ProviderConfig {
         models: indexmap::IndexMap::new(),
         auto_models: None,
         no_auth: false,
+        stream_idle_timeout_ms: 90_000,
         thinking_level: None,
         thinking_levels: Vec::new(),
         service_tier: None,

@@ -14,6 +14,7 @@ pub(crate) struct OpenAiResponsesProvider {
     pub(crate) api_key: String,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) client: reqwest::Client,
+    pub(crate) stream_idle_timeout: std::time::Duration,
 }
 
 #[async_trait]
@@ -39,6 +40,7 @@ impl super::Provider for OpenAiResponsesProvider {
         Ok(map_sse_response(
             resp,
             IrSseMapper::<OpenAiResponsesIr>::default(),
+            self.stream_idle_timeout,
         ))
     }
 }

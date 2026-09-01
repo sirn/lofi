@@ -278,12 +278,14 @@ fn write_response(stream: &mut TcpStream, response: &MockResponse) {
         }
         let _ = stream.write_all(b"\r\n");
         if let Some(chunks) = &response.chunks {
-            for chunk in chunks {
+            for (index, chunk) in chunks.iter().enumerate() {
                 if stream.write_all(chunk).is_err() {
                     break;
                 }
                 let _ = stream.flush();
-                thread::sleep(response.chunk_delay);
+                if index + 1 < chunks.len() {
+                    thread::sleep(response.chunk_delay);
+                }
             }
         } else {
             let _ = stream.write_all(response.body.as_bytes());
