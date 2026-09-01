@@ -3,7 +3,7 @@ resolver = "2"
 members = ["lofi", "lofi-core", "lofi-code", "lofi-error", "lofi-providers", "lofi-types", "lofi-ui"]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://git.sr.ht/~sirn/lofi"
