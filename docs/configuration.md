@@ -640,4 +640,4 @@ model = "gpt-4o-mini"
 # max_tokens = 1024
 ```
 
-`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use the agent's default stream idle timeout, and `max_tokens` defaults to the selected model's output limit.
+`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use that provider's `stream_idle_timeout_ms`, and `max_tokens` defaults to the selected model's output limit.
