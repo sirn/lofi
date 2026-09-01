@@ -185,6 +185,7 @@ Each `[providers.<name>]` table defines authentication, protocol routing, and it
 | `env_name` | string | none | Environment variable containing the API key. |
 | `headers` | table | none | Additional HTTP headers; values support value resolution. |
 | `no_auth` | boolean | `false` | Make the provider available without authentication headers. |
+| `stream_idle_timeout_ms` | positive integer | `90000` | Maximum gap between response-body chunks before the stream fails. |
 | `thinking_level` | string | inherited | Provider-level thinking default. |
 | `thinking_levels` | string array | empty | Provider capability metadata. Declare supported levels on each static model. |
 | `service_tier` | string | inherited | Provider-level service-tier default. |
@@ -639,4 +640,4 @@ model = "gpt-4o-mini"
 # max_tokens = 1024
 ```
 
-`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use the agent's default stream idle timeout, and `max_tokens` defaults to the selected model's output limit.
+`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use that provider's `stream_idle_timeout_ms`, and `max_tokens` defaults to the selected model's output limit.
