@@ -196,13 +196,7 @@ async fn step<M: SseMapper>(
             return None;
         }
         match tokio::time::timeout(state.idle_timeout, state.bytes.next()).await {
-            Err(_) => {
-                state.done = true;
-                return Some((
-                    Err(Error::Provider("stream idle timeout".to_string())),
-                    state,
-                ));
-            }
+            Err(_) => sse_error(&mut state, "stream idle timeout"),
             Ok(Some(Ok(chunk))) => feed_chunk(&mut state, &chunk),
             Ok(Some(Err(e))) => return Some((Err(Error::Http(e.to_string())), state)),
             Ok(None) => {

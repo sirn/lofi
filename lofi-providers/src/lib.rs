@@ -137,7 +137,7 @@ pub fn effective_credentials(cfg: &ProviderConfig) -> (String, HashMap<String, S
 /// are not. A flat `.timeout()` caps the *whole* response body, so a long
 /// reasoning-model turn (which can stream for several minutes) would be
 /// aborted mid-stream by reqwest even though bytes are still arriving.
-/// Stuck response bodies are instead caught by the SSE transport's per-byte
+/// Stuck response bodies are instead caught by the SSE transport's per-chunk
 /// idle timeout, which still permits long turns while bytes keep arriving.
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()

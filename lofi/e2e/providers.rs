@@ -147,8 +147,6 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
             offset
         })
         .collect::<Vec<_>>();
-    // Lifecycle-only time exceeds the idle budget, but each raw response-body
-    // gap stays well below it.
     let server = MockServer::start(vec![MockResponse::fragmented_sse(
         body,
         &split_at,
