@@ -56,12 +56,6 @@ pub use model::{build_agent, rebuild_agent, select_model};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 
-/// Per-chunk idle budget: if no SSE event arrives for this long the stream
-/// is treated as stuck and aborted. This is intentionally an *idle* timeout
-/// rather than a wall-clock cap so a long but productive reasoning-model turn
-/// (which can stream for several minutes) is not cut off mid-response. The
-/// HTTP client has no overall timeout for the same reason.
-const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Maximum cumulative bytes of streamed text/thinking/tool-input retained
 /// for a single round, so a hostile or misbehaving endpoint sending many
 /// small valid events cannot exhaust memory within the stream timeout.
