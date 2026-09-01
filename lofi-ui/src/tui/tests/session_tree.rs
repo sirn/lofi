@@ -455,6 +455,105 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
 }
 
 #[test]
+fn tree_rollback_after_compacted_failed_turn_keeps_checkpoint_context() {
+    use lofi_core::session::store::{self, SessionStore};
+    let dir = tempfile::tempdir().unwrap();
+    let session_store = SessionStore::new(dir.path().join("s"));
+    let cursor = session_store
+        .create_cursor(std::path::Path::new("/x"), &"m".into())
+        .unwrap();
+    let path = cursor.path().to_path_buf();
+    cursor
+        .append_compaction(
+            &[user("kept prompt"), assistant("kept reply")],
+            "summary through n+4",
+            &[String::new(), String::new()],
+            store::CompactionCounts {
+                summarized: 5,
+                represented: 5,
+                kept: 2,
+            },
+        )
+        .unwrap();
+    cursor.append_system("instructions").unwrap();
+    let mut failed = blank_events([
+        msg(user("failed prompt")),
+        msg(assistant("failed partial")),
+        SessionEventKind::TurnFailed {
+            model: "m".into(),
+            elapsed_ms: 5,
+            error: "boom".into(),
+            cost: 0.0,
+            usage: Usage::default(),
+        },
+    ]);
+    cursor.append_events(&mut failed).unwrap();
+    let failed_id = failed[2].id.clone();
+    let mut later = blank_events([
+        msg(user("n+8")),
+        msg(assistant("later reply")),
+        SessionEventKind::TurnEnd {
+            model: "m".into(),
+            elapsed_ms: 10,
+            cost: 0.0,
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ]);
+    cursor.append_events(&mut later).unwrap();
+
+    let mut a = app();
+    attach_session_sink(
+        &mut a,
+        session_store,
+        std::path::Path::new("/x"),
+        store::SessionCursor::open(path).unwrap(),
+    );
+    assert!(a.slash_command("/tree"));
+    let edit_idx = a
+        .tree_picker
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|entry| entry.prefill == "n+8")
+        .expect("post-error prompt is selectable");
+    assert_eq!(
+        a.tree_picker.as_ref().unwrap().entries[edit_idx].branch_point,
+        failed_id
+    );
+    a.tree_picker.as_mut().unwrap().selected = edit_idx;
+    a.tree_picker_confirm();
+
+    assert_eq!(a.input, "n+8");
+    assert_eq!(
+        a.session
+            .cursor
+            .as_ref()
+            .and_then(store::SessionCursor::leaf_id),
+        Some(failed_id)
+    );
+    let history = a.lifecycle.shared_history();
+    let messages = history.lock().unwrap();
+    let texts: Vec<String> = messages
+        .iter()
+        .map(|message| match &message.blocks[..] {
+            [ContentBlock::Text { text }] => text.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "instructions",
+            "summary through n+4",
+            "kept prompt",
+            "kept reply",
+        ]
+    );
+}
+
+#[test]
 fn tree_revert_to_cancelled_turn_drops_aborted_tail() {
     // n: user prompt
     // n+1: agent message + TurnEnd (turn 1 completes)
