@@ -116,6 +116,65 @@ fn fragmented_sse_custom_headers_and_no_auth_work_for_every_provider() {
 }
 
 #[test]
+fn responses_lifecycle_events_keep_a_long_stream_alive() {
+    let lifecycle = [
+        json!({ "type": "response.created" }),
+        json!({ "type": "response.queued" }),
+        json!({ "type": "response.in_progress" }),
+    ];
+    let text = json!({
+        "type": "response.output_text.delta",
+        "delta": "answer after lifecycle events",
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "response": { "usage": { "input_tokens": 2, "output_tokens": 4 } },
+    });
+    let blocks = lifecycle
+        .into_iter()
+        .chain([text, completed])
+        .map(|event| format!("data: {event}\n\n"))
+        .chain(["data: [DONE]\n\n".to_string()])
+        .collect::<Vec<_>>();
+    let body = blocks.concat();
+    let mut offset = 0;
+    let split_at = blocks
+        .iter()
+        .take(blocks.len() - 1)
+        .map(|block| {
+            offset += block.len();
+            offset
+        })
+        .collect::<Vec<_>>();
+    let server = MockServer::start(vec![MockResponse::fragmented_sse(
+        body,
+        &split_at,
+        Duration::from_millis(75),
+    )]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "[providers.responses]\n",
+        "[providers.responses]\nstream_idle_timeout_ms = 100\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+
+    let output = fixture.output(&[
+        "--model",
+        "responses/reasoning",
+        "--print",
+        "wait through lifecycle events",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("answer after lifecycle events"));
+    assert_eq!(server.request_count(), 1);
+}
+
+#[test]
 fn premature_stream_end_retries_for_every_provider_protocol() {
     let partial_chat = {
         let event = json!({ "choices": [{ "delta": { "content": "discard chat" } }] });

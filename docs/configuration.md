@@ -185,6 +185,7 @@ Each `[providers.<name>]` table defines authentication, protocol routing, and it
 | `env_name` | string | none | Environment variable containing the API key. |
 | `headers` | table | none | Additional HTTP headers; values support value resolution. |
 | `no_auth` | boolean | `false` | Make the provider available without authentication headers. |
+| `stream_idle_timeout_ms` | integer | `90000` | Maximum gap between response-body chunks before the request is retried. |
 | `thinking_level` | string | inherited | Provider-level thinking default. |
 | `thinking_levels` | string array | empty | Provider capability metadata. Declare supported levels on each static model. |
 | `service_tier` | string | inherited | Provider-level service-tier default. |
