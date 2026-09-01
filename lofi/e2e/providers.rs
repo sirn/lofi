@@ -178,6 +178,44 @@ fn responses_lifecycle_events_keep_a_long_stream_alive() {
 }
 
 #[test]
+fn responses_idle_body_retries_with_the_configured_timeout() {
+    let lifecycle = json!({ "type": "response.created" });
+    let first_block = format!("data: {lifecycle}\n\n");
+    let delayed_body = format!("{first_block}{}", responses_body("late response"));
+    let server = MockServer::start(vec![
+        MockResponse::fragmented_sse(
+            delayed_body,
+            &[first_block.len()],
+            Duration::from_millis(900),
+        ),
+        MockResponse::sse(responses_body("answer after idle retry")),
+    ]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "[providers.responses]\n",
+        "[providers.responses]\nstream_idle_timeout_ms = 300\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+
+    let output = fixture.output(&[
+        "--model",
+        "responses/reasoning",
+        "--print",
+        "retry an idle response body",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("answer after idle retry"), "{stdout}");
+    assert!(!stdout.contains("late response"), "{stdout}");
+    assert_eq!(server.request_count(), 2);
+}
+
+#[test]
 fn premature_stream_end_retries_for_every_provider_protocol() {
     let partial_chat = {
         let event = json!({ "choices": [{ "delta": { "content": "discard chat" } }] });
