@@ -47,7 +47,7 @@ fn failed_exec_settles_pending_native_tools() {
 #[test]
 fn cancelled_turn_settles_open_tool_rows() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -491,7 +491,7 @@ fn log_scrollbar_thumb_tracks_scroll_input_ownership() {
 
     let mut a = app();
     for n in 0..40 {
-        a.apply_event(AgentEvent::TurnStart {
+        a.apply_event(AgentEvent::Prompt {
             kind: lofi_types::PromptKind::User,
             prompt: format!("prompt {n}"),
         });
@@ -961,7 +961,7 @@ fn thinking_renders_inline_without_expansion() {
 #[test]
 fn repeated_provider_tool_ids_get_independent_detail_keys() {
     let events = [
-        AgentEvent::TurnStart {
+        AgentEvent::Prompt {
             prompt: "first".to_string(),
             kind: lofi_types::PromptKind::User,
         },
@@ -969,7 +969,7 @@ fn repeated_provider_tool_ids_get_independent_detail_keys() {
             id: "reused".to_string(),
             name: "exec".to_string(),
         },
-        AgentEvent::TurnStart {
+        AgentEvent::Prompt {
             prompt: "second".to_string(),
             kind: lofi_types::PromptKind::User,
         },

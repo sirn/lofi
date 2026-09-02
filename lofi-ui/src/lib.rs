@@ -362,7 +362,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
                 | AgentEvent::RetryEnd { .. }
-                | AgentEvent::TurnStart { .. }
+                | AgentEvent::RunStart
+                | AgentEvent::Prompt { .. }
                 | AgentEvent::TurnContinue
                 | AgentEvent::Compaction { .. }
                 | AgentEvent::UserShellStart { .. }

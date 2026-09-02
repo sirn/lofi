@@ -78,7 +78,7 @@ pub(super) fn replay_indexed_session(
             // Notices keep their persisted kind: a hollow bullet marks them
             // as app-injected, not typed input.
             let (prompt, kind) = prompts.get(turn).cloned().unwrap_or_default();
-            app.apply_file_backed_replay_event(AgentEvent::TurnStart { prompt, kind });
+            app.apply_file_backed_replay_event(AgentEvent::Prompt { prompt, kind });
             for &i in selected {
                 if !matches!(
                     index[i].kind,

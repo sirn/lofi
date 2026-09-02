@@ -8,9 +8,60 @@ fn last_text(app: &App) -> Option<&str> {
 }
 
 #[test]
+fn agent_notice_prompt_enters_transcript_not_app_notification() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "go".into(),
+    });
+    a.apply_event(AgentEvent::Text("repeating".into()));
+    a.turn_cost = 1.25;
+    a.turn_has_round_usage = true;
+
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::Notice,
+        prompt: "A potential loop was detected".into(),
+    });
+
+    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.turns[1].kind, lofi_types::PromptKind::Notice);
+    assert_eq!(a.turns[1].prompt, "A potential loop was detected");
+    assert!(a.notify.is_none());
+    assert_eq!(a.turn_cost, 1.25);
+    assert!(a.turn_has_round_usage);
+}
+
+#[test]
+fn job_and_loop_notices_use_the_same_transcript_prompt() {
+    let notice = || AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::Notice,
+        prompt: "job or loop notice".into(),
+    };
+
+    let mut job = app();
+    job.apply_event(AgentEvent::RunStart);
+    job.apply_event(notice());
+
+    let mut loop_recovery = app();
+    loop_recovery.apply_event(AgentEvent::RunStart);
+    loop_recovery.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "go".into(),
+    });
+    loop_recovery.apply_event(notice());
+
+    let job_notice = job.turns.last().unwrap();
+    let loop_notice = loop_recovery.turns.last().unwrap();
+    assert_eq!(job_notice.kind, loop_notice.kind);
+    assert_eq!(job_notice.prompt, loop_notice.prompt);
+    assert!(job.notify.is_none());
+    assert!(loop_recovery.notify.is_none());
+}
+
+#[test]
 fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "first".into(),
     });
@@ -37,7 +88,7 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
     assert!(a.turns[0].blocks.is_empty());
 
     a.turn_byte_ranges[1] = Some((20, 30));
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "second".into(),
     });
@@ -326,7 +377,7 @@ fn round_commit_releases_hidden_exec_result() {
 
     let mut a = app();
     a.session.cursor = Some(cursor);
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -389,7 +440,7 @@ fn round_commit_releases_hidden_exec_result() {
 #[test]
 fn turn_committed_extends_existing_range_across_silent_continuation() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -408,7 +459,7 @@ fn turn_committed_extends_existing_range_across_silent_continuation() {
 #[test]
 fn run_finished_keeps_latest_persisted_turn_visible_until_next_prompt() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -430,7 +481,7 @@ fn run_finished_keeps_latest_persisted_turn_visible_until_next_prompt() {
 #[test]
 fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "previous prompt".into(),
     });
@@ -446,7 +497,7 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "previous response")));
 
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "new prompt".into(),
     });
@@ -500,7 +551,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
 
     let mut a = app();
     a.session.cursor = Some(cursor);
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -520,7 +571,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
 #[test]
 fn run_finished_keeps_blocks_for_hard_cap_continuation() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "go".into(),
     });
@@ -559,7 +610,7 @@ fn turn_end_updates_usage() {
 #[test]
 fn round_usage_updates_totals_per_round() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "p".into(),
         kind: lofi_types::PromptKind::User,
     });
@@ -614,7 +665,7 @@ fn round_usage_updates_totals_per_round() {
 #[test]
 fn turn_end_folds_bundled_totals_on_resume_path() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "p".into(),
         kind: lofi_types::PromptKind::User,
     });

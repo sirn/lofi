@@ -136,7 +136,6 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
         match &ev.kind {
             SessionEventKind::Message(msg) => match msg.role {
                 Role::User => {
-                    let next_turn_kind = msg.kind;
                     if msg
                         .blocks
                         .iter()
@@ -167,19 +166,9 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                         }
                         continue;
                     }
-                    // Otherwise a prompt: start a new turn.
-                    let prompt = msg
-                        .blocks
-                        .iter()
-                        .find_map(|b| match b {
-                            ContentBlock::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    emit(AgentEvent::TurnStart {
-                        prompt,
-                        kind: next_turn_kind,
-                    });
+                    if let Some(event) = AgentEvent::from_prompt(msg) {
+                        emit(event);
+                    }
                 }
                 Role::Assistant => {
                     for b in &msg.blocks {
@@ -270,20 +259,20 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                 truncated,
                 cancelled,
                 exclude_from_context,
-            } => emit(AgentEvent::UserShell {
-                command: command.clone(),
-                output: output.clone(),
-                exit_code: *exit_code,
-                signal: *signal,
-                duration_ms: *duration_ms,
-                truncated: *truncated,
-                cancelled: *cancelled,
-                exclude_from_context: *exclude_from_context,
-            }),
-            SessionEventKind::RoundDiscarded { detail } => {
-                emit(AgentEvent::Notice(detail.clone()));
+            } => {
+                emit(AgentEvent::UserShell {
+                    command: command.clone(),
+                    output: output.clone(),
+                    exit_code: *exit_code,
+                    signal: *signal,
+                    duration_ms: *duration_ms,
+                    truncated: *truncated,
+                    cancelled: *cancelled,
+                    exclude_from_context: *exclude_from_context,
+                });
             }
-            SessionEventKind::NativeTool(_)
+            SessionEventKind::RoundDiscarded { .. }
+            | SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
             | SessionEventKind::ThinkingTiming { .. }
             | SessionEventKind::JobStarted { .. }
@@ -900,6 +889,20 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["go", "try again differently", "recovery answer"]);
+
+        let mut replayed = Vec::new();
+        replay_session_events(&events, |event| replayed.push(event));
+        assert!(replayed.iter().any(|event| matches!(
+            event,
+            AgentEvent::Prompt { prompt, kind }
+                if *kind == PromptKind::Notice && prompt == "try again differently"
+        )));
+        assert!(
+            replayed
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::Notice(_))),
+            "discard metadata must not become a transient notification"
+        );
     }
 
     #[test]
@@ -1033,7 +1036,7 @@ mod tests {
         ];
         let mut prompts: Vec<String> = Vec::new();
         replay_selected_session_events(&events, |ev| {
-            if let AgentEvent::TurnStart { prompt, .. } = ev {
+            if let AgentEvent::Prompt { prompt, .. } = ev {
                 prompts.push(prompt);
             }
         });
@@ -1049,7 +1052,7 @@ mod tests {
         ];
         let mut kinds: Vec<lofi_types::PromptKind> = Vec::new();
         replay_selected_session_events(&events, |ev| {
-            if let AgentEvent::TurnStart { kind, .. } = ev {
+            if let AgentEvent::Prompt { kind, .. } = ev {
                 kinds.push(kind);
             }
         });
@@ -1062,5 +1065,21 @@ mod tests {
             ],
             "kind travels with each user message and resets to User"
         );
+    }
+
+    #[test]
+    fn replay_does_not_guess_live_run_boundaries() {
+        let events = vec![
+            user_msg("first"),
+            assistant_msg("partial"),
+            user_msg("second"),
+        ];
+        let mut prompts = Vec::new();
+        replay_selected_session_events(&events, |event| match event {
+            AgentEvent::RunStart => panic!("run starts are live-only"),
+            AgentEvent::Prompt { prompt, .. } => prompts.push(prompt),
+            _ => {}
+        });
+        assert_eq!(prompts, ["first", "second"]);
     }
 }

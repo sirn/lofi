@@ -262,8 +262,12 @@ fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
         let mut tui = fixture.spawn(&["--model", model]);
 
         tui.submit("loop recovery prompt marker");
-        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("A potential loop was detected", WAIT);
         tui.wait_for("loop recovery answer marker", WAIT);
+        assert!(
+            !tui.screen_text().contains("potential agent loop detected"),
+            "{api}: loop recovery must not use the app notification area"
+        );
 
         let requests = server.requests();
         assert_eq!(requests.len(), 2, "{api}");
@@ -306,7 +310,7 @@ fn repeated_thinking_stops_after_failed_recovery_for_all_api_types() {
         let mut tui = fixture.spawn(&["--model", model]);
 
         tui.submit("failed loop recovery prompt marker");
-        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("A potential loop was detected", WAIT);
         tui.wait_for("agent stopped after loop recovery failed", WAIT);
 
         assert_eq!(server.request_count(), 2, "{api}");
@@ -375,8 +379,12 @@ fn repeated_tool_results_notify_and_recover_once_for_all_api_types() {
         let mut tui = fixture.spawn(&["--model", model]);
 
         tui.submit("tool loop recovery prompt marker");
-        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("A potential loop was detected", WAIT);
         tui.wait_for("tool loop recovery answer marker", WAIT);
+        assert!(
+            !tui.screen_text().contains("potential agent loop detected"),
+            "{api}: loop recovery must not use the app notification area"
+        );
 
         let requests = server.requests();
         assert_eq!(requests.len(), 6, "{api}");
@@ -416,7 +424,7 @@ fn repeated_tool_results_stop_after_failed_recovery_for_all_api_types() {
         let mut tui = fixture.spawn(&["--model", model]);
 
         tui.submit("failed tool loop recovery prompt marker");
-        tui.wait_for("potential agent loop detected", WAIT);
+        tui.wait_for("A potential loop was detected", WAIT);
         tui.wait_for("agent stopped after loop recovery failed", WAIT);
 
         assert_eq!(server.request_count(), 6, "{api}");

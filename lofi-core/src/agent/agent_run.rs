@@ -213,59 +213,93 @@ impl Agent {
         cancel: Option<Arc<AtomicBool>>,
         preempt: Option<Arc<AtomicBool>>,
     ) -> Result<()> {
+        self.run_continuation_with_notices(
+            messages,
+            user_prompt,
+            prompt_kind,
+            attachments,
+            Vec::new(),
+            tx,
+            session,
+            continuation,
+            cancel,
+            preempt,
+        )
+        .await
+    }
+
+    /// Runs a continuation after adding app-generated notices before the
+    /// submitted prompt. Each notice uses the same durable prompt path as
+    /// notices generated during the run.
+    /// # Errors
+    /// Propagates [`Error`] from provider streaming, timeouts, or tool
+    /// execution failures that cannot be surfaced as a `ToolResult`.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub async fn run_continuation_with_notices(
+        &self,
+        messages: &mut Vec<Message>,
+        user_prompt: String,
+        prompt_kind: lofi_types::PromptKind,
+        attachments: Vec<ContentBlock>,
+        notices: Vec<String>,
+        tx: Sender<AgentEvent>,
+        session: Option<&crate::session::store::SessionCursor>,
+        continuation: bool,
+        cancel: Option<Arc<AtomicBool>>,
+        preempt: Option<Arc<AtomicBool>>,
+    ) -> Result<()> {
         // Rejected: trim from the TUI when the channel closes. The burst
         // is allocated and dropped on this task's return paths.
         let _trim = crate::malloc_trim::ReleaseFreedMemoryOnDrop;
         let prev_len = messages.len();
-        let turn_start = if continuation {
+        let prompt = if continuation {
             None
         } else {
-            // Surface attachments on the turn header (TurnStart.prompt and,
-            // via the recorder, the durable turn label) as a marker per image,
-            // so the live and replayed views both show that an image was
-            // attached. The image bytes themselves never appear in the label.
-            let attachment_markers: Vec<String> = attachments
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Image { media_type, .. } => {
-                        let short = media_type.strip_prefix("image/").unwrap_or(media_type);
-                        Some(format!("[image: {short}]"))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let prompt_for_event = if attachment_markers.is_empty() {
-                user_prompt.clone()
-            } else if user_prompt.is_empty() {
-                attachment_markers.join(" ")
-            } else {
-                format!("{}\n{}", user_prompt, attachment_markers.join(" "))
-            };
             // The system prompt is pinned on the durable transcript at each
             // context boundary (create, compact) and arrives via the restored
             // history — the engine never materializes it inline.
             let mut blocks = vec![ContentBlock::Text { text: user_prompt }];
             blocks.extend(attachments);
-            messages.push(Message {
+            Some(Message {
                 role: Role::User,
                 blocks,
                 kind: prompt_kind,
-            });
-            Some(prompt_for_event)
+            })
         };
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        if let Some(prompt) = turn_start {
-            // Persist the user prompt before TurnStart so a closed consumer
-            // cannot drop a submitted turn. Later checkpoints skip this suffix.
-            commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await;
-            if !emit(
-                Some(&tx),
-                AgentEvent::TurnStart {
-                    prompt,
-                    kind: prompt_kind,
-                },
+        let mut starts_run = true;
+        for notice in notices {
+            let message = Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: notice }],
+                kind: lofi_types::PromptKind::Notice,
+            };
+            if !append_prompt(
+                messages,
+                message,
+                starts_run,
+                recorder.as_mut(),
+                prev_len,
+                &stats,
+                &tx,
+            )
+            .await
+            {
+                return Ok(());
+            }
+            starts_run = false;
+        }
+        if let Some(prompt) = prompt {
+            if !append_prompt(
+                messages,
+                prompt,
+                starts_run,
+                recorder.as_mut(),
+                prev_len,
+                &stats,
+                &tx,
             )
             .await
             {
@@ -342,7 +376,21 @@ impl Agent {
             // Feed the prior round's context fill back in so the next request
             // clips its output cap against the remaining context window.
             let prev_input = Some(stats.usage.context_tokens());
-            if recovery_round_exceeded(&tx, &mut recovery_rounds).await {
+            if let Some(message) = recovery_round_exceeded(&mut recovery_rounds) {
+                if !append_prompt(
+                    messages,
+                    message,
+                    false,
+                    recorder.as_mut(),
+                    prev_len,
+                    &stats,
+                    &tx,
+                )
+                .await
+                {
+                    detached = true;
+                    break;
+                }
                 finished_normally = true;
                 break;
             }
@@ -397,9 +445,7 @@ impl Agent {
                         outcome.loop_detail.as_deref(),
                         outcome.interrupted_thinking_index,
                         &mut loop_recovered,
-                        &tx,
-                    )
-                    .await;
+                    );
                     // What streamed must reach the transcript before it
                     // leaves the model history.
                     if let Some((index, detail)) = plan.removal {
@@ -419,13 +465,29 @@ impl Agent {
                         }
                         messages.remove(index);
                     }
-                    if let Some(message) = plan.recovery {
-                        messages.push(message);
-                    }
                     // Loop handling can replace an interrupted, unsigned
                     // reasoning message with a provider-valid recovery prompt.
-                    // Persist only after that correction reaches its final form.
-                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await;
+                    // Persist and surface that prompt only after the correction
+                    // reaches its final form.
+                    if let Some(message) = plan.recovery {
+                        if !append_prompt(
+                            messages,
+                            message,
+                            false,
+                            recorder.as_mut(),
+                            prev_len,
+                            &stats,
+                            &tx,
+                        )
+                        .await
+                        {
+                            detached = true;
+                            break;
+                        }
+                    } else {
+                        commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx)
+                            .await;
+                    }
                     match plan.action {
                         LoopAction::Continue => continue,
                         LoopAction::Stop => {
@@ -439,43 +501,44 @@ impl Agent {
                         LoopAction::None => {}
                     }
                     if finished {
-                        let recovery = if outcome.stop_reason
-                            == Some(lofi_types::StopReason::MaxTokens)
-                        {
-                            Some((
-                                TRUNCATION_CONTINUATION_PROMPT,
-                                "response hit the token limit; continuing the turn",
-                            ))
-                        } else if self.auto_continue.lost_tool_call
-                            && outcome.stop_reason == Some(lofi_types::StopReason::ToolUse)
-                        {
-                            Some((
-                                LOST_TOOL_CONTINUATION_PROMPT,
-                                "provider stopped for a tool call but emitted none; continuing the turn",
-                            ))
-                        } else if self.auto_continue.intent
-                            && outcome.stop_reason == Some(lofi_types::StopReason::EndTurn)
-                            && outcome.announced_tool_intent
-                        {
-                            Some((
-                                INTENT_CONTINUATION_PROMPT,
-                                "response stopped after announcing an action; continuing the turn",
-                            ))
-                        } else {
-                            None
-                        };
+                        let recovery =
+                            if outcome.stop_reason == Some(lofi_types::StopReason::MaxTokens) {
+                                Some(TRUNCATION_CONTINUATION_PROMPT)
+                            } else if self.auto_continue.lost_tool_call
+                                && outcome.stop_reason == Some(lofi_types::StopReason::ToolUse)
+                            {
+                                Some(LOST_TOOL_CONTINUATION_PROMPT)
+                            } else if self.auto_continue.intent
+                                && outcome.stop_reason == Some(lofi_types::StopReason::EndTurn)
+                                && outcome.announced_tool_intent
+                            {
+                                Some(INTENT_CONTINUATION_PROMPT)
+                            } else {
+                                None
+                            };
                         if !auto_continued {
-                            if let Some((prompt, notice)) = recovery {
+                            if let Some(prompt) = recovery {
                                 auto_continued = true;
-                                messages.push(Message {
+                                let message = Message {
                                     role: Role::User,
                                     blocks: vec![ContentBlock::Text {
                                         text: prompt.to_string(),
                                     }],
                                     kind: lofi_types::PromptKind::Notice,
-                                });
-                                if !emit(Some(&tx), AgentEvent::Notice(notice.into())).await {
+                                };
+                                if !append_prompt(
+                                    messages,
+                                    message,
+                                    false,
+                                    recorder.as_mut(),
+                                    prev_len,
+                                    &stats,
+                                    &tx,
+                                )
+                                .await
+                                {
                                     detached = true;
+                                    break;
                                 }
                                 continue;
                             }
@@ -653,7 +716,7 @@ impl Agent {
         if let Some(recorder) = recorder.as_mut() {
             let summary = stats.summary(elapsed_ms);
             let flush_outcome = outcome.clone().unwrap_or(TurnOutcome::Detached);
-            match recorder.flush(&messages[prev_len..], &flush_outcome, &summary) {
+            match recorder.flush_incremental(&messages[prev_len..], &flush_outcome, &summary) {
                 Ok(range) => committed = range,
                 Err(e) if err.is_none() => return Err(e),
                 Err(_) => {}
@@ -1569,22 +1632,26 @@ async fn commit_progress(
     stats: &TurnStats,
     tx: &Sender<AgentEvent>,
 ) {
-    let Some(recorder) = recorder else {
-        return;
-    };
+    if let Some((byte_start, byte_end)) = checkpoint_progress(recorder, messages, stats, tx).await {
+        let _ = tx
+            .send(AgentEvent::RoundCommitted {
+                byte_start,
+                byte_end,
+            })
+            .await;
+    }
+}
+
+async fn checkpoint_progress(
+    recorder: Option<&mut SessionRecorder>,
+    messages: &[Message],
+    stats: &TurnStats,
+    tx: &Sender<AgentEvent>,
+) -> Option<(u64, u64)> {
+    let recorder = recorder?;
     let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
     match recorder.checkpoint(messages, &stats.summary(elapsed_ms)) {
-        Ok(Some((byte_start, byte_end))) => {
-            if !tx.is_closed() {
-                let _ = tx
-                    .send(AgentEvent::RoundCommitted {
-                        byte_start,
-                        byte_end,
-                    })
-                    .await;
-            }
-        }
-        Ok(None) => {}
+        Ok(range) => range,
         Err(error) => {
             let _ = emit(
                 Some(tx),
@@ -1593,8 +1660,64 @@ async fn commit_progress(
                 )),
             )
             .await;
+            None
         }
     }
+}
+
+/// Checkpoint the preceding response, then add one durable prompt and expose
+/// the same transcript boundary live that replay derives from the message.
+/// Splitting the checkpoints keeps each byte range with its matching turn.
+async fn append_prompt(
+    messages: &mut Vec<Message>,
+    prompt: Message,
+    starts_run: bool,
+    mut recorder: Option<&mut SessionRecorder>,
+    prev_len: usize,
+    stats: &TurnStats,
+    tx: &Sender<AgentEvent>,
+) -> bool {
+    let Some(event) = AgentEvent::from_prompt(&prompt) else {
+        debug_assert!(false, "append_prompt requires a user-role prompt");
+        return false;
+    };
+    if let Some((byte_start, byte_end)) =
+        checkpoint_progress(recorder.as_deref_mut(), &messages[prev_len..], stats, tx).await
+    {
+        if !emit(
+            Some(tx),
+            AgentEvent::RoundCommitted {
+                byte_start,
+                byte_end,
+            },
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    messages.push(prompt);
+    let range = checkpoint_progress(recorder, &messages[prev_len..], stats, tx).await;
+    if starts_run && !emit(Some(tx), AgentEvent::RunStart).await {
+        return false;
+    }
+    if !emit(Some(tx), event).await {
+        return false;
+    }
+    if let Some((byte_start, byte_end)) = range {
+        if !emit(
+            Some(tx),
+            AgentEvent::RoundCommitted {
+                byte_start,
+                byte_end,
+            },
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    true
 }
 
 async fn record_round_removal(
@@ -1611,13 +1734,26 @@ async fn record_round_removal(
     };
     let elapsed_ms = stats.turn_start.elapsed().as_millis() as u64;
     let suffix = messages.get(prev_len..).unwrap_or_default();
-    if let Err(error) = recorder.checkpoint(suffix, &stats.summary(elapsed_ms)) {
-        let _ = emit(
-            Some(tx),
-            AgentEvent::Notice(format!("transcript write failed: {error}")),
-        )
-        .await;
-        return Err(error);
+    match recorder.checkpoint(suffix, &stats.summary(elapsed_ms)) {
+        Ok(Some((byte_start, byte_end))) => {
+            let _ = emit(
+                Some(tx),
+                AgentEvent::RoundCommitted {
+                    byte_start,
+                    byte_end,
+                },
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = emit(
+                Some(tx),
+                AgentEvent::Notice(format!("transcript write failed: {error}")),
+            )
+            .await;
+            return Err(error);
+        }
     }
     // The checkpoint just counted the round the caller is about to remove;
     // without this credit, later slices would skip the first recovery
@@ -1702,19 +1838,20 @@ enum LoopAction {
     Stop,
 }
 
-async fn recovery_round_exceeded(tx: &Sender<AgentEvent>, recovery_rounds: &mut usize) -> bool {
+fn recovery_round_exceeded(recovery_rounds: &mut usize) -> Option<Message> {
     *recovery_rounds += 1;
     if *recovery_rounds <= MAX_RECOVERY_ROUNDS {
-        return false;
+        return None;
     }
-    let _ = emit(
-        Some(tx),
-        AgentEvent::Notice(format!(
+    Some(Message {
+        role: Role::User,
+        blocks: vec![ContentBlock::Text {
+            text: format!(
             "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
-        )),
-    )
-    .await;
-    true
+            ),
+        }],
+        kind: lofi_types::PromptKind::Notice,
+    })
 }
 
 /// Plan for one detected loop, computed without touching history so the
@@ -1725,11 +1862,10 @@ struct LoopPlan {
     recovery: Option<Message>,
 }
 
-async fn handle_loop_detection(
+fn handle_loop_detection(
     detail: Option<&str>,
     interrupted_thinking_index: Option<usize>,
     recovered: &mut bool,
-    tx: &Sender<AgentEvent>,
 ) -> LoopPlan {
     let Some(detail) = detail else {
         return LoopPlan {
@@ -1739,30 +1875,22 @@ async fn handle_loop_detection(
         };
     };
     if *recovered {
-        let _ = emit(
-            Some(tx),
-            AgentEvent::Notice(format!(
-                "agent stopped after loop recovery failed: {detail}"
-            )),
-        )
-        .await;
         let detail = format!("agent stopped after loop recovery failed: {detail}");
         return LoopPlan {
             action: LoopAction::Stop,
-            removal: interrupted_thinking_index.map(|index| (index, detail)),
-            recovery: None,
+            removal: interrupted_thinking_index.map(|index| (index, detail.clone())),
+            recovery: Some(Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::Text { text: detail }],
+                kind: lofi_types::PromptKind::Notice,
+            }),
         };
     }
     *recovered = true;
     let notice =
         format!("potential agent loop detected; requesting a different approach: {detail}");
-    let steady = emit(Some(tx), AgentEvent::Notice(notice.clone())).await;
     LoopPlan {
-        action: if steady {
-            LoopAction::Continue
-        } else {
-            LoopAction::Stop
-        },
+        action: LoopAction::Continue,
         removal: interrupted_thinking_index.map(|index| (index, notice)),
         recovery: Some(loop_recovery_message(detail)),
     }

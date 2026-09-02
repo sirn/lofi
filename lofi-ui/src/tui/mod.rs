@@ -1016,7 +1016,7 @@ pub(crate) struct App {
     run_model_label: Option<String>,
     retry: Option<RetryState>,
     /// True between the submit-time prompt pre-push and the engine's
-    /// `TurnStart` for it. Gates the dedup in `apply_event` so replayed
+    /// matching `Prompt` event. Gates the dedup in `apply_event` so replayed
     /// transcripts (where consecutive identical prompts are legal)
     /// never false-match the pre-pushed turn.
     pending_prompt_start: bool,

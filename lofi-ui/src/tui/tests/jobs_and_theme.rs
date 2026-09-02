@@ -179,14 +179,14 @@ fn apply_color_scheme_applies_only_in_auto() {
 }
 
 #[test]
-fn turn_start_confirms_a_pre_pushed_prompt() {
+fn prompt_event_confirms_a_pre_pushed_prompt() {
     let mut a = app();
     push_turn(&mut a);
     a.begin_prompt_turn("hi".to_string(), lofi_types::PromptKind::User);
     assert_eq!(a.turns.len(), 2);
     assert_eq!(a.turns[1].prompt, "hi");
     assert!(a.turns[1].blocks.is_empty());
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
@@ -195,13 +195,13 @@ fn turn_start_confirms_a_pre_pushed_prompt() {
 }
 
 #[test]
-fn turn_start_pushes_when_no_prompt_is_awaited() {
+fn prompt_event_pushes_when_no_prompt_is_awaited() {
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
@@ -214,7 +214,7 @@ fn run_finished_disarms_a_pending_prompt_start() {
     a.begin_prompt_turn("hi".to_string(), lofi_types::PromptKind::User);
     a.run_finished();
     assert!(!a.pending_prompt_start);
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });

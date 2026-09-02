@@ -153,7 +153,7 @@ impl App {
     /// keeps resume peak memory bounded to one visible turn instead of the
     /// entire transcript.
     pub(super) fn apply_file_backed_replay_event(&mut self, ev: AgentEvent) {
-        if matches!(ev, AgentEvent::TurnStart { .. }) {
+        if matches!(ev, AgentEvent::Prompt { .. }) {
             if let Some(turn) = self.turns.last_mut() {
                 turn.blocks.clear();
             }
@@ -163,10 +163,16 @@ impl App {
 
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub(super) fn apply_event(&mut self, ev: AgentEvent) {
-        if let AgentEvent::TurnStart { prompt, kind } = ev {
+        if let AgentEvent::RunStart = ev {
+            self.turn_cost = 0.0;
+            self.turn_has_round_usage = false;
+            self.settled_usage_fresh = false;
+            return;
+        }
+        if let AgentEvent::Prompt { prompt, kind } = ev {
             // spawn_agent_run pre-pushes the prompt at submit time so it
             // shows before the working indicator's first frame. The
-            // matching TurnStart is then a confirmation, not a new turn.
+            // matching Prompt is then a confirmation, not a new turn.
             let awaited = self.pending_prompt_start
                 && self.turns.last().is_some_and(|turn| {
                     turn.blocks.is_empty() && turn.prompt == prompt && turn.kind == kind
@@ -180,9 +186,6 @@ impl App {
                     blocks: Vec::new(),
                 });
             }
-            self.turn_cost = 0.0;
-            self.turn_has_round_usage = false;
-            self.settled_usage_fresh = false;
             return;
         }
         if let AgentEvent::TurnContinue = ev {
@@ -424,7 +427,7 @@ impl App {
     }
 
     /// Push a submitted prompt immediately instead of waiting for the
-    /// engine's `TurnStart`, so it renders before the working indicator's
+    /// engine's `Prompt` event, so it renders before the working indicator's
     /// first frame.
     pub(super) fn begin_prompt_turn(&mut self, prompt: String, kind: lofi_types::PromptKind) {
         self.freeze_previous_file_backed_turn();

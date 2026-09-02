@@ -320,6 +320,24 @@ impl SessionRecorder {
         if self.flushed {
             return Ok(None);
         }
+        self.flush_incremental(messages, outcome, summary)?;
+        Ok(self.byte_start.zip(self.byte_end))
+    }
+
+    /// Flush the remaining data and return only the bytes written by this
+    /// call. A live transcript consumer uses this range for the current row;
+    /// prior checkpoint ranges can belong to earlier internal prompt rows.
+    /// # Errors
+    /// Propagates transcript serialization and I/O failures.
+    pub fn flush_incremental(
+        &mut self,
+        messages: &[Message],
+        outcome: &TurnOutcome,
+        summary: &TurnSummary,
+    ) -> Result<Option<(u64, u64)>> {
+        if self.flushed {
+            return Ok(None);
+        }
         let terminal = match outcome {
             TurnOutcome::Finished => Some(SessionEventKind::TurnEnd {
                 model: self.model.clone(),
@@ -343,10 +361,10 @@ impl SessionRecorder {
             }),
             TurnOutcome::ContextPressure | TurnOutcome::Detached => None,
         };
-        self.flush_pending_discard()?;
-        self.append_pending(messages, summary, terminal)?;
+        let discarded = self.flush_pending_discard()?;
+        let appended = self.append_pending(messages, summary, terminal)?;
         self.flushed = true;
-        Ok(self.byte_start.zip(self.byte_end))
+        Ok(merge_ranges(discarded, appended))
     }
 
     fn flush_pending_discard(&mut self) -> Result<Option<(u64, u64)>> {
@@ -634,6 +652,30 @@ mod tests {
             events.last().map(|event| &event.kind),
             Some(SessionEventKind::TurnEnd { .. })
         ));
+    }
+
+    #[test]
+    fn incremental_flush_returns_only_the_final_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor, "m".into());
+        let first = vec![user_msg("go"), assistant_text("round one")];
+        let first_range = rec
+            .checkpoint(&first, &summary(10))
+            .unwrap()
+            .expect("checkpoint persisted");
+        let mut all = first;
+        all.push(assistant_text("round two"));
+
+        let final_range = rec
+            .flush_incremental(&all, &TurnOutcome::Finished, &summary(20))
+            .unwrap()
+            .expect("final suffix persisted");
+
+        assert_eq!(final_range.0, first_range.1);
+        assert!(final_range.1 > final_range.0);
     }
 
     #[test]

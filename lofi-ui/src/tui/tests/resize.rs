@@ -452,7 +452,7 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "p".to_string(),
     });

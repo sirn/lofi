@@ -327,7 +327,7 @@ fn working_status_is_replaced_in_place_by_done_status() {
     }
 
     let mut a = app();
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "show the status transition".to_string(),
     });

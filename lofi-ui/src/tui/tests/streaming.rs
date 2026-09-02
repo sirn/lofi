@@ -21,7 +21,7 @@ fn streaming_long_text_never_drops_visible_lines() {
     let mut a = app();
     a.run = Some(0);
     a.run_start = Some(Instant::now());
-    a.apply_event(AgentEvent::TurnStart {
+    a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "stream a long reply".to_string(),
     });

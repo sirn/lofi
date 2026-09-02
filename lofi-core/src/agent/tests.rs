@@ -494,6 +494,76 @@ async fn user_prompt_is_persisted_before_first_provider_round() {
 }
 
 #[tokio::test]
+async fn startup_notice_uses_the_durable_prompt_path() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    let agent = agent_with(
+        vec![vec![StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        }]],
+        dir.path(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = Vec::new();
+    let cursor = crate::session::store::SessionCursor::new(path, None);
+    agent
+        .run_continuation_with_notices(
+            &mut messages,
+            "continue".into(),
+            lofi_types::PromptKind::User,
+            Vec::new(),
+            vec!["job 7 is stale".into()],
+            tx,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        [lofi_types::PromptKind::Notice, lofi_types::PromptKind::User]
+    );
+    let mut prompts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Prompt { prompt, kind } = event {
+            prompts.push((prompt, kind));
+        }
+    }
+    assert_eq!(
+        prompts,
+        [
+            ("job 7 is stale".into(), lofi_types::PromptKind::Notice),
+            ("continue".into(), lofi_types::PromptKind::User),
+        ]
+    );
+    let events = cursor.load_tree_events().unwrap();
+    let persisted = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            SessionEventKind::Message(message) if message.role == Role::User => Some(message.kind),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted,
+        [lofi_types::PromptKind::Notice, lofi_types::PromptKind::User]
+    );
+}
+
+#[tokio::test]
 async fn settled_messages_remain_on_disk_after_consumer_drops() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
@@ -746,7 +816,7 @@ async fn forward_progress_resets_the_recovery_round_budget() {
     let mut rounds: Vec<_> = (0..productive_rounds).map(productive_tool_round).collect();
     rounds.push(final_round());
     let agent = agent_with(rounds, dir.path());
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8192);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8192);
     let mut messages = Vec::new();
     agent
         .run_continuation(
@@ -762,12 +832,18 @@ async fn forward_progress_resets_the_recovery_round_budget() {
         .await
         .unwrap();
 
-    let mut notices = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        if let AgentEvent::Notice(text) = event {
-            notices.push(text);
-        }
-    }
+    let recovery_notices = messages
+        .iter()
+        .filter(|message| {
+            message.kind == PromptKind::Notice
+                && message.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Text { text } if text.contains("recovery rounds")
+                    )
+                })
+        })
+        .count();
     let final_answer = messages.iter().rev().find(|message| {
         message.role == Role::Assistant
             && message
@@ -780,8 +856,8 @@ async fn forward_progress_resets_the_recovery_round_budget() {
         "turn must run past the round limit and reach the scripted final round"
     );
     assert!(
-        notices.iter().all(|text| !text.contains("recovery rounds")),
-        "long productive turns must not trip the recovery-round limit: {notices:?}"
+        recovery_notices == 0,
+        "long productive turns must not trip the recovery-round limit"
     );
 }
 
@@ -795,11 +871,15 @@ async fn run_resets_the_recovery_round_budget_after_progress() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8192);
     agent.run("go".into(), tx).await.unwrap();
 
-    let mut notices = Vec::new();
+    let mut recovery_notices = 0;
     let mut reached_final = false;
     while let Ok(event) = rx.try_recv() {
         match event {
-            AgentEvent::Notice(text) => notices.push(text),
+            AgentEvent::Prompt { prompt, kind }
+                if kind == PromptKind::Notice && prompt.contains("recovery rounds") =>
+            {
+                recovery_notices += 1;
+            }
             AgentEvent::Text(text) if text == "final answer" => reached_final = true,
             _ => {}
         }
@@ -809,8 +889,8 @@ async fn run_resets_the_recovery_round_budget_after_progress() {
         "run must run past the round limit and stream the scripted final round"
     );
     assert!(
-        notices.iter().all(|text| !text.contains("recovery rounds")),
-        "long productive turns must not trip the recovery-round limit: {notices:?}"
+        recovery_notices == 0,
+        "long productive turns must not trip the recovery-round limit"
     );
 }
 
@@ -854,13 +934,24 @@ async fn repeated_thinking_notifies_agent_and_allows_one_recovery() {
         panic!("expected notice text");
     };
     assert!(text.contains("different concrete action"), "{text}");
-    let mut saw_loop_notice = false;
+    let mut saw_loop_prompt = false;
+    let mut saw_transient_notice = false;
     while let Ok(event) = rx.try_recv() {
-        if matches!(event, AgentEvent::Notice(text) if text.contains("potential agent loop")) {
-            saw_loop_notice = true;
+        match event {
+            AgentEvent::Prompt { prompt, kind }
+                if kind == lofi_types::PromptKind::Notice
+                    && prompt.contains("A potential loop was detected") =>
+            {
+                saw_loop_prompt = true;
+            }
+            AgentEvent::Notice(text) if text.contains("loop") => {
+                saw_transient_notice = true;
+            }
+            _ => {}
         }
     }
-    assert!(saw_loop_notice);
+    assert!(saw_loop_prompt);
+    assert!(!saw_transient_notice);
 }
 
 #[tokio::test]
@@ -885,13 +976,17 @@ async fn repeated_thinking_stops_after_failed_recovery() {
         .await
         .unwrap();
 
-    assert_eq!(
-        messages
-            .iter()
-            .filter(|message| message.kind == lofi_types::PromptKind::Notice)
-            .count(),
-        1
-    );
+    let notices = messages
+        .iter()
+        .filter(|message| message.kind == lofi_types::PromptKind::Notice)
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.iter().any(|message|
+        matches!(&message.blocks[0], ContentBlock::Text { text } if text.contains("different concrete action"))
+    ));
+    assert!(notices.iter().any(|message|
+        matches!(&message.blocks[0], ContentBlock::Text { text } if text.contains("recovery failed"))
+    ));
     assert_eq!(
         messages
             .iter()
@@ -899,13 +994,15 @@ async fn repeated_thinking_stops_after_failed_recovery() {
             .count(),
         0
     );
-    let mut saw_stop_notice = false;
+    let mut saw_stop_prompt = false;
     while let Ok(event) = rx.try_recv() {
-        if matches!(event, AgentEvent::Notice(text) if text.contains("recovery failed")) {
-            saw_stop_notice = true;
+        if matches!(event, AgentEvent::Prompt { prompt, kind }
+            if kind == lofi_types::PromptKind::Notice && prompt.contains("recovery failed"))
+        {
+            saw_stop_prompt = true;
         }
     }
-    assert!(saw_stop_notice);
+    assert!(saw_stop_prompt);
 }
 
 #[tokio::test]
@@ -960,13 +1057,15 @@ async fn max_tokens_stop_continues_the_turn_once() {
             .count(),
         2
     );
-    let mut saw_notice = false;
+    let mut saw_notice_prompt = false;
     while let Ok(ev) = rx.try_recv() {
-        if matches!(&ev, AgentEvent::Notice(n) if n.contains("token limit")) {
-            saw_notice = true;
+        if matches!(&ev, AgentEvent::Prompt { prompt, kind }
+            if *kind == lofi_types::PromptKind::Notice && prompt.contains("token limit"))
+        {
+            saw_notice_prompt = true;
         }
     }
-    assert!(saw_notice, "live notice emitted");
+    assert!(saw_notice_prompt, "live notice prompt emitted");
 }
 
 #[tokio::test]
@@ -1400,7 +1499,7 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
     // Replay starts a notice-kind turn for it, never a user turn.
     let mut kinds = Vec::new();
     crate::session::replay::replay_selected_session_events(&events, |ev| {
-        if let AgentEvent::TurnStart { kind, .. } = ev {
+        if let AgentEvent::Prompt { kind, .. } = ev {
             kinds.push(kind);
         }
     });
@@ -1469,14 +1568,16 @@ async fn cancel_preempts_the_truncation_continuation() {
         );
         tokio::pin!(run);
 
-        // Interrupt once the truncation notice went out, while the
+        // Interrupt once the truncation prompt went out, while the
         // continuation round is still streaming.
         loop {
             let event = tokio::select! {
                 result = run.as_mut() => panic!("run settled before cancellation: {result:?}"),
                 event = rx.recv() => event.unwrap_or_else(|| panic!("run event channel closed")),
             };
-            if matches!(event, AgentEvent::Notice(ref text) if text.contains("token limit")) {
+            if matches!(event, AgentEvent::Prompt { ref prompt, kind }
+                if kind == PromptKind::Notice && prompt.contains("token limit"))
+            {
                 break;
             }
         }

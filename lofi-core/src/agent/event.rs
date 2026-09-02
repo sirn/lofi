@@ -4,13 +4,14 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// A user turn has begun with this prompt. Always the first event of a
-    /// turn; the matching [`TurnEnd`](Self::TurnEnd) (or
-    /// [`Error`](Self::Error)) closes it. Making the turn boundary explicit
-    /// lets a consumer build its view from the event stream alone — no
-    /// external "push a new turn" call — so the live path and the
-    /// from-disk replay path share one builder.
-    TurnStart {
+    /// Live-only lifecycle marker for a new agent run. This resets run-level
+    /// state but does not create transcript content; every durable prompt uses
+    /// [`Prompt`](Self::Prompt). Replay restores durable usage from terminal
+    /// events instead of guessing run boundaries from adjacent prompts.
+    RunStart,
+    /// A durable prompt was added to the transcript. User input, job notices,
+    /// and prompts injected by the run loop all use this event.
+    Prompt {
         prompt: String,
         kind: lofi_types::PromptKind,
     },
@@ -168,4 +169,45 @@ pub enum AgentEvent {
         kept: usize,
         summary: String,
     },
+}
+
+impl AgentEvent {
+    /// Convert a durable user-role prompt into its transcript boundary.
+    /// Tool-result messages continue an existing turn and therefore have no
+    /// boundary event. Live execution and replay must both use this mapping.
+    pub(crate) fn from_prompt(message: &Message) -> Option<Self> {
+        if message.role != Role::User
+            || message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            return None;
+        }
+        let text = message.blocks.iter().find_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        let attachments = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { media_type, .. } => Some(format!(
+                    "[image: {}]",
+                    media_type.strip_prefix("image/").unwrap_or(media_type)
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let prompt = match (text, attachments.is_empty()) {
+            (Some(text), true) => text.to_string(),
+            (Some("") | None, false) => attachments.join(" "),
+            (Some(text), false) => format!("{text}\n{}", attachments.join(" ")),
+            (None, true) => String::new(),
+        };
+        Some(Self::Prompt {
+            prompt,
+            kind: message.kind,
+        })
+    }
 }

@@ -345,9 +345,6 @@ fn spawn_agent_run(
     let preempt_clone = preempt.clone();
     let continuation = prompt.is_none();
     let prompt = prompt.unwrap_or_default();
-    if !continuation {
-        app.begin_prompt_turn(prompt.clone(), prompt_kind);
-    }
     // Notices computed at session startup (e.g. stale job ids) ride the
     // first agent run so the model sees them inline before the user's text.
     // Continuations skip them: mid-run context is already shaped.
@@ -356,6 +353,12 @@ fn spawn_agent_run(
     } else {
         std::mem::take(&mut app.startup_notices)
     };
+    // Pre-render only when the submitted prompt is the first durable row.
+    // Otherwise the core event stream must establish notice-before-user
+    // ordering without deduplicating the wrong last row.
+    if !continuation && startup_notices.is_empty() {
+        app.begin_prompt_turn(prompt.clone(), prompt_kind);
+    }
     // The agent run loop performs durable transcript syncs. Its own runtime
     // keeps those blocking writes off the current-thread TUI runtime.
     let handle = tokio::task::spawn_blocking(move || {
@@ -376,19 +379,12 @@ fn spawn_agent_run(
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cursor.clone());
                 }
                 let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-                for notice in &startup_notices {
-                    messages.push(lofi_types::Message {
-                        role: lofi_types::Role::User,
-                        blocks: vec![lofi_types::ContentBlock::Text {
-                            text: notice.clone(),
-                        }],
-                        kind: lofi_types::PromptKind::Notice,
-                    });
-                }
-                let result = std::panic::AssertUnwindSafe(agent.run_continuation(
+                let result = std::panic::AssertUnwindSafe(agent.run_continuation_with_notices(
                     &mut messages,
                     prompt,
                     prompt_kind,
+                    Vec::new(),
+                    startup_notices,
                     tx,
                     cursor.as_ref(),
                     continuation,

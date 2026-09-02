@@ -239,6 +239,13 @@ fn resume_reports_job_from_interrupted_process_as_stale() {
     let resume_request = &requests.last().unwrap().body;
     assert!(resume_request.contains("session resumed: jobs ["));
     assert!(resume_request.contains("their ids are stale"));
+    let transcript = transcript_text(&fixture.events());
+    assert_eq!(transcript.matches("session resumed: jobs [").count(), 1);
+    assert!(
+        transcript.find("session resumed: jobs [").unwrap()
+            < transcript.find("check resumed session").unwrap(),
+        "the startup notice must precede the typed prompt in the transcript"
+    );
 
     let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
     wait_for_process_exit(pid);
@@ -1470,8 +1477,11 @@ fn truncated_response_continues_the_turn_once() {
 
     tui.submit("answer in full");
     tui.wait_for("continued after truncation", WAIT);
-    // The UI surfaced the live continuation notice.
-    tui.wait_for("response hit the token limit; continuing the turn", WAIT);
+    // The UI surfaced the durable continuation notice in the transcript.
+    tui.wait_for(
+        "Your previous response was cut off at the token limit",
+        WAIT,
+    );
 
     // Two model requests: the truncated round and the continuation round.
     let requests = server.requests();
