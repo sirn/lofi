@@ -80,7 +80,9 @@ pub(super) fn handle_event(
         return;
     }
     match k.code {
-        KeyCode::Enter if current_run.is_some() && !app.input.is_empty() => {
+        KeyCode::Enter
+            if (current_run.is_some() || app.lifecycle_busy) && !app.input.is_empty() =>
+        {
             let prompt = std::mem::take(&mut app.input);
             app.input_cursor = 0;
             app.history_idx = None;

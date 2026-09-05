@@ -342,9 +342,17 @@ fn compact_keeps_file_backed_turn_content_visible() {
     );
     let c0 = a.session.cursor.as_ref().unwrap().clone();
     let snap = c0.snapshot().unwrap();
-    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
+    a.restore_indexed_session(
+        &c0,
+        &snap.index,
+        snap.file_size,
+        snap.history_start,
+        snap.contiguous,
+    )
+    .unwrap();
+    a.lifecycle
+        .restore_history(&c0, &snap.index, snap.history_start)
         .unwrap();
-    a.lifecycle.restore_history(&c0, &snap.index).unwrap();
 
     assert!(a.compact_now());
 

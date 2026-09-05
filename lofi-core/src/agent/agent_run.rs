@@ -129,6 +129,8 @@ struct RoundOpts<'a> {
     /// at the continuation loop, not once per tool round in `run_once_inner`.
     suppress_omit_notice: bool,
     on_job_acquired: Option<lofi_code::JobAcquireFn>,
+    recorder: Option<&'a mut SessionRecorder>,
+    record_from: usize,
     loop_detector: Option<&'a mut LoopDetector>,
 }
 
@@ -250,7 +252,7 @@ impl Agent {
     ) -> Result<()> {
         // Rejected: trim from the TUI when the channel closes. The burst
         // is allocated and dropped on this task's return paths.
-        let _trim = crate::malloc_trim::ReleaseFreedMemoryOnDrop;
+        let _trim = lofi_code::memory::ReleaseFreedMemoryOnDrop;
         let prev_len = messages.len();
         let prompt = if continuation {
             None
@@ -334,19 +336,17 @@ impl Agent {
         let result: Option<ResultFn> = session.map(|cursor| {
             let cursor = cursor.clone();
             Arc::new(move |id: &str| -> String {
-                match cursor.event_by_id(id) {
-                    Ok(Some(event)) => match event.kind {
-                        lofi_types::SessionEventKind::Message(message) => {
-                            crate::context_edit::recover_message_content(&message).unwrap_or_else(|| {
-                                format!(
-                                    "no recoverable content for event {id:?} (message held no elidable block)."
-                                )
-                            })
-                        }
-                        _ => format!(
+                match cursor.recovery_message_by_id(id) {
+                    Ok(Some(crate::session::store::RecoveryMessage::Message(message))) => {
+                        crate::context_edit::recover_message_content(&message).unwrap_or_else(|| {
+                            format!(
+                                "no recoverable content for event {id:?} (message held no elidable block)."
+                            )
+                        })
+                    }
+                    Ok(Some(crate::session::store::RecoveryMessage::NotMessage)) => format!(
                             "no recoverable content for event {id:?} (not a message event)."
                         ),
-                    },
                     Ok(None) => format!("no recoverable content for event {id:?} (event not found)."),
                     Err(_) => "result: session file unreadable.".to_string(),
                 }
@@ -407,6 +407,8 @@ impl Agent {
                         prev_input_tokens: prev_input,
                         suppress_omit_notice: omit_notice_sent,
                         on_job_acquired: on_job_acquired.clone(),
+                        recorder: recorder.as_mut(),
+                        record_from: prev_len,
                         loop_detector: Some(&mut loop_detector),
                     },
                 )
@@ -884,6 +886,8 @@ impl Agent {
             prev_input_tokens,
             suppress_omit_notice,
             on_job_acquired,
+            recorder,
+            record_from,
             mut loop_detector,
         } = opts;
         let schema = exec_tool_schema();
@@ -1247,6 +1251,24 @@ impl Agent {
             });
         }
 
+        let native_cursor =
+            if let (Some(recorder), Some(stats), Some(tx)) = (recorder, stats.as_deref(), tx) {
+                if let Some((byte_start, byte_end)) =
+                    checkpoint_progress(Some(recorder), &messages[record_from..], stats, tx).await
+                {
+                    let _ = tx
+                        .send(AgentEvent::RoundCommitted {
+                            byte_start,
+                            byte_end,
+                        })
+                        .await;
+                    Some(recorder.cursor())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
         let run_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
             .iter()
             .filter(|(id, _, _)| !cut_tool_ids.contains(id))
@@ -1257,6 +1279,7 @@ impl Agent {
                 &run_refs,
                 tx,
                 stats.as_deref_mut(),
+                native_cursor,
                 recall.clone(),
                 result.clone(),
                 cancel,
@@ -1344,6 +1367,7 @@ impl Agent {
         tool_uses: &[(&str, &str, &serde_json::Value)],
         tx: Option<&Sender<AgentEvent>>,
         mut stats: Option<&mut TurnStats>,
+        native_cursor: Option<crate::session::store::SessionCursor>,
         recall: Option<RecallFn>,
         result: Option<ResultFn>,
         cancel: Option<&Arc<AtomicBool>>,
@@ -1445,11 +1469,9 @@ impl Agent {
             let parent = id.to_string();
             let native_pending: Arc<Mutex<HashMap<u64, (String, String)>>> =
                 Arc::new(Mutex::new(HashMap::new()));
-            let native_completed: Arc<Mutex<Vec<NativeToolRecord>>> =
-                Arc::new(Mutex::new(Vec::new()));
             let on_tool_event: Arc<dyn Fn(ToolEvent) + Send + Sync> = {
                 let native_pending = native_pending.clone();
-                let native_completed = native_completed.clone();
+                let native_cursor = native_cursor.clone();
                 let event_parent = parent.clone();
                 Arc::new(move |ev: ToolEvent| match ev {
                     ToolEvent::Start { id, name, args } => {
@@ -1466,26 +1488,30 @@ impl Agent {
                         result,
                         is_error,
                     } => {
-                        // Cap each native tool result individually so one huge
-                        // `lofi.read`/`lofi.bash` can't monopolize the exec
-                        // payload, and many concurrent calls each keep a
-                        // truncated slice rather than the first few whole and
-                        // the rest dropped by the outer cap.
-                        let result = cap_tool_result(&result);
+                        let display_result = cap_tool_result(&result);
                         if let Some((name, args)) = lock(&native_pending).remove(&id) {
-                            lock(&native_completed).push(NativeToolRecord {
-                                parent: event_parent.clone(),
-                                call_id: id,
-                                name,
-                                args,
-                                result: result.clone(),
-                                is_error,
-                            });
+                            if let Some(cursor) = native_cursor.as_ref() {
+                                let record = NativeToolRecord {
+                                    parent: event_parent.clone(),
+                                    call_id: id,
+                                    name,
+                                    args,
+                                    result,
+                                    is_error,
+                                };
+                                if let Err(error) = cursor.record(
+                                    crate::session::recorder::SessionRecord::NativeTool { record },
+                                ) {
+                                    let _ = native_tx.send(AgentEvent::Notice(format!(
+                                        "transcript write failed for native tool result: {error}"
+                                    )));
+                                }
+                            }
                         }
                         let _ = native_tx.send(AgentEvent::NativeToolEnd {
                             parent: event_parent.clone(),
                             id,
-                            result,
+                            result: display_result,
                             is_error,
                         });
                     }
@@ -1539,14 +1565,11 @@ impl Agent {
                     exec_ctx,
                     ExecOptions {
                         timeout: lofi_code::DEFAULT_GUEST_TIMEOUT,
+                        max_value_bytes: MAX_EXEC_RESULT_BYTES,
                         cancel: cancel.cloned(),
                     },
                 )
                 .await;
-            let captured = lock(&native_completed).drain(..).collect::<Vec<_>>();
-            if let Some(s) = stats.as_deref_mut() {
-                s.native_tools.extend(captured);
-            }
             // A tool may return a tagged image (`read` on an image file).
             // Upgrade it to a `ToolResultImage` carried on this result block,
             // so the model sees the image in the same round as the result on
@@ -1555,11 +1578,16 @@ impl Agent {
             let (content, is_error, result_images) = match outcome {
                 Ok(r) => {
                     let mut value = r.value;
-                    match upgrade_tagged_image(&mut value, &self.image) {
+                    match upgrade_exec_image(&mut value, r.image, &self.image) {
                         Ok(img) => {
-                            let payload = serde_json::json!({ "value": value, "logs": r.logs });
-                            let content = serde_json::to_string(&payload)
-                                .unwrap_or_else(|_| "{}".to_string());
+                            let mut content = serde_json::to_string(&serde_json::json!({
+                                "value": value,
+                                "logs": r.logs,
+                            }))
+                            .unwrap_or_else(|_| "{}".to_string());
+                            if r.value_truncated {
+                                content.push_str("\n[output truncated at sandbox boundary]");
+                            }
                             (cap_exec_result(&content), false, img)
                         }
                         Err(error) => (cap_exec_result(&error.to_string()), true, None),
@@ -1580,15 +1608,22 @@ impl Agent {
                 };
                 for (call_id, (name, args)) in pending {
                     let result = "cancelled because parent exec failed".to_string();
-                    if let Some(s) = stats.as_deref_mut() {
-                        s.native_tools.push(NativeToolRecord {
+                    if let Some(cursor) = native_cursor.as_ref() {
+                        let record = NativeToolRecord {
                             parent: parent.clone(),
                             call_id,
                             name,
                             args,
                             result: result.clone(),
                             is_error: true,
-                        });
+                        };
+                        if let Err(error) = cursor
+                            .record(crate::session::recorder::SessionRecord::NativeTool { record })
+                        {
+                            let _ = relay_tx.send(AgentEvent::Notice(format!(
+                                "transcript write failed for native tool result: {error}"
+                            )));
+                        }
                     }
                     let _ = relay_tx.send(AgentEvent::NativeToolEnd {
                         parent: parent.clone(),
@@ -2070,35 +2105,23 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
-/// Recognize a tagged image payload from a tool result and upgrade it to a
-/// [`lofi_types::ToolResultImage`] carried on that result block. `lofi.read`
-/// returns `{type:"image", media_type, data_b64}` when it reads an image file
-/// (the sandbox boundary is JSON, so bytes cannot cross directly). On a match
-/// the base64 is decoded and normalized with the configured image limits.
-/// The `data_b64` field is replaced with a compact byte count, so the durable
-/// transcript keeps a small marker while the image rides the `ToolResult` for
-/// same-round vision. Non-image payloads are left unchanged.
-fn upgrade_tagged_image(
+/// Normalize an image returned out of band by the exec sandbox. `QuickJS` carries
+/// only a small token, so source image bytes never become a base64 guest string
+/// or a second host JSON allocation. The durable result keeps only a byte count.
+fn upgrade_exec_image(
     value: &mut serde_json::Value,
+    image: Option<lofi_code::ExecImage>,
     config: &lofi_types::ImageConfig,
 ) -> Result<Option<lofi_types::ToolResultImage>> {
-    use base64::Engine as _;
-    let Some(obj) = value.as_object() else {
+    use std::io::Seek as _;
+
+    let Some(mut image) = image else {
         return Ok(None);
     };
-    if obj.get("type").and_then(serde_json::Value::as_str) != Some("image") {
-        return Ok(None);
-    }
-    let data_b64 = obj
-        .get("data_b64")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| Error::Tool("image result has no data_b64".to_string()))?;
-    let source = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|error| Error::Tool(format!("decode image result: {error}")))?;
-    let (bytes, media_type) = crate::image::normalize(&source, config)?;
+    image.file.rewind()?;
+    let reader = std::io::BufReader::new(image.file);
+    let (bytes, media_type) = crate::image::normalize_reader(reader, config)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.remove("data_b64");
         obj.insert("bytes".to_string(), serde_json::json!(bytes.len()));
         obj.insert("media_type".to_string(), serde_json::json!(&media_type));
     }
@@ -2143,7 +2166,6 @@ fn image_payload_bytes(messages: &[Message]) -> u64 {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use base64::Engine as _;
     use lofi_types::PromptKind;
     use serde_json::json;
 
@@ -2346,7 +2368,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_tagged_image_normalizes_and_strips_base64() {
+    fn upgrade_exec_image_normalizes_file_backed_source() {
         const TINY_PNG: &[u8] = &[
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
             0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
@@ -2354,41 +2376,38 @@ mod tests {
             0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
             0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
-        let data_b64 = base64::engine::general_purpose::STANDARD.encode(TINY_PNG);
+        let file = tempfile::tempfile().unwrap();
+        std::io::Write::write_all(&mut &file, TINY_PNG).unwrap();
+        let image = lofi_code::ExecImage {
+            file,
+            bytes: TINY_PNG.len(),
+        };
         let mut value = serde_json::json!({
             "type": "image",
             "media_type": "image/png",
-            "data_b64": data_b64,
+            "bytes": TINY_PNG.len(),
         });
 
-        let img = upgrade_tagged_image(&mut value, &lofi_types::ImageConfig::default())
-            .unwrap()
-            .unwrap();
+        let image =
+            upgrade_exec_image(&mut value, Some(image), &lofi_types::ImageConfig::default())
+                .unwrap()
+                .unwrap();
 
-        assert_eq!(img.media_type, "image/jpeg");
-        assert!(!img.bytes.is_empty());
-        assert!(value.get("data_b64").is_none());
-        assert_eq!(value["bytes"], serde_json::json!(img.bytes.len()));
+        assert_eq!(image.media_type, "image/jpeg");
+        assert!(!image.bytes.is_empty());
+        assert_eq!(value["bytes"], serde_json::json!(image.bytes.len()));
         assert_eq!(value["media_type"], serde_json::json!("image/jpeg"));
     }
 
     #[test]
-    fn upgrade_tagged_image_ignores_non_image_payloads() {
-        let config = lofi_types::ImageConfig::default();
-        let mut text = serde_json::json!({"ok": true, "content": "hi"});
-        assert!(upgrade_tagged_image(&mut text, &config).unwrap().is_none());
-        assert_eq!(text["content"], serde_json::json!("hi"));
-
-        let mut other = serde_json::json!({"type": "text", "data_b64": "AAAA"});
-        assert!(upgrade_tagged_image(&mut other, &config).unwrap().is_none());
-    }
-
-    #[test]
-    fn upgrade_tagged_image_rejects_invalid_image_data() {
-        let mut bad =
-            serde_json::json!({"type": "image", "media_type": "image/png", "data_b64": "!!!"});
-
-        assert!(upgrade_tagged_image(&mut bad, &lofi_types::ImageConfig::default()).is_err());
+    fn upgrade_exec_image_ignores_missing_image() {
+        let mut value = serde_json::json!({"ok": true, "content": "hi"});
+        assert!(
+            upgrade_exec_image(&mut value, None, &lofi_types::ImageConfig::default())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(value["content"], serde_json::json!("hi"));
     }
 
     #[test]

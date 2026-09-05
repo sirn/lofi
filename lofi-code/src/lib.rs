@@ -31,10 +31,11 @@ use lofi_error::{Error, Result};
 pub mod compact_hook;
 mod convert;
 pub mod docs;
+pub mod memory;
 pub mod policy;
 mod skill_metadata;
 pub mod user_shell;
-use convert::{js_to_json, json_to_js};
+use convert::{js_to_json, js_to_json_with_limit, json_to_js};
 
 mod bind;
 use bind::bind_tools;
@@ -73,7 +74,7 @@ pub fn exec_tool_input_schema() -> serde_json::Value {
 
 pub const DEFAULT_GUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
-const GUEST_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
+const GUEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 /// Maximum native call-stack depth the interpreter may use. `QuickJS` checks
 /// this at function-entry granularity, so a deeply recursive guest aborts
 /// with a stack-overflow exception rather than segfaulting the host.
@@ -225,6 +226,7 @@ impl ExecWorker {
             {
                 rt.block_on(async {
                     while let Some(job) = rx.recv().await {
+                        let _release = memory::ReleaseFreedMemoryOnDrop;
                         if job.done.is_closed() {
                             continue;
                         }
@@ -277,6 +279,10 @@ impl std::fmt::Debug for ExecCtx {
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
     pub timeout: Duration,
+    /// Maximum cumulative bytes copied from the guest result into host JSON.
+    /// The agent sets this to its model-visible result cap so oversized values
+    /// are truncated before a second full-sized representation is allocated.
+    pub max_value_bytes: usize,
     /// Optional external cancellation flag. When set to `true`, the `QuickJS`
     /// interrupt handler breaks out of any running synchronous guest code and
     /// [`exec`](fn.exec.html) returns [`Error::Sandbox`] with a
@@ -290,15 +296,24 @@ impl Default for ExecOptions {
     fn default() -> Self {
         Self {
             timeout: DEFAULT_GUEST_TIMEOUT,
+            max_value_bytes: JS_TO_JSON_MAX_BYTES,
             cancel: None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub struct ExecImage {
+    pub file: std::fs::File,
+    pub bytes: usize,
+}
+
+#[derive(Debug)]
 pub struct ExecResult {
     pub value: Json,
     pub logs: String,
+    pub value_truncated: bool,
+    pub image: Option<ExecImage>,
 }
 
 struct JsonV(Json);
@@ -472,8 +487,17 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                 }); void 0;"#,
             )
             .map_err(|e| Error::Sandbox(format!("context: {e}")))?;
-            install_globals(&ctx, &tools, &strings, recall, result, skills_dir, &logs)
-                .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
+            install_globals(
+                &ctx,
+                &tools,
+                &strings,
+                recall,
+                result,
+                skills_dir,
+                &logs,
+                opts.max_value_bytes,
+            )
+            .map_err(|e| Error::Sandbox(format!("install: {e}")))?;
             let promise: Promise = ctx
                 .eval(js.as_str())
                 .map_err(|e| Error::Sandbox(format!("eval: {e}")))?;
@@ -481,13 +505,22 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                 .into_future()
                 .await
                 .map_err(|e| Error::Sandbox(format!("guest promise rejected: {e}")))?;
-            let json = js_to_json(&value);
+            let log_bytes = logs.lock().ok().map_or(0, |logs| logs.len());
+            let value_budget = opts.max_value_bytes.saturating_sub(log_bytes);
+            let (mut json, value_truncated) = js_to_json_with_limit(&value, value_budget);
             if let Some(err) = json.get(SANDBOX_ERROR_KEY).and_then(Json::as_str) {
                 return Err::<ExecResult, Error>(Error::Sandbox(err.to_string()));
             }
+            let image = take_pending_image(&mut json, &tools);
             Ok::<ExecResult, Error>(ExecResult {
                 value: json,
-                logs: logs.lock().ok().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default(),
+                logs: logs
+                    .lock()
+                    .ok()
+                    .map(|mut logs| std::mem::take(&mut *logs))
+                    .unwrap_or_default(),
+                value_truncated,
+                image,
             })
         })
         .await
@@ -508,6 +541,19 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     }
 }
 
+fn take_pending_image(value: &mut Json, tools: &BuiltinTools) -> Option<ExecImage> {
+    let object = value.as_object_mut()?;
+    if object.get("type").and_then(Json::as_str) != Some("image") {
+        return None;
+    }
+    let token = object.remove("image_token")?.as_u64()?;
+    let pending = tools.take_image(token)?;
+    Some(ExecImage {
+        file: pending.file,
+        bytes: pending.bytes,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_globals(
     ctx: &Ctx<'_>,
@@ -517,13 +563,15 @@ fn install_globals(
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
     logs: &Arc<Mutex<String>>,
+    max_output_bytes: usize,
 ) -> rquickjs::Result<()> {
     let lofi = Object::new(ctx.clone())?;
     bind_tools(ctx, &lofi, tools, recall, result, skills_dir)?;
     lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
     ctx.globals().set("lofi", lofi)?;
 
-    let print = Function::new(ctx.clone(), {
+    let max_log_bytes = MAX_LOG_BYTES.min(max_output_bytes);
+    let print_sink = Function::new(ctx.clone(), {
         let logs = logs.clone();
         move |args: Rest<Coerced<std::string::String>>| -> rquickjs::Result<()> {
             let mut line = String::new();
@@ -532,13 +580,13 @@ fn install_globals(
             // the post-hoc cap runs. (The per-arg `Coerced<String>` is owned
             // by the runtime; this prevents amplifying it via concatenation.)
             for (i, arg) in args.iter().enumerate() {
-                if line.len() >= MAX_LOG_BYTES {
+                if line.len() >= max_log_bytes {
                     break;
                 }
                 if i > 0 {
                     line.push(' ');
                 }
-                let room = MAX_LOG_BYTES.saturating_sub(line.len());
+                let room = max_log_bytes.saturating_sub(line.len());
                 if arg.len() <= room {
                     line.push_str(arg);
                 } else {
@@ -553,26 +601,35 @@ fn install_globals(
                 // Reserve room for the truncation marker and clamp to a valid
                 // char boundary so a multibyte tail doesn't panic.
                 const MARKER: &str = "\n<logs truncated>";
-                if buf.ends_with(MARKER) {
+                let marker_end = MARKER.floor_char_boundary(MARKER.len().min(max_log_bytes));
+                let marker = &MARKER[..marker_end];
+                if marker.is_empty() || buf.ends_with(marker) {
                     return Ok(());
                 }
-                let cap = MAX_LOG_BYTES.saturating_sub(MARKER.len());
+                let cap = max_log_bytes.saturating_sub(marker.len());
                 let room = cap.saturating_sub(buf.len());
                 if room == 0 {
-                    buf.push_str(MARKER);
+                    buf.push_str(marker);
                     return Ok(());
                 }
                 let take = line.len().min(room);
                 let take = line.floor_char_boundary(take);
                 buf.push_str(&line[..take]);
                 if take < line.len() || buf.len() >= cap {
-                    buf.push_str(MARKER);
+                    buf.push_str(marker);
                 }
             }
             Ok(())
         }
     })?;
-    ctx.globals().set("print", print)?;
+    ctx.globals().set("__lofi_print_sink", print_sink)?;
+    ctx.eval::<(), _>(format!(
+        r"globalThis.print = ((sink, max) => (...args) =>
+            sink(...args.map(value => String(value).slice(0, max))))(
+                globalThis.__lofi_print_sink, {max_log_bytes}
+            );
+            delete globalThis.__lofi_print_sink;"
+    ))?;
 
     let strings_obj = Object::new(ctx.clone())?;
     for (k, v) in strings {
@@ -770,13 +827,32 @@ mod tests {
         .unwrap();
         assert_eq!(res.value["type"], json!("image"));
         assert_eq!(res.value["media_type"], json!("image/png"));
-        let data_b64 = res.value["data_b64"].as_str().unwrap();
-        let decoded =
-            base64::engine::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
-                .unwrap();
+        let Some(image) = res.image else {
+            panic!("missing out-of-band image");
+        };
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut &image.file, &mut decoded).unwrap();
         assert_eq!(decoded, PNG);
+        assert_eq!(image.bytes, PNG.len());
+        assert!(res.value.get("image_token").is_none());
         // The text path must NOT have run (no content/lines keys).
         assert!(res.value.get("content").is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_bounds_pending_image_handles() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("img.png"), b"not decoded").unwrap();
+        let calls = std::iter::repeat_n("lofi.read('img.png')", 33)
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("await Promise.all([{calls}]); return null;");
+
+        let error = exec(&source, &ctx(dir.path()), &ExecOptions::default())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("32-image limit"), "{error}");
     }
 
     #[tokio::test]
@@ -873,6 +949,60 @@ mod tests {
             .unwrap();
         assert!(res.logs.contains("<logs truncated>"));
         assert!(res.logs.len() <= MAX_LOG_BYTES);
+    }
+
+    #[tokio::test]
+    async fn exec_result_budget_truncates_before_host_conversion() {
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            max_value_bytes: 1024,
+            ..ExecOptions::default()
+        };
+        let res = exec("return \"é\".repeat(1024 * 1024);", &ctx(dir.path()), &opts)
+            .await
+            .unwrap();
+
+        assert!(res.value_truncated);
+        assert!(res.value.as_str().unwrap().len() <= opts.max_value_bytes);
+    }
+
+    #[tokio::test]
+    async fn exec_result_budget_is_shared_with_logs() {
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            max_value_bytes: 1024,
+            ..ExecOptions::default()
+        };
+        let res = exec(
+            "print(\"p\".repeat(1024 * 1024)); return \"x\".repeat(1024 * 1024);",
+            &ctx(dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert!(res.logs.len() <= opts.max_value_bytes);
+        assert!(res.value_truncated);
+        assert_eq!(res.value.as_str(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn exec_result_budget_rejects_oversized_object_key() {
+        let dir = tempdir().unwrap();
+        let opts = ExecOptions {
+            max_value_bytes: 1024,
+            ..ExecOptions::default()
+        };
+        let res = exec(
+            "return { [\"x\".repeat(1024 * 1024)]: true };",
+            &ctx(dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert!(res.value_truncated);
+        assert_eq!(res.value, json!({}));
     }
 
     #[tokio::test]
@@ -979,7 +1109,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),
-            cancel: None,
+            ..ExecOptions::default()
         };
         let err = exec("while (true) {}", &ctx(dir.path()), &opts)
             .await
@@ -995,7 +1125,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),
-            cancel: None,
+            ..ExecOptions::default()
         };
         let err = exec(
             "let x = 0; while (true) { x = (x + 1) * 3; } return x;",
@@ -1021,6 +1151,7 @@ mod tests {
         let opts = ExecOptions {
             timeout: Duration::from_secs(30),
             cancel: Some(cancel.clone()),
+            ..ExecOptions::default()
         };
 
         tokio::spawn({
@@ -1048,6 +1179,7 @@ mod tests {
         let opts = ExecOptions {
             timeout: Duration::from_secs(30),
             cancel: Some(cancel.clone()),
+            ..ExecOptions::default()
         };
 
         tokio::spawn({
@@ -1089,7 +1221,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_secs(5),
-            cancel: None,
+            ..ExecOptions::default()
         };
         let err = exec(
             "const a = []; while (true) a.push('x'.repeat(1024)); return a.length;",
@@ -1106,7 +1238,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_secs(5),
-            cancel: None,
+            ..ExecOptions::default()
         };
         let err = exec(
             "function f() { return f(); } return f();",
@@ -1123,7 +1255,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let opts = ExecOptions {
             timeout: Duration::from_millis(500),
-            cancel: None,
+            ..ExecOptions::default()
         };
         let src = r#"
             for (let i = 0; i < 3; i++) {

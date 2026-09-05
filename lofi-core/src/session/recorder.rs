@@ -43,7 +43,6 @@ pub struct TurnSummary {
     pub stop_reason: Option<lofi_types::StopReason>,
     pub tool_elapsed: Vec<(String, u64)>,
     pub thinking_elapsed: Vec<u64>,
-    pub native_tools: Vec<NativeToolRecord>,
 }
 
 /// One durable session write. Callers never build a [`SessionEvent`].
@@ -67,6 +66,9 @@ pub enum SessionRecord<'a> {
     RoundDiscarded {
         detail: &'a str,
     },
+    NativeTool {
+        record: NativeToolRecord,
+    },
     /// Incremental turn suffix. Built only by [`SessionRecorder`].
     Turn(TurnBatch<'a>),
 }
@@ -74,7 +76,6 @@ pub enum SessionRecord<'a> {
 /// New messages and timings for one checkpoint.
 pub struct TurnBatch<'a> {
     messages: &'a [Message],
-    native_tools: &'a [NativeToolRecord],
     tool_elapsed: Vec<(&'a String, &'a u64)>,
     thinking_elapsed: &'a [u64],
     terminal: Option<SessionEventKind>,
@@ -97,7 +98,6 @@ impl store::SessionCursor {
         };
         let batch = TurnBatch {
             messages: std::slice::from_ref(&message),
-            native_tools: &[],
             tool_elapsed: Vec::new(),
             thinking_elapsed: &[],
             terminal: None,
@@ -144,6 +144,14 @@ impl store::SessionCursor {
                     kind: SessionEventKind::RoundDiscarded {
                         detail: detail.to_string(),
                     },
+                }];
+                self.append_events(&mut events)
+            }
+            SessionRecord::NativeTool { record } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::NativeTool(record),
                 }];
                 self.append_events(&mut events)
             }
@@ -195,17 +203,6 @@ fn record_turn(cursor: &store::SessionCursor, batch: TurnBatch<'_>) -> Result<(u
         parent_id: None,
         kind: SessionEventKind::Message(message),
     }));
-    events.extend(
-        batch
-            .native_tools
-            .iter()
-            .cloned()
-            .map(|record| SessionEvent {
-                id: String::new(),
-                parent_id: None,
-                kind: SessionEventKind::NativeTool(record),
-            }),
-    );
     for (id, elapsed_ms) in &batch.tool_elapsed {
         events.push(SessionEvent {
             id: String::new(),
@@ -248,7 +245,6 @@ pub struct SessionRecorder {
     message_count: usize,
     recorded_messages_removed: usize,
     pending_discard: Option<String>,
-    native_tool_count: usize,
     thinking_timing_count: usize,
     tool_timing_ids: HashSet<String>,
     byte_start: Option<u64>,
@@ -265,7 +261,6 @@ impl SessionRecorder {
             message_count: 0,
             recorded_messages_removed: 0,
             pending_discard: None,
-            native_tool_count: 0,
             thinking_timing_count: 0,
             tool_timing_ids: HashSet::new(),
             byte_start: None,
@@ -286,6 +281,11 @@ impl SessionRecorder {
 
     pub fn note_recorded_messages_removed(&mut self, count: usize) {
         self.recorded_messages_removed += count;
+    }
+
+    #[must_use]
+    pub(crate) fn cursor(&self) -> store::SessionCursor {
+        self.cursor.clone()
     }
 
     /// Append everything completed since the previous checkpoint, without a
@@ -389,10 +389,6 @@ impl SessionRecorder {
             .message_count
             .saturating_sub(self.recorded_messages_removed);
         let new_messages = messages.get(slice_from..).unwrap_or_default();
-        let new_native = summary
-            .native_tools
-            .get(self.native_tool_count..)
-            .unwrap_or_default();
         let new_thinking = summary
             .thinking_elapsed
             .get(self.thinking_timing_count..)
@@ -409,7 +405,6 @@ impl SessionRecorder {
             .collect();
         let (start, end) = self.cursor.record(SessionRecord::Turn(TurnBatch {
             messages: new_messages,
-            native_tools: new_native,
             tool_elapsed: new_tool_timings,
             thinking_elapsed: new_thinking,
             terminal,
@@ -419,7 +414,6 @@ impl SessionRecorder {
         }
         self.message_count = messages.len();
         self.recorded_messages_removed = 0;
-        self.native_tool_count = summary.native_tools.len();
         self.thinking_timing_count = summary.thinking_elapsed.len();
         self.tool_timing_ids.extend(new_tool_ids);
         self.record_range((start, end));
@@ -482,59 +476,12 @@ mod tests {
             usage: Usage::default(),
             tool_elapsed: vec![("t1".into(), 7)],
             thinking_elapsed: vec![12],
-            native_tools: vec![NativeToolRecord {
-                parent: "t1".into(),
-                call_id: 0,
-                name: "bash".into(),
-                args: "ls".into(),
-                result: "file".into(),
-                is_error: false,
-            }],
             stop_reason: None,
         }
     }
 
-    #[test]
-    fn flush_writes_messages_timings_and_turn_end_in_order() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        std::fs::write(&path, header()).unwrap();
-        let cursor = store::SessionCursor::new(path.clone(), None);
-        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
-        let messages = vec![
-            user_msg("go"),
-            Message {
-                role: Role::Assistant,
-                blocks: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "exec".into(),
-                    input: serde_json::Value::String("1".into()),
-                }],
-                kind: PromptKind::default(),
-            },
-            Message {
-                role: Role::User,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".into(),
-                    content: "2".into(),
-                    is_error: false,
-                    images: Vec::new(),
-                }],
-                kind: PromptKind::default(),
-            },
-        ];
-        let range = rec
-            .flush(&messages, &TurnOutcome::Finished, &summary(100))
-            .unwrap()
-            .expect("wrote something");
-        assert!(rec
-            .flush(&messages, &TurnOutcome::Finished, &summary(100))
-            .unwrap()
-            .is_none());
-        let events = cursor.load_tree_events().unwrap();
+    fn assert_complete_turn(events: &[SessionEvent]) {
         let mut i = 0;
-        assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
-        i += 1;
         assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
         assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
@@ -547,6 +494,8 @@ mod tests {
             }
             other => panic!("expected native tool, got {other:?}"),
         }
+        i += 1;
+        assert!(matches!(events[i].kind, SessionEventKind::Message(_)));
         i += 1;
         match &events[i].kind {
             SessionEventKind::ToolTiming {
@@ -580,9 +529,67 @@ mod tests {
         assert_eq!(events.len(), i + 1);
         assert!(!events[0].id.is_empty());
         assert!(events[0].parent_id.is_none());
-        for w in events.windows(2) {
-            assert_eq!(w[1].parent_id.as_deref(), Some(w[0].id.as_str()));
+        for pair in events.windows(2) {
+            assert_eq!(pair[1].parent_id.as_deref(), Some(pair[0].id.as_str()));
         }
+    }
+
+    #[test]
+    fn flush_writes_messages_timings_and_turn_end_in_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, header()).unwrap();
+        let cursor = store::SessionCursor::new(path.clone(), None);
+        let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
+        let messages = vec![
+            user_msg("go"),
+            Message {
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "exec".into(),
+                    input: serde_json::Value::String("1".into()),
+                }],
+                kind: PromptKind::default(),
+            },
+            Message {
+                role: Role::User,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "2".into(),
+                    is_error: false,
+                    images: Vec::new(),
+                }],
+                kind: PromptKind::default(),
+            },
+        ];
+        let mut checkpoint_summary = summary(50);
+        checkpoint_summary.tool_elapsed.clear();
+        checkpoint_summary.thinking_elapsed.clear();
+        rec.checkpoint(&messages[..2], &checkpoint_summary)
+            .unwrap()
+            .expect("assistant call persisted");
+        cursor
+            .record(SessionRecord::NativeTool {
+                record: NativeToolRecord {
+                    parent: "t1".into(),
+                    call_id: 0,
+                    name: "bash".into(),
+                    args: "ls".into(),
+                    result: "file".into(),
+                    is_error: false,
+                },
+            })
+            .unwrap();
+        let range = rec
+            .flush(&messages, &TurnOutcome::Finished, &summary(100))
+            .unwrap()
+            .expect("wrote something");
+        assert!(rec
+            .flush(&messages, &TurnOutcome::Finished, &summary(100))
+            .unwrap()
+            .is_none());
+        assert_complete_turn(&cursor.load_tree_events().unwrap());
         let _ = range;
     }
 
@@ -594,7 +601,6 @@ mod tests {
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let mut first_summary = summary(10);
-        first_summary.native_tools.clear();
         first_summary.thinking_elapsed.clear();
         first_summary.tool_elapsed = vec![("t1".into(), 7)];
         let first = vec![user_msg("go"), assistant_text("round one")];
@@ -715,7 +721,6 @@ mod tests {
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut rec = SessionRecorder::new(cursor.clone(), "m".into());
         let mut clean = summary(10);
-        clean.native_tools.clear();
         clean.thinking_elapsed.clear();
         clean.tool_elapsed.clear();
 
@@ -764,7 +769,6 @@ mod tests {
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut recorder = SessionRecorder::new(cursor.clone(), "m".into());
         let mut clean = summary(10);
-        clean.native_tools.clear();
         clean.thinking_elapsed.clear();
         clean.tool_elapsed.clear();
         let mut messages = vec![user_msg("go"), assistant_text("discarded")];
@@ -843,7 +847,6 @@ mod tests {
         let cursor = store::SessionCursor::new(path.clone(), None);
         let mut first = SessionRecorder::new(cursor.clone(), "m".into());
         let mut clean = summary(10);
-        clean.native_tools.clear();
         clean.thinking_elapsed.clear();
         clean.tool_elapsed.clear();
         first
@@ -909,7 +912,6 @@ mod tests {
             usage: Usage::default(),
             tool_elapsed: vec![],
             thinking_elapsed: vec![],
-            native_tools: vec![],
             stop_reason: None,
         };
         let range = rec.flush(&[], &TurnOutcome::Detached, &empty).unwrap();
@@ -961,7 +963,6 @@ mod tests {
                 usage: Usage::default(),
                 tool_elapsed: vec![],
                 thinking_elapsed: vec![],
-                native_tools: vec![],
                 stop_reason: None,
             },
         )
@@ -980,7 +981,6 @@ mod tests {
                 },
                 tool_elapsed: vec![],
                 thinking_elapsed: vec![],
-                native_tools: vec![],
                 stop_reason: None,
             },
         )

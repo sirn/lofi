@@ -297,8 +297,9 @@ away) and return rendered matches as text.
 
 ## lofi.result(eventId)
 
-Recover the original, full content of a tool result or tool-call that
-compaction elided.
+Recover the original retained content of a tool result or tool call that
+compaction elided. Pathological legacy values above the current result limit are
+bounded during recovery.
 
 **Parameters:**
 - `eventId` (string, required) — the event id shown in a cleared stub (`[id]`).

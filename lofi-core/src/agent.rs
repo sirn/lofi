@@ -59,13 +59,13 @@ pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 /// Maximum cumulative bytes of streamed text/thinking/tool-input retained
 /// for a single round, so a hostile or misbehaving endpoint sending many
 /// small valid events cannot exhaust memory within the stream timeout.
-const MAX_ROUND_BYTES: usize = 32 * 1024 * 1024;
-const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
+const MAX_ROUND_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 50 * 1024;
 /// Outer cap on the whole exec result sent back to the provider. Native
 /// sub-tool results are already individually capped to `MAX_TOOL_RESULT_BYTES`;
 /// this guards the aggregate (many sub-tool results + `logs`) so a long
 /// `Promise.all` burst or a verbose `print` loop can't balloon the context.
-const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
+pub(crate) const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 
 const PER_EVENT_OVERHEAD: usize = 64;
 /// User-role notice appended once per turn when the provider reports a
@@ -84,7 +84,6 @@ struct TurnStats {
     tool_starts: HashMap<String, Instant>,
     tool_elapsed: HashMap<String, Duration>,
     thinking_elapsed: Vec<Duration>,
-    native_tools: Vec<NativeToolRecord>,
     cost: f64,
     usage: Usage,
     // Stop reason of the latest finished round; the final round's value is
@@ -99,7 +98,6 @@ impl TurnStats {
             tool_starts: HashMap::new(),
             tool_elapsed: HashMap::new(),
             thinking_elapsed: Vec::new(),
-            native_tools: Vec::new(),
             cost: 0.0,
             usage: Usage::default(),
             stop_reason: None,
@@ -160,7 +158,6 @@ impl TurnStats {
                 .iter()
                 .map(|d| d.as_millis() as u64)
                 .collect(),
-            native_tools: self.native_tools.clone(),
             stop_reason: self.stop_reason,
         }
     }

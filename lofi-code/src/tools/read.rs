@@ -1,6 +1,5 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use base64::Engine as _;
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
@@ -36,30 +35,32 @@ impl BuiltinTools {
         let label = path.to_string();
         let label_inner = label.clone();
         let offset = offset.unwrap_or(1).max(1);
-        // Image files short-circuit the text path entirely: return a tagged
-        // base64 payload the host decodes and attaches to the tool result.
-        // Reading binary as lossy UTF-8 would corrupt it and waste tokens.
+        // Image bytes stay outside QuickJS. The guest carries only a small
+        // token. Keeping the verified file open also prevents a path swap
+        // between validation and the host read at the end of the exec.
         if let Some(media_type) = image_media_type(path) {
             let label_img = label.clone();
-            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-                let meta = std::fs::metadata(&resolved)?;
-                if meta.len() > MAX_READ_BYTES as u64 {
+            let (file, bytes) = tokio::task::spawn_blocking(move || -> Result<_> {
+                let file = std::fs::File::open(&resolved)?;
+                let bytes = file.metadata()?.len();
+                if bytes > MAX_READ_BYTES as u64 {
                     return Err(Error::Tool(format!(
                         "read {label_img}: image is {} (exceeds {} limit)",
-                        format_size(meta.len() as usize),
+                        format_size(bytes as usize),
                         format_size(MAX_READ_BYTES)
                     )));
                 }
-                Ok(std::fs::read(&resolved)?)
+                Ok((file, bytes as usize))
             })
             .await
             .map_err(|e| Error::Tool(format!("read {label}: {e}")))??;
-            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let image_token = self.register_image(file, bytes)?;
             return Ok(json!({
                 "ok": true,
                 "type": "image",
                 "media_type": media_type,
-                "data_b64": data_b64,
+                "image_token": image_token,
+                "bytes": bytes,
             }));
         }
 

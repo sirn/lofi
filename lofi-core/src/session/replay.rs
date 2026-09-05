@@ -14,7 +14,7 @@ use lofi_types::{
     Usage,
 };
 
-use super::store::{self, EventIndex, IndexId, IndexKind, SessionCursor};
+use super::store::{self, IndexId, IndexKind, SessionCursor, SessionIndexEntry};
 use crate::agent::AgentEvent;
 use crate::exec_input_code_and_label;
 use crate::shell::UserShellResult;
@@ -521,76 +521,19 @@ pub fn messages_from_events(events: &[SessionEvent]) -> Vec<Message> {
     projection.finish()
 }
 
-/// Index-driven projections for resume and the status line. All operate on the
-/// lightweight index plus targeted `event_at` reads, so a resumed session's
-/// memory stays bounded by projection size, not transcript size.
-/// Only the hide-triggering fields of a checkpointed compaction marker; the
-/// verdict text never crosses the resume path.
-#[derive(serde::Deserialize)]
-struct CompactionMarkerProjection {
-    #[serde(default)]
-    checkpointed_tail: bool,
-    #[serde(default)]
-    first_kept_entry_id: String,
-}
-
 #[must_use]
-pub fn visible_index_path(cursor: &SessionCursor, index: &[EventIndex]) -> Vec<usize> {
-    let markers: Vec<usize> = index
+pub fn visible_index_path(index: &[SessionIndexEntry]) -> Vec<usize> {
+    index
         .iter()
         .enumerate()
-        .filter_map(|(pos, event)| (event.kind == IndexKind::Compaction).then_some(pos))
-        .collect();
-    if markers.is_empty() {
-        return (0..index.len()).collect();
-    }
-    // Fetch every marker's hide details in one sweep of the file. Reading
-    // them with per-marker `event_at` opens and seeks the transcript once per
-    // compaction, and long sessions compact often. A marker that fails to
-    // parse fills with "hide nothing", the treatment `compaction_details_at`
-    // gives it when fetched one by one.
-    let offsets: Vec<u64> = markers.iter().map(|&pos| index[pos].offset).collect();
-    let mut details: Vec<(bool, String)> = Vec::with_capacity(markers.len());
-    if cursor
-        .visit_event_values::<CompactionMarkerProjection>(&offsets, |marker| {
-            details.push((marker.checkpointed_tail, marker.first_kept_entry_id));
-            Ok(())
-        })
-        .is_err()
-    {
-        details.resize(markers.len(), (false, String::new()));
-    }
-    let mut details = details.into_iter();
-    // The resume projection spans the whole index, so the path is 0..len and
-    // hidden positions are index positions directly.
-    let all: Vec<usize> = (0..index.len()).collect();
-    let mut positions: Option<Map<IndexId, usize>> = None;
-    let hidden = hidden_compaction_range(
-        &all,
-        |p| (index[p].kind == IndexKind::Compaction).then(|| details.next().unwrap_or_default()),
-        |id| {
-            positions
-                .get_or_insert_with(|| {
-                    let mut map = Map::new();
-                    for (pos, event) in index.iter().enumerate() {
-                        map.entry(event.id.clone()).or_insert(pos);
-                    }
-                    map
-                })
-                .get(id)
-                .copied()
-        },
-    );
-    (0..index.len())
-        .zip(hidden)
-        .filter_map(|(i, hide)| (!hide).then_some(i))
+        .filter_map(|(position, entry)| entry.visible.then_some(position))
         .collect()
 }
 
 #[must_use]
 pub fn last_run_model_from_index(
     cursor: &SessionCursor,
-    index: &[EventIndex],
+    index: &[SessionIndexEntry],
 ) -> Option<lofi_types::RunModel> {
     for i in (0..index.len()).rev() {
         if !matches!(
@@ -612,7 +555,7 @@ pub fn last_run_model_from_index(
 #[must_use]
 pub fn compaction_status_from_index(
     cursor: &SessionCursor,
-    index: &[EventIndex],
+    index: &[SessionIndexEntry],
 ) -> (bool, Option<Usage>) {
     // Read only the latest turn outcome: the prior shape fetched every
     // TurnEnd event on the transcript, and each fetch opens and seeks the
@@ -670,7 +613,7 @@ pub fn outstanding_job_ids(events: &[SessionEvent]) -> Vec<u64> {
 /// Propagates cursor I/O failures.
 pub fn outstanding_job_ids_at(
     cursor: &SessionCursor,
-    index: &[EventIndex],
+    index: &[SessionIndexEntry],
 ) -> lofi_error::Result<Vec<u64>> {
     Ok(job_lifecycle_ids_at(cursor, index)?.outstanding)
 }
@@ -682,7 +625,7 @@ pub(crate) struct JobLifecycleIds {
 
 pub(crate) fn job_lifecycle_ids_at(
     cursor: &SessionCursor,
-    index: &[EventIndex],
+    index: &[SessionIndexEntry],
 ) -> lofi_error::Result<JobLifecycleIds> {
     let mut started: Vec<u64> = Vec::new();
     let mut finished: HashSet<u64> = HashSet::new();

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -47,6 +47,13 @@ const MAX_LS_ENTRIES: usize = 50_000;
 const MAX_FIND_RESULTS: usize = 50_000;
 const MAX_FIND_VISITED: usize = 65_536;
 const MAX_GREP_VISITED: usize = 65_536;
+const MAX_PENDING_IMAGES: usize = 32;
+
+#[derive(Debug)]
+pub(super) struct PendingImage {
+    pub file: std::fs::File,
+    pub bytes: usize,
+}
 
 #[derive(Clone)]
 pub struct BuiltinTools {
@@ -54,6 +61,8 @@ pub struct BuiltinTools {
     tmp_dir: PathBuf,
     tool_cb: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
     tool_counter: Arc<AtomicU64>,
+    image_counter: Arc<AtomicU64>,
+    pending_images: Arc<Mutex<std::collections::HashMap<u64, PendingImage>>>,
     bash_env: BashEnv,
     shell_policy: crate::policy::ResolvedPolicy,
     confirm: Option<crate::ConfirmFn>,
@@ -120,6 +129,8 @@ impl BuiltinTools {
             tmp_dir,
             tool_cb,
             tool_counter: Arc::new(AtomicU64::new(0)),
+            image_counter: Arc::new(AtomicU64::new(0)),
+            pending_images: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bash_env,
             shell_policy,
             confirm,
@@ -176,6 +187,28 @@ impl BuiltinTools {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(super) fn register_image(&self, file: std::fs::File, bytes: usize) -> Result<u64> {
+        let id = self.image_counter.fetch_add(1, Ordering::Relaxed);
+        let mut images = self
+            .pending_images
+            .lock()
+            .map_err(|_| Error::Tool("image registry lock poisoned".to_string()))?;
+        if images.len() >= MAX_PENDING_IMAGES {
+            return Err(Error::Tool(format!(
+                "exec exceeded {MAX_PENDING_IMAGES}-image limit"
+            )));
+        }
+        images.insert(id, PendingImage { file, bytes });
+        Ok(id)
+    }
+
+    pub(super) fn take_image(&self, id: u64) -> Option<PendingImage> {
+        self.pending_images
+            .lock()
+            .ok()
+            .and_then(|mut images| images.remove(&id))
     }
 
     #[must_use]

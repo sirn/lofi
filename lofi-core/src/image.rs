@@ -25,17 +25,29 @@ const QUALITY_STEP: u8 = 10;
 /// Returns [`Error::Tool`] when `bytes` is not a decodable image in an enabled
 /// format, or when no quality/dimension combination fits `cfg.max_bytes`.
 pub fn normalize(bytes: &[u8], cfg: &ImageConfig) -> Result<(Vec<u8>, String)> {
-    let format = image::guess_format(bytes)
-        .map_err(|e| Error::Tool(format!("unrecognized image format: {e}")))?;
+    normalize_reader(std::io::Cursor::new(bytes), cfg)
+}
 
-    // Decode under an allocation cap, not the 512 MiB decoder default. The
-    // cap is sized to the output bounding box with 8x headroom: an oversized
-    // input still decodes so it can be downscaled, while a file claiming
-    // pathological dimensions fails before its pixel buffer is committed.
+/// Normalize an image from a buffered seekable source without first copying
+/// the complete encoded file into memory.
+///
+/// # Errors
+/// Returns [`Error::Tool`] when the source is not a supported image or cannot
+/// be encoded within the configured limits.
+pub fn normalize_reader<R>(reader: R, cfg: &ImageConfig) -> Result<(Vec<u8>, String)>
+where
+    R: std::io::BufRead + std::io::Seek,
+{
+    // The decoder needs headroom above the output frame so a larger source can
+    // still be decoded and downscaled. The allocation limit rejects
+    // pathological dimensions before their pixel buffer is committed.
     let max_alloc = u64::from(cfg.max_width) * u64::from(cfg.max_height) * 4 * 8;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(max_alloc);
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut reader = image::ImageReader::new(reader)
+        .with_guessed_format()
+        .map_err(|e| Error::Tool(format!("unrecognized image format: {e}")))?;
+    let format = reader.format();
     reader.limits(limits);
     let img = reader
         .decode()

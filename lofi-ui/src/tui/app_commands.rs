@@ -63,20 +63,38 @@ fn run_tree_snapshot(
 ) {
     match cursor.tree_snapshot() {
         Ok(snapshot) => {
+            // Pin the snapshot before the first cancellation check. Every
+            // return path can then release it through the same worker-owned
+            // drop-and-trim operation.
+            let snapshot_id = state.insert_tree_snapshot(snapshot);
             if generation_clock.load(Ordering::Relaxed) != generation {
+                state.remove_tree_snapshot(snapshot_id);
                 return;
             }
+            let Some(snapshot) = state.tree_snapshot(snapshot_id) else {
+                return;
+            };
             let skeletons =
                 build_tree_entry_skeletons(&snapshot.index, snapshot.leaf_id.as_deref(), cursor);
-            // Pin the snapshot on this worker; the UI gets only an id. All
-            // subsequent hydration looks the snapshot up by id, and picker
-            // close drops it here — so the multi-MB index Vec is allocated
-            // and freed on the same thread.
-            let snapshot_id = state.insert_tree_snapshot(snapshot);
+            if generation_clock.load(Ordering::Relaxed) != generation {
+                drop(skeletons);
+                state.remove_tree_snapshot(snapshot_id);
+                return;
+            }
+            // The UI gets only an id. All subsequent hydration looks the
+            // snapshot up by id, and picker close drops it here so its whole
+            // lifecycle stays on the allocating worker.
+            let start = skeletons.len().saturating_sub(20);
+            let requested: Vec<_> = skeletons[start..]
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(offset, row)| (start + offset, row))
+                .collect();
             if tx
                 .send(PickerLoad::TreeReady {
                     generation,
-                    entries: skeletons.clone(),
+                    entries: skeletons,
                     snapshot_id,
                 })
                 .is_err()
@@ -89,12 +107,10 @@ fn run_tree_snapshot(
             let Some(snapshot) = state.tree_snapshot(snapshot_id) else {
                 return;
             };
-            let start = skeletons.len().saturating_sub(20);
-            hydrate_tree_entry_window(
+            hydrate_tree_entry_rows(
                 &snapshot.index,
                 cursor,
-                &skeletons,
-                start..skeletons.len(),
+                &requested,
                 |rows| tx.send(PickerLoad::TreeRows { generation, rows }).is_ok(),
                 || generation_clock.load(Ordering::Relaxed) != generation,
             );
@@ -384,7 +400,7 @@ impl App {
     }
 
     pub(super) fn start_new_session(&mut self) {
-        if self.run_active() {
+        if self.busy() {
             self.notify(
                 NotifyKind::Warn,
                 "wait for the running turn to finish before starting a new session",
@@ -520,13 +536,17 @@ impl App {
                     .as_mut()
                     .filter(|picker| picker.generation == generation)
                 else {
-                    // Picker was closed before the snapshot was ready. Tell
-                    // the worker to drop the snapshot now so it doesn't leak
-                    // until process exit.
+                    // Picker was closed before the snapshot was ready. Move
+                    // its rows back to the allocating worker so both the rows
+                    // and snapshot are dropped before that worker trims.
                     if let Some(sink) = self.session.sink.as_ref() {
                         sink.submit_io(Box::new(move |state| {
+                            drop(entries);
                             state.remove_tree_snapshot(snapshot_id);
                         }));
+                    } else {
+                        drop(entries);
+                        lofi_core::release_freed_memory();
                     }
                     return;
                 };
@@ -554,6 +574,7 @@ impl App {
                     .as_mut()
                     .filter(|picker| picker.generation == generation)
                 else {
+                    self.release_tree_rows(rows);
                     return;
                 };
                 for (index, mut entry) in rows {
@@ -584,7 +605,7 @@ impl App {
         self.picker_generation.fetch_add(1, Ordering::Relaxed);
         // Switching under an active run would book its records into the
         // wrong transcript.
-        if self.run_active() {
+        if self.busy() {
             self.notify(
                 NotifyKind::Warn,
                 "wait for the running turn to finish before switching sessions",
@@ -599,7 +620,13 @@ impl App {
             Ok((cursor, snapshot)) => {
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;
-                let loaded = self.restore_indexed_session(&cursor, &index, file_size);
+                let loaded = self.restore_indexed_session(
+                    &cursor,
+                    &index,
+                    file_size,
+                    snapshot.history_start,
+                    snapshot.contiguous,
+                );
                 if let Err(e) = loaded {
                     self.push_turn(Turn {
                         prompt: "/resume".to_string(),
@@ -1041,19 +1068,43 @@ impl App {
         self.bump_render_epoch();
     }
 
-    /// Drop the IO-thread-held tree snapshot, if any. Sends the release to
-    /// the same worker that built the snapshot so the multi-MB
-    /// `Vec<EventIndex>` is freed on the thread that allocated it; glibc can
-    /// then reuse the pages for the next IO job instead of leaving them in
-    /// the worker's arena because the free ran on the main thread.
-    fn release_tree_snapshot(&mut self) {
-        let (Some(id), Some(sink)) = (self.tree_picker_snapshot.take(), self.session.sink.as_ref())
-        else {
+    /// Return tree allocations to the IO worker that created them. The
+    /// snapshot index and picker rows can each use multiple MiB. Dropping both
+    /// on that worker before trimming lets glibc release its arena pages.
+    fn release_tree_rows(&self, rows: Vec<(usize, TreeEntry)>) {
+        if let Some(sink) = self.session.sink.as_ref() {
+            sink.submit_io(Box::new(move |_state| {
+                drop(rows);
+                lofi_core::release_freed_memory();
+            }));
+        } else {
+            drop(rows);
+            lofi_core::release_freed_memory();
+        }
+    }
+
+    fn release_tree_resources(&mut self, entries: Vec<TreeEntry>) {
+        let snapshot_id = self.tree_picker_snapshot.take();
+        if entries.is_empty() && snapshot_id.is_none() {
             return;
-        };
-        sink.submit_io(Box::new(move |state| {
-            state.remove_tree_snapshot(id);
-        }));
+        }
+        if let Some(sink) = self.session.sink.as_ref() {
+            sink.submit_io(Box::new(move |state| {
+                drop(entries);
+                if let Some(id) = snapshot_id {
+                    state.remove_tree_snapshot(id);
+                } else {
+                    lofi_core::release_freed_memory();
+                }
+            }));
+        } else {
+            drop(entries);
+            lofi_core::release_freed_memory();
+        }
+    }
+
+    fn release_tree_snapshot(&mut self) {
+        self.release_tree_resources(Vec::new());
     }
 
     /// '/tree': open the branch-picker overlay over the active session's
@@ -1123,6 +1174,9 @@ impl App {
         let Some(snapshot_id) = self.tree_picker_snapshot else {
             return;
         };
+        if !self.tree_picker_pending.is_empty() {
+            return;
+        }
         let Some(tx) = self.picker_load_tx.clone() else {
             return;
         };
@@ -1203,20 +1257,19 @@ impl App {
         }
     }
 
-    pub(super) fn tree_picker_confirm_inner(&mut self, picker: &TreePickerState) {
-        if self.run_active() {
+    pub(super) fn tree_picker_confirm_inner(&mut self, picker: TreePickerState) {
+        let entry = picker.entries.get(picker.selected).cloned();
+        self.picker_generation.fetch_add(1, Ordering::Relaxed);
+        self.release_tree_resources(picker.entries);
+        self.tree_picker_pending.clear();
+        if self.busy() {
             self.notify(
                 NotifyKind::Warn,
                 "wait for the running turn to finish before rolling back",
             );
             return;
         }
-        self.picker_generation.fetch_add(1, Ordering::Relaxed);
-        self.release_tree_snapshot();
-        self.tree_picker_pending.clear();
-        // See Escape path for why we trim after dropping picker state.
-        lofi_core::malloc_trim::release_freed_memory();
-        let Some(entry) = picker.entries.get(picker.selected).cloned() else {
+        let Some(entry) = entry else {
             return;
         };
         if !entry.hydrated {
@@ -1245,7 +1298,13 @@ impl App {
             }
         };
         self.session.refresh_cursor();
-        let loaded = self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size);
+        let loaded = self.rollback_indexed(
+            &cursor,
+            &snapshot.index,
+            snapshot.file_size,
+            snapshot.history_start,
+            snapshot.contiguous,
+        );
         if let Err(e) = loaded {
             // Undo the head move (core-owned), then re-roll to the old lineage.
             let restored_snapshot = {
@@ -1256,8 +1315,14 @@ impl App {
             };
             self.session.refresh_cursor();
             let restored = restored_snapshot.map(|snapshot| {
-                self.rollback_indexed(&cursor, &snapshot.index, snapshot.file_size)
-                    .ok()
+                self.rollback_indexed(
+                    &cursor,
+                    &snapshot.index,
+                    snapshot.file_size,
+                    snapshot.history_start,
+                    snapshot.contiguous,
+                )
+                .ok()
             });
             let suffix = if restored.is_some() {
                 String::new()
@@ -1576,7 +1641,7 @@ impl App {
                 }
                 ModalSlot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(&picker);
+                        self.tree_picker_confirm_inner(picker);
                     }
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
@@ -1595,7 +1660,7 @@ impl App {
                 }
                 ModalSlot::Tree => {
                     if let Some(picker) = self.tree_picker.take() {
-                        self.tree_picker_confirm_inner(&picker);
+                        self.tree_picker_confirm_inner(picker);
                     }
                 }
                 ModalSlot::Model => self.model_picker_confirm(),
@@ -1610,15 +1675,14 @@ impl App {
                     self.picker_generation.fetch_add(1, Ordering::Relaxed);
                 }
                 ModalSlot::Tree => {
-                    self.tree_picker = None;
-                    self.release_tree_snapshot();
-                    self.tree_picker_pending.clear();
+                    let entries = self
+                        .tree_picker
+                        .take()
+                        .map(|picker| picker.entries)
+                        .unwrap_or_default();
                     self.picker_generation.fetch_add(1, Ordering::Relaxed);
-                    // The picker entries Vec buffer was cloned on the IO
-                    // thread before being sent here; dropping it on this
-                    // thread leaves the freed pages stranded in this arena.
-                    // Trim after drop so RSS returns to the pre-/tree level.
-                    lofi_core::malloc_trim::release_freed_memory();
+                    self.release_tree_resources(entries);
+                    self.tree_picker_pending.clear();
                 }
                 ModalSlot::Model => self.model_picker = None,
                 ModalSlot::Thinking => self.thinking_picker = None,
@@ -1746,17 +1810,19 @@ impl App {
     #[cfg(test)]
     pub(super) fn tree_picker_confirm(&mut self) {
         if let Some(picker) = self.tree_picker.take() {
-            self.tree_picker_confirm_inner(&picker);
+            self.tree_picker_confirm_inner(picker);
         }
     }
 
     fn rollback_indexed(
         &mut self,
         cursor: &store::SessionCursor,
-        index: &[store::EventIndex],
+        index: &[store::SessionIndexEntry],
         file_size: u64,
+        history_start: usize,
+        contiguous: bool,
     ) -> Result<()> {
-        self.restore_indexed_session(cursor, index, file_size)?;
+        self.restore_indexed_session(cursor, index, file_size, history_start, contiguous)?;
         // Rollback leaves no live run. Unlike resume, even the selected final
         // turn is immutable and file-backed, so retaining its potentially huge
         // blocks would recreate the RSS spike this path is meant to prevent.

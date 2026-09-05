@@ -8,12 +8,19 @@ use lofi_types::{Message, PromptKind, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
 mod index;
+mod index_parser;
 use index::{
-    compaction_index_suffix, index_kind_for_event, load_compaction_path, load_event_at,
-    load_event_by_id, load_event_range, load_events_at, load_index, load_index_range,
-    load_indexed_path, visit_event_values, visit_events,
+    compaction_index_suffix, index_kind_for_event, load_compaction_path, load_display_event_range,
+    load_display_events_at, load_event_at, load_event_range, load_event_values, load_events_at,
+    load_index, load_index_range, load_indexed_path, load_linear_session_index,
+    session_index_from_lineage, visit_display_events, visit_events,
 };
-pub use index::{EventIndex, IndexId, IndexKind};
+pub use index::{EventIndex, IndexId, IndexKind, SessionIndexEntry};
+
+pub enum RecoveryMessage {
+    Message(Message),
+    NotMessage,
+}
 
 /// Pre-release: there is one transcript format and it is versioned 1.
 pub const SESSION_VERSION: u32 = 1;
@@ -135,8 +142,12 @@ fn short_id() -> String {
 #[derive(Debug)]
 pub struct SessionSnapshot {
     pub meta: SessionMeta,
-    pub index: Vec<EventIndex>,
+    pub index: Vec<SessionIndexEntry>,
     pub file_size: u64,
+    pub history_start: usize,
+    /// The selected lineage is a physical file prefix. Consumers can replay
+    /// byte ranges directly instead of retaining one offset vector per turn.
+    pub contiguous: bool,
 }
 
 /// A full-tree snapshot for branch selection. Unlike a lineage snapshot,
@@ -191,14 +202,27 @@ impl SessionCursor {
     /// head no longer exists.
     pub fn open_snapshot(path: PathBuf) -> Result<(Self, SessionSnapshot)> {
         crate::state::ensure_private_file(&path)?;
+        if let Some(linear) = load_linear_session_index(&path)? {
+            let cursor = Self::new(path, linear.leaf_id);
+            *cursor.lock_compaction_index() = Some(linear.compaction_suffix);
+            return Ok((
+                cursor,
+                SessionSnapshot {
+                    meta: linear.meta,
+                    index: linear.entries,
+                    file_size: linear.file_size,
+                    history_start: linear.history_start,
+                    contiguous: true,
+                },
+            ));
+        }
+
         let (meta, index, file_size) = load_index(&path)?;
         let cursor_record = index
             .iter()
             .rev()
             .find(|event| event.kind == IndexKind::Cursor);
         let leaf = match cursor_record {
-            // The cursor record carries its selected leaf in `id`; an empty id
-            // means the record had no leaf, falling back to the latest event.
             Some(event) => Some(event.id.to_event_id()).filter(|id| !id.is_empty()),
             None => index
                 .iter()
@@ -207,14 +231,17 @@ impl SessionCursor {
                 .map(|event| event.id.to_event_id()),
         };
         let selected = indexed_lineage(index, leaf.as_deref())?;
+        let (resume_index, history_start) = session_index_from_lineage(&path, &selected)?;
         let cursor = Self::new(path, leaf);
         *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &selected)?);
         Ok((
             cursor,
             SessionSnapshot {
                 meta,
-                index: selected,
+                index: resume_index,
                 file_size,
+                history_start,
+                contiguous: false,
             },
         ))
     }
@@ -290,12 +317,18 @@ impl SessionCursor {
     pub fn snapshot(&self) -> Result<SessionSnapshot> {
         let leaf = self.lock_leaf();
         let (meta, index, file_size) = load_index(&self.path)?;
-        let index = indexed_lineage(index, leaf.as_deref())?;
-        *self.lock_compaction_index() = Some(compaction_index_suffix(&self.path, &index)?);
+        let contiguous = leaf
+            .as_deref()
+            .is_some_and(|leaf| linear_lineage_end(&index, leaf).is_some());
+        let lineage = indexed_lineage(index, leaf.as_deref())?;
+        let (index, history_start) = session_index_from_lineage(&self.path, &lineage)?;
+        *self.lock_compaction_index() = Some(compaction_index_suffix(&self.path, &lineage)?);
         Ok(SessionSnapshot {
             meta,
             index,
             file_size,
+            history_start,
+            contiguous,
         })
     }
 
@@ -350,14 +383,54 @@ impl SessionCursor {
         load_events_at(&self.path, offsets)
     }
 
-    /// Read an event by its durable ID from this transcript.
-    /// This intentionally searches the complete append-only tree, not only the
-    /// selected lineage: result recovery may target compacted or abandoned
-    /// content by an immutable transcript ID.
+    /// Read one event through the bounded transcript-display projection.
+    /// # Errors
+    /// Propagates transcript seek, read, and parsing failures.
+    pub fn display_event_at(&self, offset: u64) -> Result<SessionEvent> {
+        let mut events = load_display_events_at(&self.path, &[offset])?;
+        events.pop().ok_or_else(|| {
+            Error::State(format!(
+                "no event at offset {offset} in {}",
+                self.path.display()
+            ))
+        })
+    }
+
+    /// Read selected events through the bounded transcript-display projection.
+    /// The raw transcript stays unchanged for model context and result recovery.
+    /// # Errors
+    /// Propagates transcript seek, read, and parsing failures.
+    pub fn display_events_at(&self, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
+        load_display_events_at(&self.path, offsets)
+    }
+
+    /// Read only the bounded message payload needed by result recovery.
+    /// This searches the complete append-only tree, so compacted and abandoned
+    /// content remains addressable by its immutable transcript ID.
     /// # Errors
     /// Propagates transcript indexing and event parsing failures.
-    pub fn event_by_id(&self, id: &str) -> Result<Option<SessionEvent>> {
-        load_event_by_id(&self.path, id)
+    pub fn recovery_message_by_id(&self, id: &str) -> Result<Option<RecoveryMessage>> {
+        let (_meta, index, _size) = load_index(&self.path)?;
+        let Some(entry) = index.iter().find(|entry| entry.id.matches(id)) else {
+            return Ok(None);
+        };
+        if !matches!(
+            entry.kind,
+            IndexKind::UserPrompt
+                | IndexKind::AssistantMessage
+                | IndexKind::SystemMessage
+                | IndexKind::ToolResult
+        ) {
+            return Ok(Some(RecoveryMessage::NotMessage));
+        }
+        let mut events = load_display_events_at(&self.path, &[entry.offset])?;
+        let Some(event) = events.pop() else {
+            return Ok(None);
+        };
+        match event.kind {
+            SessionEventKind::Message(message) => Ok(Some(RecoveryMessage::Message(message))),
+            _ => Ok(Some(RecoveryMessage::NotMessage)),
+        }
     }
 
     /// # Errors
@@ -370,14 +443,16 @@ impl SessionCursor {
         visit_events(&self.path, offsets, visit)
     }
 
+    /// Visit selected events through a fresh bounded projection per event.
+    /// Use this for streaming scans that do not retain event payloads.
     /// # Errors
     /// Propagates transcript seek/read/parse failures and callback errors.
-    pub fn visit_event_values<T: serde::de::DeserializeOwned>(
+    pub fn visit_display_events(
         &self,
         offsets: &[u64],
-        visit: impl FnMut(T) -> Result<()>,
+        visit: impl FnMut(SessionEvent) -> Result<()>,
     ) -> Result<()> {
-        visit_event_values(&self.path, offsets, visit)
+        visit_display_events(&self.path, offsets, visit)
     }
 
     /// Read only the display metadata for native calls at snapshot-derived
@@ -394,12 +469,10 @@ impl SessionCursor {
             args: String,
         }
 
-        let mut summaries = Vec::with_capacity(offsets.len());
-        visit_event_values::<NativeToolSummary>(&self.path, offsets, |record| {
-            summaries.push((record.parent, record.name, record.args));
-            Ok(())
-        })?;
-        Ok(summaries)
+        Ok(load_event_values::<NativeToolSummary>(&self.path, offsets)?
+            .into_iter()
+            .map(|record| (record.parent, record.name, record.args))
+            .collect())
     }
 
     /// Read only the first text block and the prompt kind from user-message
@@ -425,19 +498,19 @@ impl SessionCursor {
             text: String,
         }
 
-        let mut prompts = Vec::with_capacity(offsets.len());
-        visit_event_values::<PromptProjection>(&self.path, offsets, |event| {
-            prompts.push((
-                event
-                    .blocks
-                    .into_iter()
-                    .find_map(|block| (block.kind == "text").then_some(block.text))
-                    .unwrap_or_default(),
-                event.kind,
-            ));
-            Ok(())
-        })?;
-        Ok(prompts)
+        Ok(load_event_values::<PromptProjection>(&self.path, offsets)?
+            .into_iter()
+            .map(|event| {
+                (
+                    event
+                        .blocks
+                        .into_iter()
+                        .find_map(|block| (block.kind == "text").then_some(block.text))
+                        .unwrap_or_default(),
+                    event.kind,
+                )
+            })
+            .collect())
     }
 
     /// Read all non-cursor events physically contained in one committed byte
@@ -446,6 +519,14 @@ impl SessionCursor {
     /// Propagates transcript seek, read, and parsing failures.
     pub fn events_in_range(&self, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
         load_event_range(&self.path, start, end)
+    }
+
+    /// Read one committed range through the bounded transcript-display
+    /// projection. The bound is shared across the complete range.
+    /// # Errors
+    /// Propagates transcript seek, read, and parsing failures.
+    pub fn display_events_in_range(&self, start: u64, end: u64) -> Result<Vec<SessionEvent>> {
+        load_display_event_range(&self.path, start, end)
     }
 
     /// Materialize every non-cursor event in the append-only transcript tree.
@@ -679,17 +760,24 @@ fn lineage_indices(index: &[EventIndex], leaf_id: Option<&str>) -> Result<Vec<us
     Ok(selected)
 }
 
-fn indexed_lineage(index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
-    let selected = lineage_indices(&index, leaf_id)?;
+fn indexed_lineage(mut index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<EventIndex>> {
+    let Some(leaf_id) = leaf_id else {
+        index.clear();
+        return Ok(index);
+    };
+    if let Some(end) = linear_lineage_end(&index, leaf_id) {
+        index.truncate(end);
+        return Ok(index);
+    }
+
+    let selected = lineage_indices(&index, Some(leaf_id))?;
     // `selected` from lineage_path is ascending, and `retain` visits in order,
     // so keeping the next wanted index preserves the original ordering while
     // filtering in place. Copying into a fresh Vec would briefly hold both
-    // buffers, doubling peak index memory on long single-lineage sessions
-    // where nearly every event is retained.
+    // buffers, doubling peak index memory on branched sessions.
     let mut wanted = selected.into_iter().peekable();
     let mut next = wanted.next();
     let mut position = 0usize;
-    let mut index = index;
     index.retain(|_| {
         let keep = next == Some(position);
         if keep {
@@ -699,6 +787,32 @@ fn indexed_lineage(index: Vec<EventIndex>, leaf_id: Option<&str>) -> Result<Vec<
         keep
     });
     Ok(index)
+}
+
+/// Return the selected prefix length when events form one physical parent
+/// chain through `leaf_id`. This is the normal transcript shape. It avoids
+/// allocating a full id map and position vector merely to keep the existing
+/// index. A branch or malformed parent falls back to the general graph walk.
+fn linear_lineage_end(index: &[EventIndex], leaf_id: &str) -> Option<usize> {
+    let mut previous = None;
+    for (position, event) in index.iter().enumerate() {
+        if event.kind == IndexKind::Cursor {
+            continue;
+        }
+        let linked = match (event.parent_id.as_ref(), previous) {
+            (None, None) => true,
+            (Some(parent), Some(previous)) => parent == previous,
+            _ => false,
+        };
+        if !linked {
+            return None;
+        }
+        if event.id.matches(leaf_id) {
+            return Some(position + 1);
+        }
+        previous = Some(&event.id);
+    }
+    None
 }
 
 fn cursor_event(leaf_id: Option<&str>) -> SessionEvent {
@@ -1488,15 +1602,11 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     let mut last_message = String::new();
     for &i in lineage.iter().rev() {
         let offset = index[i].offset;
-        let mut preview = String::new();
-        if index::visit_event_values::<EntryPreview>(path, &[offset], |ev| {
-            preview = entry_preview(&ev);
-            Ok(())
-        })
-        .is_err()
-        {
-            return None;
-        }
+        let preview = index::load_event_values::<EntryPreview>(path, &[offset])
+            .ok()?
+            .first()
+            .map(entry_preview)
+            .unwrap_or_default();
         if !preview.is_empty() {
             last_message = preview;
             break;
@@ -1576,6 +1686,16 @@ mod tests {
         }
     }
 
+    fn message_text(event: &SessionEvent) -> &str {
+        match &event.kind {
+            SessionEventKind::Message(message) => match &message.blocks[0] {
+                ContentBlock::Text { text } => text,
+                _ => panic!("expected text"),
+            },
+            _ => panic!("expected message"),
+        }
+    }
+
     /// A store rooted at a fresh temp dir, so tests never touch real state
     /// and never race on the process-global `XDG_STATE_HOME` env var.
     fn isolated_store() -> (tempfile::TempDir, SessionStore) {
@@ -1594,6 +1714,157 @@ mod tests {
         assert_eq!(meta.cwd, "/tmp/project");
         assert_eq!(meta.model, "openai/gpt-5.6-sol".into());
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn recovery_message_lookup_is_bounded_and_typed() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/recovery-message"), &"p/m".into())
+            .unwrap();
+        let mut events = [
+            ev(Message {
+                role: Role::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call".into(),
+                    content: "x".repeat(4 * 1024 * 1024),
+                    is_error: false,
+                    images: Vec::new(),
+                }],
+                kind: PromptKind::default(),
+            }),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::ThinkingTiming { elapsed_ms: 1 },
+            },
+        ];
+        cursor.append_events(&mut events).unwrap();
+
+        let Some(RecoveryMessage::Message(message)) =
+            cursor.recovery_message_by_id(&events[0].id).unwrap()
+        else {
+            panic!("expected recoverable message");
+        };
+        let ContentBlock::ToolResult { content, .. } = &message.blocks[0] else {
+            panic!("expected tool result");
+        };
+        assert!(content.len() <= crate::agent::MAX_EXEC_RESULT_BYTES);
+        assert!(content.contains("transcript content truncated for display"));
+        assert!(matches!(
+            cursor.recovery_message_by_id(&events[1].id).unwrap(),
+            Some(RecoveryMessage::NotMessage)
+        ));
+        assert!(cursor
+            .recovery_message_by_id("missing-event")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn display_event_collection_keeps_newest_content() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/display-budget"), &"p/m".into())
+            .unwrap();
+        let payload = "x".repeat(300 * 1024);
+        let mut events: Vec<SessionEvent> = (0..12)
+            .map(|index| ev(user(&format!("{index}:{payload}"))))
+            .collect();
+        cursor.append_events(&mut events).unwrap();
+        let offsets: Vec<u64> = cursor
+            .snapshot()
+            .unwrap()
+            .index
+            .iter()
+            .map(|entry| entry.offset)
+            .collect();
+
+        let displayed = cursor.display_events_at(&offsets).unwrap();
+
+        assert_eq!(displayed.len(), 12);
+        assert!(message_text(displayed.last().unwrap()).starts_with("11:"));
+        assert!(message_text(displayed.first().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn linear_snapshot_ignores_only_the_final_malformed_record() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/partial-resume"), &"p/m".into())
+            .unwrap();
+        let mut events = [ev(user("committed"))];
+        cursor.append_events(&mut events).unwrap();
+        let path = cursor.path().to_path_buf();
+        let committed_size = std::fs::metadata(&path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"id":"partial"#)
+            .unwrap();
+
+        let (resumed, snapshot) = SessionCursor::open_snapshot(path.clone()).unwrap();
+
+        assert_eq!(snapshot.file_size, committed_size);
+        assert_eq!(snapshot.index.len(), 1);
+        assert_eq!(
+            resumed.event_at(snapshot.index[0].offset).unwrap().id,
+            events[0].id
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let (_, snapshot) = SessionCursor::open_snapshot(path.clone()).unwrap();
+        assert_eq!(snapshot.file_size, committed_size);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        assert!(SessionCursor::open_snapshot(path).is_err());
+    }
+
+    #[test]
+    fn linear_snapshot_compaction_cache_falls_back_to_marker() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/missing-kept-id"), &"p/m".into())
+            .unwrap();
+        let mut events = [
+            ev(user("before")),
+            SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::Compaction {
+                    summary: "summary".into(),
+                    first_kept_entry_id: "missing".into(),
+                    summarized_range: [String::new(), String::new()],
+                    checkpointed_tail: true,
+                    summarized: 1,
+                    represented: 1,
+                    kept: 0,
+                },
+            },
+        ];
+        cursor.append_events(&mut events).unwrap();
+
+        let (resumed, snapshot) =
+            SessionCursor::open_snapshot(cursor.path().to_path_buf()).unwrap();
+        let compacted = resumed.load_compaction_events().unwrap();
+
+        assert_eq!(snapshot.history_start, 1);
+        assert_eq!(compacted.len(), 1);
+        assert!(matches!(
+            compacted[0].kind,
+            SessionEventKind::Compaction { .. }
+        ));
     }
 
     #[test]
@@ -1821,7 +2092,8 @@ mod tests {
         assert_eq!(resumed.leaf_id().as_deref(), Some(root_id.as_str()));
         let snapshot = resumed.snapshot().unwrap();
         assert_eq!(snapshot.index.len(), 1);
-        assert!(snapshot.index[0].id.matches(&root_id));
+        let selected = resumed.event_at(snapshot.index[0].offset).unwrap();
+        assert_eq!(selected.id, root_id);
 
         let mut branch = [ev(user("new branch"))];
         resumed.append_events(&mut branch).unwrap();

@@ -59,6 +59,9 @@ impl App {
             run_model_label: None,
             retry: None,
             pending_prompt_start: false,
+            lifecycle_tx: None,
+            lifecycle_busy: false,
+            continue_after_hard_compact: false,
             pinned: true,
             top_line: 0,
             last_base: 0,
@@ -338,7 +341,21 @@ impl App {
             self.freeze_previous_file_backed_turn();
         }
         let previous_turns = self.turns.len();
+        let native_end = match &ev {
+            AgentEvent::NativeToolEnd { parent, id, .. } => Some((parent.clone(), *id)),
+            _ => None,
+        };
         apply_event_to_turns(&mut self.turns, ev);
+        if let Some((parent, id)) = native_end {
+            if let Some(native) = self
+                .turns
+                .last_mut()
+                .and_then(|turn| tool_mut(&mut turn.blocks, &parent))
+                .and_then(|tool| tool.native.iter_mut().find(|native| native.id == id))
+            {
+                view::blocks::cache_native_preview(native);
+            }
+        }
         if starts_standalone_turn {
             debug_assert_eq!(self.turns.len(), previous_turns + 1);
             self.turn_byte_ranges.push(None);
@@ -535,12 +552,12 @@ impl App {
         };
         let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
         let events = if let Some(offsets) = selected_offsets {
-            cursor.events_at(offsets)
+            cursor.display_events_at(offsets)
         } else {
             let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
                 return Arc::new(empty);
             };
-            cursor.events_in_range(start, end)
+            cursor.display_events_in_range(start, end)
         };
         let mut events = match events {
             Ok(events) => events,
@@ -873,6 +890,10 @@ impl App {
         self.run.is_some()
     }
 
+    pub(super) fn busy(&self) -> bool {
+        self.run_active() || self.lifecycle_busy
+    }
+
     pub(super) fn spinner_frame(&self) -> usize {
         self.run.unwrap_or(0)
     }
@@ -935,11 +956,48 @@ impl App {
         self.debug_sample("compaction");
     }
 
-    /// Request an immediate core-owned compaction and render its outcome.
-    pub(super) fn compact_now(&mut self) -> bool {
+    fn start_lifecycle_operation(&mut self, operation: LifecycleOperation) -> bool {
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return false;
+        };
+        if self.run_active() {
+            self.notify(NotifyKind::Warn, "wait for the running turn to finish");
+            return true;
+        }
+        if self.lifecycle_busy {
+            self.notify(NotifyKind::Warn, "wait for the memory operation to finish");
+            return true;
+        }
+        self.lifecycle_busy = true;
+        let mut lifecycle = self.lifecycle.clone();
         let cursor = self.session.cursor.clone();
         let system_prompt = self.system_prompt.clone();
-        match self.lifecycle.compact(cursor.as_ref(), &system_prompt) {
+        let task = tokio::task::spawn_blocking(move || match operation {
+            LifecycleOperation::Compact => {
+                LifecycleResult::Compact(lifecycle.compact(cursor.as_ref(), &system_prompt))
+            }
+            LifecycleOperation::AutoCompact(usage) => LifecycleResult::AutoCompact(
+                lifecycle.auto_compact(usage, cursor.as_ref(), &system_prompt),
+            ),
+            LifecycleOperation::HardCompact => LifecycleResult::HardCompact(
+                lifecycle.hard_compact(cursor.as_ref(), &system_prompt),
+            ),
+            LifecycleOperation::Recall(line) => LifecycleResult::Recall {
+                result: lifecycle.recall_line(cursor.as_ref(), &line),
+                line,
+            },
+        });
+        tokio::task::spawn_local(async move {
+            let result = task.await.unwrap_or_else(|error| {
+                LifecycleResult::Failed(format!("memory operation failed: {error}"))
+            });
+            let _ = tx.send(result);
+        });
+        true
+    }
+
+    fn present_compact_result(&mut self, result: Result<Option<lofi_core::Compaction>>) -> bool {
+        match result {
             Ok(Some(compaction)) => {
                 self.render_compaction(&compaction);
                 true
@@ -955,10 +1013,23 @@ impl App {
         }
     }
 
-    /// Request core-owned recall and render the read-only result.
-    pub(super) fn recall_now(&mut self, line: &str) {
-        let cursor = self.session.cursor.as_ref();
-        match self.lifecycle.recall_line(cursor, line) {
+    /// Request an immediate core-owned compaction and render its outcome.
+    pub(super) fn compact_now(&mut self) -> bool {
+        if self.start_lifecycle_operation(LifecycleOperation::Compact) {
+            return true;
+        }
+        let cursor = self.session.cursor.clone();
+        let system_prompt = self.system_prompt.clone();
+        let result = self.lifecycle.compact(cursor.as_ref(), &system_prompt);
+        self.present_compact_result(result)
+    }
+
+    fn present_recall_result(
+        &mut self,
+        line: &str,
+        result: Result<Option<lofi_core::recall::RecallOutcome>>,
+    ) {
+        match result {
             Ok(Some(outcome)) => {
                 self.push_turn(Turn {
                     prompt: line.trim().to_string(),
@@ -973,6 +1044,16 @@ impl App {
         }
     }
 
+    /// Request core-owned recall and render the read-only result.
+    pub(super) fn recall_now(&mut self, line: &str) {
+        if self.start_lifecycle_operation(LifecycleOperation::Recall(line.to_string())) {
+            return;
+        }
+        let cursor = self.session.cursor.as_ref();
+        let result = self.lifecycle.recall_line(cursor, line);
+        self.present_recall_result(line, result);
+    }
+
     /// Let core evaluate soft-compaction policy; the UI only renders outcomes.
     pub(super) fn maybe_auto_compact(&mut self) {
         if !std::mem::take(&mut self.settled_usage_fresh) {
@@ -981,22 +1062,36 @@ impl App {
         let Some(usage) = self.status_usage else {
             return;
         };
+        if self.start_lifecycle_operation(LifecycleOperation::AutoCompact(usage)) {
+            return;
+        }
         let cursor = self.session.cursor.clone();
         let system_prompt = self.system_prompt.clone();
-        match self
+        let result = self
             .lifecycle
-            .auto_compact(usage, cursor.as_ref(), &system_prompt)
-        {
-            Ok(Some(compaction)) => self.render_compaction(&compaction),
-            Ok(None) => {}
-            Err(error) => self.notify(NotifyKind::Error, format!("could not compact: {error}")),
+            .auto_compact(usage, cursor.as_ref(), &system_prompt);
+        if let Ok(Some(compaction)) = result {
+            self.render_compaction(&compaction);
+        } else if let Err(error) = result {
+            self.notify(NotifyKind::Error, format!("could not compact: {error}"));
         }
     }
 
-    pub(super) fn hard_compact(&mut self) -> HardCompactOutcome {
+    pub(super) fn hard_compact(&mut self) -> Option<HardCompactOutcome> {
+        if self.start_lifecycle_operation(LifecycleOperation::HardCompact) {
+            return None;
+        }
         let cursor = self.session.cursor.clone();
         let system_prompt = self.system_prompt.clone();
-        match self.lifecycle.hard_compact(cursor.as_ref(), &system_prompt) {
+        let result = self.lifecycle.hard_compact(cursor.as_ref(), &system_prompt);
+        Some(self.present_hard_compact_result(result))
+    }
+
+    fn present_hard_compact_result(
+        &mut self,
+        result: Result<HardCompactOutcome>,
+    ) -> HardCompactOutcome {
+        match result {
             Ok(HardCompactOutcome::Compacted(compaction)) => {
                 self.render_compaction(&compaction);
                 HardCompactOutcome::Compacted(compaction)
@@ -1005,6 +1100,53 @@ impl App {
             Err(error) => {
                 self.notify(NotifyKind::Error, format!("could not compact: {error}"));
                 HardCompactOutcome::NotEnoughHistory
+            }
+        }
+    }
+
+    pub(super) fn apply_lifecycle_result(&mut self, result: LifecycleResult) -> bool {
+        self.lifecycle_busy = false;
+        match result {
+            LifecycleResult::Compact(result) => {
+                self.present_compact_result(result);
+                false
+            }
+            LifecycleResult::AutoCompact(result) => {
+                match result {
+                    Ok(Some(compaction)) => self.render_compaction(&compaction),
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.notify(NotifyKind::Error, format!("could not compact: {error}"));
+                    }
+                }
+                false
+            }
+            LifecycleResult::Recall { line, result } => {
+                self.present_recall_result(&line, result);
+                false
+            }
+            LifecycleResult::HardCompact(result) => {
+                match self.present_hard_compact_result(result) {
+                    HardCompactOutcome::Compacted(_) => true,
+                    HardCompactOutcome::Cooldown => {
+                        self.notify(
+                            NotifyKind::Warn,
+                            "context exceeded the hard cap too soon after a compaction; cannot continue",
+                        );
+                        false
+                    }
+                    HardCompactOutcome::NotEnoughHistory => {
+                        self.notify(
+                            NotifyKind::Warn,
+                            "could not compact at the hard cap; cannot continue",
+                        );
+                        false
+                    }
+                }
+            }
+            LifecycleResult::Failed(error) => {
+                self.notify(NotifyKind::Error, error);
+                false
             }
         }
     }

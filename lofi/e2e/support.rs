@@ -784,6 +784,19 @@ data: [DONE]
     ))
 }
 
+pub fn chunked_text_response(chunk: &str, count: usize, suffix: &str) -> MockResponse {
+    use std::fmt::Write as _;
+
+    let mut body = String::new();
+    for _ in 0..count {
+        let event = json!({ "choices": [{ "delta": { "content": chunk } }] });
+        let _ = write!(body, "data: {event}\n\n");
+    }
+    let event = json!({ "choices": [{ "delta": { "content": suffix } }] });
+    let _ = write!(body, "data: {event}\n\ndata: [DONE]\n\n");
+    MockResponse::sse(body)
+}
+
 /// A clean end of turn, real-provider shape: text with `finish_reason:
 /// "stop"`, then a usage-only frame so the mapper emits `Done(EndTurn)`.
 pub fn stop_text_response(text: &str) -> MockResponse {
@@ -1132,6 +1145,115 @@ impl Fixture {
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub fn append_tree_siblings(&self, count: usize) {
+        self.append_tree_sibling_bytes(count, 0);
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn append_history_bytes(&self, turns: usize, payload_bytes: usize) {
+        let path = self
+            .session_files()
+            .into_iter()
+            .next()
+            .expect("session transcript");
+        let events = self.events();
+        let mut parent_id = events
+            .iter()
+            .rev()
+            .find_map(|event| event["leaf_id"].as_str().or_else(|| event["id"].as_str()))
+            .expect("session leaf")
+            .to_string();
+        let payload = "x".repeat(payload_bytes);
+        let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        let mut event_index = 0usize;
+        for turn in 0..turns {
+            append_memory_turn(
+                &mut writer,
+                &mut parent_id,
+                &mut event_index,
+                turn,
+                &payload,
+            );
+        }
+        serde_json::to_writer(
+            &mut writer,
+            &json!({ "type": "cursor", "leaf_id": parent_id }),
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn append_compacted_history_bytes(&self, turns: usize, payload_bytes: usize) {
+        let path = self
+            .session_files()
+            .into_iter()
+            .next()
+            .expect("session transcript");
+        let events = self.events();
+        let mut parent_id = events
+            .iter()
+            .rev()
+            .find_map(|event| event["leaf_id"].as_str().or_else(|| event["id"].as_str()))
+            .expect("session leaf")
+            .to_string();
+        let payload = "x".repeat(payload_bytes);
+        let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        let mut event_index = 0usize;
+        for turn in 0..turns {
+            append_memory_turn(
+                &mut writer,
+                &mut parent_id,
+                &mut event_index,
+                turn,
+                &payload,
+            );
+        }
+        append_synthetic_event(
+            &mut writer,
+            &mut parent_id,
+            &mut event_index,
+            json!({
+                "type": "native_tool",
+                "parent": "legacy-large-result",
+                "call_id": turns,
+                "name": "bash",
+                "args": "{}",
+                "result": "y".repeat(24 * 1024 * 1024),
+                "is_error": false,
+            }),
+        );
+        let compact_id = "efffffffffffffffffffffffffffffff";
+        serde_json::to_writer(
+            &mut writer,
+            &json!({
+                "id": compact_id,
+                "parent_id": parent_id,
+                "type": "compaction",
+                "summary": "synthetic compacted history",
+                "first_kept_entry_id": "",
+                "summarized_range": ["", ""],
+                "checkpointed_tail": true,
+                "summarized": turns,
+                "represented": turns,
+                "kept": 0,
+            }),
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
+        serde_json::to_writer(
+            &mut writer,
+            &json!({ "type": "cursor", "leaf_id": compact_id }),
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn append_tree_sibling_bytes(&self, count: usize, payload_bytes: usize) {
         let path = self
             .session_files()
             .into_iter()
@@ -1143,6 +1265,7 @@ impl Fixture {
             .rev()
             .find_map(|event| event["leaf_id"].as_str().or_else(|| event["id"].as_str()))
             .expect("session leaf");
+        let payload = "x".repeat(payload_bytes);
         let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         let mut writer = std::io::BufWriter::new(file);
         for index in 0..count {
@@ -1155,7 +1278,7 @@ impl Fixture {
                     "role": "user",
                     "blocks": [{
                         "type": "text",
-                        "text": format!("synthetic tree prompt {index:06}"),
+                        "text": format!("synthetic tree prompt {index:06}{payload}"),
                     }],
                 }),
             )
@@ -1163,6 +1286,50 @@ impl Fixture {
             writer.write_all(b"\n").unwrap();
         }
         writer.flush().unwrap();
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn append_synthetic_event(
+    writer: &mut std::io::BufWriter<File>,
+    parent_id: &mut String,
+    event_index: &mut usize,
+    kind: Value,
+) {
+    let id = format!("f{:031x}", *event_index);
+    *event_index += 1;
+    let Value::Object(mut event) = kind else {
+        panic!("synthetic event must be an object");
+    };
+    event.insert("id".to_string(), json!(&id));
+    event.insert("parent_id".to_string(), json!(&parent_id));
+    serde_json::to_writer(&mut *writer, &event).unwrap();
+    writer.write_all(b"\n").unwrap();
+    *parent_id = id;
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn append_memory_turn(
+    writer: &mut std::io::BufWriter<File>,
+    parent_id: &mut String,
+    event_index: &mut usize,
+    turn: usize,
+    payload: &str,
+) {
+    let events = [
+        json!({
+            "type": "message",
+            "role": "user",
+            "blocks": [{ "type": "text", "text": format!("memory prompt {turn}") }],
+        }),
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "blocks": [{ "type": "text", "text": payload }],
+        }),
+    ];
+    for event in events {
+        append_synthetic_event(writer, parent_id, event_index, event);
     }
 }
 
@@ -1812,15 +1979,37 @@ impl Tui {
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub fn resident_kib(&self) -> u64 {
+        self.status_kib("VmRSS:")
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn peak_resident_kib(&self) -> u64 {
+        self.status_kib("VmHWM:")
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub fn wait_for_resident_kib_at_most(&self, limit: u64, timeout: Duration) -> u64 {
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(250));
+        let mut resident = self.resident_kib();
+        while resident > limit && start.elapsed() < timeout {
+            thread::sleep(Duration::from_millis(20));
+            resident = self.resident_kib();
+        }
+        resident
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn status_kib(&self, field: &str) -> u64 {
         let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id())).unwrap();
         status
             .lines()
             .find_map(|line| {
-                line.strip_prefix("VmRSS:")
+                line.strip_prefix(field)
                     .and_then(|value| value.split_whitespace().next())
                     .and_then(|value| value.parse().ok())
             })
-            .expect("VmRSS")
+            .unwrap_or_else(|| panic!("{field}"))
     }
 
     pub fn submit(&mut self, text: &str) {

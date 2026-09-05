@@ -144,8 +144,13 @@ fn sse_error<M: SseMapper>(state: &mut SseState<M>, msg: &str) {
 /// Unfold state holding the upstream byte stream plus partial decodings.
 struct SseState<M> {
     bytes: std::pin::Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
+    /// Current provider transport chunk. It can be large, so the parser copies
+    /// only bounded slices into its own buffer before yielding mapped events.
+    transport_chunk: Option<Bytes>,
+    transport_start: usize,
     pending_bytes: Vec<u8>,
     pending_lines: String,
+    pending_start: usize,
     /// A trailing `\r` carried across a chunk boundary so a split `\r\n`
     /// line ending is not mistaken for a `\n\n` block terminator.
     pending_cr: bool,
@@ -164,8 +169,11 @@ pub(crate) fn map_sse_response<M: SseMapper>(resp: reqwest::Response, mapper: M)
     let bytes = Box::pin(resp.bytes_stream());
     let state = SseState {
         bytes,
+        transport_chunk: None,
+        transport_start: 0,
         pending_bytes: Vec::new(),
         pending_lines: String::new(),
+        pending_start: 0,
         pending_cr: false,
         queued: std::collections::VecDeque::new(),
         pending_done: None,
@@ -183,15 +191,49 @@ async fn step<M: SseMapper>(
         if let Some(ev) = state.queued.pop_front() {
             return Some((ev, state));
         }
+        let final_flush = state.exhausted;
+        if flush_one_pending_block(&mut state, final_flush) {
+            continue;
+        }
         if state.exhausted {
+            if !state.done {
+                match state.mapper.on_eof() {
+                    Ok(()) => {
+                        if let Some(done) = state.pending_done.take() {
+                            state.queued.push_back(Ok(done));
+                        }
+                    }
+                    Err(error) => {
+                        state.pending_done = None;
+                        state.queued.push_back(Err(error));
+                    }
+                }
+                state.done = true;
+                continue;
+            }
             return None;
         }
         if state.done {
             state.exhausted = true;
-            return None;
+            continue;
+        }
+        if let Some(chunk) = state.transport_chunk.take() {
+            const INGEST_BYTES: usize = 64 * 1024;
+            let start = state.transport_start;
+            let end = start.saturating_add(INGEST_BYTES).min(chunk.len());
+            feed_chunk(&mut state, &chunk[start..end]);
+            if end < chunk.len() {
+                state.transport_chunk = Some(chunk);
+                state.transport_start = end;
+            } else {
+                state.transport_start = 0;
+            }
+            continue;
         }
         match state.bytes.next().await {
-            Some(Ok(chunk)) => feed_chunk(&mut state, &chunk),
+            Some(Ok(chunk)) => {
+                state.transport_chunk = Some(chunk);
+            }
             Some(Err(error)) => {
                 return Some((
                     Err(provider_transport_error(
@@ -204,50 +246,46 @@ async fn step<M: SseMapper>(
             None => {
                 state.exhausted = true;
                 flush_tail(&mut state);
-                if !state.done {
-                    match state.mapper.on_eof() {
-                        Ok(()) => {
-                            if let Some(done) = state.pending_done.take() {
-                                state.queued.push_back(Ok(done));
-                            }
-                        }
-                        Err(e) => {
-                            state.pending_done = None;
-                            state.queued.push_back(Err(e));
-                            state.done = true;
-                        }
-                    }
-                }
             }
         }
     }
 }
 
-fn feed_chunk<M: SseMapper>(state: &mut SseState<M>, chunk: &Bytes) {
-    state.pending_bytes.extend_from_slice(chunk);
-    let pending = state.pending_bytes.split_off(0);
-    let valid_len = match std::str::from_utf8(&pending) {
-        Ok(_) => pending.len(),
-        Err(e) => match e.error_len() {
-            // A permanently invalid byte (not a truncated multi-byte tail):
-            // reject immediately instead of buffering it and every later
-            // chunk until EOF.
-            Some(_) => {
+fn feed_chunk<M: SseMapper>(state: &mut SseState<M>, chunk: &[u8]) {
+    if state.pending_bytes.is_empty() {
+        match std::str::from_utf8(chunk) {
+            Ok(decoded) => {
+                append_text(state, decoded);
+                return;
+            }
+            Err(error) if error.error_len().is_some() => {
                 sse_error(state, "invalid UTF-8 in SSE stream");
                 return;
             }
-            None => e.valid_up_to(),
-        },
-    };
-    let decoded = std::str::from_utf8(&pending[..valid_len]).unwrap_or_default();
-    state.pending_bytes.extend_from_slice(&pending[valid_len..]);
-    append_text(state, decoded);
-    // `pending_bytes` now holds only an incomplete UTF-8 tail; cap it so a
-    // hostile stream of partial sequences can't grow it without bound. The
-    // in-flight event tail is bounded separately in `append_text`.
-    if state.pending_bytes.len() > MAX_SSE_PENDING_BYTES {
-        sse_error(state, "SSE event exceeded maximum buffered size");
+            Err(error) => {
+                let valid = error.valid_up_to();
+                append_text(
+                    state,
+                    std::str::from_utf8(&chunk[..valid]).unwrap_or_default(),
+                );
+                state.pending_bytes.extend_from_slice(&chunk[valid..]);
+                return;
+            }
+        }
     }
+
+    state.pending_bytes.extend_from_slice(chunk);
+    let valid_len = match std::str::from_utf8(&state.pending_bytes) {
+        Ok(_) => state.pending_bytes.len(),
+        Err(error) if error.error_len().is_some() => {
+            sse_error(state, "invalid UTF-8 in SSE stream");
+            return;
+        }
+        Err(error) => error.valid_up_to(),
+    };
+    let decoded = String::from_utf8_lossy(&state.pending_bytes[..valid_len]).into_owned();
+    state.pending_bytes.drain(..valid_len);
+    append_text(state, &decoded);
 }
 
 /// On upstream end, decode any trailing bytes and flush the final block even
@@ -261,13 +299,11 @@ fn flush_tail<M: SseMapper>(state: &mut SseState<M>) {
         state.pending_cr = false;
     }
     if state.pending_bytes.is_empty() {
-        flush_pending_lines(state, true);
         return;
     }
     let pending = std::mem::take(&mut state.pending_bytes);
-    let lossy = String::from_utf8_lossy(&pending).into_owned();
+    let lossy = String::from_utf8_lossy(&pending);
     append_text(state, &lossy);
-    flush_pending_lines(state, true);
 }
 
 fn append_text<M: SseMapper>(state: &mut SseState<M>, text: &str) {
@@ -277,66 +313,74 @@ fn append_text<M: SseMapper>(state: &mut SseState<M>, text: &str) {
     // is deferred (`pending_cr`): if the next chunk begins with `\n` it is the
     // LF of a `\r\n` pair (one line ending), not a second blank line, so we
     // consume it instead of emitting `\n\n` and prematurely closing the block.
-    let mut buf = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    if state.pending_cr {
-        if let Some('\n') = chars.peek() {
-            chars.next();
-        }
-        buf.push('\n');
-        state.pending_cr = false;
-    }
-    while let Some(c) = chars.next() {
-        if c == '\r' {
-            match chars.peek() {
-                Some('\n') => {
-                    chars.next();
-                    buf.push('\n');
-                }
-                None => state.pending_cr = true,
-                _ => buf.push('\n'),
+    if !state.pending_cr && !text.contains('\r') {
+        state.pending_lines.push_str(text);
+    } else {
+        let mut chars = text.chars().peekable();
+        if state.pending_cr {
+            if let Some('\n') = chars.peek() {
+                chars.next();
             }
-        } else {
-            buf.push(c);
+            state.pending_lines.push('\n');
+            state.pending_cr = false;
+        }
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                match chars.peek() {
+                    Some('\n') => {
+                        chars.next();
+                        state.pending_lines.push('\n');
+                    }
+                    None => state.pending_cr = true,
+                    _ => state.pending_lines.push('\n'),
+                }
+            } else {
+                state.pending_lines.push(c);
+            }
         }
     }
-    state.pending_lines.push_str(&buf);
-    // Drain complete blocks first, then bound only the unfinished tail so a
-    // large chunk of many small terminated events decodes successfully.
-    flush_pending_lines(state, false);
-    if state.pending_lines.len() > MAX_SSE_PENDING_BYTES {
+    let tail_start = state.pending_lines[state.pending_start..]
+        .rfind("\n\n")
+        .map_or(state.pending_start, |offset| {
+            state.pending_start + offset + 2
+        });
+    if state.pending_lines.len().saturating_sub(tail_start) > MAX_SSE_PENDING_BYTES {
         sse_error(state, "SSE event exceeded maximum buffered size");
     }
 }
 
-fn flush_pending_lines<M: SseMapper>(state: &mut SseState<M>, final_flush: bool) {
+fn flush_one_pending_block<M: SseMapper>(state: &mut SseState<M>, final_flush: bool) -> bool {
     if state.done {
-        return;
+        return false;
     }
-    // Process complete (`\n\n`-terminated) blocks in one pass, advancing a
-    // start cursor instead of draining the front each iteration (which would
-    // shift the whole tail and make a chunk of many small events quadratic).
-    let mut start = 0;
-    while let Some(rel) = state.pending_lines[start..].find("\n\n") {
-        let abs = start + rel;
-        let block: String = state.pending_lines[start..abs].to_string();
-        start = abs + 2;
-        enqueue_block(state, &block);
-        if state.done {
-            return;
+    let remaining = &state.pending_lines[state.pending_start..];
+    let (end, next) = if let Some(relative) = remaining.find("\n\n") {
+        (
+            state.pending_start + relative,
+            state.pending_start + relative + 2,
+        )
+    } else if final_flush {
+        let end = state.pending_lines.trim_end_matches('\n').len();
+        if end <= state.pending_start {
+            return false;
         }
+        (end, state.pending_lines.len())
+    } else {
+        return false;
+    };
+    if end.saturating_sub(state.pending_start) > MAX_SSE_PENDING_BYTES {
+        sse_error(state, "SSE event exceeded maximum buffered size");
+        return true;
     }
-    if start > 0 {
-        let tail = state.pending_lines.split_off(start);
-        state.pending_lines = tail;
+    let block = state.pending_lines[state.pending_start..end].to_string();
+    state.pending_start = next;
+    enqueue_block(state, &block);
+    if state.pending_start >= state.pending_lines.len() / 2 {
+        state.pending_lines.drain(..state.pending_start);
+        state.pending_start = 0;
+        state.pending_lines.shrink_to(MAX_SSE_PENDING_BYTES);
     }
-    if final_flush {
-        let remaining = std::mem::take(&mut state.pending_lines);
-        let trimmed = remaining.trim_end_matches('\n');
-        if !trimmed.is_empty() {
-            enqueue_block(state, trimmed);
-        }
-    }
+    true
 }
 
 /// Parse one SSE block and push its mapped event (if any) onto `queued`.
@@ -405,8 +449,11 @@ mod tests {
         let byte_stream = futures::stream::iter(chunk_iter);
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,
@@ -423,8 +470,11 @@ mod tests {
         let byte_stream = futures::stream::iter(chunk_iter);
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,
@@ -516,8 +566,11 @@ mod tests {
     async fn idle_response_body_has_no_deadline() {
         let state = SseState {
             bytes: Box::pin(futures::stream::pending()),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,
@@ -546,6 +599,17 @@ mod tests {
         // without bound; the decoder rejects once the cap is exceeded.
         let big: Vec<u8> = std::iter::repeat_n(b'x', 2 * 1024 * 1024).collect();
         let out = run_decoder_owned(vec![big]).await;
+        assert!(out.iter().any(Result::is_err));
+    }
+
+    #[tokio::test]
+    async fn oversized_complete_event_is_rejected() {
+        let mut event = b"data: {\"text\":\"".to_vec();
+        event.extend(std::iter::repeat_n(b'x', MAX_SSE_PENDING_BYTES + 1));
+        event.extend_from_slice(b"\"}\n\n");
+
+        let out = run_decoder_owned(vec![event]).await;
+
         assert!(out.iter().any(Result::is_err));
     }
 
@@ -616,8 +680,11 @@ mod tests {
         });
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,
@@ -640,8 +707,11 @@ mod tests {
             futures::stream::once(async { Ok(Bytes::from_static(b"data: done\n\n")) });
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,
@@ -664,8 +734,11 @@ mod tests {
                 .chain(futures::stream::pending());
         let state = SseState {
             bytes: Box::pin(byte_stream),
+            transport_chunk: None,
+            transport_start: 0,
             pending_bytes: Vec::new(),
             pending_lines: String::new(),
+            pending_start: 0,
             pending_cr: false,
             queued: std::collections::VecDeque::new(),
             pending_done: None,

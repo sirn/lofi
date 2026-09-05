@@ -171,9 +171,9 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
 }
 
 #[test]
-fn oversized_turn_skips_the_collapsed_cache() {
-    // A single entry past the per-turn cap reparses from the transcript on
-    // demand instead of flushing every other entry out of the budget.
+fn oversized_turn_caches_the_bounded_display_projection() {
+    // Raw transcript size does not control cache eligibility. The cache owns
+    // only the bounded display projection and applies its cap to that value.
     use lofi_core::session::store::SessionStore;
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(dir.path().join("s"));
@@ -234,14 +234,21 @@ fn oversized_turn_skips_the_collapsed_cache() {
     );
     let c0 = a.session.cursor.as_ref().unwrap().clone();
     let snap = c0.snapshot().unwrap();
-    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
-        .unwrap();
+    a.restore_indexed_session(
+        &c0,
+        &snap.index,
+        snap.file_size,
+        snap.history_start,
+        snap.contiguous,
+    )
+    .unwrap();
 
     let rendered = a.materialize_turn(0);
     assert!(!rendered.blocks.is_empty());
-    assert!(
-        a.collapsed_turns.borrow().map.is_empty(),
-        "entry above the cap must not be retained"
+    assert_eq!(
+        a.collapsed_turns.borrow().map.len(),
+        1,
+        "the bounded projection should fit in one cache entry"
     );
 }
 

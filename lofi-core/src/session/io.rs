@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 
 use super::store::SessionTreeSnapshot;
@@ -55,18 +55,18 @@ impl WorkerState {
         self.tree_snapshots.remove(&id);
         // The freed Vec<EventIndex> stays in this thread's glibc arena
         // otherwise. Trim so the next /tree open doesn't ratchet RSS.
-        crate::malloc_trim::release_freed_memory();
+        lofi_code::memory::release_freed_memory();
     }
 }
 
-fn workers() -> &'static Mutex<HashMap<PathBuf, SyncSender<Job>>> {
-    static WORKERS: OnceLock<Mutex<HashMap<PathBuf, SyncSender<Job>>>> = OnceLock::new();
+fn workers() -> &'static Mutex<HashMap<PathBuf, Sender<Job>>> {
+    static WORKERS: OnceLock<Mutex<HashMap<PathBuf, Sender<Job>>>> = OnceLock::new();
     WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Submit a closure to the IO worker for `root`, spawning the worker on first
-/// use. Jobs run one at a time in submission order; a full channel drops the
-/// job rather than blocking the caller.
+/// use. Jobs run one at a time in submission order. Submission is reliable:
+/// cleanup and branch-switch jobs must not disappear behind queued reads.
 ///
 /// The closure receives the worker's mutable state so long-lived jobs (tree
 /// snapshot open / hydrate / close) can pin state on the worker thread.
@@ -76,7 +76,7 @@ pub fn submit(root: PathBuf, job: Job) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tx = map.entry(root).or_insert_with(|| {
-            let (tx, rx): (SyncSender<Job>, Receiver<Job>) = mpsc::sync_channel(8);
+            let (tx, rx): (Sender<Job>, Receiver<Job>) = mpsc::channel();
             std::thread::spawn(move || {
                 let mut state = WorkerState::default();
                 while let Ok(job) = rx.recv() {
@@ -87,5 +87,53 @@ pub fn submit(root: PathBuf, job: Job) {
         });
         tx.clone()
     };
-    let _ = tx.try_send(job);
+    let _ = tx.send(job);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn queued_cleanup_is_not_dropped_behind_reads() {
+        let root = tempfile::tempdir().unwrap().path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        submit(
+            root.clone(),
+            Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..16 {
+            let completed = Arc::clone(&completed);
+            submit(
+                root.clone(),
+                Box::new(move |_| {
+                    completed.fetch_add(1, Ordering::Relaxed);
+                }),
+            );
+        }
+        let (cleanup_tx, cleanup_rx) = mpsc::channel();
+        submit(
+            root,
+            Box::new(move |_| {
+                cleanup_tx.send(()).unwrap();
+            }),
+        );
+
+        release_tx.send(()).unwrap();
+        cleanup_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(completed.load(Ordering::Relaxed), 16);
+    }
 }

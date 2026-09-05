@@ -6,12 +6,12 @@ use serde_json::json;
 
 use crate::support::{
     anthropic_text_response, anthropic_text_response_with_usage, anthropic_truncated_text_response,
-    delayed_text_response, event_types, job_events, parallel_responses_tool_response,
-    parallel_tool_response, process_is_alive, responses_response, spawned_pid, stop_text_response,
-    text_response, text_response_with_usage, tool_response, tool_response_with_usage,
-    transcript_text, truncated_responses_response, truncated_text_response,
-    truncated_tool_response, wait_for_process_exit, Fixture, MockResponse, MockServer,
-    ProcessGuard, WAIT,
+    chunked_text_response, delayed_text_response, event_types, job_events,
+    parallel_responses_tool_response, parallel_tool_response, process_is_alive, responses_response,
+    spawned_pid, stop_text_response, text_response, text_response_with_usage, tool_response,
+    tool_response_with_usage, transcript_text, truncated_responses_response,
+    truncated_text_response, truncated_tool_response, wait_for_process_exit, Fixture, MockResponse,
+    MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -427,6 +427,79 @@ fn resuming_a_large_transcript_releases_replay_memory() {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn input_stays_responsive_while_compaction_reads_large_history() {
+    let server = MockServer::start(vec![text_response("responsive compact seed")]);
+    let fixture = Fixture::new(&server);
+    let mut seed = fixture.spawn(&[]);
+    seed.submit("responsive compact seed prompt");
+    seed.wait_for("responsive compact seed", WAIT);
+    seed.submit("/quit");
+    seed.wait_exit();
+
+    fixture.append_history_bytes(8_000, 2_048);
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.clear_output();
+    tui.send(b"/compact\rCOMPACT-INPUT-RESPONSIVE");
+    tui.wait_for_screen(
+        "COMPACT-INPUT-RESPONSIVE",
+        std::time::Duration::from_millis(750),
+    );
+    tui.wait_for("Compacted", WAIT);
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn five_hundred_mebibyte_transcript_stays_below_memory_limit() {
+    const MEMORY_LIMIT_KIB: u64 = 50 * 1024;
+    const TRANSCRIPT_MIN_BYTES: u64 = 500 * 1024 * 1024;
+
+    let server = MockServer::start(vec![
+        text_response("memory seed answer"),
+        tool_response(
+            "memory-exec",
+            "const held = new Uint8Array(12 * 1024 * 1024); held.fill(1); print(\"p\".repeat(1024 * 1024)); return \"x\".repeat(12 * 1024 * 1024);",
+        ),
+        chunked_text_response(
+            &"s".repeat(256 * 1024),
+            48,
+            "MEMORY_STREAM_DONE",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut seed = fixture.spawn(&[]);
+    seed.submit("memory seed prompt");
+    seed.wait_for("memory seed answer", WAIT);
+    seed.submit("/quit");
+    seed.wait_exit();
+
+    // The compaction marker keeps the selected model context small while
+    // startup still indexes the complete linear transcript.
+    fixture.append_compacted_history_bytes(23_000, 23_000);
+    let transcript_bytes = std::fs::metadata(&fixture.session_files()[0])
+        .unwrap()
+        .len();
+    assert!(
+        transcript_bytes >= TRANSCRIPT_MIN_BYTES,
+        "{transcript_bytes}"
+    );
+
+    let mut tui = fixture.spawn(&["--continue"]);
+    let startup_rss = tui.resident_kib();
+    let startup_peak = tui.peak_resident_kib();
+    tui.submit("memory turn prompt");
+    tui.wait_for("round exceeded 1048576 byte budget", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let turn_rss = tui.resident_kib();
+    let turn_peak = tui.peak_resident_kib();
+
+    assert!(
+        turn_peak <= MEMORY_LIMIT_KIB,
+        "500 MiB transcript exceeded memory limit {MEMORY_LIMIT_KIB}: startup={startup_rss} KiB, startup_peak={startup_peak} KiB, turn={turn_rss} KiB, turn_peak={turn_peak} KiB"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn closing_large_tree_picker_releases_transient_memory() {
     let server = MockServer::start(vec![text_response("memory seed answer")]);
     let fixture = Fixture::new(&server);
@@ -440,20 +513,46 @@ fn closing_large_tree_picker_releases_transient_memory() {
 
     let mut tui = fixture.spawn(&["--continue"]);
     let baseline = tui.resident_kib();
+
+    // Close once before the snapshot is ready. Its late result must release
+    // itself rather than leaving the worker-owned snapshot behind.
+    tui.submit("/tree");
+    tui.send(b"\x1b");
+    let closed_before_ready = tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT);
+    assert!(
+        closed_before_ready <= baseline + 16 * 1024,
+        "closing before tree readiness retained memory: baseline={baseline} KiB, closed={closed_before_ready} KiB"
+    );
+
+    // Close again after skeleton rows arrive but before the initial hydrated
+    // rows do. This cancels active topology construction and queues snapshot
+    // cleanup behind it.
+    tui.clear_output();
+    tui.submit("/tree");
+    tui.wait_for_screen("Roll back to a turn", WAIT);
+    tui.send("\x1b[A".repeat(40).as_bytes());
+    tui.send(b"\x1b");
+    let closed_during_hydration = tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT);
+    assert!(
+        closed_during_hydration <= baseline + 16 * 1024,
+        "closing during tree hydration retained memory: baseline={baseline} KiB, closed={closed_during_hydration} KiB"
+    );
+
+    // Reopening proves that stale cleanup did not affect a later snapshot.
+    // Repeated settled closes check that RSS does not ratchet upward.
     let mut closed_samples = Vec::new();
     for _ in 0..3 {
         tui.clear_output();
         tui.submit("/tree");
         tui.wait_for("074999", WAIT);
         tui.send(b"\x1b");
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        closed_samples.push(tui.resident_kib());
+        closed_samples.push(tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT));
     }
 
     let highest_closed = closed_samples.iter().copied().max().unwrap();
     assert!(
         highest_closed <= baseline + 16 * 1024,
-        "tree picker retained too much memory: baseline={baseline} KiB, closed={closed_samples:?} KiB"
+        "tree picker retained too much memory: baseline={baseline} KiB, before_ready={closed_before_ready} KiB, during_hydration={closed_during_hydration} KiB, closed={closed_samples:?} KiB"
     );
 }
 

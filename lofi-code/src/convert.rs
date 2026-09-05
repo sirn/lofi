@@ -1,21 +1,118 @@
 //! `js_to_json`/`json_to_js` move values between a guest `rquickjs::Value`
-//! and a `serde_json::Value`; `js_to_json_bounded` caps depth/nodes/bytes so
-//! a self-referential or pathologically nested structure surfaces as the
-//! sandbox-error sentinel instead of exhausting memory.
+//! and a `serde_json::Value`; conversion caps depth, nodes, and copied bytes
+//! so a self-referential or pathologically large value cannot exhaust memory.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-/// Convert a guest value to JSON, surfacing depth/node overflow as the
-/// sandbox-error sentinel so the caller raises [`Error::Sandbox`].
+
+struct Conversion<'js> {
+    nodes: usize,
+    bytes: usize,
+    max_bytes: usize,
+    overflow: bool,
+    truncate: bool,
+    truncated: bool,
+    string_limiter: Option<Function<'js>>,
+}
+
+impl<'js> Conversion<'js> {
+    fn new(value: &Value<'js>, max_bytes: usize, truncate: bool) -> Self {
+        let string_limiter = truncate.then(|| {
+            value.ctx().eval::<Function, _>(
+                "(value, max) => { const cut = value.length > max; return [cut ? value.slice(0, max) : value, cut]; }",
+            )
+        });
+        let overflow = string_limiter
+            .as_ref()
+            .is_some_and(std::result::Result::is_err);
+        Self {
+            nodes: 0,
+            bytes: 0,
+            max_bytes,
+            overflow,
+            truncate,
+            truncated: false,
+            string_limiter: string_limiter.and_then(std::result::Result::ok),
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.max_bytes.saturating_sub(self.bytes)
+    }
+
+    fn copy_string(
+        &mut self,
+        string: rquickjs::String<'js>,
+        allow_prefix: bool,
+    ) -> Option<std::string::String> {
+        let mut guest_truncated = false;
+        let string = if let Some(limiter) = &self.string_limiter {
+            let limit = u32::try_from(self.remaining()).unwrap_or(u32::MAX);
+            let bounded: rquickjs::Result<Array> = limiter.call((string, limit));
+            let Ok(bounded) = bounded else {
+                self.overflow = true;
+                return None;
+            };
+            guest_truncated = bounded.get(1).unwrap_or(true);
+            if guest_truncated && !allow_prefix {
+                self.truncated = true;
+                return None;
+            }
+            let Ok(string) = bounded.get(0) else {
+                self.overflow = true;
+                return None;
+            };
+            string
+        } else {
+            string
+        };
+        let Ok(text) = string.to_cstring() else {
+            self.overflow = true;
+            return None;
+        };
+        let remaining = self.remaining();
+        if text.len() <= remaining {
+            self.bytes += text.len();
+            self.truncated |= guest_truncated;
+            return Some(text.as_str().to_string());
+        }
+        if self.truncate {
+            self.truncated = true;
+            if allow_prefix {
+                let end = text.as_str().floor_char_boundary(remaining);
+                self.bytes += end;
+                return Some(text.as_str()[..end].to_string());
+            }
+        } else {
+            self.overflow = true;
+        }
+        None
+    }
+}
+
+/// Convert a guest value to JSON, surfacing depth, node, or byte overflow as
+/// the sandbox-error sentinel so the caller raises [`Error::Sandbox`].
 pub(super) fn js_to_json(v: &Value<'_>) -> Json {
-    let mut nodes = 0usize;
-    let mut bytes = 0usize;
-    let mut overflow = false;
-    let json = js_to_json_bounded(v, 0, &mut nodes, &mut bytes, &mut overflow);
-    if overflow {
-        json!({ SANDBOX_ERROR_KEY: "value too deep or too large to convert" })
+    js_to_json_with_mode(v, JS_TO_JSON_MAX_BYTES, false).0
+}
+
+/// Convert a guest result while copying no more than `max_bytes` of strings
+/// and object keys into host allocations. The boolean reports byte-budget
+/// truncation. Structural depth and node overflows remain sandbox errors.
+pub(super) fn js_to_json_with_limit(v: &Value<'_>, max_bytes: usize) -> (Json, bool) {
+    js_to_json_with_mode(v, max_bytes, true)
+}
+
+fn js_to_json_with_mode(v: &Value<'_>, max_bytes: usize, truncate: bool) -> (Json, bool) {
+    let mut conversion = Conversion::new(v, max_bytes, truncate);
+    let json = js_to_json_bounded(v, 0, &mut conversion);
+    if conversion.overflow {
+        (
+            json!({ SANDBOX_ERROR_KEY: "value too deep or too large to convert" }),
+            false,
+        )
     } else {
-        json
+        (json, conversion.truncated)
     }
 }
 
@@ -50,31 +147,17 @@ pub(super) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Valu
     Ok(val)
 }
 
-/// `undefined` maps to `Null` so a guest `return;` (or no return) yields
-/// `Value::Null` rather than vanishing. Functions and symbols stringify.
-/// Opaque values (class instances, functions, exotic objects) map to a
-/// sentinel object instead of `{}` so the model can see the value crossed
-/// the bridge.
-/// Convert a `QuickJS` value to `JSON`, bounded by [`JS_TO_JSON_MAX_DEPTH`] and
-/// [`JS_TO_JSON_MAX_NODES`] so a self-referential or pathologically nested
-/// object can't recurse unboundedly and abort the harness. On overflow the
-/// sentinel object `{ __lofi_sandbox_error__: ... }` is returned, which the
-/// caller surfaces as [`Error::Sandbox`].
-pub(super) fn js_to_json_bounded(
-    v: &Value<'_>,
-    depth: usize,
-    nodes: &mut usize,
-    bytes: &mut usize,
-    overflow: &mut bool,
-) -> Json {
-    if *overflow {
+/// `undefined` maps to `Null` so a guest `return;` yields `Value::Null`.
+/// Functions, symbols, and opaque objects use visible sentinel values.
+fn js_to_json_bounded<'js>(v: &Value<'js>, depth: usize, conversion: &mut Conversion<'js>) -> Json {
+    if conversion.overflow || conversion.truncated {
         return Json::Null;
     }
-    if depth > JS_TO_JSON_MAX_DEPTH || *nodes > JS_TO_JSON_MAX_NODES {
-        *overflow = true;
+    if depth > JS_TO_JSON_MAX_DEPTH || conversion.nodes > JS_TO_JSON_MAX_NODES {
+        conversion.overflow = true;
         return Json::Null;
     }
-    *nodes += 1;
+    conversion.nodes += 1;
     if v.is_undefined() || v.is_null() {
         return Json::Null;
     }
@@ -91,73 +174,47 @@ pub(super) fn js_to_json_bounded(
         }
         return json!(f);
     }
-    if v.is_string() {
-        if let Some(s) = v.as_string() {
-            // rquickjs 0.9 exposes no safe way to read a JS string length
-            // without materializing an owned Rust `String`, so the budget is
-            // checked after conversion. The check prevents the value from
-            // being retained in the result (returns `null` on overflow); the
-            // transient copy is bounded by the same QuickJS-heap limitation
-            // documented as an accepted tradeoff (no safe memory-limit API,
-            // `unsafe` forbidden).
-            let text = s.to_string().unwrap_or_default();
-            *bytes = bytes.saturating_add(text.len());
-            if *bytes > JS_TO_JSON_MAX_BYTES {
-                *overflow = true;
-                return Json::Null;
-            }
-            return json!(text);
-        }
+    if let Some(string) = v.as_string() {
+        return conversion
+            .copy_string(string.clone(), true)
+            .map_or(Json::Null, Json::String);
     }
     if let Some(sym) = v.as_symbol() {
-        // Symbols have no JSON form; surface their description so the model
-        // at least sees that something crossed the bridge.
         let desc = sym
             .description()
             .ok()
             .and_then(Value::into_string)
-            .and_then(|s| s.to_string().ok())
+            .and_then(|string| conversion.copy_string(string, true))
             .unwrap_or_default();
         return json!(format!("Symbol({desc})"));
     }
-    if v.is_array() {
-        if let Some(arr) = v.as_array() {
-            if *nodes + arr.len() > JS_TO_JSON_MAX_NODES {
-                *overflow = true;
-                return Json::Null;
+    if let Some(arr) = v.as_array() {
+        if conversion.nodes + arr.len() > JS_TO_JSON_MAX_NODES {
+            conversion.overflow = true;
+            return Json::Null;
+        }
+        let mut out = Vec::with_capacity(arr.len().min(64));
+        for item in arr.iter::<Value>() {
+            if conversion.overflow || conversion.truncated {
+                break;
             }
-            let mut out = Vec::with_capacity(arr.len().min(64));
-            for item in arr.iter::<Value>() {
-                if *overflow {
-                    break;
-                }
-                let item = item.unwrap_or_else(|_| Value::new_undefined(v.ctx().clone()));
-                out.push(js_to_json_bounded(&item, depth + 1, nodes, bytes, overflow));
-            }
-            return Json::Array(out);
+            let item = item.unwrap_or_else(|_| Value::new_undefined(v.ctx().clone()));
+            out.push(js_to_json_bounded(&item, depth + 1, conversion));
         }
+        return Json::Array(out);
     }
-    if v.is_function() {
-        // Functions are opaque to JSON; emit a tagged placeholder so the
-        // model sees the value crossed the bridge, not dropped silently.
-        if let Some(f) = v.as_function() {
-            let name = f
-                .as_object()
-                .and_then(|o| o.get::<_, std::string::String>("name").ok())
-                .unwrap_or_default();
-            let ctor = f.is_constructor();
-            return sentinel_for("function", Some(&name), ctor);
-        }
-        return Json::Null;
+    if let Some(function) = v.as_function() {
+        let name = function
+            .as_object()
+            .and_then(|object| object.get::<_, rquickjs::String>("name").ok())
+            .and_then(|string| conversion.copy_string(string, true))
+            .unwrap_or_default();
+        return sentinel_for("function", Some(&name), function.is_constructor());
     }
-    if v.is_object() {
-        if let Some(obj) = v.as_object() {
-            return object_to_json(obj, depth, nodes, bytes, overflow);
-        }
+    if let Some(object) = v.as_object() {
+        return object_to_json(object, depth, conversion);
     }
     if let Some(big) = v.as_big_int() {
-        // BigInt has no JSON number form; emit a tagged string so the value
-        // doesn't silently vanish. `to_i64` consumes, so clone the reference.
         return big.clone().to_i64().map_or_else(
             |_| json!("BigInt(<unconverted>)"),
             |i| json!(format!("{i}n")),
@@ -166,52 +223,41 @@ pub(super) fn js_to_json_bounded(
     Json::Null
 }
 
-fn object_to_json(
-    obj: &rquickjs::Object<'_>,
+fn object_to_json<'js>(
+    object: &rquickjs::Object<'js>,
     depth: usize,
-    nodes: &mut usize,
-    bytes: &mut usize,
-    overflow: &mut bool,
+    conversion: &mut Conversion<'js>,
 ) -> Json {
     let mut map = serde_json::Map::new();
-    // Use `own_props` without `enum_only()` so non-enumerable own props also
-    // cross the bridge — the default `prop` iterator matches JSON.stringify
-    // and silently drops fields hidden via `Object.defineProperty`.
     let string_only = rquickjs::object::Filter::new().string();
-    for (k, val) in obj
-        .own_props::<std::string::String, Value>(string_only)
+    for (key, value) in object
+        .own_props::<rquickjs::String, Value>(string_only)
         .flatten()
     {
-        if *overflow {
+        if conversion.overflow || conversion.truncated {
             break;
         }
-        *bytes = bytes.saturating_add(k.len());
-        if *bytes > JS_TO_JSON_MAX_BYTES {
-            *overflow = true;
+        let Some(key) = conversion.copy_string(key, false) else {
             break;
-        }
-        map.insert(
-            k,
-            js_to_json_bounded(&val, depth + 1, nodes, bytes, overflow),
-        );
+        };
+        map.insert(key, js_to_json_bounded(&value, depth + 1, conversion));
     }
 
-    if map.is_empty() {
-        // A class instance or other object with a non-default prototype has
-        // state we cannot serialize. Surface as a tagged placeholder so the
-        // model can tell the value crossed the bridge but is opaque.
-        let proto_ctor_name = obj.get_prototype().and_then(|p| {
-            p.get::<_, Function>("constructor").ok().and_then(|c| {
-                c.as_object()
-                    .and_then(|o| o.get::<_, std::string::String>("name").ok())
-            })
+    if map.is_empty() && !conversion.truncated {
+        let prototype_name = object.get_prototype().and_then(|prototype| {
+            prototype
+                .get::<_, Function>("constructor")
+                .ok()
+                .and_then(|constructor| {
+                    constructor
+                        .as_object()
+                        .and_then(|object| object.get::<_, rquickjs::String>("name").ok())
+                })
+                .and_then(|string| conversion.copy_string(string, true))
         });
-        // Only emit the sentinel when there is a real class name; a literal
-        // `{}` with the default Object prototype should stay `{}`.
-        if let Some(name) = proto_ctor_name.filter(|n| !n.is_empty() && n != "Object") {
+        if let Some(name) = prototype_name.filter(|name| !name.is_empty() && name != "Object") {
             return sentinel_for("object", Some(name.as_str()), false);
         }
-        return Json::Object(map);
     }
     Json::Object(map)
 }
@@ -219,8 +265,8 @@ fn object_to_json(
 fn sentinel_for(kind: &str, name: Option<&str>, is_constructor: bool) -> Json {
     let mut map = serde_json::Map::new();
     map.insert("__lofi_opaque_kind__".to_string(), json!(kind));
-    if let Some(n) = name {
-        map.insert("__lofi_opaque_name__".to_string(), json!(n));
+    if let Some(name) = name {
+        map.insert("__lofi_opaque_name__".to_string(), json!(name));
     }
     if is_constructor {
         map.insert("__lofi_opaque_constructor__".to_string(), json!(true));

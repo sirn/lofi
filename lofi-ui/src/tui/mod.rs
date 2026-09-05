@@ -390,8 +390,10 @@ pub(crate) struct SessionConfig {
     /// Core-owned session write endpoint; `None` for ephemeral sessions.
     sink: Option<lofi_core::session::sink::SessionSink>,
     cursor: Option<store::SessionCursor>,
-    index: Vec<store::EventIndex>,
+    index: Vec<store::SessionIndexEntry>,
     file_size: u64,
+    history_start: usize,
+    contiguous: bool,
     cwd: PathBuf,
 }
 
@@ -402,6 +404,8 @@ impl SessionConfig {
             cursor: None,
             index: Vec::new(),
             file_size: 0,
+            history_start: 0,
+            contiguous: true,
             cwd,
         }
     }
@@ -414,6 +418,8 @@ impl SessionConfig {
             cursor: None,
             index: Vec::new(),
             file_size: 0,
+            history_start: 0,
+            contiguous: true,
             cwd,
         }
     }
@@ -422,8 +428,10 @@ impl SessionConfig {
     pub(crate) fn resumed(
         sink: lofi_core::session::sink::SessionSink,
         cursor: store::SessionCursor,
-        index: Vec<store::EventIndex>,
+        index: Vec<store::SessionIndexEntry>,
         file_size: u64,
+        history_start: usize,
+        contiguous: bool,
         cwd: PathBuf,
     ) -> Self {
         Self {
@@ -431,6 +439,8 @@ impl SessionConfig {
             cursor: Some(cursor),
             index,
             file_size,
+            history_start,
+            contiguous,
             cwd,
         }
     }
@@ -933,6 +943,24 @@ pub(crate) enum Mode {
     Select,
 }
 
+enum LifecycleOperation {
+    Compact,
+    AutoCompact(Usage),
+    HardCompact,
+    Recall(String),
+}
+
+enum LifecycleResult {
+    Compact(Result<Option<lofi_core::Compaction>>),
+    AutoCompact(Result<Option<lofi_core::Compaction>>),
+    HardCompact(Result<HardCompactOutcome>),
+    Recall {
+        line: String,
+        result: Result<Option<lofi_core::recall::RecallOutcome>>,
+    },
+    Failed(String),
+}
+
 enum PickerLoad {
     ResumePreviews {
         generation: u64,
@@ -1020,6 +1048,9 @@ pub(crate) struct App {
     /// transcripts (where consecutive identical prompts are legal)
     /// never false-match the pre-pushed turn.
     pending_prompt_start: bool,
+    lifecycle_tx: Option<tokio::sync::mpsc::UnboundedSender<LifecycleResult>>,
+    lifecycle_busy: bool,
+    continue_after_hard_compact: bool,
     pinned: bool,
     top_line: usize,
     last_base: usize,
@@ -1139,10 +1170,13 @@ impl App {
     fn restore_indexed_session(
         &mut self,
         cursor: &store::SessionCursor,
-        index: &[store::EventIndex],
+        index: &[store::SessionIndexEntry],
         file_size: u64,
+        history_start: usize,
+        contiguous: bool,
     ) -> Result<()> {
-        self.lifecycle.restore_history(cursor, index)?;
+        self.lifecycle
+            .restore_history(cursor, index, history_start)?;
         self.turns.clear();
         self.expanded_details.clear();
         self.detail_focus = None;
@@ -1153,10 +1187,10 @@ impl App {
         self.total_in = 0;
         self.total_out = 0;
         self.reset_compaction_gauges();
-        replay_indexed_session(self, cursor, index, file_size)?;
+        replay_indexed_session(self, cursor, index, file_size, contiguous)?;
         // Replay parses the whole transcript and drops most of it again; the
         // freed heap sits in the arena otherwise.
-        lofi_core::malloc_trim::release_freed_memory();
+        lofi_core::release_freed_memory();
 
         restore_compaction_from_index(self, cursor, index);
         Ok(())
@@ -1420,6 +1454,8 @@ async fn run_loop(
         cursor,
         index,
         file_size,
+        history_start,
+        contiguous,
         cwd,
     } = session;
     let model_choices = switcher
@@ -1438,7 +1474,7 @@ async fn run_loop(
     app.model_choices = model_choices;
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
-        app.restore_indexed_session(&cursor, &index, file_size)?;
+        app.restore_indexed_session(&cursor, &index, file_size, history_start, contiguous)?;
         // Jobs whose started marker is on this lineage but whose terminal
         // marker is not (process died, or user /tree'd a fresh branch
         // elsewhere). Their ids are stale; surface that on the first agent
@@ -1462,6 +1498,7 @@ async fn run_loop(
     // only for branch operations. Explicitly drop it before the event loop so
     // an async state-machine frame cannot retain thousands of ID strings.
     drop(index);
+    lofi_core::release_freed_memory();
     // Resume replay creates file-backed shells for every historical turn,
     // including the final one. Viewport materialization owns the bounded
     // display working set from this point onward.
@@ -1508,6 +1545,8 @@ async fn run_loop(
 
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
+    let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.lifecycle_tx = Some(lifecycle_tx);
     let mut current_run: Option<RunHandle> = None;
     let mut events = tty_events::TtyEvents::start().map_err(Error::Io)?;
     app.sync_color_scheme_reports();
@@ -1557,18 +1596,27 @@ async fn run_loop(
                         if let Some(run) = current_run.as_ref() {
                             attach_run_cursor(&mut app, run);
                         }
-                        if let AgentEvent::UserShell {
-                            command, output, exit_code, signal, duration_ms,
-                            truncated, cancelled, exclude_from_context,
-                        } = e
-                        {
-                            let result = lofi_core::UserShellResult::from_session(
+                        let mut event = Some(e);
+                        for index in 0..64 {
+                            let Some(e) = event.take() else { break };
+                            if let AgentEvent::UserShell {
                                 command, output, exit_code, signal, duration_ms,
-                                truncated, cancelled,
-                            );
-                            finish_user_shell(&mut app, result, exclude_from_context);
-                        } else {
-                            app.apply_event(e);
+                                truncated, cancelled, exclude_from_context,
+                            } = e
+                            {
+                                let result = lofi_core::UserShellResult::from_session(
+                                    command, output, exit_code, signal, duration_ms,
+                                    truncated, cancelled,
+                                );
+                                finish_user_shell(&mut app, result, exclude_from_context);
+                            } else {
+                                app.apply_event(e);
+                            }
+                            if index < 63 {
+                                event = current_run
+                                    .as_mut()
+                                    .and_then(|run| run.rx.try_recv().ok());
+                            }
                         }
                         // If there's a queued prompt, signal the agent to
                         // exit its round loop after the current round so the
@@ -1609,26 +1657,30 @@ async fn run_loop(
                                     // Core owns hard-cap eligibility and
                                     // compaction; the UI only presents its outcome.
                                     app.context_pressure = false;
-                                    match app.hard_compact() {
-                                        HardCompactOutcome::Compacted(_) => {
-                                            spawn_continue(
-                                                &mut app,
-                                                agent.as_ref(),
-                                                &mut current_run,
-                                            );
+                                    app.continue_after_hard_compact = true;
+                                    if let Some(outcome) = app.hard_compact() {
+                                        app.continue_after_hard_compact = false;
+                                        match outcome {
+                                            HardCompactOutcome::Compacted(_) => {
+                                                spawn_continue(
+                                                    &mut app,
+                                                    agent.as_ref(),
+                                                    &mut current_run,
+                                                );
+                                            }
+                                            HardCompactOutcome::Cooldown => app.notify(
+                                                NotifyKind::Warn,
+                                                "context exceeded the hard cap too soon after a compaction; cannot continue",
+                                            ),
+                                            HardCompactOutcome::NotEnoughHistory => app.notify(
+                                                NotifyKind::Warn,
+                                                "could not compact at the hard cap; cannot continue",
+                                            ),
                                         }
-                                        HardCompactOutcome::Cooldown => app.notify(
-                                            NotifyKind::Warn,
-                                            "context exceeded the hard cap too soon after a compaction; cannot continue",
-                                        ),
-                                        HardCompactOutcome::NotEnoughHistory => app.notify(
-                                            NotifyKind::Warn,
-                                            "could not compact at the hard cap; cannot continue",
-                                        ),
                                     }
                                 } else {
                                     app.maybe_auto_compact();
-                                    if app.run.is_none() {
+                                    if !app.lifecycle_busy && app.run.is_none() {
                                         if let Some(queued) = app.prompt_queue.first().cloned() {
                                             app.prompt_queue.remove(0);
                                             spawn_prompt(
@@ -1718,7 +1770,7 @@ async fn run_loop(
                     // never fires and the notice would sit forever. Drain
                     // at rest here, matching the mpsc notice path.
                     if !app.should_quit
-                        && current_run.is_none()
+                        && !app.busy()
                         && !app.prompt_queue.is_empty()
                         && agent.is_some()
                     {
@@ -1852,9 +1904,11 @@ async fn run_loop(
                         text,
                         kind: lofi_types::PromptKind::Notice,
                     };
-                    if let Some(r) = &current_run {
+                    if app.busy() {
                         app.prompt_queue.push(queued);
-                        r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(r) = &current_run {
+                            r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                     } else if agent.is_some() {
                         spawn_prompt(
                             &mut app,
@@ -1870,6 +1924,28 @@ async fn run_loop(
             picker_load = picker_load_rx.recv() => {
                 if let Some(load) = picker_load {
                     app.apply_picker_load(load);
+                    dirty = true;
+                }
+            }
+            lifecycle_result = lifecycle_rx.recv() => {
+                if let Some(result) = lifecycle_result {
+                    let hard_compacted = app.apply_lifecycle_result(result);
+                    let continue_run =
+                        std::mem::take(&mut app.continue_after_hard_compact) && hard_compacted;
+                    if continue_run {
+                        spawn_continue(&mut app, agent.as_ref(), &mut current_run);
+                    } else if current_run.is_none() {
+                        if let Some(queued) = app.prompt_queue.first().cloned() {
+                            app.prompt_queue.remove(0);
+                            spawn_prompt(
+                                &mut app,
+                                agent.as_ref(),
+                                &mut current_run,
+                                queued.text,
+                                queued.kind,
+                            );
+                        }
+                    }
                     dirty = true;
                 }
             }

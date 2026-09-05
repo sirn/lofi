@@ -277,6 +277,8 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
             cursor,
             snapshot.index,
             snapshot.file_size,
+            snapshot.history_start,
+            snapshot.contiguous,
             opts.root.clone(),
         ));
     }
@@ -289,6 +291,8 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
                 cursor,
                 snapshot.index,
                 snapshot.file_size,
+                snapshot.history_start,
+                snapshot.contiguous,
                 opts.root.clone(),
             ));
         }

@@ -11,10 +11,11 @@ pub(super) use lofi_core::session::replay::last_run_model_from_index;
 pub(super) fn replay_indexed_session(
     app: &mut App,
     cursor: &store::SessionCursor,
-    index: &[store::EventIndex],
+    index: &[store::SessionIndexEntry],
     file_size: u64,
+    contiguous: bool,
 ) -> Result<()> {
-    let visible = lofi_core::session::replay::visible_index_path(cursor, index);
+    let visible = lofi_core::session::replay::visible_index_path(index);
     let starts: Vec<usize> = visible
         .iter()
         .enumerate()
@@ -70,7 +71,7 @@ pub(super) fn replay_indexed_session(
         let selected = &visible[start_pos..end_pos];
         let offsets: Vec<u64> = selected.iter().map(|&i| index[i].offset).collect();
         if index[visible[start_pos]].kind == store::IndexKind::UserShell {
-            let event = cursor.event_at(index[visible[start_pos]].offset)?;
+            let event = cursor.display_event_at(index[visible[start_pos]].offset)?;
             replay_selected_session_events(&[event], |ev| {
                 app.apply_file_backed_replay_event(ev);
             });
@@ -105,7 +106,11 @@ pub(super) fn replay_indexed_session(
             *range = Some((start, end));
         }
         if let Some(event_offsets) = app.turn_event_offsets.last_mut() {
-            *event_offsets = Some(offsets);
+            if contiguous {
+                *event_offsets = None;
+            } else {
+                *event_offsets = Some(offsets);
+            }
         }
         if let Some(shell_turn) = app.turns.last_mut() {
             shell_turn.blocks.clear();
@@ -119,7 +124,7 @@ pub(super) fn replay_indexed_session(
 pub(super) fn restore_compaction_from_index(
     app: &mut App,
     cursor: &store::SessionCursor,
-    index: &[store::EventIndex],
+    index: &[store::SessionIndexEntry],
 ) {
     let (compacted, status_usage) =
         lofi_core::session::replay::compaction_status_from_index(cursor, index);

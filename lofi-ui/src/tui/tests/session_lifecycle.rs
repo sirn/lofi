@@ -229,8 +229,14 @@ fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
 
     let mut a = app();
     a.session.cursor = Some(cursor.clone());
-    a.restore_indexed_session(&cursor, &snapshot.index, snapshot.file_size)
-        .unwrap();
+    a.restore_indexed_session(
+        &cursor,
+        &snapshot.index,
+        snapshot.file_size,
+        snapshot.history_start,
+        snapshot.contiguous,
+    )
+    .unwrap();
 
     assert_eq!(a.turns.len(), 3);
     assert_eq!(a.turns.len(), a.turn_byte_ranges.len());

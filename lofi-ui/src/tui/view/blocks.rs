@@ -314,6 +314,24 @@ impl Component for UserMessage<'_> {
             move |_| vec![Span::styled("▌ ", mark)],
         )
     }
+
+    fn height(&self, cx: &Cx) -> usize {
+        markdown_body_height(self.prompt.trim(), cx.width.saturating_sub(2))
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let mark = Style::new().fg(user_indicator(t));
+        render_markdown_body_window(
+            self.prompt.trim(),
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            Style::new().fg(t.fg),
+            move |_| vec![Span::styled("▌ ", mark)],
+            range,
+        )
+    }
 }
 
 struct NoticeMessage<'a> {
@@ -334,6 +352,25 @@ impl Component for NoticeMessage<'_> {
         render_markdown_body(self.prompt.trim(), t, w, content_w, body_style, move |_| {
             vec![Span::styled("▌ ", mark)]
         })
+    }
+
+    fn height(&self, cx: &Cx) -> usize {
+        markdown_body_height(self.prompt.trim(), cx.width.saturating_sub(2))
+    }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let mark = Style::new().fg(t.muted);
+        let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
+        render_markdown_body_window(
+            self.prompt.trim(),
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            body_style,
+            move |_| vec![Span::styled("▌ ", mark)],
+            range,
+        )
     }
 }
 
@@ -365,6 +402,136 @@ impl Component for AssistantText<'_> {
         }
         markdown_body_height(text, content_w)
     }
+
+    fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let mark = Style::new().fg(agent_indicator(t));
+        render_markdown_body_window(
+            self.text.trim(),
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            Style::new().fg(t.fg),
+            move |_| vec![Span::styled("▌ ", mark)],
+            range,
+        )
+    }
+}
+
+fn plain_paragraph(text: &str) -> bool {
+    let opts = MdOptions::ENABLE_STRIKETHROUGH
+        | MdOptions::ENABLE_TABLES
+        | MdOptions::ENABLE_FOOTNOTES
+        | MdOptions::ENABLE_TASKLISTS
+        | MdOptions::ENABLE_HEADING_ATTRIBUTES;
+    let mut events = MdParser::new_ext(text, opts);
+    matches!(events.next(), Some(Event::Start(MdTag::Paragraph)))
+        && matches!(events.next(), Some(Event::Text(content)) if content.as_ref() == text)
+        && matches!(events.next(), Some(Event::End(TagEnd::Paragraph)))
+        && events.next().is_none()
+}
+
+fn for_each_plain_row(text: &str, max_w: usize, mut visit: impl FnMut(usize, usize)) {
+    if max_w == 0 {
+        visit(0, text.len());
+        return;
+    }
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut width = 0usize;
+        let mut end = start;
+        let mut overflow = None;
+        let mut break_after = None;
+        for (offset, ch) in text[start..].char_indices() {
+            let byte = start + offset;
+            let char_end = byte + ch.len_utf8();
+            let char_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + char_w > max_w {
+                overflow = Some((byte, char_end, ch));
+                break;
+            }
+            width += char_w;
+            end = char_end;
+            if ch == ' ' {
+                break_after = Some(char_end);
+            }
+        }
+        if let Some((byte, char_end, ch)) = overflow {
+            end = if ch == ' ' {
+                char_end
+            } else if let Some(boundary) = break_after.filter(|boundary| *boundary > start) {
+                boundary
+            } else if byte > start {
+                byte
+            } else {
+                char_end
+            };
+        }
+        visit(start, end);
+        start = end;
+    }
+}
+
+fn plain_paragraph_height(text: &str, content_w: usize) -> usize {
+    let mut height = 0usize;
+    for_each_plain_row(text, content_w, |_, _| height += 1);
+    height
+}
+
+fn render_plain_paragraph_window(
+    text: &str,
+    content_w: usize,
+    base_style: Style,
+    lead_fn: &impl Fn(usize) -> Vec<Span<'static>>,
+    range: std::ops::Range<usize>,
+) -> Vec<RenderLine> {
+    let mut row = 0usize;
+    let mut out = Vec::with_capacity(range.end.saturating_sub(range.start).min(256));
+    for_each_plain_row(text, content_w, |start, end| {
+        if range.contains(&row) {
+            let source: Arc<str> = Arc::from(&text[start..end]);
+            let display_len = text[start..end].chars().count();
+            let map = if source.is_ascii() {
+                (0..=display_len).collect()
+            } else {
+                std::iter::once(0)
+                    .chain(source.char_indices().map(|(byte, ch)| byte + ch.len_utf8()))
+                    .collect()
+            };
+            out.push(
+                prim::rline(
+                    lead_fn(row),
+                    vec![Span::styled(text[start..end].to_string(), base_style)],
+                )
+                .with_raw(RawLine::new(source, map, row == 0)),
+            );
+        }
+        row += 1;
+    });
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_body_window(
+    text: &str,
+    t: Theme,
+    w: usize,
+    content_w: usize,
+    base_style: Style,
+    lead_fn: impl Fn(usize) -> Vec<Span<'static>>,
+    range: std::ops::Range<usize>,
+) -> Vec<RenderLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if plain_paragraph(text) {
+        return render_plain_paragraph_window(text, content_w, base_style, &lead_fn, range);
+    }
+    render_markdown_body(text, t, w, content_w, base_style, lead_fn)
+        .into_iter()
+        .skip(range.start)
+        .take(range.end.saturating_sub(range.start))
+        .collect()
 }
 
 fn render_markdown_body(
@@ -1468,6 +1635,9 @@ fn quote_lines(
 fn markdown_body_height(text: &str, content_w: usize) -> usize {
     if text.is_empty() {
         return 0;
+    }
+    if plain_paragraph(text) {
+        return plain_paragraph_height(text, content_w);
     }
     // Walk the same block tree the renderer emits, counting rows with the
     // exact wrap calls each emitter uses but allocating no styled lines. This
@@ -2692,6 +2862,41 @@ fn native_body(nt: &NativeTool) -> NativeBody {
     }
 }
 
+pub(in crate::tui) fn cache_native_preview(native: &mut NativeTool) {
+    let Some(raw) = native.result.as_deref().filter(|result| !result.is_empty()) else {
+        return;
+    };
+    let header_suffix = native_header_suffix(&native.name, Some(raw));
+    let encoded_field = match native.name.as_str() {
+        "bash" => Some("output"),
+        "write" => Some("content"),
+        _ => None,
+    };
+    let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
+    let body = encoded.is_none().then(|| native_body(native));
+    let total_lines = encoded.map_or_else(
+        || body.as_ref().map_or(0, |body| body.lines.len()),
+        encoded_json_line_count,
+    );
+    let range = native_preview_range(&native.name, total_lines);
+    let mut lines = Vec::with_capacity(range.len());
+    if let Some(encoded) = encoded {
+        for_each_encoded_json_line(encoded, range.clone(), |_, line| lines.push(line));
+    } else if let Some(body) = &body {
+        lines.extend(body.lines[range.clone()].iter().cloned());
+    }
+    native.preview = Some(Box::new(NativePreview {
+        header_suffix,
+        lines,
+        total_lines,
+        preview_start: range.start,
+        numbered: body.as_ref().is_some_and(|body| body.numbered),
+        start_line: body.as_ref().map_or(1, |body| body.start_line),
+        is_diff: body.as_ref().is_some_and(|body| body.is_diff),
+        notice: body.and_then(|body| body.notice),
+    }));
+}
+
 pub(crate) fn compact_native_previews(turn: &mut Turn) {
     for block in &mut turn.blocks {
         let Block::Tool(tool) = block else { continue };
@@ -2699,36 +2904,7 @@ pub(crate) fn compact_native_previews(turn: &mut Turn) {
             if native.is_error || native.result.as_deref().is_none_or(str::is_empty) {
                 continue;
             }
-            let raw = native.result.as_deref().unwrap_or_default();
-            let header_suffix = native_header_suffix(&native.name, Some(raw));
-            let encoded_field = match native.name.as_str() {
-                "bash" => Some("output"),
-                "write" => Some("content"),
-                _ => None,
-            };
-            let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
-            let body = encoded.is_none().then(|| native_body(native));
-            let total_lines = encoded.map_or_else(
-                || body.as_ref().map_or(0, |body| body.lines.len()),
-                encoded_json_line_count,
-            );
-            let range = native_preview_range(&native.name, total_lines);
-            let mut lines = Vec::with_capacity(range.len());
-            if let Some(encoded) = encoded {
-                for_each_encoded_json_line(encoded, range.clone(), |_, line| lines.push(line));
-            } else if let Some(body) = &body {
-                lines.extend(body.lines[range.clone()].iter().cloned());
-            }
-            native.preview = Some(Box::new(NativePreview {
-                header_suffix,
-                lines,
-                total_lines,
-                preview_start: range.start,
-                numbered: body.as_ref().is_some_and(|body| body.numbered),
-                start_line: body.as_ref().map_or(1, |body| body.start_line),
-                is_diff: body.as_ref().is_some_and(|body| body.is_diff),
-                notice: body.and_then(|body| body.notice),
-            }));
+            cache_native_preview(native);
             native.result = None;
         }
     }
@@ -2982,21 +3158,22 @@ impl ExecBlockBranch<'_> {
             parent: self.parent,
             id: self.nt.id,
         };
+        let expanded = cx.app.expanded_details.contains_key(&key);
+        let preview = self.nt.preview.as_deref();
         let body = self
             .nt
             .result
             .as_deref()
             .filter(|result| !result.is_empty())
+            .filter(|_| expanded || preview.is_none())
             .map(|_| native_body(self.nt));
-        let mut lines = body.as_ref().map_or_else(
-            || {
-                self.nt
-                    .preview
-                    .as_ref()
-                    .map_or_else(Vec::new, |preview| preview.lines.clone())
-            },
-            |body| body.lines.clone(),
-        );
+        let mut lines = if let Some(body) = &body {
+            body.lines.clone()
+        } else if expanded {
+            preview.map_or_else(Vec::new, |preview| preview.lines.clone())
+        } else {
+            Vec::new()
+        };
         if let Some(body) = &body {
             if body.numbered {
                 for (index, line) in lines.iter_mut().enumerate() {
@@ -3006,21 +3183,13 @@ impl ExecBlockBranch<'_> {
             if let Some(notice) = &body.notice {
                 lines.push(notice.clone());
             }
-        } else if let Some(notice) = self
-            .nt
-            .preview
-            .as_ref()
-            .and_then(|preview| preview.notice.as_ref())
-        {
-            lines.push(notice.clone());
+        } else if expanded {
+            if let Some(notice) = preview.and_then(|preview| preview.notice.as_ref()) {
+                lines.push(notice.clone());
+            }
         }
         let total = body.as_ref().map_or_else(
-            || {
-                self.nt
-                    .preview
-                    .as_ref()
-                    .map_or(lines.len(), |preview| preview.total_lines)
-            },
+            || preview.map_or(lines.len(), |preview| preview.total_lines),
             |body| body.lines.len(),
         );
         let detail_deco = vec![
@@ -3028,8 +3197,18 @@ impl ExecBlockBranch<'_> {
             Span::styled(exec_cont, Style::new().fg(t.subtle)),
             Span::raw("  "),
         ];
-        let visual_total = detail_row_count(&lines, cx.width, &detail_deco);
-        let has_detail = visual_total > 0 && lines.iter().any(|line| !line.is_empty());
+        let visual_total = if expanded || preview.is_none() {
+            detail_row_count(&lines, cx.width, &detail_deco)
+        } else {
+            total + usize::from(preview.is_some_and(|preview| preview.notice.is_some()))
+        };
+        let has_detail = if expanded || preview.is_none() {
+            visual_total > 0 && lines.iter().any(|line| !line.is_empty())
+        } else {
+            preview.is_some_and(|preview| {
+                preview.notice.is_some() || preview.lines.iter().any(|line| !line.is_empty())
+            })
+        };
 
         let mut content = vec![
             Span::styled("Tool ", Style::new().fg(t.muted)),

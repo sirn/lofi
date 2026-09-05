@@ -26,6 +26,7 @@ nix = { workspace = true }
 uuid = { workspace = true }
 image = { workspace = true }
 base64 = { workspace = true }
+memchr = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

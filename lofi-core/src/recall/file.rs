@@ -1,6 +1,5 @@
 use lofi_error::Result;
 use lofi_types::{NativeToolRecord, SessionEventKind};
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
 use super::{
@@ -13,13 +12,6 @@ use super::{
 #[derive(Default)]
 struct FileScope {
     allowed: Option<HashSet<String>>,
-}
-
-#[derive(Deserialize)]
-struct NativeSidecar {
-    parent: String,
-    name: String,
-    args: String,
 }
 
 #[must_use]
@@ -60,8 +52,7 @@ fn recall_cursor_inner(
 
     // Native-tool result bodies account for roughly half of large transcript
     // files, but recall only needs their parent/name/args for assistant labels
-    // and file annotations. Deserialize that borrowed sidecar shape so the
-    // large result field is skipped rather than retained.
+    // and file annotations.
     let native_offsets: Vec<u64> = index
         .iter()
         .filter(|event| event.kind == store::IndexKind::NativeTool)
@@ -73,18 +64,18 @@ fn recall_cursor_inner(
         })
         .map(|event| event.offset)
         .collect();
-    let mut native_records = Vec::with_capacity(native_offsets.len());
-    cursor.visit_event_values::<NativeSidecar>(&native_offsets, |sidecar| {
-        native_records.push(NativeToolRecord {
-            parent: sidecar.parent,
+    let native_records: Vec<NativeToolRecord> = cursor
+        .native_tool_summaries(&native_offsets)?
+        .into_iter()
+        .map(|(parent, name, args)| NativeToolRecord {
+            parent,
             call_id: 0,
-            name: sidecar.name,
-            args: sidecar.args,
+            name,
+            args,
             result: String::new(),
             is_error: false,
-        });
-        Ok(())
-    })?;
+        })
+        .collect();
     let mut native_by_parent: HashMap<String, Vec<&NativeToolRecord>> = HashMap::new();
     for record in &native_records {
         native_by_parent
@@ -95,7 +86,7 @@ fn recall_cursor_inner(
 
     let mut entries = Vec::with_capacity(offsets.len());
     let mut position = 0usize;
-    cursor.visit_events(&offsets, |event| {
+    cursor.visit_display_events(&offsets, |event| {
         if let SessionEventKind::Message(message) = event.kind {
             entries.push(render_message(
                 &message,
@@ -146,7 +137,7 @@ fn expand(
     let wanted: HashSet<usize> = req.expand.iter().copied().collect();
     let mut expanded = HashMap::new();
     let mut position = 0usize;
-    cursor.visit_events(offsets, |event| {
+    cursor.visit_display_events(offsets, |event| {
         if let SessionEventKind::Message(message) = event.kind {
             let global = globals[position];
             if wanted.contains(&global) {
@@ -204,7 +195,7 @@ fn search(
         let pattern = safe_regex(raw_query);
         let mut hits = Vec::new();
         let mut position = 0usize;
-        cursor.visit_events(offsets, |event| {
+        cursor.visit_display_events(offsets, |event| {
             if let SessionEventKind::Message(message) = event.kind {
                 if hits.len() < MAX_SEARCH_RESULTS
                     && message_matches(&message, |text| pattern.is_match(text))
@@ -232,7 +223,7 @@ fn search(
                 .collect();
             let mut lengths = Vec::with_capacity(offsets.len());
             let mut df = vec![0usize; terms.len()];
-            cursor.visit_events(offsets, |event| {
+            cursor.visit_display_events(offsets, |event| {
                 if let SessionEventKind::Message(message) = event.kind {
                     lengths.push(message_word_count(&message));
                     for (i, pattern) in patterns.iter().enumerate() {
@@ -256,7 +247,7 @@ fn search(
             .unwrap();
             let mut scored = Vec::new();
             let mut position = 0usize;
-            cursor.visit_events(offsets, |event| {
+            cursor.visit_display_events(offsets, |event| {
                 if let SessionEventKind::Message(message) = event.kind {
                     let mut match_count = 0;
                     let mut score = 0.0;
@@ -336,7 +327,7 @@ fn search(
             let Some(&position) = positions.get(&hit.entry.index) else {
                 continue;
             };
-            let event = cursor.event_at(offsets[position])?;
+            let event = cursor.display_event_at(offsets[position])?;
             if let SessionEventKind::Message(message) = event.kind {
                 hit.entry = render_message(&message, hit.entry.index, true, native_by_parent);
                 hit.snippet = Some(hit.entry.summary.clone());
@@ -411,7 +402,7 @@ fn resolve_scope(
             allowed: Some(lineage.iter().map(|&i| index[i].id.to_event_id()).collect()),
         });
     };
-    let marker = cursor.event_at(index[selected].offset)?;
+    let marker = cursor.display_event_at(index[selected].offset)?;
     let SessionEventKind::Compaction {
         summarized_range, ..
     } = marker.kind

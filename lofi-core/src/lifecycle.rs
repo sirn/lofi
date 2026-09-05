@@ -10,13 +10,14 @@ use crate::recall::{
     recall, recall_cursor, CompactionTarget, RecallOutcome, RecallRequest, RecallScope,
 };
 use crate::session::recorder::SessionRecord;
-use crate::session::store::{CompactionCounts, EventIndex, IndexKind, SessionCursor};
+use crate::session::store::{CompactionCounts, SessionCursor, SessionIndexEntry};
 use crate::session::view::SessionView;
 use crate::{CodeCompactionHook, Error, Result};
 
 /// Core-owned mutable state and policy for an agent conversation.
 /// Frontends render lifecycle outcomes, but do not plan compactions,
 /// reconstruct event histories, execute recall, or decide policy eligibility.
+#[derive(Clone)]
 pub struct AgentLifecycle {
     history: Arc<Mutex<Vec<Message>>>,
     compaction: CompactionConfig,
@@ -115,30 +116,13 @@ impl AgentLifecycle {
     /// Rebuild the active agent context from an indexed durable lineage.
     /// # Errors
     /// Propagates transcript reads and poisoned history state.
-    pub fn restore_history(&mut self, cursor: &SessionCursor, index: &[EventIndex]) -> Result<()> {
-        let mut start = 0;
-        for (position, entry) in index.iter().enumerate().rev() {
-            if entry.kind != IndexKind::Compaction {
-                continue;
-            }
-            let event = cursor.event_at(entry.offset)?;
-            if let SessionEventKind::Compaction {
-                first_kept_entry_id,
-                ..
-            } = &event.kind
-            {
-                start = if first_kept_entry_id.is_empty() {
-                    position
-                } else {
-                    index[..position]
-                        .iter()
-                        .position(|entry| entry.id.matches(first_kept_entry_id))
-                        .unwrap_or(position)
-                };
-                break;
-            }
-        }
-        let offsets: Vec<u64> = index[start..]
+    pub fn restore_history(
+        &mut self,
+        cursor: &SessionCursor,
+        index: &[SessionIndexEntry],
+        history_start: usize,
+    ) -> Result<()> {
+        let offsets: Vec<u64> = index[history_start.min(index.len())..]
             .iter()
             .rev()
             .map(|entry| entry.offset)
@@ -159,7 +143,7 @@ impl AgentLifecycle {
     pub fn reconcile_jobs_after_lineage_switch(
         &self,
         cursor: &SessionCursor,
-        index: &[EventIndex],
+        index: &[SessionIndexEntry],
         jobs: &lofi_code::tools::JobRegistry,
     ) -> Result<LineageJobReconciliation> {
         let lineage = crate::session::replay::job_lifecycle_ids_at(cursor, index)?;
@@ -291,7 +275,7 @@ impl AgentLifecycle {
         *history = new_history;
         drop(history);
         // /compact can finish with no following agent run.
-        crate::malloc_trim::release_freed_memory();
+        lofi_code::memory::release_freed_memory();
         Ok(Some(compaction))
     }
 
@@ -546,7 +530,9 @@ mod tests {
         cursor.append_events(&mut events).unwrap();
         let mut lifecycle = AgentLifecycle::new(config, 100_000);
         let snapshot = cursor.snapshot().unwrap();
-        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        lifecycle
+            .restore_history(&cursor, &snapshot.index, snapshot.history_start)
+            .unwrap();
 
         let usage = Usage {
             input_tokens: 2,
@@ -744,7 +730,9 @@ mod tests {
         let snapshot = cursor.snapshot().unwrap();
         let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
 
-        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        lifecycle
+            .restore_history(&cursor, &snapshot.index, snapshot.history_start)
+            .unwrap();
 
         let history = lifecycle.shared_history();
         let messages = history.lock().unwrap();
@@ -802,7 +790,9 @@ mod tests {
         let snapshot = cursor.snapshot().unwrap();
         let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
 
-        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        lifecycle
+            .restore_history(&cursor, &snapshot.index, snapshot.history_start)
+            .unwrap();
 
         let history = lifecycle.shared_history();
         let messages = history.lock().unwrap();
@@ -838,7 +828,9 @@ mod tests {
         cursor.append_events(&mut events).unwrap();
         let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 1_000);
         let snapshot = cursor.snapshot().unwrap();
-        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        lifecycle
+            .restore_history(&cursor, &snapshot.index, snapshot.history_start)
+            .unwrap();
         let live_before = lifecycle.shared_history().lock().unwrap().clone();
         assert_eq!(live_before.len(), 11);
         assert_eq!(live_before[0].role, Role::System);
@@ -870,7 +862,9 @@ mod tests {
         ));
 
         let snapshot = cursor.snapshot().unwrap();
-        lifecycle.restore_history(&cursor, &snapshot.index).unwrap();
+        lifecycle
+            .restore_history(&cursor, &snapshot.index, snapshot.history_start)
+            .unwrap();
         let restored = lifecycle.shared_history().lock().unwrap().clone();
         assert_eq!(restored[0].role, Role::System);
         assert_eq!(

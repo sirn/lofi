@@ -75,7 +75,8 @@ fn resumed_compaction_restores_summarized_message_count() {
     seed_post_compact_continuation(&path);
 
     let resumed = store::SessionCursor::open(path.clone()).unwrap();
-    let index = resumed.snapshot().unwrap().index;
+    let snapshot = resumed.snapshot().unwrap();
+    let index = snapshot.index;
     let mut config = lofi_types::CompactionConfig::default();
     config.auto.max_context_tokens = Some(100_000);
     let mut a = App::new(
@@ -87,7 +88,9 @@ fn resumed_compaction_restores_summarized_message_count() {
         String::new(),
     );
     a.session.cursor = Some(resumed.clone());
-    a.lifecycle.restore_history(&resumed, &index).unwrap();
+    a.lifecycle
+        .restore_history(&resumed, &index, snapshot.history_start)
+        .unwrap();
     restore_compaction_from_index(&mut a, &resumed, &index);
 
     assert_eq!(a.lifecycle.history_stats().messages, 3);
@@ -161,11 +164,12 @@ fn resumed_compaction_stays_on_its_cursor_when_a_sibling_appends_later() {
     let branch_a_leaf = branch_a.last().unwrap().id.clone();
 
     let resumed = store::SessionCursor::open(path.clone()).unwrap();
-    let resumed_index = resumed.snapshot().unwrap().index;
+    let snapshot = resumed.snapshot().unwrap();
+    let resumed_index = snapshot.index;
     let mut a = app();
     a.session.cursor = Some(resumed.clone());
     a.lifecycle
-        .restore_history(&resumed, &resumed_index)
+        .restore_history(&resumed, &resumed_index, snapshot.history_start)
         .unwrap();
 
     let root = branch_a[0].id.clone();

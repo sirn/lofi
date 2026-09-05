@@ -73,6 +73,45 @@ fn select_transcript_row(tui: &mut Tui, needle: &str) {
     );
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn input_stays_responsive_after_many_large_exec_results() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "responsive-exec-call",
+            r#"
+for (let i = 0; i < 300; i++) {
+    await lofi.read("responsive-native.txt");
+}
+return await lofi.bash({ cmd: "touch responsive-exec.ready; sleep 2" });
+            "#,
+        ),
+        text_response("responsive exec done"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.workspace.join("responsive-native.txt"),
+        "responsive native output\n".repeat(3_000),
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("run the responsive exec fixture");
+    let ready = fixture.workspace.join("responsive-exec.ready");
+    let started = std::time::Instant::now();
+    while !ready.exists() && started.elapsed() < WAIT {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(ready.exists(), "shell call did not start");
+
+    tui.send(b"EXEC-INPUT-RESPONSIVE");
+    tui.wait_for_screen(
+        "EXEC-INPUT-RESPONSIVE",
+        std::time::Duration::from_millis(750),
+    );
+    tui.wait_for("responsive exec done", WAIT);
+}
+
 #[test]
 fn expanded_transcript_details_are_independent_adaptive_and_styled() {
     let server = MockServer::start(vec![

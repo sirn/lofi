@@ -139,8 +139,14 @@ fn height_remeasure_does_not_populate_the_collapsed_cache() {
     );
     let c0 = a.session.cursor.as_ref().unwrap().clone();
     let snap = c0.snapshot().unwrap();
-    a.restore_indexed_session(&c0, &snap.index, snap.file_size)
-        .unwrap();
+    a.restore_indexed_session(
+        &c0,
+        &snap.index,
+        snap.file_size,
+        snap.history_start,
+        snap.contiguous,
+    )
+    .unwrap();
 
     a.ensure_frozen(40);
     assert!(

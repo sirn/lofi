@@ -70,6 +70,9 @@ pub fn hydrate_tree_rows(
     let mut children_by_parent: HashMap<&IndexId, Vec<usize>> = HashMap::new();
     let mut by_id: HashMap<&IndexId, usize> = HashMap::new();
     for (index, entry) in indices.iter().enumerate() {
+        if cancelled() {
+            return;
+        }
         // Cursor records reuse `id` for the selected leaf; including them
         // shadows the real leaf event (appended last) and truncates the path.
         if entry.kind != IndexKind::Cursor && !entry.id.is_empty() {
@@ -709,7 +712,7 @@ pub fn load_assistant_preview(
 
 #[must_use]
 pub fn load_prompt_text(cursor: &SessionCursor, offset: u64) -> String {
-    let Ok(ev) = cursor.event_at(offset) else {
+    let Ok(ev) = cursor.display_event_at(offset) else {
         return String::new();
     };
     if let SessionEventKind::Message(m) = ev.kind {
@@ -735,7 +738,7 @@ pub fn load_tool_result(
     cursor: &SessionCursor,
 ) -> (String, String, String, bool) {
     let ix = &indices[idx];
-    let Ok(ev) = cursor.event_at(ix.offset) else {
+    let Ok(ev) = cursor.display_event_at(ix.offset) else {
         return (String::new(), String::new(), String::new(), false);
     };
     let SessionEventKind::Message(m) = ev.kind else {
@@ -759,7 +762,7 @@ pub fn load_tool_result(
         .and_then(|pid| by_id.get(pid).copied())
         .and_then(|pidx| {
             let pentry = &indices[pidx];
-            let pev = cursor.event_at(pentry.offset).ok()?;
+            let pev = cursor.display_event_at(pentry.offset).ok()?;
             let SessionEventKind::Message(pm) = pev.kind else {
                 return None;
             };
@@ -774,7 +777,7 @@ pub fn load_tool_result(
 
 #[must_use]
 pub fn load_assistant_text(cursor: &SessionCursor, offset: u64) -> Option<String> {
-    let ev = cursor.event_at(offset).ok()?;
+    let ev = cursor.display_event_at(offset).ok()?;
     let SessionEventKind::Message(m) = ev.kind else {
         return None;
     };
@@ -789,7 +792,7 @@ pub fn load_assistant_text(cursor: &SessionCursor, offset: u64) -> Option<String
 
 #[must_use]
 pub fn load_failed_error(cursor: &SessionCursor, offset: u64) -> String {
-    let Ok(ev) = cursor.event_at(offset) else {
+    let Ok(ev) = cursor.display_event_at(offset) else {
         return String::new();
     };
     if let SessionEventKind::TurnFailed { error, .. } = ev.kind {

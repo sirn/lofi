@@ -119,7 +119,52 @@ fn native_tool_events_nest_under_their_exec() {
     assert_eq!(nt.args, "ls");
     assert!(nt.done);
     assert_eq!(nt.result.as_deref(), Some("file.txt"));
+    assert!(nt.preview.is_some());
     assert!(!nt.is_error);
+}
+
+#[test]
+fn cached_native_notice_remains_expandable() {
+    use crate::tui::view::blocks::render_turn_lines;
+    use crate::tui::view::component::Cx;
+
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::ToolStart {
+        id: "e1".to_string(),
+        name: "exec".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolStart {
+        parent: "e1".to_string(),
+        id: 0,
+        name: "jobRead".to_string(),
+        args: "{}".to_string(),
+    });
+    a.apply_event(AgentEvent::NativeToolEnd {
+        parent: "e1".to_string(),
+        id: 0,
+        result: serde_json::json!({
+            "output": "",
+            "cursor": 0,
+            "totalBytes": 10,
+            "done": false,
+        })
+        .to_string(),
+        is_error: false,
+    });
+
+    let cx = Cx {
+        app: &a,
+        theme: a.theme,
+        width: 80,
+        active_turn: true,
+    };
+    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let header = lines
+        .iter()
+        .find(|line| line.line.to_string().contains("Tool jobRead"))
+        .expect("native tool header");
+    assert!(header.detail.is_some());
 }
 
 #[test]
