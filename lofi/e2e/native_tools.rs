@@ -148,7 +148,7 @@ return { read, bash, full, timedBash, escape, ambiguous };
 }
 
 #[test]
-fn every_background_job_api_reports_output_status_wait_notify_and_kill() {
+fn every_background_job_api_reports_output_status_notify_and_kill() {
     let server = MockServer::start(vec![
         tool_response(
             "job-api-call",
@@ -156,9 +156,9 @@ fn every_background_job_api_reports_output_status_wait_notify_and_kill() {
 const first = await lofi.jobSpawn({ cmd: "printf job-page-one; sleep 0.2; printf job-page-two", notify: false });
 const notify = await lofi.jobNotify({ id: first.id, enabled: true, intervalMs: 1, changed: false });
 const silenced = await lofi.jobNotify({ id: first.id, enabled: false });
-const early = await lofi.jobWait({ id: first.id, timeoutMs: 1 });
 const running = await lofi.jobStatus({ id: first.id });
-const done = await lofi.jobWait({ id: first.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.3" });
+const done = await lofi.jobStatus({ id: first.id });
 const page1 = await lofi.jobRead({ id: first.id, limit: 12 });
 const page2 = await lofi.jobRead({ id: first.id, cursor: page1.cursor, limit: 100 });
 const second = await lofi.jobSpawn({ cmd: "sleep 60", notify: false });
@@ -166,30 +166,30 @@ const killed = await lofi.jobKill({ id: second.id, reason: "job kill marker" });
 const killedStatus = await lofi.jobStatus({ id: second.id });
 const killedAgain = await lofi.jobKill({ id: second.id, reason: "idempotent marker" });
 const timed = await lofi.jobSpawn({ cmd: "sleep 60", timeoutMs: 20, notify: false });
-const timedStatus = await lofi.jobWait({ id: timed.id, timeoutMs: 5000 });
 const failed = await lofi.jobSpawn({ cmd: "printf failed-job-marker; exit 23", notify: false });
-const failedStatus = await lofi.jobWait({ id: failed.id });
-const failedLog = await lofi.jobRead({ id: failed.id });
 const large = await lofi.jobSpawn({ cmd: "yes x | head -c 70000", notify: false });
-await lofi.jobWait({ id: large.id });
+await lofi.bash({ cmd: "sleep 0.2" });
+const timedStatus = await lofi.jobStatus({ id: timed.id });
+const failedStatus = await lofi.jobStatus({ id: failed.id });
+const failedLog = await lofi.jobRead({ id: failed.id });
 const largePage = await lofi.jobRead({ id: large.id, limit: 999999 });
 const pastEnd = await lofi.jobRead({ id: large.id, cursor: 999999, limit: 1 });
 const concurrentA = await lofi.jobSpawn({ cmd: "sleep 0.05; printf concurrent-a", notify: false });
 const concurrentB = await lofi.jobSpawn({ cmd: "sleep 0.03; printf concurrent-b", notify: false });
 const concurrentC = await lofi.jobSpawn({ cmd: "sleep 0.01; printf concurrent-c", notify: false });
-const concurrentDoneA = await lofi.jobWait({ id: concurrentA.id });
-const concurrentDoneB = await lofi.jobWait({ id: concurrentB.id });
-const concurrentDoneC = await lofi.jobWait({ id: concurrentC.id });
+await lofi.bash({ cmd: "sleep 0.1" });
+const concurrentDoneA = await lofi.jobStatus({ id: concurrentA.id });
+const concurrentDoneB = await lofi.jobStatus({ id: concurrentB.id });
+const concurrentDoneC = await lofi.jobStatus({ id: concurrentC.id });
 const list = await lofi.jobList();
 const missing = {
   status: await lofi.jobStatus({ id: "999999" }),
   read: await lofi.jobRead({ id: "999999" }),
-  wait: await lofi.jobWait({ id: "999999", timeoutMs: 1 }),
   kill: await lofi.jobKill({ id: "999999" }),
   notify: await lofi.jobNotify({ id: "999999" }),
 };
 return {
-  notify, silenced, early, running, done, page1, page2, killed, killedStatus, killedAgain,
+  notify, silenced, running, done, page1, page2, killed, killedStatus, killedAgain,
   timedStatus, failedStatus, failedLog,
   largePage: { cursor: largePage.cursor, totalBytes: largePage.totalBytes, outputBytes: largePage.output.length },
   pastEnd, concurrentIds: [concurrentA.id, concurrentB.id, concurrentC.id],
@@ -243,7 +243,6 @@ return {
     for tool in [
         "jobSpawn",
         "jobNotify",
-        "jobWait",
         "jobStatus",
         "jobList",
         "jobRead",
@@ -262,10 +261,6 @@ fn every_background_job_api_rejects_invalid_arguments() {
             r#"return await lofi.jobStatus({ id: "not-an-id" });"#,
         ),
         tool_response("invalid-job-read", "return await lofi.jobRead({});"),
-        tool_response(
-            "invalid-job-wait",
-            "return await lofi.jobWait({ id: null });",
-        ),
         tool_response("invalid-job-kill", "return await lofi.jobKill({ id: -1 });"),
         tool_response("invalid-job-notify", "return await lofi.jobNotify({});"),
         text_response("invalid job arguments final answer"),
@@ -277,10 +272,10 @@ fn every_background_job_api_rejects_invalid_arguments() {
     tui.wait_for_scrollback("invalid job arguments final answer", WAIT);
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 7);
-    let body = &requests[6].body;
+    assert_eq!(requests.len(), 6);
+    let body = &requests[5].body;
     assert!(body.contains("jobSpawn: missing"));
-    assert_eq!(body.matches("job: missing or invalid").count(), 5);
+    assert_eq!(body.matches("job: missing or invalid").count(), 4);
 }
 
 #[test]
@@ -319,18 +314,19 @@ fn tui_shutdown_kills_a_live_background_job_process_group() {
 }
 
 #[test]
-fn interactive_job_accepts_typed_input_and_reports_idle() {
+fn interactive_job_accepts_typed_input() {
     let server = MockServer::start(vec![
         tool_response(
             "interactive-job-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'Name? '; read name; echo \"hello:$name\"", tty: true, notify: false });
-const waiting = await lofi.jobWait({ id: s.id, idleMs: 500, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
 const typed = await lofi.jobType({ id: s.id, text: "ada" });
 const entered = await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
-return { tty: s.tty, idle: waiting.idle, typed: typed.sent, entered: entered.ok, state: done.state, output: log.output };
+return { tty: s.tty, typed: typed.sent, entered: entered.ok, state: done.state, output: log.output };
 "#,
         ),
         text_response("interactive job final answer"),
@@ -346,7 +342,6 @@ return { tty: s.tty, idle: waiting.idle, typed: typed.sent, entered: entered.ok,
     let body = &requests[1].body;
     for marker in [
         r#"\"tty\":true"#,
-        r#"\"idle\":true"#,
         r#"\"typed\":3"#,
         r#"\"entered\":true"#,
         r#"\"state\":\"completed\""#,
@@ -355,27 +350,30 @@ return { tty: s.tty, idle: waiting.idle, typed: typed.sent, entered: entered.ok,
         assert!(body.contains(marker), "missing {marker}: {body}");
     }
     let transcript = transcript_text(&fixture.events());
-    for tool in ["jobSpawn", "jobType", "jobKeyPress", "jobWait", "jobRead"] {
+    for tool in ["jobSpawn", "jobType", "jobKeyPress", "jobStatus", "jobRead"] {
         assert!(transcript.contains(&format!(r#""name":"{tool}""#)));
     }
 }
 
 #[test]
-fn tty_job_answers_a_multi_prompt_flow_by_pattern() {
+fn tty_job_answers_a_multi_prompt_flow() {
     let server = MockServer::start(vec![
         tool_response(
             "multi-prompt-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'A: '; read a; printf 'B: '; read b; echo sum:$a$b", tty: true, notify: false });
-const w1 = await lofi.jobWait({ id: s.id, pattern: "A:", timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const screen1 = await lofi.jobScreen({ id: s.id });
 const t1 = await lofi.jobType({ id: s.id, text: "one" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const w2 = await lofi.jobWait({ id: s.id, pattern: "B:", timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const screen2 = await lofi.jobScreen({ id: s.id });
 const t2 = await lofi.jobType({ id: s.id, text: "two" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
-return { w1: w1.matched, w2: w2.matched, t1: t1.sent, t2: t2.sent, state: done.state, output: log.output };
+return { screen1: screen1.screen, screen2: screen2.screen, t1: t1.sent, t2: t2.sent, state: done.state, output: log.output };
 "#,
         ),
         text_response("multi prompt final answer"),
@@ -390,8 +388,8 @@ return { w1: w1.matched, w2: w2.matched, t1: t1.sent, t2: t2.sent, state: done.s
     assert_eq!(requests.len(), 2);
     let body = &requests[1].body;
     for marker in [
-        r#"\"w1\":\"A:\""#,
-        r#"\"w2\":\"B:\""#,
+        "A:",
+        "B:",
         r#"\"t1\":3"#,
         r#"\"t2\":3"#,
         r#"\"state\":\"completed\""#,
@@ -408,11 +406,12 @@ fn tty_job_key_presses_deliver_xterm_byte_sequences() {
             "key-bytes-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "stty -icanon -echo; echo READY; od -An -tx1 -N 5; echo", tty: true, notify: false });
-await lofi.jobWait({ id: s.id, pattern: "READY", timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
 await lofi.jobKeyPress({ id: s.id, key: "Backspace" });
 await lofi.jobKeyPress({ id: s.id, key: "Left" });
 await lofi.jobType({ id: s.id, text: "X" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { state: done.state, output: log.output };
 "#,
@@ -440,10 +439,11 @@ fn tty_job_ctrl_c_interrupts_a_running_program() {
             "ctrl-c-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, notify: false });
-const waiting = await lofi.jobWait({ id: s.id, idleMs: 300, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.3" });
 await lofi.jobKeyPress({ id: s.id, key: "Ctrl+C" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
-return { idle: waiting.idle, state: done.state, signal: done.signal };
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
+return { state: done.state, signal: done.signal };
 "#,
         ),
         text_response("ctrl-c final answer"),
@@ -457,11 +457,7 @@ return { idle: waiting.idle, state: done.state, signal: done.signal };
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     let body = &requests[1].body;
-    for marker in [
-        r#"\"idle\":true"#,
-        r#"\"state\":\"failed\""#,
-        r#"\"signal\":2"#,
-    ] {
+    for marker in [r#"\"state\":\"failed\""#, r#"\"signal\":2"#] {
         assert!(body.contains(marker), "missing {marker}: {body}");
     }
 }
@@ -473,13 +469,14 @@ fn tty_job_ctrl_d_closes_stdin_to_a_read_loop() {
             "ctrl-d-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo go; while IFS= read -r line; do echo line:$line; done; echo eof", tty: true, notify: false });
-await lofi.jobWait({ id: s.id, pattern: "go", timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
 await lofi.jobType({ id: s.id, text: "hello" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 await lofi.jobType({ id: s.id, text: "world" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 await lofi.jobKeyPress({ id: s.id, key: "Ctrl+D" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { state: done.state, output: log.output };
 "#,
@@ -512,10 +509,11 @@ fn tty_job_has_term_dimensions_and_a_working_controlling_terminal() {
             "terminal-env-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo term=$TERM; stty size; read x < /dev/tty; echo tty:$x", tty: true, cols: 88, rows: 26, notify: false });
-await lofi.jobWait({ id: s.id, pattern: "26 88", timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
 await lofi.jobType({ id: s.id, text: "data" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-const done = await lofi.jobWait({ id: s.id, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.2" });
+const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { tty: s.tty, cols: s.cols, rows: s.rows, state: done.state, output: log.output };
 "#,
@@ -552,10 +550,10 @@ fn plain_job_reports_idle_when_configured_via_job_notify() {
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf burst; sleep 60", notify: false });
 const n = await lofi.jobNotify({ id: s.id, idleMs: 500, enabled: false });
-const waiting = await lofi.jobWait({ id: s.id, idleMs: 600, timeoutMs: 5000 });
+await lofi.bash({ cmd: "sleep 0.6" });
 const status = await lofi.jobStatus({ id: s.id });
 await lofi.jobKill({ id: s.id });
-return { notifyIdleMs: n.idleMs, waitingIdle: waiting.idle, statusIdle: status.idle, idleMs: status.idleMs, tty: status.tty };
+return { notifyIdleMs: n.idleMs, statusIdle: status.idle, idleMs: status.idleMs, tty: status.tty };
 "#,
         ),
         text_response("plain idle final answer"),
@@ -571,7 +569,6 @@ return { notifyIdleMs: n.idleMs, waitingIdle: waiting.idle, statusIdle: status.i
     let body = &requests[1].body;
     for marker in [
         r#"\"notifyIdleMs\":500"#,
-        r#"\"waitingIdle\":true"#,
         r#"\"statusIdle\":true"#,
         r#"\"idleMs\":500"#,
         r#"\"tty\":false"#,
@@ -632,10 +629,9 @@ let keyNonTty;
 try { await lofi.jobKeyPress({ id: plain.id, key: "Enter" }); } catch (e) { keyNonTty = String(e); }
 const typeMissing = await lofi.jobType({ id: "999999", text: "x" });
 const keyMissing = await lofi.jobKeyPress({ id: "999999", key: "Enter" });
-const waitMissing = await lofi.jobWait({ id: "999999", pattern: "x" });
 await lofi.jobKill({ id: tty.id });
 await lofi.jobKill({ id: plain.id });
-return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, typeMissing, keyMissing, waitMissing };
+return { typeNoId, typeNoText, typeNonTty, keyUnknown, keyNonTty, typeMissing, keyMissing };
 "#,
         ),
         text_response("invalid interactive arguments final answer"),

@@ -48,7 +48,7 @@ pub use tools::BashEnv;
 
 pub const EXEC_TOOL_NAME: &str = "exec";
 
-pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, patch, bash). Top-level await and return are supported. The returned value is sent back as the tool result; keep it compact and final.";
+pub const EXEC_TOOL_DESCRIPTION: &str = "Compile and run a TypeScript program in a sandboxed QuickJS runtime. The program has access to a `lofi` object with file/shell/search tools (read, ls, find, grep, write, edit, patch, bash). Top-level await and return are supported. Await every foreground `lofi` call; unawaited calls are drained and any failure makes the exec result fail. Use `jobSpawn` for background work. The result reports success, errors, logs, and an explicitly returned value; keep it compact and final.";
 
 #[must_use]
 pub fn exec_tool_input_schema() -> serde_json::Value {
@@ -95,6 +95,7 @@ const SUSPEND_THRESHOLD: Duration = Duration::from_millis(1);
 const SANDBOX_ERROR_KEY: &str = "__lofi_sandbox_error__";
 
 const MAX_LOG_BYTES: usize = 1024 * 1024;
+const LOG_TRUNCATION_MARKER: &str = "\n<logs truncated>";
 const JS_TO_JSON_MAX_DEPTH: usize = 64;
 const JS_TO_JSON_MAX_NODES: usize = 10_000;
 /// Maximum cumulative bytes of converted strings and object keys, so a single
@@ -311,9 +312,60 @@ pub struct ExecImage {
 #[derive(Debug)]
 pub struct ExecResult {
     pub value: Json,
+    has_value: bool,
+    pub errors: Vec<Json>,
     pub logs: String,
     pub value_truncated: bool,
     pub image: Option<ExecImage>,
+}
+
+const TRACK_FOREGROUND_TOOLS: &str = r#"
+    lofi => {
+        const pending = new Set();
+        const errors = [];
+        const errorText = error =>
+            String(error && error.message ? error.message : error);
+
+        for (const name of Object.keys(lofi)) {
+            const tool = lofi[name];
+            if (typeof tool !== "function") continue;
+            lofi[name] = (...args) => {
+                const promise = Promise.resolve().then(() => tool(...args));
+                const tracked = promise.then(
+                    value => {
+                        if (value !== null && typeof value === "object" && value.ok === false) {
+                            errors.push({ tool: name, result: value });
+                        }
+                        return value;
+                    },
+                    error => {
+                        errors.push({ tool: name, error: errorText(error) });
+                        throw error;
+                    }
+                );
+                pending.add(tracked);
+                tracked.then(
+                    () => pending.delete(tracked),
+                    () => pending.delete(tracked)
+                );
+                return tracked;
+            };
+        }
+
+        return async () => {
+            while (pending.size > 0) {
+                await Promise.allSettled(Array.from(pending));
+            }
+            return errors;
+        };
+    }
+"#;
+
+impl ExecResult {
+    #[must_use]
+    pub fn has_returned_value(&self) -> bool {
+        self.has_value
+    }
 }
 
 struct JsonV(Json);
@@ -487,7 +539,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                 }); void 0;"#,
             )
             .map_err(|e| Error::Sandbox(format!("context: {e}")))?;
-            install_globals(
+            let drain_tools = install_globals(
                 &ctx,
                 &tools,
                 &strings,
@@ -505,23 +557,14 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                 .into_future()
                 .await
                 .map_err(|e| Error::Sandbox(format!("guest promise rejected: {e}")))?;
-            let log_bytes = logs.lock().ok().map_or(0, |logs| logs.len());
-            let value_budget = opts.max_value_bytes.saturating_sub(log_bytes);
-            let (mut json, value_truncated) = js_to_json_with_limit(&value, value_budget);
-            if let Some(err) = json.get(SANDBOX_ERROR_KEY).and_then(Json::as_str) {
-                return Err::<ExecResult, Error>(Error::Sandbox(err.to_string()));
-            }
-            let image = take_pending_image(&mut json, &tools);
-            Ok::<ExecResult, Error>(ExecResult {
-                value: json,
-                logs: logs
-                    .lock()
-                    .ok()
-                    .map(|mut logs| std::mem::take(&mut *logs))
-                    .unwrap_or_default(),
-                value_truncated,
-                image,
-            })
+            let errors_promise: Promise = drain_tools
+                .call(())
+                .map_err(|e| Error::Sandbox(format!("drain tools: {e}")))?;
+            let errors: Value = errors_promise
+                .into_future()
+                .await
+                .map_err(|e| Error::Sandbox(format!("drain tools: {e}")))?;
+            convert_exec_result(&value, &errors, &logs, &tools, opts.max_value_bytes)
         })
         .await
     }
@@ -541,6 +584,58 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     }
 }
 
+fn convert_exec_result(
+    value: &Value<'_>,
+    errors: &Value<'_>,
+    logs: &Arc<Mutex<String>>,
+    tools: &BuiltinTools,
+    max_value_bytes: usize,
+) -> Result<ExecResult> {
+    let has_value = !value.is_undefined();
+    let (errors_json, errors_truncated) = js_to_json_with_limit(errors, max_value_bytes);
+    if let Some(error) = errors_json.get(SANDBOX_ERROR_KEY).and_then(Json::as_str) {
+        return Err(Error::Sandbox(format!("nested tool errors {error}")));
+    }
+    let errors = errors_json.as_array().cloned().unwrap_or_default();
+    let errors_bytes = serde_json::to_string(&errors).map_or(0, |json| json.len());
+    let logs_budget = max_value_bytes.saturating_sub(errors_bytes);
+    let mut logs = logs
+        .lock()
+        .ok()
+        .map(|mut logs| std::mem::take(&mut *logs))
+        .unwrap_or_default();
+    let logs_truncated = truncate_logs(&mut logs, logs_budget);
+    let value_budget = max_value_bytes
+        .saturating_sub(errors_bytes)
+        .saturating_sub(logs.len());
+    let (mut value, value_truncated) = js_to_json_with_limit(value, value_budget);
+    if let Some(error) = value.get(SANDBOX_ERROR_KEY).and_then(Json::as_str) {
+        return Err(Error::Sandbox(error.to_string()));
+    }
+    let image = take_pending_image(&mut value, tools);
+    Ok(ExecResult {
+        value,
+        has_value,
+        errors,
+        logs,
+        value_truncated: value_truncated || errors_truncated || logs_truncated,
+        image,
+    })
+}
+
+fn truncate_logs(logs: &mut String, max_bytes: usize) -> bool {
+    if logs.len() <= max_bytes {
+        return false;
+    }
+    let marker_end =
+        LOG_TRUNCATION_MARKER.floor_char_boundary(LOG_TRUNCATION_MARKER.len().min(max_bytes));
+    let marker = &LOG_TRUNCATION_MARKER[..marker_end];
+    let content_end = logs.floor_char_boundary(max_bytes.saturating_sub(marker.len()));
+    logs.truncate(content_end);
+    logs.push_str(marker);
+    true
+}
+
 fn take_pending_image(value: &mut Json, tools: &BuiltinTools) -> Option<ExecImage> {
     let object = value.as_object_mut()?;
     if object.get("type").and_then(Json::as_str) != Some("image") {
@@ -555,8 +650,8 @@ fn take_pending_image(value: &mut Json, tools: &BuiltinTools) -> Option<ExecImag
 }
 
 #[allow(clippy::too_many_arguments)]
-fn install_globals(
-    ctx: &Ctx<'_>,
+fn install_globals<'js>(
+    ctx: &Ctx<'js>,
     tools: &Arc<BuiltinTools>,
     strings: &HashMap<String, String>,
     recall: Option<RecallFn>,
@@ -564,10 +659,12 @@ fn install_globals(
     skills_dir: Option<PathBuf>,
     logs: &Arc<Mutex<String>>,
     max_output_bytes: usize,
-) -> rquickjs::Result<()> {
+) -> rquickjs::Result<Function<'js>> {
     let lofi = Object::new(ctx.clone())?;
     bind_tools(ctx, &lofi, tools, recall, result, skills_dir)?;
     lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
+    let install_tracker: Function = ctx.eval(TRACK_FOREGROUND_TOOLS)?;
+    let drain_tools = install_tracker.call((lofi.clone(),))?;
     ctx.globals().set("lofi", lofi)?;
 
     let max_log_bytes = MAX_LOG_BYTES.min(max_output_bytes);
@@ -600,9 +697,9 @@ fn install_globals(
                 // Bound retained logs so a chatty guest can't exhaust memory.
                 // Reserve room for the truncation marker and clamp to a valid
                 // char boundary so a multibyte tail doesn't panic.
-                const MARKER: &str = "\n<logs truncated>";
-                let marker_end = MARKER.floor_char_boundary(MARKER.len().min(max_log_bytes));
-                let marker = &MARKER[..marker_end];
+                let marker_end = LOG_TRUNCATION_MARKER
+                    .floor_char_boundary(LOG_TRUNCATION_MARKER.len().min(max_log_bytes));
+                let marker = &LOG_TRUNCATION_MARKER[..marker_end];
                 if marker.is_empty() || buf.ends_with(marker) {
                     return Ok(());
                 }
@@ -636,7 +733,7 @@ fn install_globals(
         strings_obj.set(k.as_str(), v.as_str())?;
     }
     ctx.globals().set("lofi_strings", strings_obj)?;
-    Ok(())
+    Ok(drain_tools)
 }
 
 fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
@@ -779,17 +876,25 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(res.has_returned_value());
         assert_eq!(res.value, json!(42));
     }
 
     #[tokio::test]
-    async fn exec_returns_undefined_as_null() {
+    async fn exec_distinguishes_implicit_undefined_from_null() {
         let dir = tempdir().unwrap();
         let res = exec("print('hi');", &ctx(dir.path()), &ExecOptions::default())
             .await
             .unwrap();
+        assert!(!res.has_returned_value());
         assert_eq!(res.value, Json::Null);
         assert!(res.logs.contains("hi"));
+
+        let res = exec("return null;", &ctx(dir.path()), &ExecOptions::default())
+            .await
+            .unwrap();
+        assert!(res.has_returned_value());
+        assert_eq!(res.value, Json::Null);
     }
 
     #[tokio::test]

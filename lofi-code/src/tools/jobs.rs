@@ -1,5 +1,5 @@
 //! Background job registry: spawn a bounded shell command without blocking
-//! the current agent turn, then poll, page, wait, type into, or cancel it by
+//! the current agent turn, then inspect, page, type into, or cancel it by
 //! id.
 //!
 //! A job runs `sh -c <cmd>` in the workspace root with the same stripped /
@@ -26,11 +26,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::process::Command;
-use tokio::sync::Notify;
 
 use lofi_error::{Error, Result};
 
-use super::bash_util::{wait_for_cancel, PgrpKillGuard};
+use super::bash_util::PgrpKillGuard;
 use super::BuiltinTools;
 
 /// Byte budget for a single `jobRead` page. Generous compared to the
@@ -59,8 +58,6 @@ const DEFAULT_TTY_ROWS: u16 = 40;
 const MAX_TTY_DIM: u16 = 1000;
 /// Upper bound for one `jobType` payload.
 const MAX_TTY_WRITE_BYTES: usize = 64 * 1024;
-/// Tail window searched by `jobWait` pattern matching.
-const PATTERN_TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -112,7 +109,7 @@ struct Job {
     /// Whether the job's output has been still long enough to be idle.
     idle: bool,
     /// When output last changed. Always tracked while running; the basis for
-    /// both idle notices and `jobWait` idle waits.
+    /// idle notices.
     last_output_at: Option<Instant>,
 }
 
@@ -263,8 +260,6 @@ pub struct JobScreen {
 
 struct JobHandle {
     data: Mutex<Job>,
-    /// Fired when the job reaches a terminal state; `jobWait` listens.
-    done: Notify,
     /// Set by `jobKill`; the driver task polls it between `try_wait`s.
     cancel: std::sync::atomic::AtomicBool,
     /// Completion belongs to the exec that acquired this job. Retaining the
@@ -510,7 +505,6 @@ impl JobRegistry {
             kill_pgrp(pid);
         }
         handle.cancel.store(true, Ordering::Relaxed);
-        handle.done.notify_waiters();
         true
     }
 
@@ -605,7 +599,6 @@ impl JobRegistry {
                 kill_pgrp(pid);
             }
             handle.cancel.store(true, Ordering::Relaxed);
-            handle.done.notify_waiters();
         }
     }
 
@@ -655,7 +648,6 @@ impl JobRegistry {
                 kill_pgrp(pid);
             }
             handle.cancel.store(true, Ordering::Relaxed);
-            handle.done.notify_waiters();
         }
     }
 }
@@ -838,7 +830,6 @@ impl BuiltinTools {
                 idle: false,
                 last_output_at: Some(started),
             }),
-            done: Notify::new(),
             cancel: std::sync::atomic::AtomicBool::new(false),
             on_release: Mutex::new(None),
             master: Mutex::new(handle_master),
@@ -1033,81 +1024,6 @@ impl BuiltinTools {
         }))
     }
 
-    /// Bounded wait for a job condition. With no condition, waits for the
-    /// job to finish. `pattern` waits for text in the output tail, and
-    /// `idleMs` waits for unchanged output. Waiting never cancels the job,
-    /// but user cancellation (ESC/Ctrl-C) breaks the wait early.
-    ///
-    /// # Errors
-    /// Returns [`Error::Tool`] when `id` is missing or invalid.
-    pub async fn job_wait(&self, args: Value) -> Result<Value> {
-        let id = parse_id(&args)?;
-        let Some(handle) = self.jobs.get(id) else {
-            return Ok(no_such_job(id));
-        };
-        let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
-        let pattern = args
-            .get("pattern")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let idle_ms = args.get("idleMs").and_then(Value::as_u64);
-        if pattern.is_some() || idle_ms.is_some() {
-            return self
-                .job_wait_for_condition(id, handle, pattern, idle_ms, timeout_ms)
-                .await;
-        }
-
-        // Fast path: already terminal.
-        {
-            let job = handle
-                .data
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if job.state.is_terminal() {
-                return Ok(job.to_json(&self.root));
-            }
-        }
-
-        let wait = handle.done.notified();
-        tokio::pin!(wait);
-        // `enable` arms the notification even if the job finishes between
-        // the fast path above and the await below.
-        wait.as_mut().enable();
-        let timed = async {
-            if let Some(ms) = timeout_ms {
-                let _ = tokio::time::timeout(Duration::from_millis(ms), wait).await;
-            } else {
-                wait.await;
-            }
-        };
-        tokio::pin!(timed);
-        // Race the wait against user cancellation, mirroring `bash`: while
-        // the guest awaits here, no QuickJS bytecode ticks, so the sandbox
-        // interrupt handler cannot observe `cancel`. A cancelled wait leaves
-        // the job running and returns the current state flagged `cancelled`.
-        let cancelled = if let Some(flag) = &self.cancel {
-            let cancel_wait = wait_for_cancel(flag);
-            tokio::pin!(cancel_wait);
-            tokio::select! {
-                biased;
-                () = &mut timed => false,
-                () = &mut cancel_wait => true,
-            }
-        } else {
-            timed.await;
-            false
-        };
-        let job = handle
-            .data
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut v = job.to_json(&self.root);
-        if cancelled {
-            v["cancelled"] = json!(true);
-        }
-        Ok(v)
-    }
-
     /// Idempotent cancellation: kill the whole process group and mark the
     /// job cancelled. Safe to call on an already-terminal job (no-op).
     /// # Errors
@@ -1229,93 +1145,6 @@ impl BuiltinTools {
             return Err(Error::Tool("jobKeyPress: partial PTY write".into()));
         }
         Ok(json!({ "ok": true, "id": id.to_string(), "key": key }))
-    }
-
-    async fn job_wait_for_condition(
-        &self,
-        id: u64,
-        handle: Arc<JobHandle>,
-        pattern: Option<String>,
-        idle_ms: Option<u64>,
-        timeout_ms: Option<u64>,
-    ) -> Result<Value> {
-        let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-        let log_path = {
-            let job = handle
-                .data
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            job.log_path.clone()
-        };
-
-        loop {
-            {
-                let job = handle
-                    .data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if job.state.is_terminal() {
-                    return Ok(job.to_json(&self.root));
-                }
-            }
-            if let Some(pattern) = &pattern {
-                let tail = read_log_tail(&log_path, PATTERN_TAIL_BYTES);
-                if tail.contains(pattern.as_str()) {
-                    return Ok(json!({
-                        "ok": true,
-                        "id": id.to_string(),
-                        "matched": pattern,
-                        "tail": read_redacted_log_tail(
-                            &log_path,
-                            PATTERN_TAIL_BYTES,
-                            &self.bash_env,
-                        ),
-                    }));
-                }
-            }
-            if let Some(idle_ms) = idle_ms {
-                let last = handle
-                    .data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .last_output_at;
-                if last.is_some_and(|t| t.elapsed() >= Duration::from_millis(idle_ms)) {
-                    return Ok(json!({
-                        "ok": true,
-                        "id": id.to_string(),
-                        "idle": true,
-                    }));
-                }
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                let job = handle
-                    .data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut result = job.to_json(&self.root);
-                result["timedOut"] = json!(true);
-                return Ok(result);
-            }
-            if let Some(flag) = &self.cancel {
-                let cancel_wait = wait_for_cancel(flag);
-                tokio::pin!(cancel_wait);
-                tokio::select! {
-                    biased;
-                    () = tokio::time::sleep(JOB_POLL_INTERVAL) => {},
-                    () = &mut cancel_wait => {
-                        let job = handle
-                            .data
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let mut result = job.to_json(&self.root);
-                        result["cancelled"] = json!(true);
-                        return Ok(result);
-                    }
-                }
-            } else {
-                tokio::time::sleep(JOB_POLL_INTERVAL).await;
-            }
-        }
     }
 }
 
@@ -1607,8 +1436,7 @@ impl IdleTracker {
 
 /// Update activity timestamps from the current output. Returns true when the
 /// output changed since the previous poll. `job.last_output_at` is always
-/// tracked so `jobWait` idle waits work even with idle notices
-/// disabled.
+/// tracked even when idle notices are disabled.
 fn update_activity(
     handle: &JobHandle,
     parser: Option<&vt100::Parser>,
@@ -1738,8 +1566,8 @@ fn short_text(s: &str, max: usize) -> String {
 
 /// Drive a spawned child to completion. Polls `try_wait` so cancellation,
 /// the (optional) timeout, and the log-size cap are observed on one clock; each
-/// terminal transition updates the job record, wakes `jobWait` listeners,
-/// and queues the completion notice for the host agent.
+/// terminal transition updates the job record and queues the completion notice
+/// for the host agent.
 // The driver takes only the JobRegistry it needs to publish notices. Taking
 // the whole BuiltinTools would leak its tool callback (an UnboundedSender per
 // execute_tools round) into the spawned task's lifetime, keeping the
@@ -1761,8 +1589,7 @@ async fn run_job(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (job.tty, job.cols, job.rows, job.log_path.clone())
     };
-    // The screen parser is driver-local: the writer tools (`jobType` etc.)
-    // only need the master fd, and `jobWait` reads the shared log.
+    // The screen parser is driver-local. Writer tools only need the master fd.
     let mut parser = if tty {
         Some(vt100::Parser::new(rows, cols, 0))
     } else {
@@ -1890,7 +1717,6 @@ async fn run_job(
             .id;
         hook(id);
     }
-    handle.done.notify_waiters();
     if let Some(text) = notice {
         push_notice(&jobs, generation, text);
     }
@@ -2027,7 +1853,6 @@ mod tests {
                 idle: false,
                 last_output_at: None,
             }),
-            done: Notify::new(),
             cancel: AtomicBool::new(false),
             on_release: Mutex::new(None),
             master: Mutex::new(None),
@@ -2041,6 +1866,36 @@ mod tests {
             enabled: true,
             interval_ms: Some(1),
             changed,
+        }
+    }
+
+    async fn wait_for_terminal(tools: &BuiltinTools, id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = tools.job_status(json!({ "id": id })).await.unwrap();
+            if status["state"] != json!("running") {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "job {id} did not finish");
+            tokio::time::sleep(JOB_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn wait_for_log(tools: &BuiltinTools, id: &str, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = tools.job_read(json!({ "id": id })).await.unwrap();
+            if result["output"]
+                .as_str()
+                .is_some_and(|output| output.contains(needle))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "job {id} did not output {needle}"
+            );
+            tokio::time::sleep(JOB_POLL_INTERVAL).await;
         }
     }
 
@@ -2290,47 +2145,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn job_wait_settles_promptly_on_cancel() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel.clone());
-        let spawned = tools
-            .job_spawn(json!({ "cmd": "sleep 30", "timeoutMs": 60_000 }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-
-        let waiter = tokio::spawn({
-            let tools = tools.clone();
-            async move { tools.job_wait(json!({ "id": id })).await.unwrap() }
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        cancel.store(true, Ordering::Relaxed);
-        let settled = tokio::time::timeout(Duration::from_secs(5), waiter).await;
-        assert!(settled.is_ok(), "job_wait must settle promptly on cancel");
-        let res = settled.unwrap().unwrap();
-        assert_eq!(res["cancelled"], json!(true), "got: {res}");
-        assert_eq!(res["state"], json!("running"), "got: {res}");
-
-        // The wait was interrupted, not the job: it must still be alive and
-        // respond to an explicit kill.
-        let killed = tools.job_kill(json!({ "id": res["id"] })).await.unwrap();
-        assert_eq!(killed["killed"], json!(true), "got: {killed}");
-    }
-
-    #[tokio::test]
-    async fn job_wait_completes_normally_without_cancel() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools.job_spawn(json!({ "cmd": "true" })).await.unwrap();
-        let res = tools
-            .job_wait(json!({ "id": spawned["id"], "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
-        assert_eq!(res["state"], json!("completed"), "got: {res}");
-        assert!(res.get("cancelled").is_none(), "got: {res}");
-    }
-
     #[test]
     fn key_press_bytes_maps_named_keys() {
         assert_eq!(key_press_bytes("Enter", false), Some(b"\r".as_slice()));
@@ -2357,18 +2171,12 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        tools
-            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
+        wait_for_log(&tools, &id, "\x1b[?1h").await;
         tools
             .job_key_press(json!({ "id": id, "key": "Down" }))
             .await
             .unwrap();
-        let done = tools
-            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
+        let done = wait_for_terminal(&tools, &id).await;
         assert_eq!(done["state"], json!("completed"), "{done}");
         let log = tools.job_read(json!({ "id": id })).await.unwrap();
         assert!(
@@ -2422,10 +2230,7 @@ mod tests {
             .unwrap();
         assert_eq!(pressed["ok"], json!(true));
 
-        let done = tools
-            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
+        let done = wait_for_terminal(&tools, &id).await;
         assert_eq!(done["state"], json!("completed"), "got: {done}");
         let log = tools.job_read(json!({ "id": id })).await.unwrap();
         assert!(
@@ -2448,15 +2253,7 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        let waited = tools
-            .job_wait(json!({
-                "id": id,
-                "pattern": "parsed-marker",
-                "timeoutMs": 5_000
-            }))
-            .await
-            .unwrap();
-        assert_eq!(waited["matched"], json!("parsed-marker"), "{waited}");
+        wait_for_log(&tools, &id, "parsed-marker").await;
 
         let screen = tools.jobs.screen(id.parse().unwrap()).unwrap();
         assert_eq!((screen.cols, screen.rows), (24, 3));
@@ -2505,10 +2302,7 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        tools
-            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
+        wait_for_terminal(&tools, &id).await;
 
         let screen = tools.job_screen(json!({ "id": id })).await.unwrap();
         assert_eq!(screen["lines"][0], json!("token=[redacted]"));
@@ -2534,10 +2328,7 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        let done = tools
-            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
+        let done = wait_for_terminal(&tools, &id).await;
         assert_eq!(done["state"], json!("completed"), "got: {done}");
         let log = tools.job_read(json!({ "id": id })).await.unwrap();
         assert!(
@@ -2555,7 +2346,7 @@ mod tests {
             .await
             .unwrap();
         let id = spawned["id"].as_str().unwrap().to_owned();
-        tools.job_wait(json!({ "id": id })).await.unwrap();
+        wait_for_terminal(&tools, &id).await;
 
         let err = tools
             .job_type(json!({ "id": id, "text": "x" }))
@@ -2596,117 +2387,6 @@ mod tests {
         let idle = notices.iter().find(|n| n.contains("idle"));
         assert!(idle.is_some(), "notices: {notices:?}");
         assert!(idle.unwrap().contains("Name?"), "notices: {notices:?}");
-        tools.job_kill(json!({ "id": id })).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn job_wait_matches_a_prompt_pattern() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools
-            .job_spawn(json!({ "cmd": "printf 'READY\n'; read x; echo \"got:$x\"", "tty": true }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let waited = tools
-            .job_wait(json!({ "id": id, "pattern": "READY", "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
-        assert_eq!(waited["matched"], json!("READY"), "got: {waited}");
-        tools
-            .job_type(json!({ "id": id, "text": "done\n" }))
-            .await
-            .unwrap();
-        let done = tools
-            .job_wait(json!({ "id": id, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
-        assert_eq!(done["state"], json!("completed"), "got: {done}");
-    }
-
-    #[tokio::test]
-    async fn job_wait_redacts_the_returned_tail() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let bash_env = crate::BashEnv {
-            redact: vec!["secret-value".to_string()],
-            ..crate::BashEnv::default()
-        };
-        let (_dir, tools) = tools_with_env(cancel, bash_env);
-        let spawned = tools
-            .job_spawn(json!({
-                "cmd": "printf 'token=secret-value'; sleep 30",
-                "tty": true,
-                "notify": false
-            }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let waited = tools
-            .job_wait(json!({
-                "id": id,
-                "pattern": "token=",
-                "timeoutMs": 5_000
-            }))
-            .await
-            .unwrap();
-        assert_eq!(waited["tail"], json!("token=[redacted]"));
-        tools.job_kill(json!({ "id": id })).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn job_wait_returns_after_idle_silence() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools
-            .job_spawn(json!({ "cmd": "printf 'prompt'; read x; echo done", "tty": true }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let waited = tools
-            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 5_000 }))
-            .await
-            .unwrap();
-        assert_eq!(waited["idle"], json!(true), "got: {waited}");
-        tools.job_kill(json!({ "id": id })).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn job_wait_treats_no_output_as_idle() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools
-            .job_spawn(json!({
-                "cmd": "sleep 30",
-                "tty": true,
-                "notify": false
-            }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let waited = tools
-            .job_wait(json!({ "id": id, "idleMs": 500, "timeoutMs": 2_000 }))
-            .await
-            .unwrap();
-        assert_eq!(waited["idle"], json!(true), "got: {waited}");
-        tools.job_kill(json!({ "id": id })).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn job_wait_condition_timeout_returns_current_status() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (_dir, tools) = tools_with_cancel(cancel);
-        let spawned = tools
-            .job_spawn(json!({ "cmd": "sleep 30", "notify": false }))
-            .await
-            .unwrap();
-        let id = spawned["id"].as_str().unwrap().to_owned();
-        let result = tools
-            .job_wait(json!({ "id": id, "pattern": "never", "timeoutMs": 50 }))
-            .await
-            .unwrap();
-
-        assert_eq!(result["state"], json!("running"), "got: {result}");
-        assert_eq!(result["timedOut"], json!(true), "got: {result}");
         tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 }

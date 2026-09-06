@@ -177,6 +177,26 @@ fn user_msg(text: &str) -> Message {
     }
 }
 
+fn exec_round(code: &str) -> Vec<StreamingEvent> {
+    vec![
+        StreamingEvent::ToolUseStart {
+            id: "t1".to_string(),
+            name: "exec".to_string(),
+        },
+        StreamingEvent::ToolUseInputDelta {
+            id: "t1".to_string(),
+            delta: serde_json::json!({ "code": code }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd {
+            id: "t1".to_string(),
+        },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ]
+}
+
 fn system_msg(text: &str) -> Message {
     Message {
         role: Role::System,
@@ -325,6 +345,23 @@ fn parse_exec_input_trims_surrounding_newlines() {
 }
 
 #[test]
+fn exec_result_display_handles_structured_success() {
+    assert_eq!(
+        exec_result_display(r#"{"ok":true,"value":null}"#, false),
+        "null"
+    );
+    assert_eq!(
+        exec_result_display(r#"{"ok":true,"value":"done"}"#, false),
+        "done"
+    );
+    assert_eq!(
+        exec_result_display(r#"{"ok":true,"logs":"worked\n"}"#, false),
+        "worked\n"
+    );
+    assert_eq!(exec_result_display(r#"{"ok":true}"#, false), "");
+}
+
+#[test]
 fn extract_code_prefix_streams_and_trims_leading_newline() {
     let cases = [
         (r#"{"code":"\nle"#, "le"),
@@ -371,24 +408,7 @@ async fn run_once_text_only_finishes() {
 #[tokio::test]
 async fn run_once_tool_call_executes_and_appends_result() {
     let dir = tempdir().unwrap();
-    let tool_input = serde_json::json!({ "code": "return 1+1" }).to_string();
-    let round1 = vec![
-        StreamingEvent::ToolUseStart {
-            id: "t1".to_string(),
-            name: "exec".to_string(),
-        },
-        StreamingEvent::ToolUseInputDelta {
-            id: "t1".to_string(),
-            delta: tool_input,
-        },
-        StreamingEvent::ToolUseEnd {
-            id: "t1".to_string(),
-        },
-        StreamingEvent::Done {
-            usage: Usage::default(),
-            stop_reason: None,
-        },
-    ];
+    let round1 = exec_round("return 1+1");
     let round2 = vec![
         StreamingEvent::TextDelta("done".to_string()),
         StreamingEvent::Done {
@@ -410,10 +430,87 @@ async fn run_once_tool_call_executes_and_appends_result() {
         panic!("expected tool_result");
     };
     assert!(!*is_error);
-    assert!(content.contains('2'), "content was {content}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(content).unwrap(),
+        serde_json::json!({ "ok": true, "value": 2 })
+    );
 
     let finished = agent.run_once(&mut messages).await.unwrap();
     assert!(finished);
+}
+
+#[tokio::test]
+async fn run_once_exec_without_return_reports_success_and_logs() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![exec_round("print('done')")], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult { content, .. } = &messages[2].blocks[0] else {
+        panic!("expected tool_result");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(content).unwrap(),
+        serde_json::json!({ "ok": true, "logs": "done\n" })
+    );
+}
+
+#[tokio::test]
+async fn run_once_exec_preserves_explicit_null_return() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![exec_round("return null")], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult { content, .. } = &messages[2].blocks[0] else {
+        panic!("expected tool_result");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(content).unwrap(),
+        serde_json::json!({ "ok": true, "value": null })
+    );
+}
+
+#[tokio::test]
+async fn run_once_exec_without_return_or_logs_reports_success() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![exec_round("const done = true")], dir.path());
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult { content, .. } = &messages[2].blocks[0] else {
+        panic!("expected tool_result");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(content).unwrap(),
+        serde_json::json!({ "ok": true })
+    );
+}
+
+#[tokio::test]
+async fn run_once_exec_reports_unawaited_bash_failure() {
+    let dir = tempdir().unwrap();
+    let agent = Agent {
+        shell_policy: lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig {
+            mode: lofi_types::ShellPolicyMode::Unrestricted,
+            ..lofi_types::ShellPolicyConfig::default()
+        }),
+        ..agent_with(vec![exec_round("lofi.bash({ cmd: 'exit 7' })")], dir.path())
+    };
+    let mut messages = vec![user_msg("go")];
+
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &messages[2].blocks[0]
+    else {
+        panic!("expected tool_result");
+    };
+    assert!(*is_error);
+    let result = serde_json::from_str::<serde_json::Value>(content).unwrap();
+    assert_eq!(result["ok"], serde_json::json!(false));
+    assert_eq!(result["errors"][0]["tool"], serde_json::json!("bash"));
+    assert_eq!(result["errors"][0]["result"]["code"], serde_json::json!(7));
 }
 
 #[tokio::test]

@@ -277,17 +277,21 @@ pub fn exec_result_display(result: &str, is_error: bool) -> String {
     if is_error {
         return result.to_string();
     }
-    serde_json::from_str::<serde_json::Value>(result)
-        .ok()
-        .and_then(|v| v.get("value").cloned())
-        .map_or_else(
-            || result.to_string(),
-            |v| {
-                if let Some(s) = v.as_str() {
-                    s.to_string()
-                } else {
-                    serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-                }
-            },
-        )
+    let Ok(output) = serde_json::from_str::<serde_json::Value>(result) else {
+        return result.to_string();
+    };
+    if let Some(value) = output.get("value") {
+        return value.as_str().map_or_else(
+            || serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+            str::to_string,
+        );
+    }
+    if output.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return output
+            .get("logs")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    result.to_string()
 }

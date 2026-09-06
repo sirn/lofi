@@ -2799,7 +2799,7 @@ fn native_body(nt: &NativeTool) -> NativeBody {
                 notice,
             }
         }
-        "jobSpawn" | "jobStatus" | "jobWait" | "jobKill" | "jobNotify" => {
+        "jobSpawn" | "jobStatus" | "jobKill" | "jobNotify" => {
             let mut lines: Vec<String> = Vec::new();
             let state = s("state");
             if !state.is_empty() {
@@ -2942,9 +2942,7 @@ fn summarize_tool_args(name: &str, args: &str) -> Option<String> {
     let id = json_string_field(args, "id");
     match name {
         "jobSpawn" => json_string_field(args, "cmd").map(|cmd| truncate_args_display(cmd, 60)),
-        "jobStatus" | "jobRead" | "jobWait" | "jobKill" | "jobNotify" => {
-            id.map(|s| format!("job {s}"))
-        }
+        "jobStatus" | "jobRead" | "jobKill" | "jobNotify" => id.map(|s| format!("job {s}")),
         _ => None,
     }
 }

@@ -40,6 +40,26 @@ fn trusted_ctx(root: &Path) -> ExecCtx {
     ctx
 }
 
+async fn wait_for_job(cx: &ExecCtx, id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let running = cx
+            .jobs
+            .snapshot()
+            .into_iter()
+            .find(|job| job.id.to_string() == id)
+            .is_some_and(|job| job.running);
+        if !running {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job {id} did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 #[test]
 fn compile_ts_strips_type_annotations() {
     let js = compile_ts("const x: number = 42; return x;").unwrap();
@@ -351,6 +371,79 @@ async fn exec_bash_echo() {
 }
 
 #[tokio::test]
+async fn exec_drains_unawaited_bash_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec(
+        "lofi.bash({ cmd: 'sleep 0.01; mkdir marker' });",
+        &trusted_ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!res.has_returned_value());
+    assert!(res.errors.is_empty(), "{:?}", res.errors);
+    assert!(dir.path().join("marker").is_dir());
+}
+
+#[tokio::test]
+async fn exec_reports_unawaited_bash_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec(
+        "lofi.bash({ cmd: 'exit 7' });",
+        &trusted_ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!res.has_returned_value());
+    assert_eq!(res.errors.len(), 1);
+    assert_eq!(res.errors[0]["tool"], json!("bash"));
+    assert_eq!(res.errors[0]["result"]["ok"], json!(false));
+    assert_eq!(res.errors[0]["result"]["code"], json!(7));
+    assert_eq!(res.errors[0]["result"]["status"], json!("exited"));
+}
+
+#[tokio::test]
+async fn exec_preserves_unawaited_failure_when_logs_fill_result_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = ExecOptions {
+        max_value_bytes: 1024,
+        ..ExecOptions::default()
+    };
+    let res = exec(
+        "print('x'.repeat(2048)); lofi.bash({ cmd: 'exit 7' });",
+        &trusted_ctx(dir.path()),
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.errors[0]["tool"], json!("bash"));
+    assert_eq!(res.errors[0]["result"]["code"], json!(7));
+    assert!(res.value_truncated);
+}
+
+#[tokio::test]
+async fn exec_reports_unawaited_rejected_tool_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec(
+        "lofi.bash('echo hi');",
+        &trusted_ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(res.errors.len(), 1);
+    assert_eq!(res.errors[0]["tool"], json!("bash"));
+    assert!(res.errors[0]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("missing 'cmd'")));
+}
+
+#[tokio::test]
 async fn exec_bash_read_pages_bash_log() {
     let dir = tempfile::tempdir().unwrap();
     let src = "const r = await lofi.bash({ cmd: 'for i in $(seq 1 5000); do echo \"output line number $i with some padding text to make it longer\"; done' }); return r.output;";
@@ -447,13 +540,20 @@ async fn write_and_edit_emit_written_content_as_result() {
 }
 
 #[tokio::test]
-async fn exec_returns_undefined_as_null() {
+async fn exec_distinguishes_implicit_undefined_from_null() {
     let dir = tempfile::tempdir().unwrap();
     let res = exec("print('hi');", &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
+    assert!(!res.has_returned_value());
     assert_eq!(res.value, Value::Null);
     assert!(res.logs.contains("hi"));
+
+    let res = exec("return null;", &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert!(res.has_returned_value());
+    assert_eq!(res.value, Value::Null);
 }
 
 #[tokio::test]
@@ -507,8 +607,9 @@ async fn job_spawn_returns_immediately_and_completes() {
     assert_eq!(spawn.value["state"], json!("running"));
     let id = spawn.value["id"].as_str().unwrap().to_string();
 
+    wait_for_job(&cx, &id).await;
     let src = format!(
-        "const s = await lofi.jobWait({{ id: '{id}' }}); return {{ state: s.state, code: s.exitCode }};"
+        "const s = await lofi.jobStatus({{ id: '{id}' }}); return {{ state: s.state, code: s.exitCode }};"
     );
     let done = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(done.value["state"], json!("completed"));
@@ -554,12 +655,13 @@ async fn job_completion_keeps_its_spawn_owner() {
         })
     });
     exec(
-        &format!("return await lofi.jobWait({{ id: '{id}' }});"),
+        &format!("return await lofi.jobStatus({{ id: '{id}' }});"),
         &second,
         &ExecOptions::default(),
     )
     .await
     .unwrap();
+    wait_for_job(&first, id).await;
 
     assert_eq!(
         first_finished.lock().unwrap().as_slice(),
@@ -589,14 +691,19 @@ async fn job_read_pages_output_over_a_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
-    let src = r#"
-        const s = await lofi.jobSpawn({ cmd: 'printf \"l1\\nl2\\nl3\\n\"' });
-        await lofi.jobWait({ id: s.id });
-        const p1 = await lofi.jobRead({ id: s.id, limit: 3 });
-        const p2 = await lofi.jobRead({ id: s.id, cursor: p1.cursor });
-        return { a: p1.output, b: p2.output, done: p2.done };
-    "#;
-    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let spawned = exec(
+        r#"return await lofi.jobSpawn({ cmd: 'printf "l1\nl2\nl3\n"' });"#,
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let id = spawned.value["id"].as_str().unwrap();
+    wait_for_job(&cx, id).await;
+    let src = format!(
+        "const p1 = await lofi.jobRead({{ id: '{id}', limit: 3 }}); const p2 = await lofi.jobRead({{ id: '{id}', cursor: p1.cursor }}); return {{ a: p1.output, b: p2.output, done: p2.done }};"
+    );
+    let res = exec(&src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value["a"], json!("l1\n"));
     assert_eq!(res.value["b"], json!("l2\nl3\n"));
     assert_eq!(res.value["done"], json!(true));
@@ -607,30 +714,38 @@ async fn job_screen_returns_the_current_parsed_tty_rows() {
     let dir = tempfile::tempdir().unwrap();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = lofi_code::tools::JobRegistry::new();
-    let src = r#"
-        const job = await lofi.jobSpawn({
-            cmd: "printf 'old\\033[2K\\rnew'",
-            tty: true,
-            cols: 12,
-            rows: 2,
-        });
-        await lofi.jobWait({ id: job.id });
-        return await lofi.jobScreen({ id: job.id });
-    "#;
-    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let spawned = exec(
+        r#"return await lofi.jobSpawn({ cmd: "printf 'old\\033[2K\\rnew'", tty: true, cols: 12, rows: 2 });"#,
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let id = spawned.value["id"].as_str().unwrap();
+    wait_for_job(&cx, id).await;
+    let res = exec(
+        &format!("return await lofi.jobScreen({{ id: '{id}' }});"),
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(res.value["cols"], json!(12));
     assert_eq!(res.value["rows"], json!(2));
     assert_eq!(res.value["lines"], json!(["new", ""]));
 }
 
 #[tokio::test]
-async fn job_wait_with_timeout_returns_running() {
+async fn job_wait_is_not_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let mut cx = trusted_ctx(dir.path());
-    cx.jobs = lofi_code::tools::JobRegistry::new();
-    let src = "const s = await lofi.jobSpawn({ cmd: 'sleep 30' }); const w = await lofi.jobWait({ id: s.id, timeoutMs: 50 }); await lofi.jobKill({ id: s.id }); return w.state;";
-    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
-    assert_eq!(res.value, json!("running"));
+    let res = exec(
+        "return typeof lofi.jobWait;",
+        &trusted_ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!("undefined"));
 }
 
 #[tokio::test]
@@ -659,8 +774,14 @@ async fn job_completion_queues_a_notice() {
     let jobs = lofi_code::tools::JobRegistry::new();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = jobs.clone();
-    let src = "const s = await lofi.jobSpawn({ cmd: 'exit 3' }); await lofi.jobWait({ id: s.id }); return s.id;";
-    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let spawned = exec(
+        "return await lofi.jobSpawn({ cmd: 'exit 3' });",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
     let notices = jobs.drain_notices();
     assert_eq!(notices.len(), 1, "notices: {notices:?}");
     assert!(notices[0].contains("failed"), "notice: {}", notices[0]);
@@ -690,8 +811,14 @@ async fn job_terminal_queues_a_notice() {
     let jobs = lofi_code::tools::JobRegistry::new();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = jobs.clone();
-    let src = "const s = await lofi.jobSpawn({ cmd: 'exit 0' }); await lofi.jobNotify({ id: s.id, intervalMs: 5000 }); await lofi.jobWait({ id: s.id }); return s.id;";
-    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let spawned = exec(
+        "const s = await lofi.jobSpawn({ cmd: 'sleep 0.1' }); await lofi.jobNotify({ id: s.id, intervalMs: 5000 }); return s;",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
     let notices = jobs.drain_notices();
     assert_eq!(notices.len(), 1, "terminal notices: {notices:?}");
 }
@@ -747,8 +874,14 @@ async fn job_notify_disabled_suppresses_notice() {
     let jobs = lofi_code::tools::JobRegistry::new();
     let mut cx = trusted_ctx(dir.path());
     cx.jobs = jobs.clone();
-    let src = "const s = await lofi.jobSpawn({ cmd: 'true' }); await lofi.jobNotify({ id: s.id, enabled: false }); await lofi.jobWait({ id: s.id }); return s.id;";
-    exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    let spawned = exec(
+        "const s = await lofi.jobSpawn({ cmd: 'sleep 0.1' }); await lofi.jobNotify({ id: s.id, enabled: false }); return s;",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
     assert!(jobs.drain_notices().is_empty());
 }
 

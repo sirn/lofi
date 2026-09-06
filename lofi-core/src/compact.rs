@@ -393,7 +393,7 @@ fn normalize(
                     {
                         out.push(CompactBlock::ToolResult {
                             id: tool_use_id.clone(),
-                            text: exec_result_display(content, *is_error),
+                            text: crate::agent::exec_result_display(content, *is_error),
                             is_error: *is_error,
                         });
                     }
@@ -457,7 +457,7 @@ fn normalize(
                     {
                         out.push(CompactBlock::ToolResult {
                             id: tool_use_id.clone(),
-                            text: exec_result_display(content, *is_error),
+                            text: crate::agent::exec_result_display(content, *is_error),
                             is_error: *is_error,
                         });
                     }
@@ -467,25 +467,6 @@ fn normalize(
         }
     }
     out
-}
-
-fn exec_result_display(content: &str, is_error: bool) -> String {
-    if is_error {
-        return content.to_string();
-    }
-    serde_json::from_str::<serde_json::Value>(content)
-        .ok()
-        .and_then(|v| v.get("value").cloned())
-        .map_or_else(
-            || content.to_string(),
-            |v| {
-                if let Some(s) = v.as_str() {
-                    s.to_string()
-                } else {
-                    serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-                }
-            },
-        )
 }
 
 const SEPARATOR: &str = "\n\n---\n\n";

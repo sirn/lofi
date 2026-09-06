@@ -1577,18 +1577,28 @@ impl Agent {
             // text payload, leaving a compact `bytes` count in the transcript.
             let (content, is_error, result_images) = match outcome {
                 Ok(r) => {
+                    let has_value = r.has_returned_value();
                     let mut value = r.value;
                     match upgrade_exec_image(&mut value, r.image, &self.image) {
                         Ok(img) => {
-                            let mut content = serde_json::to_string(&serde_json::json!({
-                                "value": value,
-                                "logs": r.logs,
-                            }))
-                            .unwrap_or_else(|_| "{}".to_string());
-                            if r.value_truncated {
-                                content.push_str("\n[output truncated at sandbox boundary]");
+                            let is_error = !r.errors.is_empty();
+                            let mut output = serde_json::Map::new();
+                            output.insert("ok".into(), serde_json::Value::Bool(!is_error));
+                            if is_error {
+                                output.insert("errors".into(), serde_json::Value::Array(r.errors));
                             }
-                            (cap_exec_result(&content), false, img)
+                            if has_value {
+                                output.insert("value".into(), value);
+                            }
+                            if !r.logs.is_empty() {
+                                output.insert("logs".into(), serde_json::Value::String(r.logs));
+                            }
+                            if r.value_truncated {
+                                output.insert("truncated".into(), serde_json::Value::Bool(true));
+                            }
+                            let content = serde_json::to_string(&output)
+                                .unwrap_or_else(|_| "{\"ok\":true}".to_string());
+                            (cap_exec_result(&content), is_error, img)
                         }
                         Err(error) => (cap_exec_result(&error.to_string()), true, None),
                     }

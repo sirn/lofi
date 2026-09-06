@@ -51,7 +51,7 @@ The `code` is parsed as TypeScript, stripped of types with swc, wrapped in an as
 
 - File and search: `read`, `ls`, `find`, `grep`, `write`, `edit`, and `patch`.
 - Foreground shell: `bash`.
-- Background jobs: `jobSpawn`, `jobStatus`, `jobList`, `jobRead`, `jobScreen`, `jobWait`, `jobKill`, `jobNotify`, `jobType`, and `jobKeyPress`.
+- Background jobs: `jobSpawn`, `jobStatus`, `jobList`, `jobRead`, `jobScreen`, `jobKill`, `jobNotify`, `jobType`, and `jobKeyPress`.
 - Session recovery: `recall` and `result`. They report unavailability without a persisted session.
 - Skills: `skills` and `skill`.
 - Embedded reference: `docs` and `docsSearch`.
@@ -61,7 +61,7 @@ The precise arguments, structured return values, paging limits, and safety caps 
 
 Read-only file tools accept workspace-relative paths and selected absolute paths under explicitly registered read roots, such as the session temporary directory and skill directories. Write, edit, and patch operations remain confined to the workspace root and reject path escapes and symlink leaves. `bash` and background jobs run through `sh -c` with their working directory pinned to the workspace root. The host applies shell policy, environment stripping, output redaction, cancellation, and process-group cleanup. `bash` uses the configured `[truncate]` limits and links to a pageable temporary log when its visible tail is truncated. Background job logs are read incrementally with `jobRead`.
 
-`print(...)` appends to a bounded log buffer instead of writing to host stdout. The async IIFE's returned value and the log buffer become the `exec` result sent back to the model. QuickJS heap, stack, synchronous CPU time, converted values, and printed logs are bounded; awaited native tools use their own limits and do not consume the guest's synchronous CPU budget.
+`print(...)` appends to a bounded log buffer instead of writing to host stdout. A successful `exec` sends a JSON object back to the model with `ok: true`, optional `logs`, and `value` only when the program explicitly returns a value. Thus, a program without `return` reports success without a misleading `null`; an explicit `return null` keeps `value: null`. Every foreground `lofi` call is tracked and drained before the sandbox exits. A rejected call or a result with `ok: false` sets the parent result to `ok: false` and adds a structured `errors` entry, even when the program omits `await`. `jobSpawn` is the explicit way to start work that outlives the call that creates it. QuickJS heap, stack, synchronous CPU time, converted values, and printed logs are bounded; awaited native tools use their own limits and do not consume the guest's synchronous CPU budget.
 
 ## Lint strictness
 

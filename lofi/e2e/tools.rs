@@ -121,6 +121,53 @@ fn openai_responses_executes_tool_call_and_returns_function_output() {
 }
 
 #[test]
+fn openai_responses_reports_unawaited_nested_tool_failure() {
+    let server = MockServer::start(vec![
+        responses_tool_response(
+            "responses-unawaited-failure",
+            r#"lofi.bash({ cmd: "exit 7" });"#,
+        ),
+        responses_response(
+            "responses failure thinking",
+            "responses failure final answer",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    tui.submit("run unawaited failing command");
+    tui.wait_for("responses failure final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let output = second["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .and_then(|item| item["output"].as_str())
+        .expect("exec result in the second provider request");
+    let result: serde_json::Value = serde_json::from_str(output).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["errors"][0]["tool"], "bash");
+    assert_eq!(result["errors"][0]["result"]["code"], 7);
+
+    let events = fixture.events();
+    let block = events
+        .iter()
+        .filter(|event| event["type"] == "message" && event["role"] == "tool")
+        .flat_map(|event| event["blocks"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "tool_result")
+        .expect("exec result in the transcript");
+    assert_eq!(block["is_error"], true);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(block["content"].as_str().unwrap()).unwrap(),
+        result
+    );
+}
+
+#[test]
 fn anthropic_executes_tool_call_and_returns_tool_result() {
     let server = MockServer::start(vec![
         anthropic_tool_response(

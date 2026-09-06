@@ -127,9 +127,8 @@ command runs `sh -c` from the workspace root in its own process group with
 the same shell policy, stripped environment, and output redaction as
 `lofi.bash`. Returns immediately.
 
-Prefer the default completion notification. Do not wait with `jobWait` or
-poll in a `bash` sleep loop unless the job result is required before the
-turn can continue.
+Use the default completion notification instead of polling for the job to
+finish. Inspect state and output with `jobStatus` and `jobRead`.
 
 **Parameters:**
 - `cmd` (string, required) — the shell command.
@@ -207,18 +206,6 @@ before sending more input.
 string per terminal row with trailing blank cells removed. Plain jobs return
 `{ ok: false, id, error }` because they have no terminal screen.
 
-## lofi.jobWait({ id, pattern?, idleMs?, timeoutMs? })
-
-Bounded wait for a job condition. With no condition, wait for the job to
-finish. Pass `pattern` to return when the output tail contains that text, or
-`idleMs` to return after the output stays unchanged for that long.
-`timeoutMs` bounds the wait. Waiting never writes to or cancels the job.
-
-**Returns:** `{ ok, id, matched, tail }` on a pattern match;
-`{ ok, id, idle }` after an idle period; the `jobStatus` shape when the job
-finishes; the current status with `timedOut: true` when a condition times out;
-or the current status with `cancelled: true` after user cancellation.
-
 ## lofi.jobKill({ id, reason? })
 
 Cancel a job: SIGKILL its entire process group (children and grandchildren)
@@ -237,8 +224,7 @@ surfaces live).
 - `id` (string, required) — job id from `jobSpawn`.
 - `enabled` (boolean, optional) — master switch. Defaults to `true` when
   omitted: calling `jobNotify` at all means "notify me". `enabled: false`
-  silences the job (including the terminal notice), useful after collecting
-  a result with `jobWait`.
+  silences the job, including the terminal notice.
 - `intervalMs` (number, optional) — turn on periodic progress pings while
   the job runs. Clamped to a 5000 ms floor. When omitted and the job has no
   interval yet, enabling sets it to the 30000 ms default.
@@ -394,6 +380,11 @@ return { files: files.entries, len: a.content.length };
 `print(...)` appends to a log buffer returned in the tool result's `logs`
 field. Use `print` for progress/scratch output; `return` the final,
 decision-relevant value. Both fields are sent back to you.
+
+Await every foreground `lofi` call. The sandbox drains omitted promises
+before it exits and reports rejected calls or results with `ok: false` in the
+parent result's `errors` field. Such failures make the parent result fail.
+Use `jobSpawn` when work must continue in the background.
 
 ## Compacted sessions
 
