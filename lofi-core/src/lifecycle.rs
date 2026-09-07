@@ -82,6 +82,7 @@ impl AgentLifecycle {
             return Ok(false);
         }
         history.push(Message {
+            origin: None,
             role: Role::System,
             blocks: vec![ContentBlock::Text {
                 text: system_prompt.to_string(),
@@ -245,6 +246,7 @@ impl AgentLifecycle {
             new_history.insert(
                 0,
                 Message {
+                    origin: None,
                     role: Role::System,
                     blocks: vec![ContentBlock::Text {
                         text: system_prompt.to_string(),
@@ -391,6 +393,9 @@ fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Re
 fn message_heap_bytes(message: &Message) -> usize {
     message.blocks.capacity() * std::mem::size_of::<ContentBlock>()
         + message.blocks.iter().map(content_heap_bytes).sum::<usize>()
+        + message.origin.as_ref().map_or(0, |origin| {
+            origin.provider.capacity() + origin.model.capacity()
+        })
 }
 
 fn content_heap_bytes(block: &ContentBlock) -> usize {
@@ -515,6 +520,7 @@ mod tests {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role,
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
@@ -569,6 +575,7 @@ mod tests {
         assert!(!lifecycle.seed_system("").unwrap());
         lifecycle
             .push_message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: "hi".into() }],
                 kind: PromptKind::default(),
@@ -664,6 +671,7 @@ mod tests {
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
         let kept = vec![
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text {
                     text: "kept prompt".into(),
@@ -671,6 +679,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: "kept reply".into(),
@@ -696,6 +705,7 @@ mod tests {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::Message(Message {
+                    origin: None,
                     role: Role::User,
                     blocks: vec![ContentBlock::Text {
                         text: "failed prompt".into(),
@@ -707,6 +717,7 @@ mod tests {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::Message(Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![ContentBlock::Text {
                         text: "failed partial".into(),
@@ -759,6 +770,7 @@ mod tests {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::Message(Message {
+                    origin: None,
                     role: Role::User,
                     blocks: vec![ContentBlock::Text { text: "go".into() }],
                     kind: PromptKind::default(),
@@ -768,6 +780,7 @@ mod tests {
                 id: String::new(),
                 parent_id: None,
                 kind: SessionEventKind::Message(Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![ContentBlock::Text {
                         text: "partial".into(),
@@ -813,6 +826,7 @@ mod tests {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role,
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
@@ -880,6 +894,7 @@ mod tests {
         let text = String::with_capacity(4_096);
         lifecycle
             .push_message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text { text }],
                 kind: PromptKind::default(),

@@ -90,6 +90,7 @@ impl store::SessionCursor {
     /// Propagates transcript serialization and I/O failures.
     pub fn record_unrun_prompt(&self, prompt: &str, kind: lofi_types::PromptKind) -> Result<()> {
         let message = Message {
+            origin: None,
             role: Role::User,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: prompt.to_string(),
@@ -451,6 +452,7 @@ mod tests {
 
     fn user_msg(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
             kind: PromptKind::default(),
@@ -459,6 +461,7 @@ mod tests {
 
     fn assistant_text(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
             kind: PromptKind::default(),
@@ -544,6 +547,7 @@ mod tests {
         let messages = vec![
             user_msg("go"),
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::ToolUse {
                     id: "t1".into(),
@@ -553,6 +557,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),

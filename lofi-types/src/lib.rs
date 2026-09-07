@@ -276,7 +276,7 @@ pub enum ContentBlock {
     /// signature, Responses `encrypted_content`, or — on chat-completions
     /// plaintext reasoning streams — the delta field name the trace arrived
     /// under so the next request can replay it to the same key. `redacted`
-    /// marks Anthropic redacted thinking: text is a placeholder, signature
+    /// marks Anthropic redacted thinking: text is a placeholder, and signature
     /// is the opaque blob returned as `redacted_thinking.data`.
     Thinking {
         text: String,
@@ -330,15 +330,79 @@ mod base64_bytes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Message {
     pub role: Role,
     pub blocks: Vec<ContentBlock>,
+    /// Provider, API, and model that produced this assistant message.
+    /// Provider-specific replay metadata in its blocks is valid only when
+    /// this identity matches the target model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ModelOrigin>,
     /// Origin of a user-role prompt. Distinguishes typed input from
     /// app-injected notices so replay does not need a separate marker
     /// event. Defaults to `User` so older transcripts remain loadable.
     #[serde(default, skip_serializing_if = "is_default_prompt_kind")]
     pub kind: PromptKind,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ContentBlockWire {
+            #[serde(flatten)]
+            block: ContentBlock,
+            #[serde(default)]
+            origin: Option<serde_json::Value>,
+        }
+
+        #[derive(Deserialize)]
+        struct MessageWire {
+            role: Role,
+            blocks: Vec<ContentBlockWire>,
+            #[serde(default)]
+            origin: Option<ModelOrigin>,
+            #[serde(default)]
+            kind: PromptKind,
+        }
+
+        let wire = MessageWire::deserialize(deserializer)?;
+        // Legacy thinking blocks can carry per-block provenance. Lift it only
+        // when every block agrees because message provenance covers all blocks.
+        let origin = if let Some(origin) = wire.origin {
+            Some(origin)
+        } else {
+            let origins = wire
+                .blocks
+                .iter()
+                .filter(|block| matches!(block.block, ContentBlock::Thinking { .. }))
+                .map(|block| {
+                    block
+                        .origin
+                        .clone()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(serde::de::Error::custom)
+                })
+                .collect::<Result<Vec<Option<ModelOrigin>>, D::Error>>()?;
+            origins.first().and_then(|first| {
+                first
+                    .as_ref()
+                    .filter(|_| origins.iter().all(|origin| origin == first))
+                    .cloned()
+            })
+        };
+        let blocks = wire.blocks.into_iter().map(|block| block.block).collect();
+        Ok(Self {
+            role: wire.role,
+            blocks,
+            origin,
+            kind: wire.kind,
+        })
+    }
 }
 
 // `skip_serializing_if` requires a `&T` signature; `PromptKind` is `Copy` but
@@ -353,6 +417,31 @@ fn is_default_prompt_kind(kind: &PromptKind) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Identity of the model that produced an assistant message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOrigin {
+    pub provider: String,
+    pub model: String,
+    pub api: Api,
+}
+
+impl ModelOrigin {
+    #[must_use]
+    pub fn matches(&self, model: &Model) -> bool {
+        self.provider == model.provider && self.model == model.id && self.api == model.api
+    }
+}
+
+impl From<&Model> for ModelOrigin {
+    fn from(model: &Model) -> Self {
+        Self {
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            api: model.api,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1844,6 +1933,11 @@ mod tests {
             signature: None,
             redacted: false,
         });
+        round_trip(&ContentBlock::Thinking {
+            text: "summary".to_string(),
+            signature: Some("encrypted".to_string()),
+            redacted: false,
+        });
         round_trip(&ContentBlock::Image {
             bytes: vec![0xFF, 0xD8, 0xFF, 0xD9],
             media_type: "image/jpeg".to_string(),
@@ -1915,6 +2009,7 @@ mod tests {
     #[test]
     fn message_round_trips() {
         round_trip(&Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "hello".to_string(),
@@ -1923,6 +2018,7 @@ mod tests {
         });
         // Default-User kind must skip in the wire form; explicit-Notice must round-trip.
         let user_json = serde_json::to_value(&Message {
+            origin: None,
             role: Role::User,
             blocks: vec![],
             kind: PromptKind::User,
@@ -1930,6 +2026,7 @@ mod tests {
         .unwrap();
         assert!(user_json.get("kind").is_none());
         let notice_json = serde_json::to_value(&Message {
+            origin: None,
             role: Role::User,
             blocks: vec![],
             kind: PromptKind::Notice,
@@ -1941,6 +2038,88 @@ mod tests {
             parsed.kind,
             PromptKind::User,
             "absent kind defaults to User"
+        );
+    }
+
+    #[test]
+    fn message_lifts_legacy_thinking_origin() {
+        let parsed: Message = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "blocks": [{
+                "type": "thinking",
+                "text": "summary",
+                "signature": "encrypted",
+                "origin": {
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "api": "openai_responses"
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parsed.origin,
+            Some(ModelOrigin {
+                provider: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                api: Api::OpenAiResponses,
+            })
+        );
+        let json = serde_json::to_value(parsed).unwrap();
+        assert!(json["blocks"][0].get("origin").is_none());
+    }
+
+    #[test]
+    fn message_does_not_lift_conflicting_legacy_thinking_origins() {
+        let parsed: Message = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "blocks": [
+                {
+                    "type": "thinking",
+                    "text": "first",
+                    "signature": "encrypted-1",
+                    "origin": {
+                        "provider": "openai",
+                        "model": "gpt-5",
+                        "api": "openai_responses"
+                    }
+                },
+                {
+                    "type": "thinking",
+                    "text": "second",
+                    "signature": "encrypted-2",
+                    "origin": {
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "api": "openai_responses"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.origin, None);
+    }
+
+    #[test]
+    fn message_ignores_retired_origin_on_non_thinking_blocks() {
+        let parsed: Message = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "blocks": [{
+                "type": "text",
+                "text": "answer",
+                "origin": "not a model origin"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.origin, None);
+        assert_eq!(
+            parsed.blocks,
+            vec![ContentBlock::Text {
+                text: "answer".to_string()
+            }]
         );
     }
 

@@ -19,8 +19,9 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
     out
 }
 
-#[must_use]
-pub fn to_anthropic_request_parts(messages: &[Message]) -> (Option<String>, Vec<Value>) {
+fn to_anthropic_request_parts<'a>(
+    messages: impl IntoIterator<Item = &'a Message>,
+) -> (Option<String>, Vec<Value>) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
@@ -137,6 +138,7 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
             text: _,
             signature,
             redacted: true,
+            ..
         } => match signature.as_deref().filter(|data| !data.is_empty()) {
             Some(data) => json!({
                 "type": "redacted_thinking",
@@ -172,7 +174,11 @@ pub(crate) struct AnthropicMessagesIr;
 impl ProtocolIr for AnthropicMessagesIr {
     type State = AnthropicMapperState;
 
-    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+    fn build_request_inner<'a>(
+        model: &Model,
+        messages: impl Iterator<Item = &'a Message>,
+        tools: &[ToolSchema],
+    ) -> Value {
         build_anthropic_request(model, messages, tools)
     }
 
@@ -198,7 +204,11 @@ impl ProtocolIr for AnthropicMessagesIr {
 }
 
 #[must_use]
-fn build_anthropic_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+fn build_anthropic_request<'a>(
+    model: &Model,
+    messages: impl IntoIterator<Item = &'a Message>,
+    tools: &[ToolSchema],
+) -> Value {
     let (system, mut msgs) = to_anthropic_request_parts(messages);
     add_conversation_cache_breakpoint(&mut msgs);
     let mut req = json!({
@@ -510,6 +520,7 @@ mod tests {
     fn request_pulls_system_to_top_level() {
         let msgs = [
             Message {
+                origin: None,
                 role: Role::System,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "sys".to_string(),
@@ -517,6 +528,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "hi".to_string(),
@@ -557,6 +569,7 @@ mod tests {
     fn request_marks_tools_system_and_conversation_for_caching() {
         let msgs = [
             Message {
+                origin: None,
                 role: Role::System,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "stable instructions".to_string(),
@@ -564,6 +577,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "first turn".to_string(),
@@ -571,6 +585,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "first answer".to_string(),
@@ -578,6 +593,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "latest turn".to_string(),
@@ -607,6 +623,7 @@ mod tests {
     #[test]
     fn tool_result_with_images_serializes_content_as_parts() {
         let msgs = [Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![lofi_types::ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
@@ -641,6 +658,7 @@ mod tests {
     #[test]
     fn unsigned_thinking_is_dropped_from_the_replay() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 lofi_types::ContentBlock::Thinking {
@@ -663,6 +681,7 @@ mod tests {
     #[test]
     fn redacted_thinking_without_data_is_dropped_from_the_replay() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::Thinking {
                 text: String::new(),
@@ -679,6 +698,7 @@ mod tests {
     #[test]
     fn empty_text_blocks_are_dropped_from_the_replay() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 lofi_types::ContentBlock::Text {
@@ -699,6 +719,7 @@ mod tests {
     #[test]
     fn tool_use_with_null_input_serializes_an_empty_object() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::ToolUse {
                 id: "t1".to_string(),
@@ -714,6 +735,7 @@ mod tests {
     #[test]
     fn tool_result_without_images_stays_string() {
         let msgs = [Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![lofi_types::ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
@@ -732,6 +754,7 @@ mod tests {
     fn conversation_breakpoint_marks_terminal_tool_result() {
         let msgs = [
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![lofi_types::ContentBlock::ToolUse {
                     id: "tool-1".to_string(),
@@ -741,6 +764,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![lofi_types::ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
@@ -766,6 +790,7 @@ mod tests {
     fn conversation_breakpoint_is_only_on_terminal_user_message() {
         let msgs = [
             Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: "do not mark an older user message".to_string(),
@@ -773,6 +798,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![lofi_types::ContentBlock::Thinking {
                     text: "reasoning".to_string(),
@@ -800,6 +826,7 @@ mod tests {
         // orphaned `tool_use` with 400 "did not find any tool_result blocks".
         let msgs = [
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![lofi_types::ContentBlock::ToolUse {
                     id: "tool-1".to_string(),
@@ -809,6 +836,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![lofi_types::ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
@@ -962,6 +990,7 @@ mod tests {
     #[test]
     fn user_image_block_serializes_as_base64_source() {
         let msgs = [Message {
+            origin: None,
             role: Role::User,
             blocks: vec![
                 lofi_types::ContentBlock::Text {
@@ -1017,6 +1046,7 @@ mod tests {
     #[test]
     fn redacted_thinking_replays_as_redacted_block() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::Thinking {
                 text: "[Reasoning redacted]".to_string(),
@@ -1040,6 +1070,7 @@ mod tests {
     #[test]
     fn non_redacted_thinking_remains_a_signed_thinking_block() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::Thinking {
                 text: "let me look".to_string(),

@@ -129,6 +129,7 @@ async fn evaluate_command(
     }
 
     let messages = vec![Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::Text { text: prompt }],
         kind: lofi_types::PromptKind::User,

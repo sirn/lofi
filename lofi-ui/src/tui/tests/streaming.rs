@@ -300,6 +300,7 @@ fn compact_keeps_file_backed_turn_content_visible() {
         id: String::new(),
         parent_id: None,
         kind: SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "prompt 1".to_string(),
@@ -312,6 +313,7 @@ fn compact_keeps_file_backed_turn_content_visible() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: format!("agent round {i}"),

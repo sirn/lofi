@@ -72,6 +72,7 @@ const PER_EVENT_OVERHEAD: usize = 64;
 /// token-limit stop, nudging the model to pick up where it was cut off.
 const TRUNCATION_CONTINUATION_PROMPT: &str =
     "Your previous response was cut off at the token limit. Continue where you left off.";
+const THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained reasoning but no final answer. Continue the task and give the final answer.";
 const LOST_TOOL_CONTINUATION_PROMPT: &str = "Your tool call was not received. Continue the task by issuing the required tool call again. If no tool call is required, give the final answer.";
 const INTENT_CONTINUATION_PROMPT: &str = "Continue the task now. If the task is already complete, give the final answer. Do not only describe the next action.";
 

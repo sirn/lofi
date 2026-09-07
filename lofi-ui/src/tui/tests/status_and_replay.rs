@@ -241,6 +241,7 @@ fn footer_shows_ctx_after_usage() {
 #[test]
 fn thinking_timing_is_restored_from_transcript() {
     let assistant_with_thinking = Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![
             ContentBlock::Thinking {
@@ -385,6 +386,7 @@ fn turns_from_events_links_tool_results() {
     let messages = vec![
         user("run it"),
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 ContentBlock::Text {
@@ -399,6 +401,7 @@ fn turns_from_events_links_tool_results() {
             kind: PromptKind::default(),
         },
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
@@ -409,6 +412,7 @@ fn turns_from_events_links_tool_results() {
             kind: PromptKind::default(),
         },
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
@@ -434,6 +438,7 @@ fn turns_from_events_restores_timings() {
     let events = sev_chain([
         msg(user("run it")),
         msg(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: "t1".to_string(),
@@ -443,6 +448,7 @@ fn turns_from_events_restores_timings() {
             kind: PromptKind::default(),
         }),
         msg(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
@@ -453,6 +459,7 @@ fn turns_from_events_restores_timings() {
             kind: PromptKind::default(),
         }),
         msg(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
@@ -675,6 +682,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
     use lofi_types::{ContentBlock, SessionEvent, SessionEventKind};
 
     let exec_call_stub = |id: &str, eid: &str| Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![ContentBlock::ToolUse {
             id: id.to_string(),
@@ -684,6 +692,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         kind: PromptKind::default(),
     };
     let exec_result_stub = |id: &str, eid: &str| Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::ToolResult {
             tool_use_id: id.to_string(),
@@ -694,6 +703,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         kind: PromptKind::default(),
     };
     let exec_call_full = |id: &str| Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![ContentBlock::ToolUse {
             id: id.to_string(),
@@ -703,6 +713,7 @@ fn messages_from_events_reads_kept_tail_verbatim_on_resume() {
         kind: PromptKind::default(),
     };
     let exec_result_full = |id: &str, out: &str| Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::ToolResult {
             tool_use_id: id.to_string(),

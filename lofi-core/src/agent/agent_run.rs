@@ -263,6 +263,7 @@ impl Agent {
             let mut blocks = vec![ContentBlock::Text { text: user_prompt }];
             blocks.extend(attachments);
             Some(Message {
+                origin: None,
                 role: Role::User,
                 blocks,
                 kind: prompt_kind,
@@ -274,6 +275,7 @@ impl Agent {
         let mut starts_run = true;
         for notice in notices {
             let message = Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: notice }],
                 kind: lofi_types::PromptKind::Notice,
@@ -361,9 +363,8 @@ impl Agent {
         // The image-omit notice fires once per turn (on the first round),
         // not once per tool round.
         let mut omit_notice_sent = false;
-        // All automatic recovery paths share one per-turn budget so a broken
-        // provider template or repeated token cap cannot loop unattended.
-        // A round that made forward progress resets the budget.
+        // Terminal and loop recovery each get one attempt. A shared budget
+        // would let one failure mode disable recovery from the other.
         let mut auto_continued = false;
         let mut loop_recovered = false;
         let mut loop_detector = LoopDetector::default();
@@ -443,38 +444,45 @@ impl Agent {
                         cancelled = true;
                         break;
                     }
-                    let plan = handle_loop_detection(
+                    let terminal_prompt = terminal_recovery_prompt(&outcome, self.auto_continue);
+                    let mut plan = handle_loop_detection(
                         outcome.loop_detail.as_deref(),
                         outcome.interrupted_thinking_index,
                         &mut loop_recovered,
                     );
-                    // What streamed must reach the transcript before it
-                    // leaves the model history.
-                    if let Some((index, detail)) = plan.removal {
-                        if let Err(error) = record_round_removal(
-                            recorder.as_mut(),
-                            messages,
-                            prev_len,
-                            1,
-                            &stats,
-                            &tx,
-                            &detail,
-                        )
-                        .await
-                        {
-                            err = Some(error);
-                            break;
-                        }
-                        messages.remove(index);
+                    if plan.is_none() && finished {
+                        let thinking_only_prompt = (outcome.stop_reason
+                            != Some(lofi_types::StopReason::Other))
+                        .then_some(terminal_prompt.unwrap_or(THINKING_ONLY_CONTINUATION_PROMPT));
+                        plan = handle_thinking_only_stop(
+                            outcome.thinking_only_index,
+                            thinking_only_prompt,
+                            &mut auto_continued,
+                        );
                     }
-                    // Loop handling can replace an interrupted, unsigned
-                    // reasoning message with a provider-valid recovery prompt.
-                    // Persist and surface that prompt only after the correction
-                    // reaches its final form.
-                    if let Some(message) = plan.recovery {
+                    if let Some(plan) = plan {
+                        // Transcript durability must precede removal from model history.
+                        if let Some((index, detail)) = plan.removal {
+                            if let Err(error) = record_round_removal(
+                                recorder.as_mut(),
+                                messages,
+                                prev_len,
+                                1,
+                                &stats,
+                                &tx,
+                                &detail,
+                            )
+                            .await
+                            {
+                                err = Some(error);
+                                break;
+                            }
+                            messages.remove(index);
+                        }
+                        // An orphan reasoning item must not enter the next provider request.
                         if !append_prompt(
                             messages,
-                            message,
+                            plan.notice,
                             false,
                             recorder.as_mut(),
                             prev_len,
@@ -486,48 +494,24 @@ impl Agent {
                             detached = true;
                             break;
                         }
-                    } else {
-                        commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx)
-                            .await;
-                    }
-                    match plan.action {
-                        LoopAction::Continue => continue,
-                        LoopAction::Stop => {
-                            if tx.is_closed() {
-                                detached = true;
-                            } else {
-                                finished_normally = true;
+                        match plan.action {
+                            RecoveryAction::Continue => continue,
+                            RecoveryAction::Stop => {
+                                if tx.is_closed() {
+                                    detached = true;
+                                } else {
+                                    finished_normally = true;
+                                }
+                                break;
                             }
-                            break;
                         }
-                        LoopAction::None => {}
                     }
+                    commit_progress(recorder.as_mut(), &messages[prev_len..], &stats, &tx).await;
                     if finished {
-                        let recovery =
-                            if outcome.stop_reason == Some(lofi_types::StopReason::MaxTokens) {
-                                Some(TRUNCATION_CONTINUATION_PROMPT)
-                            } else if self.auto_continue.lost_tool_call
-                                && outcome.stop_reason == Some(lofi_types::StopReason::ToolUse)
-                            {
-                                Some(LOST_TOOL_CONTINUATION_PROMPT)
-                            } else if self.auto_continue.intent
-                                && outcome.stop_reason == Some(lofi_types::StopReason::EndTurn)
-                                && outcome.announced_tool_intent
-                            {
-                                Some(INTENT_CONTINUATION_PROMPT)
-                            } else {
-                                None
-                            };
                         if !auto_continued {
-                            if let Some(prompt) = recovery {
+                            if let Some(prompt) = terminal_prompt {
                                 auto_continued = true;
-                                let message = Message {
-                                    role: Role::User,
-                                    blocks: vec![ContentBlock::Text {
-                                        text: prompt.to_string(),
-                                    }],
-                                    kind: lofi_types::PromptKind::Notice,
-                                };
+                                let message = notice_message(prompt);
                                 if !append_prompt(
                                     messages,
                                     message,
@@ -838,6 +822,7 @@ impl Agent {
         }
         let mut request = Vec::with_capacity(messages.len() + 1);
         request.push(Message {
+            origin: None,
             role: Role::System,
             blocks: vec![ContentBlock::Text {
                 text: self.system_prompt.clone(),
@@ -1200,7 +1185,8 @@ impl Agent {
             // terminal outcome decides context semantics: failures
             // are rolled back, while explicit user cancellation retains the
             // partial assistant message.
-            let partial = assembler.finish();
+            let mut partial = assembler.finish();
+            stamp_message_origin(&mut partial, &model);
             if !partial.blocks.is_empty() {
                 messages.push(partial);
             }
@@ -1222,7 +1208,9 @@ impl Agent {
                 std::collections::HashSet::new()
             };
         let assistant_index = messages.len();
-        messages.push(assembler.finish());
+        let mut assistant = assembler.finish();
+        stamp_message_origin(&mut assistant, &model);
+        messages.push(assistant);
         // Collect the requested tool uses, then end the borrow so the rest
         // of the round (and any orphaned-close on early exit) can mutate
         // `messages`.
@@ -1241,11 +1229,14 @@ impl Agent {
         };
 
         if tool_uses.is_empty() {
-            let announced_tool_intent = assistant_announces_tool_intent(&messages[assistant_index]);
+            let assistant = &messages[assistant_index];
+            let announced_tool_intent = assistant_announces_tool_intent(assistant);
             return Ok(RoundOutcome {
                 finished: true,
                 stop_reason: round_stop_reason,
                 announced_tool_intent,
+                thinking_only_index: assistant_is_thinking_only(assistant)
+                    .then_some(assistant_index),
                 interrupted_thinking_index: round_loop_detail.as_ref().map(|_| assistant_index),
                 loop_detail: round_loop_detail,
             });
@@ -1342,6 +1333,7 @@ impl Agent {
 
         let result_index = messages.len();
         messages.push(Message {
+            origin: None,
             role: Role::Tool,
             blocks: results,
             kind: lofi_types::PromptKind::User,
@@ -1356,6 +1348,7 @@ impl Agent {
             finished: false,
             stop_reason: round_stop_reason,
             announced_tool_intent: false,
+            thinking_only_index: None,
             loop_detail: round_loop_detail.or(tool_loop_detail),
             interrupted_thinking_index: None,
         })
@@ -1835,8 +1828,28 @@ struct RoundOutcome {
     finished: bool,
     stop_reason: Option<lofi_types::StopReason>,
     announced_tool_intent: bool,
+    thinking_only_index: Option<usize>,
     loop_detail: Option<String>,
     interrupted_thinking_index: Option<usize>,
+}
+
+fn terminal_recovery_prompt(
+    outcome: &RoundOutcome,
+    policy: lofi_types::AutoContinuePolicy,
+) -> Option<&'static str> {
+    if !outcome.finished {
+        return None;
+    }
+    match outcome.stop_reason {
+        Some(lofi_types::StopReason::MaxTokens) => Some(TRUNCATION_CONTINUATION_PROMPT),
+        Some(lofi_types::StopReason::ToolUse) if policy.lost_tool_call => {
+            Some(LOST_TOOL_CONTINUATION_PROMPT)
+        }
+        Some(lofi_types::StopReason::EndTurn) if policy.intent && outcome.announced_tool_intent => {
+            Some(INTENT_CONTINUATION_PROMPT)
+        }
+        _ => None,
+    }
 }
 
 fn tool_round_fingerprint(assistant: &Message, result: &Message) -> String {
@@ -1867,18 +1880,20 @@ fn tool_round_fingerprint(assistant: &Message, result: &Message) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn loop_recovery_message(detail: &str) -> Message {
+fn notice_message(text: impl Into<String>) -> Message {
     Message {
+        origin: None,
         role: Role::User,
-        blocks: vec![ContentBlock::Text {
-            text: format!("{LOOP_RECOVERY_PROMPT} Detection: {detail}"),
-        }],
+        blocks: vec![ContentBlock::Text { text: text.into() }],
         kind: lofi_types::PromptKind::Notice,
     }
 }
 
-enum LoopAction {
-    None,
+fn loop_recovery_message(detail: &str) -> Message {
+    notice_message(format!("{LOOP_RECOVERY_PROMPT} Detection: {detail}"))
+}
+
+enum RecoveryAction {
     Continue,
     Stop,
 }
@@ -1888,57 +1903,99 @@ fn recovery_round_exceeded(recovery_rounds: &mut usize) -> Option<Message> {
     if *recovery_rounds <= MAX_RECOVERY_ROUNDS {
         return None;
     }
-    Some(Message {
-        role: Role::User,
-        blocks: vec![ContentBlock::Text {
-            text: format!(
-            "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
-            ),
-        }],
-        kind: lofi_types::PromptKind::Notice,
-    })
+    Some(notice_message(format!(
+        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
+    )))
 }
 
-/// Plan for one detected loop, computed without touching history so the
-/// caller can arrange durability before the memory drop.
-struct LoopPlan {
-    action: LoopAction,
+struct RecoveryPlan {
+    action: RecoveryAction,
     removal: Option<(usize, String)>,
-    recovery: Option<Message>,
+    notice: Message,
 }
 
 fn handle_loop_detection(
     detail: Option<&str>,
     interrupted_thinking_index: Option<usize>,
     recovered: &mut bool,
-) -> LoopPlan {
-    let Some(detail) = detail else {
-        return LoopPlan {
-            action: LoopAction::None,
-            removal: None,
-            recovery: None,
-        };
-    };
+) -> Option<RecoveryPlan> {
+    let detail = detail?;
     if *recovered {
         let detail = format!("agent stopped after loop recovery failed: {detail}");
-        return LoopPlan {
-            action: LoopAction::Stop,
+        return Some(RecoveryPlan {
+            action: RecoveryAction::Stop,
             removal: interrupted_thinking_index.map(|index| (index, detail.clone())),
-            recovery: Some(Message {
-                role: Role::User,
-                blocks: vec![ContentBlock::Text { text: detail }],
-                kind: lofi_types::PromptKind::Notice,
-            }),
-        };
+            notice: notice_message(detail),
+        });
     }
     *recovered = true;
     let notice =
         format!("potential agent loop detected; requesting a different approach: {detail}");
-    LoopPlan {
-        action: LoopAction::Continue,
+    Some(RecoveryPlan {
+        action: RecoveryAction::Continue,
         removal: interrupted_thinking_index.map(|index| (index, notice)),
-        recovery: Some(loop_recovery_message(detail)),
+        notice: loop_recovery_message(detail),
+    })
+}
+
+fn handle_thinking_only_stop(
+    thinking_only_index: Option<usize>,
+    continuation_prompt: Option<&str>,
+    recovered: &mut bool,
+) -> Option<RecoveryPlan> {
+    let index = thinking_only_index?;
+    let (action, detail, prompt) = match (continuation_prompt, *recovered) {
+        (None, _) => (
+            RecoveryAction::Stop,
+            "discarding thinking-only response after terminal provider stop",
+            "Agent stopped because the provider ended generation before a final answer.",
+        ),
+        (Some(_), true) => (
+            RecoveryAction::Stop,
+            "discarding repeated thinking-only response after automatic continuation",
+            "Agent stopped after the continuation also produced reasoning without a final answer.",
+        ),
+        (Some(prompt), false) => {
+            *recovered = true;
+            (
+                RecoveryAction::Continue,
+                "discarding thinking-only response before automatic continuation",
+                prompt,
+            )
+        }
+    };
+    Some(RecoveryPlan {
+        action,
+        removal: Some((index, detail.to_string())),
+        notice: notice_message(prompt),
+    })
+}
+
+fn stamp_message_origin(message: &mut Message, model: &Model) {
+    message.origin = Some(lofi_types::ModelOrigin::from(model));
+}
+
+pub(super) fn assistant_is_thinking_only(message: &Message) -> bool {
+    let mut has_thinking = false;
+    let mut last_was_thinking = false;
+    for block in &message.blocks {
+        match block {
+            ContentBlock::Thinking {
+                text,
+                signature,
+                redacted,
+                ..
+            } => {
+                has_thinking |= *redacted || signature.is_some() || !text.trim().is_empty();
+                last_was_thinking = true;
+            }
+            ContentBlock::Text { text } if text.trim().is_empty() => last_was_thinking = false,
+            ContentBlock::PartSignature { .. } if last_was_thinking => has_thinking = true,
+            ContentBlock::PartSignature { .. } => {}
+            _ => return false,
+        }
     }
+    has_thinking
 }
 
 pub(super) fn assistant_announces_tool_intent(message: &Message) -> bool {
@@ -2050,6 +2107,7 @@ fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
         return;
     }
     messages.push(Message {
+        origin: None,
         role: Role::Tool,
         blocks: synthesized,
         kind: lofi_types::PromptKind::User,
@@ -2079,6 +2137,7 @@ fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
         .map(|m| Message {
+            origin: m.origin.clone(),
             role: m.role,
             kind: m.kind,
             blocks: m
@@ -2181,6 +2240,7 @@ mod tests {
 
     fn assistant_with_tool_use(id: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: id.to_string(),
@@ -2301,6 +2361,7 @@ mod tests {
         let mut messages = vec![
             assistant_with_tool_use("tool-1"),
             Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
@@ -2322,6 +2383,7 @@ mod tests {
     #[test]
     fn text_only_assistant_message_is_untouched() {
         let mut messages = vec![Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "partial text".to_string(),
@@ -2336,6 +2398,7 @@ mod tests {
     fn only_unanswered_tool_uses_are_closed() {
         let mut messages = vec![
             Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![
                     ContentBlock::ToolUse {
@@ -2352,6 +2415,7 @@ mod tests {
                 kind: PromptKind::default(),
             },
             Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool-1".to_string(),
@@ -2423,6 +2487,7 @@ mod tests {
     #[test]
     fn strip_image_blocks_replaces_images_with_text_markers() {
         let messages = vec![Message {
+            origin: None,
             role: Role::User,
             blocks: vec![
                 ContentBlock::Text {
@@ -2463,6 +2528,7 @@ mod tests {
     #[test]
     fn strip_image_blocks_downgrades_tool_result_images() {
         let messages = vec![Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
@@ -2497,6 +2563,7 @@ mod tests {
     #[test]
     fn strip_image_blocks_is_a_noop_without_images() {
         let messages = vec![Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "hi".to_string(),
@@ -2515,6 +2582,7 @@ mod tests {
             media_type: "image/jpeg".to_string(),
         };
         let messages = vec![Message {
+            origin: None,
             role: Role::User,
             blocks: vec![
                 ContentBlock::Text {
@@ -2539,6 +2607,7 @@ mod tests {
         };
         // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB budget.
         let over = vec![Message {
+            origin: None,
             role: Role::User,
             blocks: vec![image(7 * 1024 * 1024)],
             kind: PromptKind::default(),
@@ -2546,6 +2615,7 @@ mod tests {
         assert!(image_payload_bytes(&over) > MAX_REQUEST_IMAGE_BYTES);
         // 1 MiB raw stays well under.
         let under = vec![Message {
+            origin: None,
             role: Role::User,
             blocks: vec![image(1024 * 1024)],
             kind: PromptKind::default(),

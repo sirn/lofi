@@ -98,6 +98,7 @@ fn height_remeasure_does_not_populate_the_collapsed_cache() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text {
                     text: format!("prompt {i}"),
@@ -109,6 +110,7 @@ fn height_remeasure_does_not_populate_the_collapsed_cache() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: format!("answer {i}"),

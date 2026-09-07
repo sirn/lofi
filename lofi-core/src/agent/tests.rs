@@ -9,6 +9,27 @@ use tempfile::tempdir;
 
 struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamingEvent>>>,
+    requests: Option<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+impl MockProvider {
+    fn new(rounds: Vec<Vec<StreamingEvent>>) -> Self {
+        Self {
+            rounds: std::sync::Mutex::new(rounds),
+            requests: None,
+        }
+    }
+
+    fn recording(rounds: Vec<Vec<StreamingEvent>>) -> Self {
+        Self {
+            requests: Some(std::sync::Mutex::new(Vec::new())),
+            ..Self::new(rounds)
+        }
+    }
+
+    fn requests(&self) -> std::sync::MutexGuard<'_, Vec<Vec<Message>>> {
+        self.requests.as_ref().unwrap().lock().unwrap()
+    }
 }
 
 #[derive(Default)]
@@ -103,9 +124,12 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         _model: &Model,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolSchema],
     ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        if let Some(requests) = &self.requests {
+            requests.lock().unwrap().push(messages.to_vec());
+        }
         let mut rounds = self.rounds.lock().unwrap();
         let evs = if rounds.is_empty() {
             Vec::new()
@@ -140,9 +164,7 @@ fn model() -> Model {
 fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent {
     Agent {
         exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
-        provider: Arc::new(MockProvider {
-            rounds: std::sync::Mutex::new(rounds),
-        }),
+        provider: Arc::new(MockProvider::new(rounds)),
         model: model(),
         root: root.to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
@@ -169,6 +191,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
 
 fn user_msg(text: &str) -> Message {
     Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -199,6 +222,7 @@ fn exec_round(code: &str) -> Vec<StreamingEvent> {
 
 fn system_msg(text: &str) -> Message {
     Message {
+        origin: None,
         role: Role::System,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -403,6 +427,35 @@ async fn run_once_text_only_finishes() {
         ContentBlock::Text { text } => assert_eq!(text, "hello"),
         other => panic!("unexpected block {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_once_stamps_assistant_message_origin() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(
+        vec![vec![
+            StreamingEvent::ThinkingDelta("summary".to_string()),
+            StreamingEvent::ThinkingSignature("encrypted".to_string()),
+            StreamingEvent::TextDelta("answer".to_string()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: None,
+            },
+        ]],
+        dir.path(),
+    );
+    let mut messages = vec![user_msg("hi")];
+
+    assert!(agent.run_once(&mut messages).await.unwrap());
+
+    assert_eq!(
+        messages[1].origin.as_ref(),
+        Some(&lofi_types::ModelOrigin::from(&agent.model))
+    );
+    assert!(matches!(
+        messages[1].blocks[0],
+        ContentBlock::Thinking { .. }
+    ));
 }
 
 #[tokio::test]
@@ -1103,6 +1156,222 @@ async fn repeated_thinking_stops_after_failed_recovery() {
 }
 
 #[tokio::test]
+async fn thinking_only_stop_continues_without_replaying_the_orphan_round() {
+    let dir = tempdir().unwrap();
+    let thinking_only = vec![
+        StreamingEvent::ThinkingDelta("unfinished reasoning".into()),
+        StreamingEvent::ThinkingSignature("reasoning-signature".into()),
+        StreamingEvent::TextDelta("   ".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let final_round = vec![
+        StreamingEvent::TextDelta("final answer".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let provider = Arc::new(MockProvider::recording(vec![thinking_only, final_round]));
+    let agent = Agent {
+        provider: provider.clone(),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].iter().all(|message| {
+        !message.blocks.iter().any(
+            |block| matches!(block, ContentBlock::Thinking { text, .. } if text == "unfinished reasoning"),
+        )
+    }));
+    assert!(requests[1].iter().any(|message| {
+        message.kind == PromptKind::Notice
+            && matches!(&message.blocks[0], ContentBlock::Text { text } if text.contains("no final answer"))
+    }));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn terminal_provider_stop_does_not_retry_thinking_only_response() {
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(MockProvider::recording(vec![vec![
+        StreamingEvent::ThinkingDelta("filtered reasoning".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::Other),
+        },
+    ]]));
+    let agent = Agent {
+        provider: provider.clone(),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(provider.requests().len(), 1);
+    assert!(messages
+        .iter()
+        .all(|message| message.role != Role::Assistant));
+    assert!(messages.iter().any(|message| {
+        matches!(&message.blocks[0], ContentBlock::Text { text } if text.contains("provider ended generation"))
+    }));
+}
+
+#[tokio::test]
+async fn repeated_thinking_only_stop_ends_after_one_continuation() {
+    let dir = tempdir().unwrap();
+    let thinking_only = || {
+        vec![
+            StreamingEvent::ThinkingDelta("unfinished reasoning".into()),
+            StreamingEvent::Done {
+                usage: Usage::default(),
+                stop_reason: Some(lofi_types::StopReason::EndTurn),
+            },
+        ]
+    };
+    let agent = agent_with(vec![thinking_only(), thinking_only()], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.kind == PromptKind::Notice)
+            .count(),
+        2
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count(),
+        0
+    );
+    assert!(messages.iter().any(|message| {
+        matches!(&message.blocks[0], ContentBlock::Text { text } if text.contains("continuation also produced reasoning"))
+    }));
+}
+
+#[test]
+fn thinking_only_detection_requires_reasoning_and_no_answer_content() {
+    let message = |blocks| Message {
+        origin: None,
+        role: Role::Assistant,
+        blocks,
+        kind: PromptKind::User,
+    };
+    assert!(agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: "reasoning".into(),
+            signature: None,
+            redacted: false,
+        }
+    ])));
+    assert!(agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: String::new(),
+            signature: Some("encrypted reasoning".into()),
+            redacted: false,
+        }
+    ])));
+    assert!(agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: "[Reasoning redacted]".into(),
+            signature: Some("redacted reasoning".into()),
+            redacted: true,
+        }
+    ])));
+    assert!(agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: String::new(),
+            signature: None,
+            redacted: false,
+        },
+        ContentBlock::PartSignature {
+            provider: "google".into(),
+            model: "gemini".into(),
+            format: lofi_types::PartSignatureFormat::Google,
+            signature: "thought signature".into(),
+        },
+    ])));
+    assert!(!agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Text {
+            text: String::new(),
+        }
+    ])));
+    assert!(!agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: String::new(),
+            signature: None,
+            redacted: false,
+        }
+    ])));
+    assert!(!agent_run::assistant_is_thinking_only(&message(vec![
+        ContentBlock::Thinking {
+            text: "reasoning".into(),
+            signature: None,
+            redacted: false,
+        },
+        ContentBlock::Text {
+            text: "answer".into(),
+        },
+    ])));
+}
+
+#[tokio::test]
 async fn max_tokens_stop_continues_the_turn_once() {
     let dir = tempdir().unwrap();
     let truncated = vec![
@@ -1210,6 +1479,61 @@ async fn max_tokens_continuation_budget_is_one_per_turn() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn loop_recovery_remains_available_after_terminal_recovery() {
+    let dir = tempdir().unwrap();
+    let pattern = "abcdefghij".repeat(10);
+    let truncated = vec![
+        StreamingEvent::TextDelta("partial".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::MaxTokens),
+        },
+    ];
+    let looping = vec![StreamingEvent::ThinkingDelta(pattern.repeat(3))];
+    let final_round = vec![
+        StreamingEvent::TextDelta("final answer".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let agent = agent_with(vec![truncated, looping, final_round], dir.path());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut messages = vec![user_msg("go")];
+
+    agent
+        .run_continuation(
+            &mut messages,
+            "go".into(),
+            lofi_types::PromptKind::User,
+            tx,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let notices = messages
+        .iter()
+        .filter(|message| message.kind == PromptKind::Notice)
+        .filter_map(|message| match &message.blocks[0] {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.iter().any(|text| text.contains("token limit")));
+    assert!(notices
+        .iter()
+        .any(|text| text.contains("different concrete action")));
+    assert!(messages.iter().any(|message| {
+        matches!(&message.blocks[0], ContentBlock::Text { text } if text == "final answer")
+    }));
 }
 
 #[tokio::test]
@@ -1381,6 +1705,7 @@ async fn clean_stop_intent_continues_only_when_enabled() {
 fn intent_recovery_is_disabled_by_default() {
     assert!(!lofi_types::AutoContinuePolicy::default().intent);
     let message = Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![ContentBlock::Text {
             text: "I'll run the tests next.".into(),
@@ -1393,6 +1718,7 @@ fn intent_recovery_is_disabled_by_default() {
 #[test]
 fn intent_detector_is_bounded_to_immediate_tool_actions() {
     let message = |text: &str| Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![ContentBlock::Text { text: text.into() }],
         kind: lofi_types::PromptKind::User,
@@ -1885,9 +2211,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
     };
     let agent = Agent {
         exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
-        provider: Arc::new(MockProvider {
-            rounds: std::sync::Mutex::new(vec![tool_round(10), tool_round(500)]),
-        }),
+        provider: Arc::new(MockProvider::new(vec![tool_round(10), tool_round(500)])),
         model: {
             let mut m = model();
             m.context_window = Some(100);
@@ -1949,15 +2273,13 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
     let dir = tempdir().unwrap();
     // A vision model so the image is NOT stripped by the non-vision guard and
     // its bytes actually count toward the request payload budget.
-    let provider = Arc::new(MockProvider {
-        rounds: std::sync::Mutex::new(vec![vec![
-            StreamingEvent::TextDelta("unreachable".to_string()),
-            StreamingEvent::Done {
-                usage: Usage::default(),
-                stop_reason: None,
-            },
-        ]]),
-    });
+    let provider = Arc::new(MockProvider::new(vec![vec![
+        StreamingEvent::TextDelta("unreachable".to_string()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ]]));
     let agent = Agent {
         exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
         provider: provider.clone(),
@@ -1990,6 +2312,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
     let mut messages = vec![Message {
+        origin: None,
         role: Role::User,
         blocks: vec![
             ContentBlock::Text {
@@ -3062,6 +3385,7 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
     ];
     let agent = agent_with(vec![round1, round2], dir.path());
     let mut messages = vec![Message {
+        origin: None,
         role: Role::User,
         blocks: vec![
             ContentBlock::Text {

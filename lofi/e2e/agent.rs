@@ -250,6 +250,43 @@ fn loop_api_cases() -> [(&'static str, &'static str, ThinkingResponse); 4] {
 }
 
 #[test]
+fn thinking_only_stops_continue_once_for_all_api_types() {
+    for (api, model, response) in loop_api_cases() {
+        let server = MockServer::start(vec![
+            response("thinking-only marker", ""),
+            response("completed reasoning", "thinking-only recovery answer"),
+        ]);
+        let fixture = Fixture::new(&server);
+        let mut tui = fixture.spawn(&["--model", model]);
+
+        tui.submit("thinking-only prompt marker");
+        tui.wait_for("contained reasoning but no final answer", WAIT);
+        tui.wait_for("thinking-only recovery answer", WAIT);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{api}");
+        assert!(
+            requests[1]
+                .body
+                .contains("contained reasoning but no final answer"),
+            "{api}"
+        );
+        assert!(
+            !requests[1].body.contains("thinking-only marker"),
+            "{api}: orphan reasoning must not be replayed"
+        );
+        let events = fixture.events();
+        assert!(event_types(&events).contains(&"round_discarded"), "{api}");
+        let transcript = transcript_text(&events);
+        assert!(transcript.contains("thinking-only marker"), "{api}");
+        assert!(
+            transcript.contains("thinking-only recovery answer"),
+            "{api}"
+        );
+    }
+}
+
+#[test]
 fn repeated_thinking_notifies_and_recovers_once_for_all_api_types() {
     let pattern = "abcdefghij".repeat(10);
     for (api, model, response) in loop_api_cases() {

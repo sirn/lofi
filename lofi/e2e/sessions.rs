@@ -6,10 +6,11 @@ use serde_json::json;
 
 use crate::support::{
     anthropic_text_response, anthropic_text_response_with_usage, anthropic_truncated_text_response,
-    chunked_text_response, delayed_text_response, event_types, job_events,
+    anthropic_usage_response, chunked_text_response, delayed_text_response, event_types,
+    google_text_response, google_thinking_usage_response, job_events,
     parallel_responses_tool_response, parallel_tool_response, process_is_alive, responses_response,
-    spawned_pid, stop_text_response, text_response, text_response_with_usage, tool_response,
-    tool_response_with_usage, transcript_text, truncated_responses_response,
+    spawned_pid, stop_text_response, text_response, text_response_with_usage, thinking_response,
+    tool_response, tool_response_with_usage, transcript_text, truncated_responses_response,
     truncated_text_response, truncated_tool_response, wait_for_process_exit, Fixture, MockResponse,
     MockServer, ProcessGuard, WAIT,
 };
@@ -1036,6 +1037,163 @@ fn resume_replays_encrypted_responses_reasoning() {
         .expect("reasoning item after resume");
     assert_eq!(reasoning["encrypted_content"], "encrypted-reasoning-marker");
     assert_eq!(reasoning["summary"][0]["text"], "saved reasoning marker");
+}
+
+#[test]
+fn responses_reasoning_becomes_plain_text_after_switch_to_google() {
+    let server = MockServer::start(vec![
+        responses_response("responses reasoning marker", "responses saved answer"),
+        google_text_response("google switched answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&["--model", "responses/reasoning:high"]);
+
+    first.submit("responses saved prompt");
+    first.wait_for("responses saved answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "google/tools:high"]);
+    resumed.submit("google switched prompt");
+    resumed.wait_for("google switched answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let request: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let request_text = request["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|content| content["parts"].as_array().unwrap())
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("responses reasoning marker"));
+    assert!(request_text.contains("responses saved answer"));
+    assert!(request_text.contains("google switched prompt"));
+    assert!(!requests[1].body.contains("encrypted-reasoning-marker"));
+    assert!(!requests[1].body.contains("thoughtSignature"));
+}
+
+#[test]
+fn anthropic_reasoning_becomes_plain_text_after_switch_to_openai_chat() {
+    let server = MockServer::start(vec![
+        anthropic_usage_response(
+            "anthropic reasoning marker",
+            "anthropic-signature-marker",
+            "anthropic saved answer",
+        ),
+        text_response("chat switched answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&["--model", "anthropic/tools:high"]);
+
+    first.submit("anthropic saved prompt");
+    first.wait_for("anthropic saved answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "mock/chat:high"]);
+    resumed.submit("chat switched prompt");
+    resumed.wait_for("chat switched answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let request: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let request_text = messages
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("anthropic reasoning marker"));
+    assert!(request_text.contains("anthropic saved answer"));
+    assert!(request_text.contains("chat switched prompt"));
+    assert!(!requests[1].body.contains("anthropic-signature-marker"));
+    assert!(messages.iter().all(|message| {
+        message.get("reasoning_content").is_none()
+            && message.get("reasoning").is_none()
+            && message.get("reasoning_text").is_none()
+    }));
+}
+
+#[test]
+fn google_reasoning_becomes_plain_text_after_switch_to_responses() {
+    let server = MockServer::start(vec![
+        google_thinking_usage_response("google reasoning marker", "google saved answer"),
+        responses_response("responses switched reasoning", "responses switched answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&["--model", "google/tools:high"]);
+
+    first.submit("google saved prompt");
+    first.wait_for("google saved answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "responses/reasoning:high"]);
+    resumed.submit("responses switched prompt");
+    resumed.wait_for("responses switched answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let request: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let input = request["input"].as_array().unwrap();
+    let request_text = input
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("google reasoning marker"));
+    assert!(request_text.contains("google saved answer"));
+    assert!(request_text.contains("responses switched prompt"));
+    assert!(input.iter().all(|item| item["type"] != "reasoning"));
+    assert!(!requests[1]
+        .body
+        .contains("Z29vZ2xlLXRob3VnaHQtc2lnbmF0dXJl"));
+    assert!(!requests[1].body.contains("thoughtSignature"));
+}
+
+#[test]
+fn openai_chat_reasoning_becomes_plain_text_after_switch_to_anthropic() {
+    let server = MockServer::start(vec![
+        thinking_response("chat reasoning marker", "chat saved answer"),
+        anthropic_text_response("anthropic switched answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut first = fixture.spawn(&["--model", "mock/chat:high"]);
+
+    first.submit("chat saved prompt");
+    first.wait_for("chat saved answer", WAIT);
+    first.submit("/quit");
+    first.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "anthropic/tools:high"]);
+    resumed.submit("anthropic switched prompt");
+    resumed.wait_for("anthropic switched answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let request: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let request_text = messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("chat reasoning marker"));
+    assert!(request_text.contains("chat saved answer"));
+    assert!(request_text.contains("anthropic switched prompt"));
+    assert!(messages.iter().all(|message| {
+        message["content"].as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .all(|block| block["type"] != "thinking" && block["type"] != "redacted_thinking")
+        })
+    }));
+    assert!(!requests[1].body.contains("reasoning_content"));
 }
 
 #[test]

@@ -47,7 +47,7 @@ fn input_message(message: &Message) -> Option<Value> {
 }
 
 #[must_use]
-pub fn to_openai_responses_input(messages: &[Message]) -> Vec<Value> {
+fn to_openai_responses_input<'a>(messages: impl IntoIterator<Item = &'a Message>) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
@@ -150,7 +150,11 @@ pub(crate) struct OpenAiResponsesIr;
 impl ProtocolIr for OpenAiResponsesIr {
     type State = ResponsesMapperState;
 
-    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+    fn build_request_inner<'a>(
+        model: &Model,
+        messages: impl Iterator<Item = &'a Message>,
+        tools: &[ToolSchema],
+    ) -> Value {
         build_openai_responses_request(model, messages, tools)
     }
 
@@ -178,9 +182,9 @@ impl ProtocolIr for OpenAiResponsesIr {
 }
 
 #[must_use]
-fn build_openai_responses_request(
+fn build_openai_responses_request<'a>(
     model: &Model,
-    messages: &[Message],
+    messages: impl IntoIterator<Item = &'a Message>,
     tools: &[ToolSchema],
 ) -> Value {
     let input = to_openai_responses_input(messages);
@@ -498,6 +502,7 @@ mod tests {
     #[test]
     fn request_cache_key_is_stable_while_history_is_appended() {
         let system = Message {
+            origin: None,
             role: lofi_types::Role::System,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "stable instructions".to_string(),
@@ -505,6 +510,7 @@ mod tests {
             kind: PromptKind::default(),
         };
         let first_user = Message {
+            origin: None,
             role: lofi_types::Role::User,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "initial prompt".to_string(),
@@ -512,6 +518,7 @@ mod tests {
             kind: PromptKind::default(),
         };
         let appended = Message {
+            origin: None,
             role: lofi_types::Role::Assistant,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: "new response".to_string(),
@@ -527,6 +534,7 @@ mod tests {
     #[test]
     fn request_cache_key_changes_when_prefix_is_rebuilt() {
         let message = |role, text: &str| Message {
+            origin: None,
             role,
             blocks: vec![lofi_types::ContentBlock::Text {
                 text: text.to_string(),
@@ -769,6 +777,7 @@ mod tests {
     #[test]
     fn encrypted_reasoning_replays_before_function_call() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 ContentBlock::Thinking {
@@ -798,8 +807,44 @@ mod tests {
     }
 
     #[test]
+    fn request_converts_foreign_reasoning_without_replaying_encrypted_content() {
+        let target = model();
+        let mut source = target.clone();
+        source.id = "gpt-5".to_string();
+        let messages = [Message {
+            origin: Some(lofi_types::ModelOrigin::from(&source)),
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Thinking {
+                    text: "Need a tool.".to_string(),
+                    signature: Some("enc_blob".to_string()),
+                    redacted: false,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({"code": "1"}),
+                },
+            ],
+            kind: PromptKind::default(),
+        }];
+
+        let request = OpenAiResponsesIr::build_request(&target, &messages, &[]);
+        let input = request["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["content"][0]["text"], "Need a tool.");
+        assert_eq!(input[1]["type"], "function_call");
+        assert!(input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none()));
+    }
+
+    #[test]
     fn plaintext_thinking_is_not_replayed() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 ContentBlock::Thinking {
@@ -895,6 +940,7 @@ mod tests {
     #[test]
     fn tool_result_with_images_serializes_output_as_items() {
         let msgs = [Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "c1".to_string(),
@@ -929,6 +975,7 @@ mod tests {
     #[test]
     fn tool_result_without_images_stays_string() {
         let msgs = [Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "c1".to_string(),
@@ -945,6 +992,7 @@ mod tests {
     #[test]
     fn user_image_block_serializes_as_input_image() {
         let msgs = [Message {
+            origin: None,
             role: Role::User,
             blocks: vec![
                 ContentBlock::Text {

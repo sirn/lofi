@@ -663,6 +663,7 @@ impl SessionCursor {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: lofi_types::Role::System,
                 blocks: vec![lofi_types::ContentBlock::Text {
                     text: system_prompt.to_string(),
@@ -1668,6 +1669,7 @@ mod tests {
 
     fn user(text: &str) -> Message {
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -1678,6 +1680,7 @@ mod tests {
 
     fn assistant(text: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -1724,6 +1727,7 @@ mod tests {
             .unwrap();
         let mut events = [
             ev(Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "call".into(),

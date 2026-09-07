@@ -192,8 +192,10 @@ fn push_tool(m: &Message, out: &mut Vec<Value>) {
     }
 }
 
-#[must_use]
-pub fn to_openai_chat_messages(model: &Model, messages: &[Message]) -> Vec<Value> {
+fn to_openai_chat_messages<'a>(
+    model: &Model,
+    messages: impl IntoIterator<Item = &'a Message>,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         match m.role {
@@ -211,7 +213,11 @@ pub(crate) struct OpenAiCompletionsIr;
 impl ProtocolIr for OpenAiCompletionsIr {
     type State = ChatMapperState;
 
-    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+    fn build_request_inner<'a>(
+        model: &Model,
+        messages: impl Iterator<Item = &'a Message>,
+        tools: &[ToolSchema],
+    ) -> Value {
         build_openai_chat_request(model, messages, tools)
     }
 
@@ -243,7 +249,11 @@ impl ProtocolIr for OpenAiCompletionsIr {
 }
 
 #[must_use]
-fn build_openai_chat_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+fn build_openai_chat_request<'a>(
+    model: &Model,
+    messages: impl IntoIterator<Item = &'a Message>,
+    tools: &[ToolSchema],
+) -> Value {
     let msgs = to_openai_chat_messages(model, messages);
     let mut req = json!({
         "model": model.id,
@@ -864,6 +874,7 @@ mod tests {
     #[test]
     fn user_image_block_serializes_as_multipart_content() {
         let msgs = [Message {
+            origin: None,
             role: Role::User,
             blocks: vec![
                 ContentBlock::Text {
@@ -894,6 +905,7 @@ mod tests {
         // tool-result image must be re-emitted on a following user message —
         // otherwise the model never sees it.
         let msgs = [Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "c1".to_string(),
@@ -926,6 +938,7 @@ mod tests {
     #[test]
     fn user_text_without_image_stays_a_plain_string() {
         let msgs = [Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "hello".to_string(),
@@ -1003,6 +1016,7 @@ mod tests {
     #[test]
     fn thinking_replayed_under_recorded_field() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Thinking {
                 text: "let me think".to_string(),
@@ -1021,6 +1035,7 @@ mod tests {
     #[test]
     fn thinking_replayed_under_alternate_field() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Thinking {
                 text: "yep".to_string(),
@@ -1038,6 +1053,7 @@ mod tests {
         // Anthropic-style signatures (any string not in the whitelist) and
         // signature-less blocks stay local.
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 ContentBlock::Thinking {
@@ -1063,6 +1079,7 @@ mod tests {
     #[test]
     fn multiple_thinking_blocks_joined_under_first_field() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![
                 ContentBlock::Thinking {
@@ -1090,6 +1107,7 @@ mod tests {
         // Pi trims the thinking text before deciding whether to emit. A
         // whitespace-only trace would just be noise on the wire.
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Thinking {
                 text: "  \n ".to_string(),
@@ -1105,6 +1123,7 @@ mod tests {
     #[test]
     fn reasoning_text_field_replayed_verbatim() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Thinking {
                 text: "thinking".to_string(),
@@ -1120,6 +1139,7 @@ mod tests {
     #[test]
     fn empty_thinking_text_is_not_replayed() {
         let msgs = [Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Thinking {
                 text: String::new(),

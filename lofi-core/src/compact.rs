@@ -207,6 +207,7 @@ pub fn compacted_history(compaction: &Compaction) -> Vec<Message> {
     let mut out = Vec::with_capacity(compaction.kept_messages.len() + 1);
     if !compaction.summary.is_empty() {
         out.push(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: compaction.summary.clone(),
@@ -1704,6 +1705,7 @@ mod tests {
 
     fn user(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: t.into() }],
             kind: PromptKind::default(),
@@ -1711,6 +1713,7 @@ mod tests {
     }
     fn assistant(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text { text: t.into() }],
             kind: PromptKind::default(),
@@ -1718,6 +1721,7 @@ mod tests {
     }
     fn exec_call(id: &str, code: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: id.into(),
@@ -1729,6 +1733,7 @@ mod tests {
     }
     fn exec_result(id: &str, value: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: id.into(),
@@ -1775,6 +1780,7 @@ mod tests {
     fn compact_counts_system_boundary_without_summarizing_it() {
         let events = events_of(&[
             Message {
+                origin: None,
                 role: Role::System,
                 blocks: vec![ContentBlock::Text {
                     text: "instructions".into(),
@@ -1970,6 +1976,7 @@ mod tests {
         // starts keeping images, the recovery loops forever — this test pins
         // the contract.
         let with_image = Message {
+            origin: None,
             role: Role::User,
             kind: PromptKind::default(),
             blocks: vec![

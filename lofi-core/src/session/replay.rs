@@ -374,6 +374,7 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
                 *cancelled,
             );
             Some(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text {
                     text: result.context_text(),
@@ -458,6 +459,7 @@ impl AgentHistoryProjection {
             self.filter.push(&event.kind);
             if !summary.is_empty() && self.summary.is_none() {
                 self.summary = Some(Message {
+                    origin: None,
                     role: Role::User,
                     blocks: vec![ContentBlock::Text {
                         text: summary.clone(),
@@ -700,6 +702,7 @@ mod tests {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: t.into() }],
                 kind: PromptKind::default(),
@@ -712,6 +715,7 @@ mod tests {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: t.into() }],
                 kind,
@@ -747,6 +751,7 @@ mod tests {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text { text: t.into() }],
                 kind: PromptKind::default(),

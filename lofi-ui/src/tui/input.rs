@@ -270,6 +270,7 @@ pub(super) fn finish_user_shell(
 ) {
     if !exclude_from_context {
         if let Err(error) = app.lifecycle.push_message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: result.context_text(),

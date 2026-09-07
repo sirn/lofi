@@ -32,6 +32,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
@@ -39,6 +40,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
@@ -53,6 +55,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             stop_reason: None,
         },
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
@@ -60,6 +63,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
@@ -195,6 +199,7 @@ fn oversized_turn_caches_the_bounded_display_projection() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: entropy }],
                 kind: PromptKind::default(),
@@ -204,6 +209,7 @@ fn oversized_turn_caches_the_bounded_display_projection() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: "small answer".into(),
@@ -361,6 +367,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
@@ -368,6 +375,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
@@ -391,6 +399,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             kept: 1,
         },
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
@@ -398,6 +407,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
@@ -725,6 +735,7 @@ fn modal_tab_cycles_with_wraparound() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
@@ -732,6 +743,7 @@ fn modal_tab_cycles_with_wraparound() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
@@ -746,6 +758,7 @@ fn modal_tab_cycles_with_wraparound() {
             stop_reason: None,
         },
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
@@ -753,6 +766,7 @@ fn modal_tab_cycles_with_wraparound() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
@@ -820,11 +834,13 @@ fn tree_revert_to_root_then_reopens() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::System,
             blocks: vec![ContentBlock::Text { text: "sys".into() }],
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "first".into(),
@@ -832,6 +848,7 @@ fn tree_revert_to_root_then_reopens() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "hello".into(),
@@ -846,6 +863,7 @@ fn tree_revert_to_root_then_reopens() {
             stop_reason: None,
         },
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "second".into(),
@@ -853,6 +871,7 @@ fn tree_revert_to_root_then_reopens() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "world".into(),
@@ -918,6 +937,7 @@ fn tree_shows_tool_result_nodes() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "list files".into(),
@@ -925,6 +945,7 @@ fn tree_shows_tool_result_nodes() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: "tu1".into(),
@@ -934,6 +955,7 @@ fn tree_shows_tool_result_nodes() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tu1".into(),
@@ -944,6 +966,7 @@ fn tree_shows_tool_result_nodes() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".into(),
@@ -1022,6 +1045,7 @@ fn tree_exec_label_shows_native_tools() {
         .to_path_buf();
     let kinds = [
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: "do stuff".into(),
@@ -1029,6 +1053,7 @@ fn tree_exec_label_shows_native_tools() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 id: "exec_0".into(),
@@ -1038,6 +1063,7 @@ fn tree_exec_label_shows_native_tools() {
             kind: PromptKind::default(),
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "exec_0".into(),
@@ -1072,6 +1098,7 @@ fn tree_exec_label_shows_native_tools() {
             is_error: false,
         }),
         SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".into(),

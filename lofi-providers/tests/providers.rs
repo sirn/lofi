@@ -10,6 +10,7 @@ use lofi_types::{
 
 fn user_msg() -> Message {
     Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::Text {
             text: "hi".to_string(),

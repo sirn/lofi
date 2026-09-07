@@ -487,6 +487,7 @@ fn resume_model_switch_none_when_no_choices_or_no_turn() {
         id: "1".into(),
         parent_id: None,
         kind: SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: "hi".into() }],
             kind: PromptKind::default(),

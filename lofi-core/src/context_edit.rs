@@ -131,6 +131,7 @@ pub fn edit_tail_refs(kept: &[(&str, &Message)], opts: &EditConfig) -> Vec<Messa
                 }
             }
             Message {
+                origin: msg.origin.clone(),
                 role: msg.role,
                 kind: msg.kind,
                 blocks,
@@ -178,6 +179,7 @@ mod tests {
     #[allow(dead_code)]
     fn user(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: t.to_string(),
@@ -187,6 +189,7 @@ mod tests {
     }
     fn assistant(t: &str) -> Message {
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: t.to_string(),
@@ -270,6 +273,7 @@ mod tests {
             (
                 "e1".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Tool,
                     blocks: vec![exec_result("a", "out-1")],
                     kind: PromptKind::default(),
@@ -278,6 +282,7 @@ mod tests {
             (
                 "e2".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Tool,
                     blocks: vec![exec_result("b", "out-2")],
                     kind: PromptKind::default(),
@@ -286,6 +291,7 @@ mod tests {
             (
                 "e3".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Tool,
                     blocks: vec![exec_result("c", "out-3")],
                     kind: PromptKind::default(),
@@ -305,11 +311,34 @@ mod tests {
     }
 
     #[test]
+    fn preserves_message_origin() {
+        let origin = lofi_types::ModelOrigin {
+            provider: "openai".to_string(),
+            model: "gpt-5".to_string(),
+            api: lofi_types::Api::OpenAiResponses,
+        };
+        let kept = vec![(
+            "e1".to_string(),
+            Message {
+                origin: Some(origin.clone()),
+                role: Role::Assistant,
+                blocks: vec![think("reasoning")],
+                kind: PromptKind::default(),
+            },
+        )];
+
+        let out = tail(&kept);
+
+        assert_eq!(out[0].origin, Some(origin));
+    }
+
+    #[test]
     fn drops_old_thinking_keeps_recent() {
         let kept = vec![
             (
                 "e1".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![think("old reasoning"), exec_call("a", "code-1")],
                     kind: PromptKind::default(),
@@ -318,6 +347,7 @@ mod tests {
             (
                 "e2".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![think("recent reasoning"), exec_call("b", "code-2")],
                     kind: PromptKind::default(),
@@ -338,6 +368,7 @@ mod tests {
             (
                 "e1".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![exec_call("a", "old-secret-code")],
                     kind: PromptKind::default(),
@@ -346,6 +377,7 @@ mod tests {
             (
                 "e2".to_string(),
                 Message {
+                    origin: None,
                     role: Role::Assistant,
                     blocks: vec![exec_call("b", "recent-code")],
                     kind: PromptKind::default(),

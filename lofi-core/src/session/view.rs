@@ -97,6 +97,7 @@ mod tests {
 
     fn user(text: &str) -> Message {
         Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
             kind: PromptKind::default(),

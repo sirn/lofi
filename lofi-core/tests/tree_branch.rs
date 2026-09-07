@@ -15,6 +15,7 @@ fn user_ev(text: &str) -> SessionEvent {
         id: String::new(),
         parent_id: None,
         kind: SessionEventKind::Message(Message {
+            origin: None,
             role: Role::User,
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -29,6 +30,7 @@ fn assistant_ev(text: &str) -> SessionEvent {
         id: String::new(),
         parent_id: None,
         kind: SessionEventKind::Message(Message {
+            origin: None,
             role: Role::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),

@@ -911,6 +911,7 @@ mod tests {
         ev(
             id,
             SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),
@@ -923,6 +924,7 @@ mod tests {
         ev(
             id,
             SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),

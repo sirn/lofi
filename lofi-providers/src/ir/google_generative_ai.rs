@@ -26,7 +26,11 @@ pub(crate) struct GoogleMapperState {
 impl ProtocolIr for GoogleGenerativeAiIr {
     type State = GoogleMapperState;
 
-    fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+    fn build_request_inner<'a>(
+        model: &Model,
+        messages: impl Iterator<Item = &'a Message>,
+        tools: &[ToolSchema],
+    ) -> Value {
         build_request(model, messages, tools)
     }
 
@@ -65,10 +69,15 @@ impl ProtocolIr for GoogleGenerativeAiIr {
     }
 }
 
-fn build_request(model: &Model, messages: &[Message], tools: &[ToolSchema]) -> Value {
+fn build_request<'a>(
+    model: &Model,
+    messages: impl IntoIterator<Item = &'a Message>,
+    tools: &[ToolSchema],
+) -> Value {
+    let messages: Vec<&Message> = messages.into_iter().collect();
     let mut system = Vec::new();
     let mut contents = Vec::new();
-    let tool_names = tool_names(messages);
+    let tool_names = tool_names(&messages);
 
     for message in messages {
         match message.role {
@@ -183,11 +192,14 @@ fn assistant_parts(blocks: &[ContentBlock], model: &Model) -> Vec<Value> {
                 } else {
                     json!({})
                 };
-                let mut call = json!({"name": name, "args": args});
+                let mut part = json!({"functionCall": {"name": name, "args": args}});
                 if requires_tool_call_id(&model.id) {
-                    call["id"] = json!(normalize_tool_id(id));
+                    part["functionCall"]["id"] = json!(normalize_tool_id(id));
                 }
-                parts.push(json!({"functionCall": call}));
+                if is_gemini_3(&model.id) {
+                    part["thoughtSignature"] = json!("skip_thought_signature_validator");
+                }
+                parts.push(part);
             }
             ContentBlock::PartSignature {
                 provider,
@@ -215,7 +227,7 @@ fn assistant_parts(blocks: &[ContentBlock], model: &Model) -> Vec<Value> {
     parts
 }
 
-fn tool_names(messages: &[Message]) -> HashMap<&str, &str> {
+fn tool_names<'a>(messages: &[&'a Message]) -> HashMap<&'a str, &'a str> {
     let mut names = HashMap::new();
     for message in messages {
         for block in &message.blocks {
@@ -538,6 +550,7 @@ mod tests {
         let request = build_request(
             &model("gemini-3.7-flash"),
             &[Message {
+                origin: None,
                 role: Role::User,
                 blocks: vec![ContentBlock::Text { text: "hi".into() }],
                 kind: PromptKind::User,
@@ -579,6 +592,7 @@ mod tests {
         let request = build_request(
             &model("gemini-3.7-flash"),
             &[Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::ToolUse {
                     id: "call_1".into(),
@@ -602,11 +616,13 @@ mod tests {
             &model("gemini-3.7-flash"),
             &[
                 Message {
+                    origin: None,
                     role: Role::User,
                     blocks: vec![ContentBlock::Text { text: "one".into() }],
                     kind: PromptKind::User,
                 },
                 Message {
+                    origin: None,
                     role: Role::User,
                     blocks: vec![ContentBlock::Text { text: "two".into() }],
                     kind: PromptKind::User,
@@ -665,9 +681,10 @@ mod tests {
         ));
 
         let request = build_request(&model("gemini-3.7-pro"), &[message], &[]);
-        assert!(request["contents"][0]["parts"][0]
-            .get("thoughtSignature")
-            .is_none());
+        assert_eq!(
+            request["contents"][0]["parts"][0]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
     }
 
     #[test]

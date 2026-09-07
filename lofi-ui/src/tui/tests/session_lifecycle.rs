@@ -355,6 +355,7 @@ fn round_commit_releases_hidden_exec_result() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Assistant,
                 blocks: vec![ContentBlock::ToolUse {
                     id: "e1".into(),
@@ -368,6 +369,7 @@ fn round_commit_releases_hidden_exec_result() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::Tool,
                 blocks: vec![ContentBlock::ToolResult {
                     tool_use_id: "e1".into(),
@@ -524,6 +526,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
             id: String::new(),
             parent_id: None,
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role: Role::System,
                 blocks: vec![ContentBlock::Text {
                     text: "system".into(),

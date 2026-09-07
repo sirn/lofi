@@ -462,6 +462,7 @@ mod tests {
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             kind: SessionEventKind::Message(Message {
+                origin: None,
                 role,
                 blocks: vec![ContentBlock::Text {
                     text: text.to_string(),

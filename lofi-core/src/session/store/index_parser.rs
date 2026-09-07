@@ -779,6 +779,9 @@ fn is_structural_key(key: &str) -> bool {
             | "name"
             | "provider"
             | "model"
+            | "api"
+            | "thinking"
+            | "service_tier"
             | "format"
             | "kind"
     )
@@ -866,6 +869,7 @@ mod tests {
             id: "image".into(),
             parent_id: None,
             kind: lofi_types::SessionEventKind::Message(lofi_types::Message {
+                origin: None,
                 role: lofi_types::Role::User,
                 blocks: vec![lofi_types::ContentBlock::Image {
                     bytes: vec![1; 1024 * 1024],
@@ -925,6 +929,32 @@ mod tests {
         let retained =
             first["text"].as_str().unwrap().len() + second["text"].as_str().unwrap().len();
         assert!(retained <= MAX_PROJECTED_STRINGS_BYTES);
+    }
+
+    #[test]
+    fn projection_keeps_run_model_valid_after_content_budget_is_exhausted() {
+        let source = format!(
+            "{{\"text\":\"{}\"}}\n{{\"type\":\"message\",\"role\":\"assistant\",\"origin\":{{\"provider\":\"mock\",\"model\":\"chat\",\"api\":\"openai-completions\"}},\"blocks\":[]}}\n{{\"type\":\"turn_end\",\"model\":{{\"provider\":\"mock\",\"id\":\"chat\",\"thinking\":\"medium\",\"service_tier\":\"flex\"}},\"elapsed_ms\":1,\"cost\":0.0,\"usage\":{{}}}}",
+            "x".repeat(MAX_PROJECTED_STRINGS_BYTES),
+        );
+        let mut reader = BufReader::new(Cursor::new(source));
+        let mut budget = ProjectionBudget::collection();
+        read_projected_value::<serde_json::Value, _>(&mut reader, &mut budget)
+            .unwrap()
+            .unwrap();
+        read_projected_value::<lofi_types::SessionEvent, _>(&mut reader, &mut budget)
+            .unwrap()
+            .unwrap();
+        let (_, _, event) =
+            read_projected_value::<lofi_types::SessionEvent, _>(&mut reader, &mut budget)
+                .unwrap()
+                .unwrap();
+
+        let lofi_types::SessionEventKind::TurnEnd { model, .. } = event.kind else {
+            panic!("expected turn end");
+        };
+        assert_eq!(model.thinking, lofi_types::ThinkingLevel::Medium);
+        assert_eq!(model.service_tier, lofi_types::ServiceTier::Flex);
     }
 
     #[test]

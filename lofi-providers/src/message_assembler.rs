@@ -219,6 +219,7 @@ impl MessageAssembler {
             }
         }
         Message {
+            origin: None,
             role: Role::Assistant,
             blocks,
             kind: lofi_types::PromptKind::User,

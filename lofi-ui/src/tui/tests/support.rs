@@ -68,6 +68,7 @@ pub(super) fn attach_session_sink(
 }
 pub(super) fn user(text: &str) -> Message {
     Message {
+        origin: None,
         role: Role::User,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -78,6 +79,7 @@ pub(super) fn user(text: &str) -> Message {
 
 pub(super) fn assistant(text: &str) -> Message {
     Message {
+        origin: None,
         role: Role::Assistant,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
