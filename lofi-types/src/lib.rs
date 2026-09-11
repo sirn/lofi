@@ -464,6 +464,12 @@ pub enum StreamingEvent {
         id: String,
         delta: String,
     },
+    /// Canonical complete tool input from a terminal provider event.
+    /// Replaces any input previously accumulated from deltas for this call.
+    ToolUseInputComplete {
+        id: String,
+        input: String,
+    },
     ToolUseEnd {
         id: String,
     },
@@ -2142,6 +2148,10 @@ mod tests {
         round_trip(&StreamingEvent::ToolUseStart {
             id: "t1".to_string(),
             name: "exec".to_string(),
+        });
+        round_trip(&StreamingEvent::ToolUseInputComplete {
+            id: "t1".to_string(),
+            input: "{\"code\":\"return 1\"}".to_string(),
         });
         round_trip(&StreamingEvent::Done {
             usage: Usage {

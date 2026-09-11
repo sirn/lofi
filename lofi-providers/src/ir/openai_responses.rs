@@ -256,6 +256,8 @@ fn openai_effort(level: &ThinkingLevel) -> Option<&str> {
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ResponsesMapperState {
     item_to_call: HashMap<String, String>,
+    completed_tool_arguments: HashSet<String>,
+    started_tool_calls: HashSet<String>,
     reasoning_items_with_deltas: HashSet<String>,
     pub(crate) saw_completed: bool,
 }
@@ -321,27 +323,7 @@ fn map_openai_responses_event(
         "response.output_item.added" => {
             if let Some(item) = v.get("item") {
                 if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let item_id = item
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !item_id.is_empty() && !call_id.is_empty() {
-                        state.item_to_call.insert(item_id, call_id.clone());
-                    }
-                    let name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !name.is_empty() && !call_id.is_empty() {
-                        out.push(StreamingEvent::ToolUseStart { id: call_id, name });
-                    }
+                    start_function_call(item, state, &mut out);
                 }
             }
         }
@@ -354,11 +336,19 @@ fn map_openai_responses_event(
             if let Some(delta) = v.get("delta").and_then(Value::as_str) {
                 if !delta.is_empty() {
                     let id = state.item_to_call.get(&item_id).cloned().unwrap_or(item_id);
-                    out.push(StreamingEvent::ToolUseInputDelta {
-                        id,
-                        delta: delta.to_string(),
-                    });
+                    if !state.completed_tool_arguments.contains(&id) {
+                        out.push(StreamingEvent::ToolUseInputDelta {
+                            id,
+                            delta: delta.to_string(),
+                        });
+                    }
                 }
+            }
+        }
+        "response.function_call_arguments.done" => {
+            let item_id = v.get("item_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(call_id) = state.item_to_call.get(item_id).cloned() {
+                emit_complete_arguments_once(v, &call_id, state, &mut out);
             }
         }
         "response.output_item.done" => {
@@ -383,15 +373,19 @@ fn map_openai_responses_event(
     Ok(out)
 }
 
-fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Vec<StreamingEvent> {
+fn map_completed_output_item(
+    item: &Value,
+    state: &mut ResponsesMapperState,
+) -> Vec<StreamingEvent> {
     match item.get("type").and_then(Value::as_str) {
-        Some("function_call") => item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(|id| StreamingEvent::ToolUseEnd { id: id.to_string() })
-            .into_iter()
-            .collect(),
+        Some("function_call") => {
+            let mut events = Vec::new();
+            if let Some(call_id) = start_function_call(item, state, &mut events) {
+                emit_complete_arguments_once(item, &call_id, state, &mut events);
+                events.push(StreamingEvent::ToolUseEnd { id: call_id });
+            }
+            events
+        }
         Some("reasoning") => {
             // Some Responses-compatible providers omit summary deltas but
             // include the completed item. Avoid duplicating streamed text.
@@ -415,6 +409,63 @@ fn map_completed_output_item(item: &Value, state: &ResponsesMapperState) -> Vec<
         }
         _ => Vec::new(),
     }
+}
+
+fn start_function_call(
+    item: &Value,
+    state: &mut ResponsesMapperState,
+    out: &mut Vec<StreamingEvent>,
+) -> Option<String> {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    if let Some(item_id) = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        state
+            .item_to_call
+            .insert(item_id.to_string(), call_id.clone());
+    }
+    if let Some(name) = item
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        if state.started_tool_calls.insert(call_id.clone()) {
+            out.push(StreamingEvent::ToolUseStart {
+                id: call_id.clone(),
+                name: name.to_string(),
+            });
+        }
+    }
+    Some(call_id)
+}
+
+fn emit_complete_arguments_once(
+    item: &Value,
+    call_id: &str,
+    state: &mut ResponsesMapperState,
+    out: &mut Vec<StreamingEvent>,
+) {
+    if state.completed_tool_arguments.contains(call_id) {
+        return;
+    }
+    let Some(arguments) = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .filter(|arguments| !arguments.is_empty())
+    else {
+        return;
+    };
+    state.completed_tool_arguments.insert(call_id.to_string());
+    out.push(StreamingEvent::ToolUseInputComplete {
+        id: call_id.to_string(),
+        input: arguments.to_string(),
+    });
 }
 
 /// Extract raw text from a completed Responses reasoning item.
@@ -630,8 +681,179 @@ mod tests {
         });
         assert_eq!(
             map_openai_responses_event(&done, &mut state).unwrap(),
-            vec![StreamingEvent::ToolUseEnd {
-                id: "call_1".to_string()
+            vec![
+                StreamingEvent::ToolUseInputComplete {
+                    id: "call_1".to_string(),
+                    input: "{\"x\":1}".to_string()
+                },
+                StreamingEvent::ToolUseEnd {
+                    id: "call_1".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_tool_item_recovers_arguments_when_deltas_are_absent() {
+        let done = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"function_call",
+                "id":"fc_1",
+                "call_id":"call_1",
+                "name":"exec",
+                "arguments":"{\"code\":\"return 1\"}"
+            }
+        });
+
+        let events =
+            map_openai_responses_event(&done, &mut ResponsesMapperState::default()).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                StreamingEvent::ToolUseStart {
+                    id: "call_1".to_string(),
+                    name: "exec".to_string(),
+                },
+                StreamingEvent::ToolUseInputComplete {
+                    id: "call_1".to_string(),
+                    input: "{\"code\":\"return 1\"}".to_string(),
+                },
+                StreamingEvent::ToolUseEnd {
+                    id: "call_1".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            crate::assemble_message(&events).blocks,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "exec".to_string(),
+                input: json!({"code": "return 1"}),
+            }]
+        );
+    }
+
+    #[test]
+    fn argument_done_event_recovers_missing_deltas() {
+        let mut state = ResponsesMapperState::default();
+        let added = json!({
+            "type":"response.output_item.added",
+            "item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}
+        });
+        map_openai_responses_event(&added, &mut state).unwrap();
+        let done = json!({
+            "type":"response.function_call_arguments.done",
+            "item_id":"fc_1",
+            "name":"exec",
+            "arguments":"{\"code\":\"return 1\"}"
+        });
+
+        assert_eq!(
+            map_openai_responses_event(&done, &mut state).unwrap(),
+            vec![StreamingEvent::ToolUseInputComplete {
+                id: "call_1".to_string(),
+                input: "{\"code\":\"return 1\"}".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn completed_tool_item_replaces_streamed_arguments() {
+        let mut state = ResponsesMapperState::default();
+        let added = json!({
+            "type":"response.output_item.added",
+            "item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}
+        });
+        let delta = json!({
+            "type":"response.function_call_arguments.delta",
+            "item_id":"fc_1",
+            "delta":"{\"code\":\"return 1\"}"
+        });
+        map_openai_responses_event(&added, &mut state).unwrap();
+        map_openai_responses_event(&delta, &mut state).unwrap();
+        let done = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"function_call",
+                "id":"fc_1",
+                "call_id":"call_1",
+                "name":"exec",
+                "arguments":"{\"code\":\"return 1\"}"
+            }
+        });
+
+        assert_eq!(
+            map_openai_responses_event(&done, &mut state).unwrap(),
+            vec![
+                StreamingEvent::ToolUseInputComplete {
+                    id: "call_1".to_string(),
+                    input: "{\"code\":\"return 1\"}".to_string(),
+                },
+                StreamingEvent::ToolUseEnd {
+                    id: "call_1".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn argument_delta_after_done_is_ignored() {
+        let mut state = ResponsesMapperState::default();
+        let added = json!({
+            "type":"response.output_item.added",
+            "item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}
+        });
+        let done = json!({
+            "type":"response.function_call_arguments.done",
+            "item_id":"fc_1",
+            "arguments":"{\"code\":\"return 1\"}"
+        });
+        let late = json!({
+            "type":"response.function_call_arguments.delta",
+            "item_id":"fc_1",
+            "delta":"late"
+        });
+        map_openai_responses_event(&added, &mut state).unwrap();
+        map_openai_responses_event(&done, &mut state).unwrap();
+
+        assert!(map_openai_responses_event(&late, &mut state)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn completed_tool_item_repairs_partial_streamed_arguments() {
+        let mut state = ResponsesMapperState::default();
+        let added = json!({
+            "type":"response.output_item.added",
+            "item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}
+        });
+        let partial = json!({
+            "type":"response.function_call_arguments.delta",
+            "item_id":"fc_1",
+            "delta":"{\"code\":"
+        });
+        let done = json!({
+            "type":"response.output_item.done",
+            "item":{
+                "type":"function_call",
+                "id":"fc_1",
+                "call_id":"call_1",
+                "name":"exec",
+                "arguments":"{\"code\":\"return 1\"}"
+            }
+        });
+        let mut events = map_openai_responses_event(&added, &mut state).unwrap();
+        events.extend(map_openai_responses_event(&partial, &mut state).unwrap());
+        events.extend(map_openai_responses_event(&done, &mut state).unwrap());
+
+        assert_eq!(
+            crate::assemble_message(&events).blocks,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "exec".to_string(),
+                input: json!({"code": "return 1"}),
             }]
         );
     }

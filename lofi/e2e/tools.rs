@@ -167,6 +167,43 @@ fn openai_responses_reports_unawaited_nested_tool_failure() {
     );
 }
 
+fn anthropic_tool_response_without_arguments(call_id: &str) -> MockResponse {
+    let start = serde_json::json!({
+        "index": 0,
+        "content_block": { "type": "tool_use", "id": call_id, "name": "exec" },
+    });
+    let stop = serde_json::json!({ "index": 0 });
+    MockResponse::sse(format!(
+        "event: content_block_start\ndata: {start}\n\nevent: content_block_stop\ndata: {stop}\n\nevent: message_stop\ndata: {{}}\n\n"
+    ))
+}
+
+#[test]
+fn anthropic_returns_missing_code_when_arguments_are_absent() {
+    let server = MockServer::start(vec![
+        anthropic_tool_response_without_arguments("anthropic-empty-call"),
+        anthropic_text_response("anthropic empty final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "anthropic/tools"]);
+
+    tui.submit("run anthropic tool call without arguments");
+    tui.wait_for("anthropic empty final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let result = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "tool_result")
+        .and_then(|block| block["content"].as_str())
+        .expect("exec result in the second provider request");
+    assert!(result.contains("exec: missing required 'code' argument"));
+}
+
 #[test]
 fn anthropic_executes_tool_call_and_returns_tool_result() {
     let server = MockServer::start(vec![
@@ -487,6 +524,39 @@ fn parallel_responses_response(calls: &[(&str, &str)]) -> MockResponse {
     MockResponse::sse(events)
 }
 
+fn responses_tool_response_without_argument_deltas(
+    call_id: &str,
+    code: Option<&str>,
+) -> MockResponse {
+    let item_id = format!("item-{call_id}");
+    let arguments = code
+        .map(|code| serde_json::json!({ "code": code }).to_string())
+        .unwrap_or_default();
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "id": item_id,
+            "call_id": call_id,
+            "name": "exec",
+            "arguments": "",
+        },
+    });
+    let done = serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "id": item_id,
+            "call_id": call_id,
+            "name": "exec",
+            "arguments": arguments,
+        },
+    });
+    MockResponse::sse(format!(
+        "data: {added}\n\ndata: {done}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":5,\"output_tokens\":3}}}}}}\n\ndata: [DONE]\n\n"
+    ))
+}
+
 fn malformed_responses_tool_response(call_id: &str) -> MockResponse {
     let item_id = format!("item-{call_id}");
     let added = serde_json::json!({
@@ -578,6 +648,66 @@ fn openai_responses_executes_interleaved_parallel_calls() {
                     .is_some_and(|text| text.contains(marker))
         }));
     }
+}
+
+#[test]
+fn openai_responses_returns_missing_code_when_arguments_are_absent() {
+    let server = MockServer::start(vec![
+        responses_tool_response_without_argument_deltas("responses-empty-call", None),
+        responses_response("empty responses thinking", "empty responses final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning"]);
+
+    tui.submit("run responses call without arguments");
+    tui.wait_for("empty responses final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let output = second["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .and_then(|item| item["output"].as_str())
+        .expect("exec result in the second provider request");
+    assert!(output.contains("exec: missing required 'code' argument"));
+}
+
+#[test]
+fn openai_responses_recovers_arguments_when_deltas_are_absent() {
+    let server = MockServer::start(vec![
+        responses_tool_response_without_argument_deltas(
+            "responses-terminal-call",
+            Some(r#"return { marker: "terminal tool result" };"#),
+        ),
+        responses_response(
+            "terminal responses thinking",
+            "terminal responses final answer",
+        ),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&["--model", "responses/reasoning"]);
+
+    tui.submit("run responses call without argument deltas");
+    tui.wait_for("terminal responses final answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    let output = second["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .and_then(|item| item["output"].as_str())
+        .expect("exec result in the second provider request");
+    assert!(
+        output.contains("terminal tool result"),
+        "expected executed tool result, got: {output}"
+    );
+    assert!(!output.contains("missing required 'code' argument"));
 }
 
 #[test]

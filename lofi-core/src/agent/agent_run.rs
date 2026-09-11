@@ -1076,6 +1076,39 @@ impl Agent {
                                         }
                                     }
                                 }
+                                StreamingEvent::ToolUseInputComplete { id, input } => {
+                                    round_bytes =
+                                        round_bytes.saturating_add(input.len().saturating_sub(
+                                            tool_raw.get(id).map_or(0, String::len),
+                                        ));
+                                    let previous = tool_decoders
+                                        .get_mut(id)
+                                        .map(|decoder| {
+                                            decoder
+                                                .update(tool_raw.get(id).map_or("", String::as_str))
+                                                .to_string()
+                                        })
+                                        .unwrap_or_default();
+                                    tool_raw.insert(id.clone(), input.clone());
+                                    let mut complete_decoder = CodePrefixDecoder::default();
+                                    let complete_code = complete_decoder.update(input).to_string();
+                                    tool_decoders.insert(id.clone(), complete_decoder);
+                                    if let Some(chunk) = complete_code.strip_prefix(&previous) {
+                                        if !chunk.is_empty()
+                                            && !emit(
+                                                tx,
+                                                AgentEvent::ToolInputDelta {
+                                                    id: id.clone(),
+                                                    delta: chunk.to_string(),
+                                                },
+                                            )
+                                            .await
+                                        {
+                                            return Err(Error::Cancelled);
+                                        }
+                                    }
+                                    tool_emitted.insert(id.clone(), complete_code.len());
+                                }
                                 StreamingEvent::Done { usage, stop_reason } => {
                                     round_usage = Some(*usage);
                                     round_stop_reason = *stop_reason;
@@ -1134,7 +1167,8 @@ impl Agent {
                                 StreamingEvent::ToolUseInputDelta { id, delta } => {
                                     id.len() + delta.len()
                                 }
-                                StreamingEvent::ToolUseEnd { id } => id.len(),
+                                StreamingEvent::ToolUseInputComplete { id, .. }
+                                | StreamingEvent::ToolUseEnd { id } => id.len(),
                                 StreamingEvent::Done { .. } => 0,
                             });
                             if round_bytes > MAX_ROUND_BYTES {

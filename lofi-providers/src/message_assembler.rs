@@ -132,6 +132,12 @@ impl MessageAssembler {
                     self.tools[i].input.push_str(&delta);
                 }
             }
+            StreamingEvent::ToolUseInputComplete { id, input } => {
+                let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
+                if let Some(i) = pos {
+                    self.tools[i].input = input;
+                }
+            }
             StreamingEvent::ToolUseEnd { id } => {
                 let pos = self.tools.iter().rposition(|t| !t.ended && t.id == id);
                 if let Some(i) = pos {
