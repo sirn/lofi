@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "lofi"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "lofi-ui",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-code"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1677,14 +1677,14 @@ dependencies = [
 
 [[package]]
 name = "lofi-error"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "lofi-providers"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-types"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.22.1",
  "indexmap",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-ui"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
