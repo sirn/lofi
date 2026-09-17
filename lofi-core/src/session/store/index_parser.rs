@@ -782,6 +782,7 @@ fn is_structural_key(key: &str) -> bool {
             | "api"
             | "thinking"
             | "service_tier"
+            | "stop_reason"
             | "format"
             | "kind"
     )
@@ -955,6 +956,52 @@ mod tests {
         };
         assert_eq!(model.thinking, lofi_types::ThinkingLevel::Medium);
         assert_eq!(model.service_tier, lofi_types::ServiceTier::Flex);
+    }
+
+    #[test]
+    fn projection_preserves_stop_reasons_after_content_budget_is_exhausted() {
+        let source = serde_json::to_vec(&serde_json::json!({
+            "text": "x".repeat(MAX_EXEC_RESULT_BYTES),
+        }))
+        .unwrap();
+        let mut budget = ProjectionBudget::collection();
+        for _ in 0..=MAX_PROJECTED_STRINGS_BYTES / MAX_EXEC_RESULT_BYTES {
+            let mut reader = BufReader::new(Cursor::new(&source));
+            read_projected_value::<serde_json::Value, _>(&mut reader, &mut budget)
+                .unwrap()
+                .unwrap();
+        }
+        for stop_reason in [
+            lofi_types::StopReason::EndTurn,
+            lofi_types::StopReason::MaxTokens,
+            lofi_types::StopReason::ToolUse,
+            lofi_types::StopReason::Other,
+        ] {
+            let event = lofi_types::SessionEvent {
+                id: "end".into(),
+                parent_id: None,
+                kind: lofi_types::SessionEventKind::TurnEnd {
+                    model: "p/m".into(),
+                    elapsed_ms: 1,
+                    cost: 0.0,
+                    usage: lofi_types::Usage::default(),
+                    stop_reason: Some(stop_reason),
+                },
+            };
+            let mut reader = BufReader::new(Cursor::new(serde_json::to_vec(&event).unwrap()));
+            let (_, _, projected) =
+                read_projected_value::<lofi_types::SessionEvent, _>(&mut reader, &mut budget)
+                    .unwrap()
+                    .unwrap();
+            let lofi_types::SessionEventKind::TurnEnd {
+                stop_reason: actual,
+                ..
+            } = projected.kind
+            else {
+                panic!("expected turn end");
+            };
+            assert_eq!(actual, Some(stop_reason));
+        }
     }
 
     #[test]

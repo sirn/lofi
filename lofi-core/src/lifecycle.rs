@@ -556,6 +556,68 @@ mod tests {
     }
 
     #[test]
+    fn auto_compact_preserves_stop_reasons_after_content_budget_is_exhausted() {
+        let mut config = CompactionConfig::default();
+        config.auto.max_context_tokens = Some(50);
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let mut events = Vec::new();
+        let usage = Usage {
+            input_tokens: 100,
+            ..Usage::default()
+        };
+        for turn in 0..12 {
+            for (role, text) in [
+                (Role::User, format!("prompt {turn}")),
+                (Role::Assistant, "x".repeat(200 * 1024)),
+            ] {
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::Message(Message {
+                        origin: None,
+                        role,
+                        blocks: vec![ContentBlock::Text { text }],
+                        kind: PromptKind::default(),
+                    }),
+                });
+            }
+            events.push(SessionEvent {
+                id: String::new(),
+                parent_id: None,
+                kind: SessionEventKind::TurnEnd {
+                    model: "p/m".into(),
+                    elapsed_ms: 1,
+                    cost: 0.0,
+                    usage,
+                    stop_reason: Some(lofi_types::StopReason::EndTurn),
+                },
+            });
+        }
+        cursor.append_events(&mut events).unwrap();
+        let mut lifecycle = AgentLifecycle::new(config, 100_000);
+
+        let compaction = lifecycle
+            .auto_compact(usage, Some(&cursor), "system prompt")
+            .unwrap();
+
+        assert!(compaction.is_some());
+        let stored = cursor.load_events().unwrap();
+        assert!(stored
+            .iter()
+            .any(|event| matches!(event.kind, SessionEventKind::Compaction { .. })));
+        let stop_reasons: Vec<_> = stored
+            .iter()
+            .filter_map(|event| match event.kind {
+                SessionEventKind::TurnEnd { stop_reason, .. } => stop_reason,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stop_reasons, vec![lofi_types::StopReason::EndTurn; 12]);
+    }
+
+    #[test]
     fn seed_system_populates_empty_history_once() {
         let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
         assert!(lifecycle.seed_system("sys").unwrap());
