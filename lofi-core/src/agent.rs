@@ -37,6 +37,7 @@ pub struct ConfirmRequest {
 mod agent_run;
 #[cfg(test)]
 use agent_run::assistant_announces_tool_intent;
+pub use agent_run::{RunControls, TurnInput, TurnRequest};
 mod auto_mode;
 mod event;
 mod exec;

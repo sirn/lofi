@@ -605,15 +605,15 @@ async fn user_prompt_is_persisted_before_first_provider_round() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
-    let run = agent.run_continuation(
+    let run = agent.run_turn(
         &mut messages,
-        "keep this".into(),
-        lofi_types::PromptKind::User,
+        TurnRequest::prompt("keep this".into(), lofi_types::PromptKind::User),
         tx,
         Some(&cursor),
-        false,
-        None,
-        None,
+        RunControls {
+            cancel: None,
+            preempt: None,
+        },
     );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), run)
@@ -663,17 +663,22 @@ async fn startup_notice_uses_the_durable_prompt_path() {
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path, None);
     agent
-        .run_continuation_with_notices(
+        .run_turn(
             &mut messages,
-            "continue".into(),
-            lofi_types::PromptKind::User,
-            Vec::new(),
-            vec!["job 7 is stale".into()],
+            TurnRequest {
+                input: TurnInput::Prompt {
+                    text: "continue".into(),
+                    kind: lofi_types::PromptKind::User,
+                    attachments: Vec::new(),
+                },
+                notices: vec!["job 7 is stale".into()],
+            },
             tx,
             Some(&cursor),
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -735,15 +740,15 @@ async fn settled_messages_remain_on_disk_after_consumer_drops() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
-    let run = agent.run_continuation(
+    let run = agent.run_turn(
         &mut messages,
-        "go".into(),
-        lofi_types::PromptKind::User,
+        TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
         tx,
         Some(&cursor),
-        false,
-        None,
-        None,
+        RunControls {
+            cancel: None,
+            preempt: None,
+        },
     );
     tokio::pin!(run);
     let mut run_done = false;
@@ -816,15 +821,15 @@ async fn completed_final_round_is_on_disk_before_turn_end() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
-    let run = agent.run_continuation(
+    let run = agent.run_turn(
         &mut messages,
-        "go".into(),
-        lofi_types::PromptKind::User,
+        TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
         tx,
         Some(&cursor),
-        false,
-        None,
-        None,
+        RunControls {
+            cancel: None,
+            preempt: None,
+        },
     );
     tokio::pin!(run);
 
@@ -899,15 +904,15 @@ async fn repeated_tool_results_notify_after_pairing_and_recover_once() {
     let (tx, _rx) = tokio::sync::mpsc::channel(128);
     let mut messages = Vec::new();
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -969,15 +974,15 @@ async fn forward_progress_resets_the_recovery_round_budget() {
     let (tx, _rx) = tokio::sync::mpsc::channel(8192);
     let mut messages = Vec::new();
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            PromptKind::User,
+            TurnRequest::prompt("go".into(), PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1060,15 +1065,15 @@ async fn repeated_thinking_notifies_agent_and_allows_one_recovery() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1113,15 +1118,15 @@ async fn repeated_thinking_stops_after_failed_recovery() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1183,15 +1188,15 @@ async fn thinking_only_stop_continues_without_replaying_the_orphan_round() {
     let mut messages = vec![user_msg("go")];
 
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1234,15 +1239,15 @@ async fn terminal_provider_stop_does_not_retry_thinking_only_response() {
     let mut messages = vec![user_msg("go")];
 
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1273,15 +1278,15 @@ async fn repeated_thinking_only_stop_ends_after_one_continuation() {
     let mut messages = vec![user_msg("go")];
 
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1392,15 +1397,15 @@ async fn max_tokens_stop_continues_the_turn_once() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1450,15 +1455,15 @@ async fn max_tokens_continuation_budget_is_one_per_turn() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1505,15 +1510,15 @@ async fn loop_recovery_remains_available_after_terminal_recovery() {
     let mut messages = vec![user_msg("go")];
 
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1552,15 +1557,15 @@ async fn clean_end_turn_does_not_continue() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1595,15 +1600,15 @@ async fn tool_stop_without_a_tool_call_continues_by_default() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1636,15 +1641,15 @@ async fn tool_stop_recovery_can_be_disabled() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1679,15 +1684,15 @@ async fn clean_stop_intent_continues_only_when_enabled() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1765,15 +1770,15 @@ async fn truncation_and_lost_tool_recovery_share_one_budget() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1822,15 +1827,15 @@ async fn max_tokens_truncated_tool_call_is_closed_and_valid_calls_still_run() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1900,15 +1905,15 @@ async fn truncation_notice_is_persisted_and_replays_as_notice_turn() {
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             Some(&cursor),
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -1979,15 +1984,15 @@ async fn cancel_preempts_the_truncation_continuation() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     {
-        let run = agent.run_continuation(
+        let run = agent.run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             Some(&cursor),
-            false,
-            Some(cancel.clone()),
-            None,
+            RunControls {
+                cancel: Some(cancel.clone()),
+                preempt: None,
+            },
         );
         tokio::pin!(run);
 
@@ -2057,15 +2062,15 @@ async fn run_continuation_persists_completed_round_before_next_round_settles() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     let cursor = crate::session::store::SessionCursor::new(path.clone(), None);
-    let run = agent.run_continuation(
+    let run = agent.run_turn(
         &mut messages,
-        "go".into(),
-        lofi_types::PromptKind::User,
+        TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
         tx,
         Some(&cursor),
-        false,
-        None,
-        None,
+        RunControls {
+            cancel: None,
+            preempt: None,
+        },
     );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), run)
@@ -2114,15 +2119,15 @@ async fn cancelled_run_persists_partial_output_as_aborted_turn() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = Vec::new();
     {
-        let run = agent.run_continuation(
+        let run = agent.run_turn(
             &mut messages,
-            "go".into(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".into(), lofi_types::PromptKind::User),
             tx,
             Some(&cursor),
-            false,
-            Some(cancel.clone()),
-            None,
+            RunControls {
+                cancel: Some(cancel.clone()),
+                preempt: None,
+            },
         );
         tokio::pin!(run);
 
@@ -2241,15 +2246,15 @@ async fn run_continuation_force_stops_at_hard_cap() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            String::new(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt(String::new(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -2326,15 +2331,15 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         kind: PromptKind::default(),
     }];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            String::new(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt(String::new(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -2450,15 +2455,15 @@ async fn run_continuation_retries_transient_provider_errors() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".to_string(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".to_string(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await;
     assert!(result.is_ok(), "should recover: {result:?}");
@@ -2536,15 +2541,15 @@ async fn successful_provider_round_resets_retry_attempt_count() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".to_string(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".to_string(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -2595,15 +2600,15 @@ async fn provider_progress_resets_retry_attempt_count_before_a_later_failure() {
     let mut messages = vec![user_msg("go")];
 
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".to_string(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".to_string(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();
@@ -2643,15 +2648,15 @@ async fn provider_error_events_do_not_reset_retry_attempt_count() {
     let mut messages = vec![user_msg("go")];
 
     let result = agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".to_string(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".to_string(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await;
 
@@ -2685,15 +2690,15 @@ async fn run_continuation_does_not_retry_non_transient_errors() {
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     let mut messages = vec![user_msg("go")];
     let result = agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            "go".to_string(),
-            lofi_types::PromptKind::User,
+            TurnRequest::prompt("go".to_string(), lofi_types::PromptKind::User),
             tx,
             None,
-            false,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await;
     assert!(result.is_err(), "non-retryable errors should propagate");
@@ -3401,15 +3406,18 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
     agent
-        .run_continuation(
+        .run_turn(
             &mut messages,
-            String::new(),
-            lofi_types::PromptKind::User,
+            TurnRequest {
+                input: TurnInput::Continue,
+                notices: Vec::new(),
+            },
             tx,
             None,
-            true,
-            None,
-            None,
+            RunControls {
+                cancel: None,
+                preempt: None,
+            },
         )
         .await
         .unwrap();

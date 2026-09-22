@@ -1,0 +1,343 @@
+#![allow(clippy::wildcard_imports)]
+
+use super::*;
+
+const THINKING_LOOP_MIN_BYTES: usize = 100;
+const THINKING_LOOP_REPETITIONS: usize = 3;
+const THINKING_LOOP_MAX_PERIOD_BYTES: usize = 2 * 1024;
+const THINKING_LOOP_HISTORY_BYTES: usize = 24 * 1024;
+const TOOL_LOOP_REPETITIONS: usize = 5;
+const TOOL_LOOP_MAX_CYCLE: usize = 5;
+pub(in crate::agent) const MAX_RECOVERY_ROUNDS: usize = 100;
+const LOOP_RECOVERY_PROMPT: &str = "A potential loop was detected in your repeated reasoning or tool results. Stop repeating the same approach. Review the latest result, choose a different concrete action, and continue only if it makes forward progress.";
+
+#[derive(Default)]
+pub(super) struct LoopDetector {
+    thinking: Vec<u8>,
+    thinking_checked_at: usize,
+    tool_rounds: Vec<String>,
+}
+
+impl LoopDetector {
+    pub(super) fn start_round(&mut self) {
+        self.thinking.clear();
+        self.thinking_checked_at = 0;
+    }
+
+    pub(super) fn add_thinking(&mut self, delta: &str) -> Option<String> {
+        self.thinking.extend_from_slice(delta.as_bytes());
+        if self.thinking.len() > THINKING_LOOP_HISTORY_BYTES {
+            let excess = self.thinking.len() - THINKING_LOOP_HISTORY_BYTES;
+            self.thinking.drain(..excess);
+            self.thinking_checked_at = self.thinking_checked_at.saturating_sub(excess);
+        }
+        if self.thinking.len() < self.thinking_checked_at + THINKING_LOOP_MIN_BYTES {
+            return None;
+        }
+        self.check_thinking()
+    }
+
+    pub(super) fn finish_thinking(&mut self) -> Option<String> {
+        if self.thinking.len() == self.thinking_checked_at {
+            return None;
+        }
+        self.check_thinking()
+    }
+
+    fn check_thinking(&mut self) -> Option<String> {
+        self.thinking_checked_at = self.thinking.len();
+        let relevant = THINKING_LOOP_REPETITIONS * THINKING_LOOP_MAX_PERIOD_BYTES;
+        let start = self.thinking.len().saturating_sub(relevant);
+        let reversed = self.thinking[start..]
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        let prefix_matches = z_array(&reversed);
+        let max_period =
+            (reversed.len() / THINKING_LOOP_REPETITIONS).min(THINKING_LOOP_MAX_PERIOD_BYTES);
+        for (period, prefix_match) in prefix_matches
+            .iter()
+            .enumerate()
+            .take(max_period + 1)
+            .skip(THINKING_LOOP_MIN_BYTES)
+        {
+            if *prefix_match >= period * (THINKING_LOOP_REPETITIONS - 1) {
+                return Some(format!(
+                    "repeated thinking pattern detected ({period} bytes repeated {THINKING_LOOP_REPETITIONS} times)"
+                ));
+            }
+        }
+        None
+    }
+
+    pub(super) fn add_tool_round(&mut self, fingerprint: String) -> Option<String> {
+        self.tool_rounds.push(fingerprint);
+        let keep = TOOL_LOOP_REPETITIONS * TOOL_LOOP_MAX_CYCLE;
+        if self.tool_rounds.len() > keep {
+            self.tool_rounds.remove(0);
+        }
+        for cycle in 1..=TOOL_LOOP_MAX_CYCLE {
+            let repeated = cycle * TOOL_LOOP_REPETITIONS;
+            if self.tool_rounds.len() < repeated {
+                continue;
+            }
+            let tail = &self.tool_rounds[self.tool_rounds.len() - repeated..];
+            if tail
+                .chunks_exact(cycle)
+                .all(|chunk| chunk == &tail[..cycle])
+            {
+                return Some(format!(
+                    "repeated tool-result cycle detected ({cycle} round cycle repeated {TOOL_LOOP_REPETITIONS} times)"
+                ));
+            }
+        }
+        None
+    }
+}
+
+fn z_array(bytes: &[u8]) -> Vec<usize> {
+    let mut matches = vec![0; bytes.len()];
+    let (mut left, mut right) = (0, 0);
+    for index in 1..bytes.len() {
+        if index < right {
+            matches[index] = matches[index - left].min(right - index);
+        }
+        while index + matches[index] < bytes.len()
+            && bytes[matches[index]] == bytes[index + matches[index]]
+        {
+            matches[index] += 1;
+        }
+        if index + matches[index] > right {
+            left = index;
+            right = index + matches[index];
+        }
+    }
+    matches
+}
+
+pub(super) fn terminal_recovery_prompt(
+    outcome: &RoundOutcome,
+    policy: lofi_types::AutoContinuePolicy,
+) -> Option<&'static str> {
+    if !outcome.finished {
+        return None;
+    }
+    match outcome.stop_reason {
+        Some(lofi_types::StopReason::MaxTokens) => Some(TRUNCATION_CONTINUATION_PROMPT),
+        Some(lofi_types::StopReason::ToolUse) if policy.lost_tool_call => {
+            Some(LOST_TOOL_CONTINUATION_PROMPT)
+        }
+        Some(lofi_types::StopReason::EndTurn) if policy.intent && outcome.announced_tool_intent => {
+            Some(INTENT_CONTINUATION_PROMPT)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn tool_round_fingerprint(assistant: &Message, result: &Message) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut value = String::new();
+    for block in &assistant.blocks {
+        if let ContentBlock::ToolUse { name, input, .. } = block {
+            value.push_str(name);
+            value.push('\0');
+            value.push_str(&serde_json::to_string(input).unwrap_or_default());
+            value.push('\0');
+        }
+    }
+    for block in &result.blocks {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = block
+        {
+            value.push_str(if *is_error { "error" } else { "ok" });
+            value.push('\0');
+            value.push_str(content);
+            value.push('\0');
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub(super) fn notice_message(text: impl Into<String>) -> Message {
+    Message {
+        origin: None,
+        role: Role::User,
+        blocks: vec![ContentBlock::Text { text: text.into() }],
+        kind: lofi_types::PromptKind::Notice,
+    }
+}
+
+fn loop_recovery_message(detail: &str) -> Message {
+    notice_message(format!("{LOOP_RECOVERY_PROMPT} Detection: {detail}"))
+}
+
+pub(super) enum RecoveryAction {
+    Continue,
+    Stop,
+}
+
+pub(super) fn recovery_round_exceeded(recovery_rounds: &mut usize) -> Option<Message> {
+    *recovery_rounds += 1;
+    if *recovery_rounds <= MAX_RECOVERY_ROUNDS {
+        return None;
+    }
+    Some(notice_message(format!(
+        "agent stopped after {MAX_RECOVERY_ROUNDS} consecutive recovery rounds without forward progress"
+    )))
+}
+
+pub(super) struct RecoveryPlan {
+    pub(super) action: RecoveryAction,
+    pub(super) removal: Option<(usize, String)>,
+    pub(super) notice: Message,
+}
+
+pub(super) fn handle_loop_detection(
+    detail: Option<&str>,
+    interrupted_thinking_index: Option<usize>,
+    recovered: &mut bool,
+) -> Option<RecoveryPlan> {
+    let detail = detail?;
+    if *recovered {
+        let detail = format!("agent stopped after loop recovery failed: {detail}");
+        return Some(RecoveryPlan {
+            action: RecoveryAction::Stop,
+            removal: interrupted_thinking_index.map(|index| (index, detail.clone())),
+            notice: notice_message(detail),
+        });
+    }
+    *recovered = true;
+    let notice =
+        format!("potential agent loop detected; requesting a different approach: {detail}");
+    Some(RecoveryPlan {
+        action: RecoveryAction::Continue,
+        removal: interrupted_thinking_index.map(|index| (index, notice)),
+        notice: loop_recovery_message(detail),
+    })
+}
+
+pub(super) fn handle_thinking_only_stop(
+    thinking_only_index: Option<usize>,
+    continuation_prompt: Option<&str>,
+    recovered: &mut bool,
+) -> Option<RecoveryPlan> {
+    let index = thinking_only_index?;
+    let (action, detail, prompt) = match (continuation_prompt, *recovered) {
+        (None, _) => (
+            RecoveryAction::Stop,
+            "discarding thinking-only response after terminal provider stop",
+            "Agent stopped because the provider ended generation before a final answer.",
+        ),
+        (Some(_), true) => (
+            RecoveryAction::Stop,
+            "discarding repeated thinking-only response after automatic continuation",
+            "Agent stopped after the continuation also produced reasoning without a final answer.",
+        ),
+        (Some(prompt), false) => {
+            *recovered = true;
+            (
+                RecoveryAction::Continue,
+                "discarding thinking-only response before automatic continuation",
+                prompt,
+            )
+        }
+    };
+    Some(RecoveryPlan {
+        action,
+        removal: Some((index, detail.to_string())),
+        notice: notice_message(prompt),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_loop_requires_three_repeated_long_suffixes() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        assert!(detector.add_thinking(&pattern).is_none());
+        assert!(detector.add_thinking(&pattern).is_none());
+        assert!(detector
+            .add_thinking(&pattern)
+            .is_some_and(|detail| detail.contains("repeated thinking")));
+    }
+
+    #[test]
+    fn thinking_loop_checks_a_short_final_delta() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        assert!(detector
+            .add_thinking(&format!("{}{}", pattern.repeat(2), &pattern[..1]))
+            .is_none());
+        assert!(detector.add_thinking(&pattern[1..]).is_none());
+        assert!(detector
+            .finish_thinking()
+            .is_some_and(|detail| detail.contains("repeated thinking")));
+    }
+
+    #[test]
+    fn thinking_loop_does_not_span_provider_rounds() {
+        let mut detector = LoopDetector::default();
+        let pattern = "abcdefghij".repeat(10);
+        for _ in 0..3 {
+            detector.start_round();
+            assert!(detector.add_thinking(&pattern).is_none());
+            assert!(detector.finish_thinking().is_none());
+        }
+    }
+
+    #[test]
+    fn thinking_loop_detects_varied_period_and_rejects_near_match() {
+        let pattern = (0..137)
+            .map(|index| char::from(b'!' + (index * 17 % 90) as u8))
+            .collect::<String>();
+        let mut near = format!("{pattern}{pattern}{pattern}");
+        near.replace_range(near.len() - 1.., "~");
+
+        let mut detector = LoopDetector::default();
+        assert!(detector.add_thinking(&near).is_none());
+        detector.start_round();
+        assert!(detector
+            .add_thinking(&pattern.repeat(3))
+            .is_some_and(|detail| detail.contains("137 bytes")));
+    }
+
+    #[test]
+    fn changing_tool_results_do_not_trigger_a_loop() {
+        let mut detector = LoopDetector::default();
+        for result in ["1", "2", "3", "4", "5"] {
+            assert!(detector
+                .add_tool_round(format!("same-call:{result}"))
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn identical_tool_result_rounds_trigger_after_five_repetitions() {
+        let mut detector = LoopDetector::default();
+        for _ in 0..TOOL_LOOP_REPETITIONS - 1 {
+            assert!(detector.add_tool_round("same".into()).is_none());
+        }
+        assert!(detector
+            .add_tool_round("same".into())
+            .is_some_and(|detail| detail.contains("tool-result cycle")));
+    }
+
+    #[test]
+    fn alternating_tool_result_cycle_is_detected() {
+        let mut detector = LoopDetector::default();
+        for fingerprint in ["a", "b"].into_iter().cycle().take(9) {
+            assert!(detector.add_tool_round(fingerprint.into()).is_none());
+        }
+        assert!(detector
+            .add_tool_round("b".into())
+            .is_some_and(|detail| detail.contains("2 round cycle")));
+    }
+}

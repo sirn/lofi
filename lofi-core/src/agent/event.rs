@@ -81,7 +81,7 @@ pub enum AgentEvent {
     /// A turn completed: the raw model identity that ran it, wall-clock
     /// duration, the accumulated USD cost across the turn's rounds, and the
     /// final round's token usage. Emitted once per turn by
-    /// [`Agent::run_continuation`] and also written to the transcript, so the
+    /// [`Agent::run_turn`] and also written to the transcript, so the
     /// live view and a resumed view render the same `◇ Done in Ns with
     /// <model>` block — the model travels with the event rather than being
     /// re-derived from the (possibly switched) active model on resume.

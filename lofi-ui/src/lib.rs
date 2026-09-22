@@ -304,7 +304,7 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 }
 
 /// Builds the agent via [`lofi_core::build_agent`], then drives
-/// [`lofi_core::Agent::run_continuation`] concurrently with a stdio consumer:
+/// [`lofi_core::Agent::run_turn`] concurrently with a stdio consumer:
 /// - [`AgentEvent::Text`] deltas are written to stdout via
 ///   `std::io::stdout().write_all` (never `println!`, which is denied by the
 ///   workspace lints);
@@ -331,15 +331,22 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
 
     let prompt = opts.prompt.clone();
     let mut messages = Vec::new();
-    let agent_run = agent.run_continuation(
+    let agent_run = agent.run_turn(
         &mut messages,
-        prompt,
-        lofi_types::PromptKind::User,
+        lofi_core::TurnRequest {
+            input: lofi_core::TurnInput::Prompt {
+                text: prompt,
+                kind: lofi_types::PromptKind::User,
+                attachments: Vec::new(),
+            },
+            notices: Vec::new(),
+        },
         tx,
         None,
-        false,
-        None,
-        None,
+        lofi_core::RunControls {
+            cancel: None,
+            preempt: None,
+        },
     );
 
     // The agent future is not `Send` (the QuickJS `AsyncContext` is not

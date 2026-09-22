@@ -382,17 +382,26 @@ fn spawn_agent_run(
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cursor.clone());
                 }
                 let mut messages = history.lock().map(|m| m.clone()).unwrap_or_default();
-                let result = std::panic::AssertUnwindSafe(agent.run_continuation_with_notices(
+                let result = std::panic::AssertUnwindSafe(agent.run_turn(
                     &mut messages,
-                    prompt,
-                    prompt_kind,
-                    Vec::new(),
-                    startup_notices,
+                    lofi_core::TurnRequest {
+                        input: if continuation {
+                            lofi_core::TurnInput::Continue
+                        } else {
+                            lofi_core::TurnInput::Prompt {
+                                text: prompt,
+                                kind: prompt_kind,
+                                attachments: Vec::new(),
+                            }
+                        },
+                        notices: startup_notices,
+                    },
                     tx,
                     cursor.as_ref(),
-                    continuation,
-                    Some(cancel_clone),
-                    Some(preempt_clone),
+                    lofi_core::RunControls {
+                        cancel: Some(cancel_clone),
+                        preempt: Some(preempt_clone),
+                    },
                 ))
                 .catch_unwind()
                 .await;

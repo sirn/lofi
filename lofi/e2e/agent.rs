@@ -745,6 +745,15 @@ fn cancelling_a_running_tool_kills_its_process_and_records_cancellation() {
     assert_eq!(server.request_count(), 1);
     let events = fixture.events();
     assert!(event_types(&events).contains(&"turn_cancelled"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "turn_cancelled")
+            .count(),
+        1
+    );
+    assert!(!event_types(&events).contains(&"turn_end"));
+    assert!(!event_types(&events).contains(&"turn_failed"));
 }
 
 #[test]
