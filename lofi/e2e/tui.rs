@@ -927,6 +927,74 @@ fn selecting_rendered_text_copies_the_original_markdown_over_osc52() {
 }
 
 #[test]
+fn mixed_markdown_survives_resize_freezing_and_resume() {
+    let markdown = "# Markdown heading
+
+> quoted marker
+
+- list marker
+
+```rust
+let code_marker = 1;
+```
+
+| Name | Value |
+| --- | ---: |
+| table marker | 42 |
+
+**copy-markdown-marker**";
+    let server = MockServer::start(vec![
+        text_response(markdown),
+        text_response("frozen markdown answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+    tui.resize(60, 100);
+    tui.submit("render mixed markdown");
+    tui.wait_for_screen("copy-markdown-marker", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    for resumed in [false, true] {
+        if resumed {
+            tui.submit("freeze markdown");
+            tui.wait_for_screen("frozen markdown answer", WAIT);
+            fixture.wait_for_event_count("turn_end", 2);
+            tui.send(b"\x04");
+            tui.wait_exit();
+            tui = fixture.spawn(&["--continue"]);
+        }
+        for width in [40, 100] {
+            tui.resize(60, width);
+            for marker in [
+                "Markdown heading",
+                "quoted marker",
+                "list marker",
+                "code_marker",
+                "table marker",
+                "42",
+                "copy-markdown-marker",
+            ] {
+                tui.wait_for_screen(marker, WAIT);
+            }
+        }
+        enter_navigation(&mut tui);
+        select_transcript_row(&mut tui, "copy-markdown-marker");
+        tui.clear_output();
+        tui.send(b"0v$y");
+        tui.wait_for("Copied to clipboard", WAIT);
+        assert!(
+            tui.output()
+                .contains("\x1b]52;c;Kipjb3B5LW1hcmtkb3duLW1hcmtlcioq\x07"),
+            "copy must retain Markdown source: {:?}",
+            tui.output()
+        );
+        tui.send(b"\x1b");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(server.request_count(), 2);
+}
+
+#[test]
 fn escape_clears_input_and_ctrl_d_exits() {
     let server = MockServer::start(Vec::new());
     let fixture = Fixture::new(&server);

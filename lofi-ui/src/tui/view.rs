@@ -18,6 +18,7 @@ use crate::tui::{App, Mode, NotifyKind, NOTIFY_MAX_LINES, SPINNER};
 
 pub(crate) mod blocks;
 pub(crate) mod component;
+mod markdown;
 mod modals;
 mod prim;
 use modals::{
