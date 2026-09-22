@@ -7,8 +7,10 @@ use lofi_error::{Error, Result};
 use lofi_types::{Message, PromptKind, RunModel, SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 
+mod append;
 mod index;
 mod index_parser;
+use append::append_records;
 use index::{
     compaction_index_suffix, index_kind_for_event, load_compaction_path, load_display_event_range,
     load_display_events_at, load_event_at, load_event_range, load_event_values, load_events_at,
@@ -1226,12 +1228,7 @@ fn append_compaction_from(
     lock.lock()?;
     let parent = parent.resolve(path)?;
     let ids: Vec<String> = (0..=kept_messages.len()).map(|_| short_id()).collect();
-    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    let write = (|| -> Result<()> {
+    let (byte_start, byte_end) = append_records(path, |writer| {
         for (index, message) in kept_messages.iter().enumerate() {
             let event = MessageCheckpoint {
                 id: &ids[index],
@@ -1244,9 +1241,7 @@ fn append_compaction_from(
                 role: message.role,
                 blocks: &message.blocks,
             };
-            serde_json::to_writer(&mut file, &event)
-                .map_err(|e| Error::State(format!("json: {e}")))?;
-            file.write_all(b"\n")?;
+            writer.record(&event)?;
         }
         let marker_index = kept_messages.len();
         let marker = CompactionCheckpoint {
@@ -1268,22 +1263,12 @@ fn append_compaction_from(
             represented: counts.represented,
             kept: counts.kept,
         };
-        serde_json::to_writer(&mut file, &marker)
-            .map_err(|e| Error::State(format!("json: {e}")))?;
-        file.write_all(b"\n")?;
+        writer.record(&marker)?;
         if persist_head {
-            serde_json::to_writer(&mut file, &cursor_event(Some(&ids[marker_index])))
-                .map_err(|e| Error::State(format!("json: {e}")))?;
-            file.write_all(b"\n")?;
+            writer.record(&cursor_event(Some(&ids[marker_index])))?;
         }
-        file.sync_data()?;
         Ok(())
-    })();
-    if let Err(error) = write {
-        let _ = file.set_len(byte_start);
-        return Err(error);
-    }
-    let byte_end = file.metadata()?.len();
+    })?;
     Ok((byte_start, byte_end, ids[kept_messages.len()].clone()))
 }
 
@@ -1292,53 +1277,21 @@ fn append_events_with_cursor(
     events: &[SessionEvent],
     cursor: &SessionEvent,
 ) -> Result<(u64, u64)> {
-    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    for event in events.iter().chain(std::iter::once(cursor)) {
-        if let Err(error) = serde_json::to_writer(&mut file, event) {
-            let _ = file.set_len(byte_start);
-            return Err(Error::State(format!("json: {error}")));
+    append_records(path, |writer| {
+        for event in events.iter().chain(std::iter::once(cursor)) {
+            writer.record(event)?;
         }
-        if let Err(error) = file.write_all(
-            b"
-",
-        ) {
-            let _ = file.set_len(byte_start);
-            return Err(Error::Io(error));
-        }
-    }
-    if let Err(error) = file.sync_data() {
-        let _ = file.set_len(byte_start);
-        return Err(Error::Io(error));
-    }
-    Ok((byte_start, file.metadata()?.len()))
+        Ok(())
+    })
 }
 
 fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
-    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    for event in events {
-        if let Err(error) = serde_json::to_writer(&mut file, event) {
-            let _ = file.set_len(byte_start);
-            return Err(Error::State(format!("json: {error}")));
+    append_records(path, |writer| {
+        for event in events {
+            writer.record(event)?;
         }
-        if let Err(error) = file.write_all(b"\n") {
-            let _ = file.set_len(byte_start);
-            return Err(Error::Io(error));
-        }
-    }
-    if let Err(error) = file.sync_data() {
-        let _ = file.set_len(byte_start);
-        return Err(Error::Io(error));
-    }
-    let byte_end = file.metadata()?.len();
-    Ok((byte_start, byte_end))
+        Ok(())
+    })
 }
 
 /// # Errors
@@ -1705,6 +1658,64 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
         (dir, store)
+    }
+
+    #[test]
+    fn failed_append_rolls_back_and_preserves_selected_head() {
+        const CHILD_MODE: &str = "LOFI_APPEND_FAILURE_TEST";
+        let Ok(mode) = std::env::var(CHILD_MODE) else {
+            for mode in ["events", "cursor", "checkpoint"] {
+                // A separate process keeps the file limit and signal disposition
+                // out of parallel tests. Ignore SIGXFSZ so writes return errors.
+                let output = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        "trap '' XFSZ; ulimit -f 8; exec \"$1\" --exact session::store::tests::failed_append_rolls_back_and_preserves_selected_head --nocapture",
+                        "append-failure",
+                    ])
+                    .arg(std::env::current_exe().unwrap())
+                    .env(CHILD_MODE, mode)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{mode}: {output:?}");
+            }
+            return;
+        };
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/append-failure"), &"p/m".into())
+            .unwrap();
+        cursor.append_events(&mut [ev(user("baseline"))]).unwrap();
+        let before = std::fs::read(cursor.path()).unwrap();
+        let leaf = cursor.leaf_id();
+        let huge = user(&"x".repeat(64 * 1024));
+        let result = match mode.as_str() {
+            "events" => append_events(cursor.path(), &mut [ev(huge)], leaf.as_deref()),
+            "cursor" => cursor.append_events(&mut [ev(huge)]),
+            "checkpoint" => cursor.append_compaction(
+                &[user("partial checkpoint"), huge],
+                "summary",
+                &[leaf.clone().unwrap(), leaf.clone().unwrap()],
+                CompactionCounts {
+                    summarized: 1,
+                    represented: 1,
+                    kept: 2,
+                },
+            ),
+            _ => panic!("unknown append mode"),
+        };
+        assert!(matches!(result, Err(Error::State(_))));
+        assert_eq!(std::fs::read(cursor.path()).unwrap(), before);
+        assert_eq!(cursor.leaf_id(), leaf);
+        assert_eq!(cursor.load_events().unwrap().len(), 1);
+        assert_eq!(cursor.load_compaction_events().unwrap().len(), 1);
+        let reopened = SessionCursor::open(cursor.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.leaf_id(), leaf);
+        cursor.append_events(&mut [ev(user("retry"))]).unwrap();
+        let events = cursor.load_events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(message_text(&events[1]), "retry");
+        assert_eq!(events[1].parent_id, leaf);
     }
 
     #[test]
