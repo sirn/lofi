@@ -71,7 +71,10 @@ pub async fn build_agent(
 
 /// Walking stops at the repository boundary so unrelated ancestor
 /// instructions cannot affect the workspace.
-fn assemble_system_prompt(config_dir: Option<&std::path::Path>, root: &std::path::Path) -> String {
+pub(super) fn assemble_system_prompt(
+    config_dir: Option<&std::path::Path>,
+    root: &std::path::Path,
+) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
 
     if let Some(dir) = config_dir {

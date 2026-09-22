@@ -16,6 +16,85 @@ The `[credential] timeout_ms` setting controls how long a `!command` credential 
 
 When `config.toml` is absent, lofi falls back to built-in OpenAI Responses, Anthropic Messages, and Google Generative AI definitions. They become available when `$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, or `$GEMINI_API_KEY` is set. An explicit config file replaces that built-in provider tree.
 
+## Agent backends
+
+Native models use Lofi's model providers and agent loop. Backend models are
+part of the same model list and use the same startup selection rules.
+The supported external backend is `claude-code`. It uses the installed Claude Code
+CLI, not ACP. The external agent owns login, credentials, model requests, context,
+and compaction. Lofi supplies its running session's `exec` tool through MCP, with
+the same shell policy, jobs, skills, and tool events as the native backend.
+Generic ACP adapters are not supported.
+
+Select a configured backend with `lofi --backend claude` or return to native mode
+with `lofi --backend native`. Both interactive and `--print` mode support selection.
+External mode resolves provider credentials only for the configured Lofi auto-mode
+evaluator, when enabled. Authenticate with the external agent's own login command
+before starting Lofi.
+
+`/model` lists native models and configured external models together. Switching
+backends keeps the conversation history and the same tools, jobs, and shell policy.
+A new external session receives prior messages from Lofi's conversation history.
+Switching models within an external backend keeps its existing session.
+Use `--continue` or `--resume` to resume the last backend used. Claude Code reuses
+its saved session ID only when its context matches the current conversation.
+Disconnects and cancellation require explicit resume. Prompts are not retried.
+
+Claude Code receives Lofi instructions through `--system-prompt`, not through
+user messages.
+
+External mode does not yet support prompt attachments, thinking changes, local
+compaction, rollback, or in-app session switching. Claude Code reports per-turn
+token usage and cumulative USD cost; its context gauge uses the last model
+response, not accumulated token totals. The gauge shows `context unknown` when
+the backend provides no context data. Backend reports are saved in the Lofi
+transcript. Configure a static `models` list in the backend block to add models
+to `/model`. Without a list, the configured model or `default` is listed.
+Selection applies to the next turn. Use `--model <backend>/<id>` to select an
+external model at startup, or use `--model <id>` with `--backend <backend>`. Resume restores the
+last selected model unless `--model` overrides it. Model labels use
+`<backend>/<model>`. Without a selection, the label starts as `claude/default`
+and changes to the initialization model reported by Claude Code, including
+suffixes such as `[1m]`. Response model IDs do not replace that display label.
+If initialization omits the model, the first response model ID supplies the label.
+Resume restores the display label. Turn records save the response model ID.
+Model selection and resume retain the selected alias, such as `sonnet`.
+Shell approval still uses `policy.toml`, including `[auto_mode]`. The evaluator
+uses its configured Lofi provider and model, independently of the external agent.
+Evaluator errors or requests for confirmation do not approve commands.
+
+### Claude Code
+
+Install Claude Code and authenticate with `claude auth login`. Lofi uses that
+installation and its credentials. No Node.js adapter or Agent SDK is required.
+
+```toml
+[backends.claude]
+type = "claude-code"
+# command = "/absolute/path/to/claude" # Default: claude on PATH
+model = "sonnet"                      # Optional initial model
+models = ["sonnet", "opus", "haiku"]   # Choices for /model
+```
+
+Run `lofi` or `lofi --print "Your prompt"`. With only backend models configured,
+startup selects `model`, or the first item in `models` when `model` is absent.
+Set `default_model = "claude/sonnet"` or `default_provider = "claude"` at the top
+of the configuration to select a backend model by default. Backend models always
+appear in `--list-models` and `/model`, without a `--backend` flag.
+
+Lofi starts Claude Code in streaming print mode. It disables built-in tools,
+slash commands, hooks, Chrome integration, and user/project/local settings.
+Only Lofi's MCP server is configured. Lofi checks the reported tool and server
+lists and stops if they contain anything other than the connected Lofi `exec`
+tool. The tool is pre-approved in Claude Code; shell approval remains in Lofi.
+Managed Claude Code policy can still apply. The process is not a security sandbox.
+
+Lofi supplies its system prompt. Claude Code owns context and compaction and
+persists its own conversation in addition to Lofi's display transcript.
+Cancelling a turn stops the process group. Use `--continue` or `--resume` to
+start it again. Missing Claude Code sessions produce an error, not a new conversation.
+Lofi's `--no-session` disables only the Lofi transcript, not Claude Code persistence.
+
 ## UI theme
 
 Set `[ui] theme` to `auto`, `light`, or `dark`:

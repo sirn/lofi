@@ -271,6 +271,17 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     exclude_from_context: *exclude_from_context,
                 });
             }
+            SessionEventKind::BackendUsage {
+                context,
+                usage,
+                cost,
+            } => {
+                emit(AgentEvent::BackendUsage {
+                    context: *context,
+                    usage: *usage,
+                    cost: *cost,
+                });
+            }
             SessionEventKind::RoundDiscarded { .. }
             | SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }

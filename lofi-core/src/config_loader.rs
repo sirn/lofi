@@ -339,6 +339,28 @@ pub async fn load_config(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Load backend selection without resolving unused provider credentials.
+/// # Errors
+/// Returns file, TOML, policy or environment-override errors.
+pub fn load_backend_config(path: &Path) -> Result<Config> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DEFAULT_CONFIG_TOML.into(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut doc: toml::Value =
+        toml::from_str(&content).map_err(|e| Error::Config(e.to_string()))?;
+    apply_env_overrides(&mut doc)?;
+    let mut config: Config = doc
+        .try_into()
+        .map_err(|e: toml::de::Error| Error::Config(e.to_string()))?;
+    config.shell_policy = load_policy_or_default(&policy_config_path(path)?)?;
+    if config.backends.contains_key("native") {
+        return Err(Error::Config("native is a reserved backend name".into()));
+    }
+    Ok(config)
+}
+
 /// Resolve one explicitly configured value. Unlike `env_name` discovery,
 /// an explicit value that fails to resolve is a configuration error: a
 /// dropped failure would otherwise let a request fall back to a default

@@ -23,6 +23,10 @@ struct Cli {
     list_sessions: bool,
     #[arg(long, value_name = "SPEC")]
     model: Option<String>,
+    #[arg(long, value_name = "NAME")]
+    backend: Option<String>,
+    #[arg(long, hide = true)]
+    exec_mcp: bool,
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
     #[arg(long, value_name = "ID")]
@@ -41,6 +45,10 @@ struct Cli {
 /// Returns command parsing, configuration, I/O, or agent startup failures.
 pub async fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.exec_mcp {
+        lofi_core::backend::run_stdio_proxy().await?;
+        return Ok(());
+    }
     let root = std::env::current_dir().context("determine working directory")?;
 
     // Apply --env specs to the process environment up front so every mode
@@ -97,6 +105,7 @@ fn policy_explain(cmd: &str) -> anyhow::Result<()> {
 
 fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> PrintOptions {
     let mut opts = PrintOptions::new(prompt, root);
+    opts.backend.clone_from(&cli.backend);
     if let Some(m) = &cli.model {
         opts = opts.with_model(m);
     }
@@ -108,6 +117,7 @@ fn build_print_opts(cli: &Cli, prompt: String, root: std::path::PathBuf) -> Prin
 
 fn build_interactive_opts(cli: &Cli, root: std::path::PathBuf) -> InteractiveOptions {
     let mut opts = InteractiveOptions::new(root);
+    opts.backend.clone_from(&cli.backend);
     if let Some(m) = &cli.model {
         opts = opts.with_model(m);
     }

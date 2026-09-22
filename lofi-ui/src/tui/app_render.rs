@@ -69,12 +69,27 @@ impl App {
         } else {
             compact_count(used)
         };
-        segments.push(format!(
-            "context {}/{}{}",
-            used_str,
-            compact_count(self.ctx_limit),
-            cached_suffix.unwrap_or_default()
-        ));
+        if self.external_backend {
+            segments.push(self.backend_context.map_or_else(
+                || "context unknown".to_string(),
+                |context| {
+                    format!(
+                        "context {}/{}",
+                        compact_count(context.used),
+                        context
+                            .size
+                            .map_or_else(|| "unknown".to_string(), compact_count)
+                    )
+                },
+            ));
+        } else {
+            segments.push(format!(
+                "context {}/{}{}",
+                used_str,
+                compact_count(self.ctx_limit),
+                cached_suffix.unwrap_or_default()
+            ));
+        }
         Line::from(vec![Span::styled(
             segments.join(sep),
             Style::new().fg(t.muted),

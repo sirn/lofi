@@ -156,6 +156,18 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
+    /// Response model identity and stable session display model. Terminal
+    /// events carry the response identity for durable turn records and replay.
+    BackendModel {
+        id: String,
+        display: String,
+    },
+    /// External context state, per-turn token totals and cumulative USD cost.
+    BackendUsage {
+        context: Option<lofi_types::ContextUsage>,
+        usage: Option<Usage>,
+        cost: Option<f64>,
+    },
     RoundCommitted {
         byte_start: u64,
         byte_end: u64,

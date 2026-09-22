@@ -21,6 +21,7 @@ impl App {
             layout: TranscriptLayout::new(),
             input: String::new(),
             input_cursor: 0,
+            external_backend: false,
             lifecycle: AgentLifecycle::new(
                 compaction,
                 if ctx_limit > 0 {
@@ -34,11 +35,13 @@ impl App {
             history_idx: None,
             input_stash: String::new(),
             model_label,
+            selected_external_model_label: None,
             thinking_label,
             thinking,
             service_label,
             service_tier,
             status_usage: None,
+            backend_context: None,
             ctx_limit: if ctx_limit > 0 {
                 ctx_limit
             } else {
@@ -58,6 +61,7 @@ impl App {
             run: None,
             run_start: None,
             run_model_label: None,
+            run_selected_model_label: None,
             retry: None,
             pending_prompt_start: false,
             lifecycle_tx: None,
@@ -241,6 +245,31 @@ impl App {
                 self.transcript.merge_last_turn_range(byte_start, byte_end);
                 return;
             }
+            AgentEvent::BackendModel { id, display } => {
+                let run_label = self.run_model_label.as_ref().unwrap_or(&self.model_label);
+                if let Some((provider, _)) = run_label.split_once('/') {
+                    let response_label = format!("{provider}/{id}");
+                    let display_label = format!("{provider}/{display}");
+                    if self
+                        .run_selected_model_label
+                        .as_ref()
+                        .is_none_or(|selected| {
+                            Some(selected) == self.selected_external_model_label.as_ref()
+                        })
+                    {
+                        self.model_label = display_label;
+                    }
+                    self.run_model_label = Some(response_label);
+                }
+                return;
+            }
+            AgentEvent::BackendUsage { context, cost, .. } => {
+                self.backend_context = context;
+                if let Some(cost) = cost {
+                    self.cost = cost;
+                }
+                return;
+            }
             AgentEvent::RoundUsage { cost, usage } => {
                 // Per-round refresh of the context gauge and cost counter.
                 // `cost` is the turn's cumulative cost so far; track it in
@@ -384,6 +413,7 @@ impl App {
         self.run_start = None;
         self.run = None;
         self.run_model_label = None;
+        self.run_selected_model_label = None;
         self.retry = None;
         self.pending_prompt_start = false;
     }
@@ -577,6 +607,9 @@ impl App {
 
     /// Let core evaluate soft-compaction policy; the UI only renders outcomes.
     pub(super) fn maybe_auto_compact(&mut self) {
+        if self.external_backend {
+            return;
+        }
         if !std::mem::take(&mut self.settled_usage_fresh) {
             return;
         }

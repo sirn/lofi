@@ -520,6 +520,13 @@ pub enum StopReason {
     Other,
 }
 
+/// Backend-reported context state, separate from billed token totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used: u64,
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -629,6 +636,12 @@ pub trait CompactionHook: Send + Sync {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventKind {
     Message(Message),
+    /// External context and cumulative USD cost; token usage is per turn.
+    BackendUsage {
+        context: Option<ContextUsage>,
+        usage: Option<Usage>,
+        cost: Option<f64>,
+    },
     UserShell {
         command: String,
         output: String,
@@ -1733,8 +1746,44 @@ impl Default for EditConfig {
     }
 }
 
+/// External agent invocation. Login and credentials remain owned by the agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BackendConfig {
+    ClaudeCode {
+        #[serde(default = "default_claude_command")]
+        command: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        models: Vec<String>,
+    },
+}
+
+impl BackendConfig {
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeCode { model, .. } => model.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn models(&self) -> &[String] {
+        match self {
+            Self::ClaudeCode { models, .. } => models,
+        }
+    }
+}
+
+fn default_claude_command() -> String {
+    "claude".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub backends: IndexMap<String, BackendConfig>,
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
@@ -1757,12 +1806,14 @@ pub struct Config {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    #[serde(default)]
     pub providers: IndexMap<String, ProviderConfig>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            backends: IndexMap::new(),
             agent: AgentConfig::default(),
             ui: UiConfig::default(),
             compaction: CompactionConfig::default(),

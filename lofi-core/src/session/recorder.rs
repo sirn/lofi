@@ -47,6 +47,11 @@ pub struct TurnSummary {
 
 /// One durable session write. Callers never build a [`SessionEvent`].
 pub enum SessionRecord<'a> {
+    BackendUsage {
+        context: Option<lofi_types::ContextUsage>,
+        usage: Option<Usage>,
+        cost: Option<f64>,
+    },
     System {
         prompt: &'a str,
     },
@@ -138,6 +143,22 @@ impl store::SessionCursor {
     /// Propagates transcript serialization and I/O failures.
     pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
         match record {
+            SessionRecord::BackendUsage {
+                context,
+                usage,
+                cost,
+            } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::BackendUsage {
+                        context,
+                        usage,
+                        cost,
+                    },
+                }];
+                self.append_events(&mut events)
+            }
             SessionRecord::RoundDiscarded { detail } => {
                 let mut events = [SessionEvent {
                     id: String::new(),
@@ -267,6 +288,12 @@ impl SessionRecorder {
             byte_start: None,
             byte_end: None,
         }
+    }
+
+    /// Update the identity used by the terminal marker when an external
+    /// agent reports the model after the turn has started.
+    pub(crate) fn set_model(&mut self, model: RunModel) {
+        self.model = model;
     }
 
     /// Stamp the durable boundary for a checkpointed round being dropped

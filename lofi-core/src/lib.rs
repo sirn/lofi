@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod backend;
 mod bash_env;
 
 pub use lofi_code::docs;

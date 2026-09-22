@@ -40,6 +40,7 @@ use auto::{
 pub struct ModelRegistry {
     providers: IndexMap<String, ProviderConfig>,
     models: Vec<Model>,
+    backends: IndexMap<String, lofi_types::BackendConfig>,
 }
 
 impl ModelRegistry {
@@ -52,6 +53,7 @@ impl ModelRegistry {
         Ok(Self {
             providers: config.providers.clone(),
             models,
+            backends: config.backends.clone(),
         })
     }
 
@@ -127,6 +129,7 @@ impl ModelRegistry {
         Ok(Self {
             providers: augmented.providers,
             models,
+            backends: augmented.backends,
         })
     }
 
@@ -193,6 +196,13 @@ impl ModelRegistry {
             })
             .collect();
         out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
+        for (name, backend) in &self.backends {
+            out.extend(crate::backend::Backend::configured_models(
+                name,
+                backend,
+                backend.model(),
+            ));
+        }
         out
     }
 
@@ -250,6 +260,13 @@ impl ModelRegistry {
                 s
             })
             .collect();
+        for (name, backend) in &self.backends {
+            lines.extend(
+                crate::backend::Backend::configured_models(name, backend, backend.model())
+                    .into_iter()
+                    .map(|model| format!("{}/{} — {}", model.provider, model.id, model.name)),
+            );
+        }
         lines.sort();
         lines.join("\n")
     }

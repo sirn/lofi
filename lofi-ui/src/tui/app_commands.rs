@@ -129,6 +129,15 @@ impl App {
     /// recognized command (so the caller does not start a run).
     pub(super) fn slash_command(&mut self, line: &str) -> bool {
         let cmd = line.trim();
+        if self.external_backend
+            && matches!(
+                cmd,
+                "/clear" | "/compact" | "/new" | "/resume" | "/tree" | "/thinking" | "/service"
+            )
+        {
+            self.notify(NotifyKind::Warn, "this operation is not supported by the external backend; start or resume a session from the CLI");
+            return true;
+        }
         match cmd {
             "/clear" => {
                 self.clear_log();
@@ -619,6 +628,20 @@ impl App {
         };
         match entry.file.open_snapshot() {
             Ok((cursor, snapshot)) => {
+                match lofi_core::backend::saved_backend(&cursor) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => {
+                        self.notify(
+                            NotifyKind::Warn,
+                            "resume external backend sessions from the CLI",
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        self.notify(NotifyKind::Error, error.to_string());
+                        return;
+                    }
+                }
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;
                 let loaded = self.restore_indexed_session(
@@ -683,14 +706,25 @@ impl App {
         if self.model_choices.is_empty() {
             self.notify(
                 NotifyKind::Warn,
-                "no models available (set a provider API key)",
+                if self.external_backend {
+                    "no models configured (set models in the backend configuration)"
+                } else {
+                    "no models available (set a provider API key)"
+                },
             );
             return;
         }
         let selected = self
             .model_choices
             .iter()
-            .position(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
+            .position(|c| {
+                format!("{}/{}", c.provider, c.id)
+                    == self
+                        .selected_external_model_label
+                        .as_ref()
+                        .unwrap_or(&self.model_label)
+                        .as_str()
+            })
             .unwrap_or(0);
         self.model_picker = Some(ModelPickerState {
             choices: self.model_choices.clone(),

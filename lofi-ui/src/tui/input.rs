@@ -6,7 +6,7 @@ use super::*;
 pub(super) fn handle_event(
     ev: &Event,
     app: &mut App,
-    agent: Option<&Agent>,
+    agent: Option<&Backend>,
     current_run: &mut Option<RunHandle>,
 ) {
     if let Event::Mouse(m) = ev {
@@ -319,13 +319,19 @@ fn install_run(app: &mut App, current_run: &mut Option<RunHandle>, run: RunHandl
     app.run = Some(0);
     app.run_start = Some(Instant::now());
     app.run_model_label = Some(app.session_model());
+    app.run_selected_model_label = Some(
+        app.selected_external_model_label
+            .as_ref()
+            .unwrap_or(&app.model_label)
+            .clone(),
+    );
     app.pinned = true;
 }
 
 fn spawn_agent_run(
     app: &mut App,
     current_run: &mut Option<RunHandle>,
-    agent: &lofi_core::Agent,
+    agent: &Backend,
     prompt: Option<String>,
     prompt_kind: lofi_types::PromptKind,
 ) {
@@ -526,7 +532,7 @@ pub(super) fn spawn_user_shell(
 
 pub(super) fn spawn_prompt(
     app: &mut App,
-    agent: Option<&lofi_core::Agent>,
+    agent: Option<&Backend>,
     current_run: &mut Option<RunHandle>,
     prompt: String,
     kind: lofi_types::PromptKind,
@@ -551,7 +557,7 @@ pub(super) fn spawn_prompt(
 
 pub(super) fn spawn_continue(
     app: &mut App,
-    agent: Option<&lofi_core::Agent>,
+    agent: Option<&Backend>,
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(agent) = agent {

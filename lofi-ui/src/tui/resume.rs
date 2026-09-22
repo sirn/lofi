@@ -55,6 +55,7 @@ pub(super) fn replay_indexed_session(
                 store::IndexKind::TurnEnd
                     | store::IndexKind::TurnFailed
                     | store::IndexKind::TurnCancelled
+                    | store::IndexKind::BackendUsage
             ) {
                 flat_outcomes.push(index[i].offset);
             }
@@ -86,6 +87,7 @@ pub(super) fn replay_indexed_session(
                     store::IndexKind::TurnEnd
                         | store::IndexKind::TurnFailed
                         | store::IndexKind::TurnCancelled
+                        | store::IndexKind::BackendUsage
                 ) {
                     continue;
                 }

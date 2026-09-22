@@ -52,7 +52,7 @@ async fn run_agent_task_panic_tui_e2e_child() {
     let root = tempfile::tempdir().unwrap();
     let agent = panicking_agent(root.path());
     run(
-        Some(agent),
+        Some(agent.into()),
         "test/panic".into(),
         ThinkingLevel::Off,
         ServiceTier::Auto,
@@ -202,7 +202,7 @@ async fn agent_task_panic_is_visible_and_task_settles() {
     local
         .run_until(async {
             let root = tempfile::tempdir().unwrap();
-            let agent = panicking_agent(root.path());
+            let agent = Backend::from(panicking_agent(root.path()));
             let mut a = app();
             let mut run = None;
 

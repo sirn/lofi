@@ -72,20 +72,21 @@ use tokio::task::{JoinHandle, LocalSet};
 use tokio::time::MissedTickBehavior;
 
 use crate::tui::view::HStack;
+use lofi_core::backend::Backend;
 use lofi_core::{Agent, AgentEvent, AgentLifecycle, HardCompactOutcome};
 use lofi_error::{Error, Result};
 
-/// Retained model registry + config so `/model` can rebuild the agent
-/// mid-session without re-running remote discovery. The registry is taken
-/// from the startup `build_agent` call; `rebuild` is sync and side-effect-free
-/// beyond provider construction, so a switch never blocks the UI on the
-/// network. `choices` backs the `/model` picker.
+/// Native and external model choices share one picker. Native startup keeps
+/// its resolved registry; external startup resolves credentials only when
+/// a native model is selected.
 pub(crate) struct ModelSwitcher {
     registry: lofi_core::ModelRegistry,
     config: lofi_types::Config,
     root: PathBuf,
     env: Vec<(String, String)>,
     choices: Vec<lofi_types::ModelChoice>,
+    unresolved_config: Option<lofi_types::Config>,
+    executor: Option<lofi_core::agent::ToolExecutor>,
 }
 
 impl ModelSwitcher {
@@ -102,11 +103,103 @@ impl ModelSwitcher {
             root,
             env,
             choices,
+            unresolved_config: None,
+            executor: None,
         }
+    }
+
+    pub(crate) fn from_external(
+        config: lofi_types::Config,
+        root: PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Result<Self> {
+        let mut choices_config = config.clone();
+        let _guard = lofi_core::config_loader::apply_env_specs(&env);
+        for provider in choices_config.providers.values_mut() {
+            if provider.api_key.is_none() {
+                provider.api_key = provider
+                    .env_name
+                    .as_ref()
+                    .and_then(|name| std::env::var(name).ok());
+            }
+        }
+        let registry = lofi_core::ModelRegistry::load(&choices_config)?;
+        let mut switcher = Self::new(registry, config.clone(), root, env);
+        switcher.unresolved_config = Some(config);
+        Ok(switcher)
     }
 
     pub(crate) fn choices(&self) -> &[lofi_types::ModelChoice] {
         &self.choices
+    }
+
+    pub(crate) fn with_tool_executor(mut self, executor: lofi_core::agent::ToolExecutor) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn external(
+        &self,
+        existing: Option<&Backend>,
+        query: &str,
+    ) -> Result<Option<Backend>> {
+        let Some((name, _)) = query.split_once('/') else {
+            return Ok(None);
+        };
+        let Some(config) = self.config.backends.get(name) else {
+            return Ok(None);
+        };
+        let mut backend = Backend::external(
+            name.into(),
+            config.clone(),
+            self.root.clone(),
+            existing
+                .map(Backend::tool_executor)
+                .or_else(|| self.executor.clone())
+                .ok_or_else(|| Error::State("missing tool executor".into()))?,
+        );
+        backend.select_model(query)?;
+        Ok(Some(backend))
+    }
+
+    pub(crate) async fn rebuild_backend(
+        &self,
+        existing: Option<&Backend>,
+        query: &str,
+    ) -> Result<(Backend, Option<lofi_types::Model>, ThinkingLevel)> {
+        if let Some(backend) = self.external(existing, query)? {
+            return Ok((backend, None, ThinkingLevel::Off));
+        }
+        let (agent, model, level) = if let Some(config) = &self.unresolved_config {
+            let provider = query.split_once('/').map_or("", |(name, _)| name);
+            let mut config = config.clone();
+            config.providers.retain(|name, _| name == provider);
+            let guard = lofi_core::config_loader::apply_env_specs(&self.env);
+            lofi_core::config_loader::resolve_config(&mut config).await?;
+            drop(guard);
+            let registry = match lofi_core::ModelRegistry::load_async(&config).await {
+                Ok(registry) => registry,
+                Err(_) => lofi_core::ModelRegistry::load(&config)?,
+            };
+            lofi_core::rebuild_agent(
+                existing.and_then(Backend::native),
+                &registry,
+                &config,
+                Some(query),
+                &self.root,
+                &self.env,
+            )?
+        } else {
+            self.rebuild(existing.and_then(Backend::native), query)?
+        };
+        let agent = if let Some(existing) = existing {
+            agent
+                .with_system_prompt(existing.system_prompt().into())
+                .with_tool_executor(existing.tool_executor())
+        } else {
+            agent
+        };
+        Ok((agent.into(), Some(model), level))
     }
 
     pub(crate) fn rebuild(
@@ -391,7 +484,7 @@ impl SessionState {
 pub(crate) struct SessionConfig {
     /// Core-owned session write endpoint; `None` for ephemeral sessions.
     sink: Option<lofi_core::session::sink::SessionSink>,
-    cursor: Option<store::SessionCursor>,
+    pub(crate) cursor: Option<store::SessionCursor>,
     index: Vec<store::SessionIndexEntry>,
     file_size: u64,
     history_start: usize,
@@ -844,6 +937,7 @@ pub(crate) struct App {
     input: String,
     input_cursor: usize,
     lifecycle: AgentLifecycle,
+    external_backend: bool,
     /// The system prompt the agent was built with; pinned onto the durable
     /// transcript at each context boundary so a resumed or compacted history
     /// replays the exact governing prompt rather than what today's config
@@ -853,11 +947,13 @@ pub(crate) struct App {
     history_idx: Option<usize>,
     input_stash: String,
     model_label: String,
+    selected_external_model_label: Option<String>,
     thinking_label: Option<String>,
     thinking: ThinkingLevel,
     service_label: Option<String>,
     service_tier: ServiceTier,
     status_usage: Option<Usage>,
+    backend_context: Option<lofi_types::ContextUsage>,
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
@@ -883,6 +979,7 @@ pub(crate) struct App {
     /// updates the footer (the newly set model); the "Working for ..." line
     /// must keep showing the model the in-flight run is actually using.
     run_model_label: Option<String>,
+    run_selected_model_label: Option<String>,
     retry: Option<RetryState>,
     /// True between the submit-time prompt pre-push and the engine's
     /// matching `Prompt` event. Gates the dedup in `apply_event` so replayed
@@ -1157,7 +1254,7 @@ impl Drop for TerminalGuard {
 /// hint instead of running.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
-    agent: Option<Agent>,
+    agent: Option<Backend>,
     model_label: String,
     thinking: ThinkingLevel,
     service_tier: ServiceTier,
@@ -1244,7 +1341,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_loop(
     guard: &mut TerminalGuard,
-    mut agent: Option<Agent>,
+    mut agent: Option<Backend>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
     model_label: String,
@@ -1266,9 +1363,10 @@ async fn run_loop(
         contiguous,
         cwd,
     } = session;
-    let model_choices = switcher
-        .as_ref()
-        .map_or(Vec::new(), |s| s.choices().to_vec());
+    let model_choices = switcher.as_ref().map_or_else(
+        || agent.as_ref().map_or_else(Vec::new, Backend::model_choices),
+        |s| s.choices().to_vec(),
+    );
     let mut app = App::new(
         model_label,
         thinking,
@@ -1277,6 +1375,12 @@ async fn run_loop(
         compaction,
         system_prompt,
     );
+    app.external_backend = agent
+        .as_ref()
+        .is_some_and(|backend| backend.native().is_none());
+    if app.external_backend {
+        app.selected_external_model_label = agent.as_ref().map(Backend::model_label);
+    }
     app.theme = theme;
     app.theme_mode = theme_mode;
     app.model_choices = model_choices;
@@ -1332,7 +1436,7 @@ async fn run_loop(
     let (confirm_tx, mut confirm_rx) =
         tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
     if let Some(a) = agent.take() {
-        let a = a.with_confirm_tx(confirm_tx);
+        let a = a.with_confirm_tx(confirm_tx.clone());
         // Clone the session's job registry for the `/job` modal and the
         // running-jobs badge. Cheap: shares the agent's map.
         app.jobs = Some(a.jobs());
@@ -1549,19 +1653,56 @@ async fn run_loop(
                             handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                         }
                     if let Some(q) = app.pending_model_switch.take() {
-                        match switcher.as_ref().map_or(
-                            Err(lofi_core::Error::Config("no model registry".into())),
-                            |s| s.rebuild(agent.as_ref(), &q),
-                        ) {
-                            Ok((new_agent, model, level)) => {
-                                let tier = model.service_tier.clone();
-                                agent = Some(new_agent);
-                                app.apply_model_switch(&model, level, tier);
+                        let target_external = q.split_once('/').is_some_and(|(name, _)| {
+                            switcher.as_ref().is_some_and(|s| s.config.backends.contains_key(name))
+                        });
+                        let same_external = app.external_backend && q.split_once('/').is_some_and(|(name, _)| {
+                            agent.as_ref().is_some_and(|a| a.model_label().starts_with(&format!("{name}/")))
+                        });
+                        if same_external {
+                            if let Some(backend) = agent.as_mut() {
+                                match backend.select_model(&q) {
+                                    Ok(()) => {
+                                        app.model_label = backend.model_label();
+                                        app.selected_external_model_label = Some(app.model_label.clone());
+                                        app.notify(NotifyKind::Info, format!("selected {} for the next turn", app.model_label));
+                                        app.bump_render_epoch();
+                                    }
+                                    Err(e) => app.notify(NotifyKind::Error, format!("switch model: {e}")),
+                                }
                             }
-                            Err(e) => app.notify(
-                                NotifyKind::Error,
-                                format!("switch model: {e}"),
-                            ),
+                        } else if let Some(switcher) = switcher.as_ref() {
+                            match switcher.rebuild_backend(agent.as_ref(), &q).await {
+                                Ok((new_agent, model, level)) => {
+                                    app.external_backend = target_external;
+                                    app.backend_context = None;
+                                    if let Some(model) = model {
+                                        let tier = model.service_tier.clone();
+                                        app.selected_external_model_label = None;
+                                        app.apply_model_switch(&model, level, tier);
+                                    } else {
+                                        app.model_label = new_agent.model_label();
+                                        app.selected_external_model_label = Some(app.model_label.clone());
+                                        app.thinking = ThinkingLevel::Off;
+                                        app.thinking_label = None;
+                                        app.service_tier = ServiceTier::Auto;
+                                        app.service_label = None;
+                                        app.notify(NotifyKind::Info, format!("selected {} for the next turn", app.model_label));
+                                    }
+                                    let new_agent = new_agent.with_confirm_tx(confirm_tx.clone());
+                                    app.no_models_hint = None;
+                                    app.system_prompt = new_agent.system_prompt().into();
+                                    app.jobs = Some(new_agent.jobs());
+                                    app.policy_override = Some(new_agent.policy_override());
+                                    app.auto_mode_configured = new_agent.has_auto_mode();
+                                    app.jobs_receiver_stale = true;
+                                    agent = Some(new_agent);
+                                    app.bump_render_epoch();
+                                }
+                                Err(e) => app.notify(NotifyKind::Error, format!("switch model: {e}")),
+                            }
+                        } else {
+                            app.notify(NotifyKind::Error, "switch model: no model registry");
                         }
                     }
                     if app.jobs_receiver_stale {

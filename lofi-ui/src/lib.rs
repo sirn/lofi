@@ -15,6 +15,7 @@ pub struct InteractiveOptions {
     pub root: PathBuf,
     pub config_path: Option<PathBuf>,
     pub model: Option<String>,
+    pub backend: Option<String>,
     pub env: Vec<String>,
     pub continue_last: bool,
     pub resume: Option<String>,
@@ -28,6 +29,7 @@ impl InteractiveOptions {
             root: root.into(),
             config_path: None,
             model: None,
+            backend: None,
             env: Vec::new(),
             continue_last: false,
             resume: None,
@@ -78,6 +80,7 @@ pub struct PrintOptions {
     pub root: PathBuf,
     pub config_path: Option<PathBuf>,
     pub model: Option<String>,
+    pub backend: Option<String>,
     pub env: Vec<String>,
 }
 
@@ -89,6 +92,7 @@ impl PrintOptions {
             root: root.into(),
             config_path: None,
             model: None,
+            backend: None,
             env: Vec::new(),
         }
     }
@@ -120,9 +124,71 @@ impl PrintOptions {
 /// Propagates [`Error`] from config/session resolution or the terminal
 /// session. Model-resolution failures that reduce to "no active model" are
 /// swallowed into the no-model TUI mode described above.
+#[allow(clippy::too_many_lines)]
 pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     let env = env_pairs(&opts.env)?;
     let session = resolve_session(&opts)?;
+    let saved_backend = session
+        .cursor
+        .as_ref()
+        .map(lofi_core::backend::saved_backend)
+        .transpose()?
+        .flatten();
+    let last_native = session
+        .last_run_model()
+        .is_some_and(|model| saved_backend.as_deref() != Some(&model.provider));
+    if let Some((mut backend, name, config)) = external_backend(
+        opts.config_path.as_deref(),
+        opts.backend.as_deref(),
+        if last_native {
+            Some("native")
+        } else {
+            saved_backend.as_deref()
+        },
+        opts.model.as_deref(),
+        &opts.root,
+        &env,
+    )
+    .await?
+    {
+        if opts.model.is_none() && saved_backend.as_deref() == Some(&name) {
+            let model = session
+                .cursor
+                .as_ref()
+                .map(lofi_core::backend::saved_model)
+                .transpose()?
+                .flatten();
+            backend.select_model(model.as_deref().unwrap_or("default"))?;
+        }
+        let label = if opts.model.is_none() && saved_backend.as_deref() == Some(&name) {
+            session
+                .cursor
+                .as_ref()
+                .map(lofi_core::backend::saved_model_label)
+                .transpose()?
+                .flatten()
+                .unwrap_or_else(|| backend.model_label())
+        } else {
+            backend.model_label()
+        };
+        let switcher =
+            tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env.clone())?;
+        let system_prompt = backend.system_prompt().to_string();
+        return Box::pin(tui::run(
+            Some(backend),
+            label,
+            ThinkingLevel::Off,
+            ServiceTier::Auto,
+            config.ui.theme,
+            session,
+            None,
+            0,
+            config.compaction,
+            Some(switcher),
+            system_prompt,
+        ))
+        .await;
+    }
 
     // Restore the model+thinking the user last ran with unless --model was
     // given: the resumed session's final turn marker carries it (raw, on the
@@ -156,17 +222,31 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                     Some(switcher),
                 )
             }
-            StartupAgent::NoModel(hint) => (
-                None,
-                "(no model)".to_string(),
-                ThinkingLevel::Off,
-                ServiceTier::Auto,
-                Some(hint),
-                0,
-                lofi_types::CompactionConfig::default(),
-                lofi_types::ThemeMode::default(),
-                None,
-            ),
+            StartupAgent::NoModel(hint) => {
+                let path = opts
+                    .config_path
+                    .clone()
+                    .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
+                let config = lofi_core::config_loader::load_backend_config(&path)?;
+                let executor = lofi_core::agent::ToolExecutor::new(&opts.root, &config, &env)?
+                    .with_skills_dir(path.parent().map(|p| p.join("skills")))
+                    .with_auto_mode_config(&config, &env)
+                    .await?;
+                let switcher =
+                    tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env)?
+                        .with_tool_executor(executor);
+                (
+                    None,
+                    "(no model)".to_string(),
+                    ThinkingLevel::Off,
+                    ServiceTier::Auto,
+                    Some(hint),
+                    0,
+                    config.compaction,
+                    config.ui.theme,
+                    Some(switcher),
+                )
+            }
         };
     // Pull the agent's resolved system prompt into a plain string before
     // `agent` moves into the TUI so the transcript can pin it at each context
@@ -176,7 +256,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .as_ref()
         .map_or_else(String::new, |a| a.system_prompt().to_string());
     Box::pin(tui::run(
-        agent,
+        agent.map(Into::into),
         label,
         thinking,
         service_tier,
@@ -205,6 +285,92 @@ enum StartupAgent {
         )>,
     ),
     NoModel(String),
+}
+
+async fn external_backend(
+    config_path: Option<&std::path::Path>,
+    requested: Option<&str>,
+    saved: Option<&str>,
+    model: Option<&str>,
+    root: &std::path::Path,
+    env: &[(String, String)],
+) -> Result<Option<(lofi_core::backend::Backend, String, lofi_types::Config)>> {
+    let _env_guard = lofi_core::config_loader::apply_env_specs(env);
+    let path = config_path
+        .map(std::path::Path::to_path_buf)
+        .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
+    let config = lofi_core::config_loader::load_backend_config(&path)?;
+    if config.backends.is_empty() && requested.is_none() {
+        return Ok(None);
+    }
+    let mut selected = model.map(str::to_owned);
+    if selected.is_none() && requested.is_none() && saved.is_none() {
+        selected.clone_from(&config.default_model);
+        if selected.is_none() {
+            if let Some(provider) = config.default_provider.as_deref() {
+                if let Some(backend) = config.backends.get(provider) {
+                    let choice = lofi_core::backend::Backend::configured_models(
+                        provider,
+                        backend,
+                        backend.model(),
+                    )
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::Config("backend has no models".into()))?;
+                    selected = Some(format!("{}/{}", choice.provider, choice.id));
+                }
+            } else {
+                let config = lofi_core::config_loader::load_config_or_default(&path).await?;
+                let registry = match lofi_core::ModelRegistry::load_async(&config).await {
+                    Ok(registry) => registry,
+                    Err(_) => lofi_core::ModelRegistry::load(&config)?,
+                };
+                selected = registry
+                    .available()
+                    .first()
+                    .map(|model| format!("{}/{}", model.provider, model.id));
+                if selected.is_none() {
+                    selected = registry
+                        .choices()
+                        .first()
+                        .map(|model| format!("{}/{}", model.provider, model.id));
+                }
+            }
+        }
+    }
+    let model_backend = selected
+        .as_deref()
+        .and_then(|query| query.split_once('/'))
+        .map(|(name, _)| name);
+    let name = requested
+        .or(model_backend
+            .filter(|name| config.backends.contains_key(*name))
+            .or_else(|| model_backend.map(|_| "native")))
+        .or(saved)
+        .unwrap_or("native");
+    if name == "native" {
+        return Ok(None);
+    }
+    let backend_config = config
+        .backends
+        .get(name)
+        .ok_or_else(|| Error::Config(format!("unknown backend: {name}")))?
+        .clone();
+    let executor = lofi_core::agent::ToolExecutor::new(root, &config, env)?
+        .with_skills_dir(path.parent().map(|p| p.join("skills")))
+        .with_auto_mode_config(&config, env)
+        .await?;
+    let name = name.to_string();
+    let mut backend =
+        lofi_core::backend::Backend::external(name.clone(), backend_config, root.into(), executor);
+    if let Some(model) = selected.as_deref() {
+        backend.select_model(model)?;
+    } else if saved.is_none() {
+        if let Some(choice) = backend.model_choices().first() {
+            backend.select_model(&choice.id)?;
+        }
+    }
+    Ok(Some((backend, name, config)))
 }
 
 /// Parse the `-e`/`--env` specs into (name, value) pairs, resolving bare
@@ -319,13 +485,27 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
 #[allow(clippy::too_many_lines)]
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
     let env = env_pairs(&opts.env)?;
-    let (agent, _model, _thinking, _config, _registry) = build_agent(
+    let agent = match external_backend(
         opts.config_path.as_deref(),
+        opts.backend.as_deref(),
+        None,
         opts.model.as_deref(),
-        opts.root.as_path(),
+        &opts.root,
         &env,
     )
-    .await?;
+    .await?
+    {
+        Some((backend, _, _)) => backend,
+        None => build_agent(
+            opts.config_path.as_deref(),
+            opts.model.as_deref(),
+            &opts.root,
+            &env,
+        )
+        .await?
+        .0
+        .into(),
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
 
@@ -372,6 +552,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
+                | AgentEvent::BackendUsage { .. }
+                | AgentEvent::BackendModel { .. }
                 | AgentEvent::RetryEnd { .. }
                 | AgentEvent::RunStart
                 | AgentEvent::Prompt { .. }

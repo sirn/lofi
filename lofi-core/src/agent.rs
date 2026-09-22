@@ -42,6 +42,8 @@ mod auto_mode;
 mod event;
 mod exec;
 mod model;
+mod tool_executor;
+pub use tool_executor::{ToolCallContext, ToolExecutor};
 
 #[cfg(test)]
 mod tests;
@@ -347,9 +349,45 @@ impl Agent {
         }
     }
 
-    /// The session's sandbox thread, created with the first guest program.
-    fn sandbox_worker(&self) -> &lofi_code::ExecWorker {
-        self.exec_worker.get_or_init(lofi_code::ExecWorker::spawn)
+    /// Share the session's jobs, policy and sandbox with a backend.
+    #[must_use]
+    pub fn tool_executor(&self) -> ToolExecutor {
+        ToolExecutor {
+            root: self.root.clone(),
+            tmp_dir: self.tmp_dir.clone(),
+            tmp_lease: self.tmp_lease.clone(),
+            bash_env: self.bash_env.clone(),
+            shell_policy: self.shell_policy.clone(),
+            truncate: self.truncate,
+            image: self.image,
+            confirm_tx: self.confirm_tx.clone(),
+            confirm_counter: self.confirm_counter.clone(),
+            auto_mode: self.auto_mode.clone(),
+            policy_override: self.policy_override.clone(),
+            skills_dir: self.skills_dir.clone(),
+            jobs: self.jobs.clone(),
+            exec_worker: self.exec_worker.clone(),
+        }
+    }
+
+    /// Keep execution state when switching from another backend.
+    #[must_use]
+    pub fn with_tool_executor(mut self, executor: ToolExecutor) -> Self {
+        self.root = executor.root;
+        self.tmp_dir = executor.tmp_dir;
+        self.tmp_lease = executor.tmp_lease;
+        self.bash_env = executor.bash_env;
+        self.shell_policy = executor.shell_policy;
+        self.truncate = executor.truncate;
+        self.image = executor.image;
+        self.confirm_tx = executor.confirm_tx;
+        self.confirm_counter = executor.confirm_counter;
+        self.auto_mode = executor.auto_mode;
+        self.policy_override = executor.policy_override;
+        self.skills_dir = executor.skills_dir;
+        self.jobs = executor.jobs;
+        self.exec_worker = executor.exec_worker;
+        self
     }
 
     #[must_use]

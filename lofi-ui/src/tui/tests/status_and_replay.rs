@@ -239,6 +239,117 @@ fn footer_shows_ctx_after_usage() {
 }
 
 #[test]
+fn external_display_model_stays_separate_from_response_and_selection() {
+    let mut a = app();
+    a.external_backend = true;
+    a.model_label = "claude/sonnet".into();
+    a.selected_external_model_label = Some(a.model_label.clone());
+    a.thinking_label = None;
+    a.run_model_label = Some(a.model_label.clone());
+    for id in ["claude-sonnet-test", "claude-opus-test"] {
+        a.apply_event(AgentEvent::BackendModel {
+            id: id.into(),
+            display: "claude-sonnet-test[1m]".into(),
+        });
+        let header = a
+            .render_header_line(120)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(header.contains("claude/claude-sonnet-test[1m]"));
+        assert_eq!(a.run_label(), format!("claude/{id}"));
+    }
+    assert_eq!(
+        a.selected_external_model_label.as_deref(),
+        Some("claude/sonnet")
+    );
+}
+
+#[test]
+fn external_reports_do_not_replace_a_mid_run_model_selection() {
+    let mut a = app();
+    a.model_label = "claude/sonnet".into();
+    a.selected_external_model_label = Some(a.model_label.clone());
+    a.run_selected_model_label = Some(a.model_label.clone());
+    a.run_model_label = Some(a.model_label.clone());
+    for selected in ["claude/opus", "openai/gpt-4o"] {
+        a.model_label = selected.into();
+        a.selected_external_model_label = selected.starts_with("claude/").then(|| selected.into());
+        a.apply_event(AgentEvent::BackendModel {
+            id: "claude-sonnet-test".into(),
+            display: "claude-sonnet-test[1m]".into(),
+        });
+        assert_eq!(a.model_label, selected);
+        assert_eq!(a.run_label(), "claude/claude-sonnet-test");
+    }
+}
+
+#[test]
+fn external_context_is_separate_from_turn_token_totals() {
+    let mut a = app();
+    a.external_backend = true;
+    let footer = |a: &App| {
+        a.render_footer_left(120)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    assert!(footer(&a).contains("context unknown"));
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::BackendUsage {
+        context: Some(lofi_types::ContextUsage {
+            used: 53_000,
+            size: Some(128_000),
+        }),
+        usage: None,
+        cost: Some(0.04),
+    });
+    assert!(footer(&a).contains("context 53k/128k"));
+    assert_eq!(a.total_in, 0);
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "m".into(),
+        elapsed_ms: 0,
+        cost: 0.0,
+        usage: Usage {
+            input_tokens: 100_000,
+            output_tokens: 2000,
+            ..Usage::default()
+        },
+        stop_reason: None,
+    });
+    assert!(footer(&a).contains("context 53k/128k"));
+    assert_eq!(a.total_in, 100_000);
+    assert_eq!(a.cost, 0.04);
+    a.apply_event(AgentEvent::BackendUsage {
+        context: Some(lofi_types::ContextUsage {
+            used: 1000,
+            size: Some(64_000),
+        }),
+        usage: None,
+        cost: Some(0.06),
+    });
+    assert!(footer(&a).contains("context 1k/64k"));
+    assert_eq!(a.cost, 0.06);
+    a.apply_event(AgentEvent::BackendUsage {
+        context: Some(lofi_types::ContextUsage {
+            used: 1000,
+            size: None,
+        }),
+        usage: None,
+        cost: None,
+    });
+    assert!(footer(&a).contains("context 1k/unknown"));
+    a.apply_event(AgentEvent::BackendUsage {
+        context: None,
+        usage: None,
+        cost: None,
+    });
+    assert!(footer(&a).contains("context unknown"));
+}
+
+#[test]
 fn thinking_timing_is_restored_from_transcript() {
     let assistant_with_thinking = Message {
         origin: None,
