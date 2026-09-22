@@ -1,0 +1,31 @@
+This summary captures work done before the most recent messages in this session. Read it to pick up context — this is work already in progress. Continue directly where you left off.
+
+Cleared tool results and exec source show only an event id. Recover the original with lofi.result(eventId).
+
+[Session Goal]
+- Please fix src/auth.rs.
+- Keep the public API unchanged.
+
+[User Preferences]
+- Please fix src/auth.rs.
+- Keep the public API unchanged.
+
+[Files And Changes]
+- Modified: src/auth.rs
+
+---
+
+[user]
+Please fix src/auth.rs.
+[assistant]
+* edit "src/auth.rs"
+[tool_result]
+ok
+[assistant]
+Fixed src/auth.rs.
+Tests passed.
+
+[user]
+Keep the public API unchanged.
+[assistant]
+Added tests.

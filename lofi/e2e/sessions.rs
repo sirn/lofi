@@ -1352,6 +1352,80 @@ fn manual_compaction_survives_resume_and_shapes_the_next_request() {
 }
 
 #[test]
+fn repeated_compaction_preserves_summary_and_tail_across_restart() {
+    let server = MockServer::start(vec![
+        text_response("repeated answer one"),
+        text_response("repeated answer two"),
+        text_response("repeated answer three"),
+        text_response("repeated answer four"),
+        text_response("repeated answer five"),
+        text_response("repeated resumed answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+    for (index, name) in ["one", "two", "three", "four"].into_iter().enumerate() {
+        tui.submit(&format!("repeated prompt {name}"));
+        tui.wait_for(&format!("repeated answer {name}"), WAIT);
+        fixture.wait_for_event_count("turn_end", index + 1);
+    }
+    tui.submit("/compact");
+    tui.wait_for("Compacted", WAIT);
+    fixture.wait_for_event_count("compaction", 1);
+    tui.submit("repeated prompt five");
+    tui.wait_for("repeated answer five", WAIT);
+    fixture.wait_for_event_count("turn_end", 5);
+    tui.clear_output();
+    tui.submit("/compact");
+    tui.wait_for("Compacted", WAIT);
+    fixture.wait_for_event_count("compaction", 2);
+    let events = fixture.events();
+    let markers: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "compaction")
+        .collect();
+    let summary = markers[1]["summary"].as_str().unwrap().to_string();
+    assert!(summary.contains("repeated prompt one"));
+    assert!(summary.contains("repeated prompt four"));
+    assert!(!summary.contains("repeated prompt five"));
+    assert_eq!(
+        summary.matches("This summary captures work done").count(),
+        1
+    );
+    assert!(
+        markers[1]["represented"].as_u64().unwrap() > markers[0]["represented"].as_u64().unwrap()
+    );
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    let mut resumed = fixture.spawn(&["--continue"]);
+    resumed.submit("repeated resumed prompt");
+    resumed.wait_for("repeated resumed answer", WAIT);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 6);
+    let request: serde_json::Value = serde_json::from_str(&requests[5].body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["content"] == summary)
+            .count(),
+        1
+    );
+    for (role, content) in [
+        ("user", "repeated prompt five"),
+        ("assistant", "repeated answer five"),
+        ("user", "repeated resumed prompt"),
+    ] {
+        assert!(messages
+            .iter()
+            .any(|message| message["role"] == role && message["content"] == content));
+    }
+    assert!(!messages
+        .iter()
+        .any(|message| message["content"] == "repeated answer four"));
+}
+
+#[test]
 fn new_continue_and_explicit_resume_select_the_requested_history() {
     let server = MockServer::start(vec![
         text_response("explicit first answer"),
