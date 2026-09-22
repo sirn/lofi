@@ -194,10 +194,16 @@ impl App {
 
     pub(crate) fn component_memory_json(&self) -> serde_json::Value {
         let history_bytes = self.lifecycle.history_stats().estimated_retained_bytes;
-        let turns_bytes = self.turns.capacity() * size_of::<Turn>()
-            + self.turns.iter().map(turn_heap_bytes).sum::<usize>();
-        let render_cache_bytes = self.frozen_render.order.capacity() * size_of::<usize>()
+        let turns_bytes = self.transcript.turns.capacity() * size_of::<Turn>()
             + self
+                .transcript
+                .turns
+                .iter()
+                .map(turn_heap_bytes)
+                .sum::<usize>();
+        let render_cache_bytes = self.layout.frozen_render.order.capacity() * size_of::<usize>()
+            + self
+                .layout
                 .frozen_render
                 .map
                 .values()
@@ -206,7 +212,7 @@ impl App {
                         + lines.iter().map(render_line_heap_bytes).sum::<usize>()
                 })
                 .sum::<usize>();
-        let collapsed_turn_cache = self.collapsed_turns.borrow();
+        let collapsed_turn_cache = self.transcript.collapsed_turns.borrow();
         let collapsed_turn_cache_bytes = collapsed_turn_cache.retained_bytes
             + collapsed_turn_cache.map.capacity() * (size_of::<usize>() + size_of::<Box<[u8]>>());
         let visible_log_bytes = self.log_vis.capacity() * size_of::<view::VisLine>()
@@ -224,15 +230,17 @@ impl App {
                 .iter()
                 .map(|q| q.text.capacity())
                 .sum::<usize>();
-        let index_bytes = self.turn_byte_ranges.capacity() * size_of::<Option<(u64, u64)>>()
-            + self.turn_event_offsets.capacity() * size_of::<Option<Vec<u64>>>()
+        let index_bytes = self.transcript.turn_byte_ranges.capacity()
+            * size_of::<Option<(u64, u64)>>()
+            + self.transcript.turn_event_offsets.capacity() * size_of::<Option<Vec<u64>>>()
             + self
+                .transcript
                 .turn_event_offsets
                 .iter()
                 .flatten()
                 .map(|offsets| offsets.capacity() * size_of::<u64>())
                 .sum::<usize>()
-            + self.frozen_heights.capacity() * size_of::<usize>();
+            + self.layout.frozen_heights.capacity() * size_of::<usize>();
         let estimated_total = history_bytes
             + turns_bytes
             + render_cache_bytes
@@ -538,9 +546,9 @@ impl DebugState {
                 "session_file": app.session.path().map(|path| path.display().to_string()),
                 "transcript_bytes": transcript_bytes,
                 "history_messages": history_messages,
-                "turns": app.turns.len(),
-                "resident_turn_blocks": app.turns.iter().filter(|turn| !turn.blocks.is_empty()).count(),
-                "render_cache_entries": app.frozen_render.map.len(),
+                "turns": app.transcript.turns.len(),
+                "resident_turn_blocks": app.transcript.turns.iter().filter(|turn| !turn.blocks.is_empty()).count(),
+                "render_cache_entries": app.layout.frozen_render.map.len(),
                 "visible_log_lines": app.log_vis.len(),
                 "queued_prompts": app.prompt_queue.len(),
                 "context_tokens": context_tokens,

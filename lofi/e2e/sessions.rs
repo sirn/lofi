@@ -2229,6 +2229,13 @@ fn resumed_many_turn_session_scrolls_to_first_turn() {
 
     let mut tui = fixture.spawn(&["--continue"]);
     tui.wait_for("scroll answer 029", WAIT);
+    for width in [40, 100, 60] {
+        tui.resize(24, width);
+        tui.wait_for_screen("scroll answer 029", WAIT);
+        tui.send(b"resize-input-marker");
+        tui.wait_for_screen("resize-input-marker", WAIT);
+        tui.send(b"\x15");
+    }
     tui.clear_output();
     for _ in 0..40 {
         tui.send(b"\x1b[5~");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::transcript::CollapsedTurnCache;
 
 // into "previous summary". Returns the leaf id of the pre-compaction range.
 fn seed_compacted_turn(path: &std::path::Path) {
@@ -437,7 +438,7 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "run it".to_string(),
         blocks: vec![Block::Tool(ToolCall {
@@ -487,8 +488,8 @@ fn collapsed_cache_round_trip_preserves_native_preview_rendering() {
             })
             .collect::<Vec<_>>()
     };
-    let expected = render(&a, &a.turns[0]);
-    let mut compact = a.turns[0].clone();
+    let expected = render(&a, &a.transcript.turns[0]);
+    let mut compact = a.transcript.turns[0].clone();
     compact_native_previews(&mut compact);
     let mut cache = CollapsedTurnCache::new();
     cache.insert(0, &compact);

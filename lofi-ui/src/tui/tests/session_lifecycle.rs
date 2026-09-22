@@ -1,10 +1,16 @@
 use super::*;
 
 fn last_text(app: &App) -> Option<&str> {
-    app.turns.last()?.blocks.iter().rev().find_map(|b| match b {
-        Block::Text(t) => Some(t.as_str()),
-        _ => None,
-    })
+    app.transcript
+        .turns
+        .last()?
+        .blocks
+        .iter()
+        .rev()
+        .find_map(|b| match b {
+            Block::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
 }
 
 #[test]
@@ -23,9 +29,12 @@ fn agent_notice_prompt_enters_transcript_not_app_notification() {
         prompt: "A potential loop was detected".into(),
     });
 
-    assert_eq!(a.turns.len(), 2);
-    assert_eq!(a.turns[1].kind, lofi_types::PromptKind::Notice);
-    assert_eq!(a.turns[1].prompt, "A potential loop was detected");
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert_eq!(a.transcript.turns[1].kind, lofi_types::PromptKind::Notice);
+    assert_eq!(
+        a.transcript.turns[1].prompt,
+        "A potential loop was detected"
+    );
     assert!(a.notify.is_none());
     assert_eq!(a.turn_cost, 1.25);
     assert!(a.turn_has_round_usage);
@@ -50,8 +59,8 @@ fn job_and_loop_notices_use_the_same_transcript_prompt() {
     });
     loop_recovery.apply_event(notice());
 
-    let job_notice = job.turns.last().unwrap();
-    let loop_notice = loop_recovery.turns.last().unwrap();
+    let job_notice = job.transcript.turns.last().unwrap();
+    let loop_notice = loop_recovery.transcript.turns.last().unwrap();
     assert_eq!(job_notice.kind, loop_notice.kind);
     assert_eq!(job_notice.prompt, loop_notice.prompt);
     assert!(job.notify.is_none());
@@ -82,19 +91,25 @@ fn standalone_user_shell_keeps_turn_backing_metadata_aligned() {
         exclude_from_context: false,
     });
 
-    assert_eq!(a.turns.len(), 2);
-    assert_eq!(a.turn_byte_ranges.len(), 2);
-    assert_eq!(a.turn_event_offsets.len(), 2);
-    assert!(a.turns[0].blocks.is_empty());
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert_eq!(a.transcript.turn_byte_ranges.len(), 2);
+    assert_eq!(a.transcript.turn_event_offsets.len(), 2);
+    assert!(a.transcript.turns[0].blocks.is_empty());
 
-    a.turn_byte_ranges[1] = Some((20, 30));
+    a.transcript.turn_byte_ranges[1] = Some((20, 30));
     a.apply_event(AgentEvent::Prompt {
         kind: lofi_types::PromptKind::User,
         prompt: "second".into(),
     });
-    assert!(a.turns[1].blocks.is_empty());
-    assert_eq!(a.turns.len(), a.turn_byte_ranges.len());
-    assert_eq!(a.turns.len(), a.turn_event_offsets.len());
+    assert!(a.transcript.turns[1].blocks.is_empty());
+    assert_eq!(
+        a.transcript.turns.len(),
+        a.transcript.turn_byte_ranges.len()
+    );
+    assert_eq!(
+        a.transcript.turns.len(),
+        a.transcript.turn_event_offsets.len()
+    );
 }
 
 #[test]
@@ -117,9 +132,9 @@ fn user_shell_streams_into_one_turn_and_finalizes_in_place() {
         exclude_from_context: false,
     });
 
-    assert_eq!(a.turns.len(), 1);
-    assert_eq!(a.turn_byte_ranges.len(), 1);
-    assert_eq!(a.turn_event_offsets.len(), 1);
+    assert_eq!(a.transcript.turns.len(), 1);
+    assert_eq!(a.transcript.turn_byte_ranges.len(), 1);
+    assert_eq!(a.transcript.turn_event_offsets.len(), 1);
     // Streaming inserts the expansion at `UserShellStart`; finalize must
     // keep the same detail id so the output stays expanded.
     assert!(a
@@ -132,7 +147,7 @@ fn user_shell_streams_into_one_turn_and_finalizes_in_place() {
         duration,
         running,
         ..
-    }) = a.turns[0].blocks.first()
+    }) = a.transcript.turns[0].blocks.first()
     else {
         panic!("expected a user-shell block");
     };
@@ -238,10 +253,16 @@ fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
     )
     .unwrap();
 
-    assert_eq!(a.turns.len(), 3);
-    assert_eq!(a.turns.len(), a.turn_byte_ranges.len());
-    assert_eq!(a.turns.len(), a.turn_event_offsets.len());
-    assert!(a.turns.iter().all(|turn| turn.blocks.is_empty()));
+    assert_eq!(a.transcript.turns.len(), 3);
+    assert_eq!(
+        a.transcript.turns.len(),
+        a.transcript.turn_byte_ranges.len()
+    );
+    assert_eq!(
+        a.transcript.turns.len(),
+        a.transcript.turn_event_offsets.len()
+    );
+    assert!(a.transcript.turns.iter().all(|turn| turn.blocks.is_empty()));
     let final_turn = a.materialize_turn(2);
     assert!(final_turn
         .blocks
@@ -256,7 +277,7 @@ fn text_deltas_accumulate_into_one_text_block() {
     a.apply_event(AgentEvent::Text("hel".to_string()));
     a.apply_event(AgentEvent::Text("lo".to_string()));
     assert_eq!(last_text(&a), Some("hello"));
-    assert_eq!(a.turns[0].blocks.len(), 1);
+    assert_eq!(a.transcript.turns[0].blocks.len(), 1);
 }
 
 #[test]
@@ -266,7 +287,7 @@ fn thinking_deltas_accumulate_into_their_own_block() {
     a.apply_event(AgentEvent::Thinking("hm".to_string()));
     a.apply_event(AgentEvent::Text("hi".to_string()));
     a.apply_event(AgentEvent::Thinking("more".to_string()));
-    let blocks = &a.turns[0].blocks;
+    let blocks = &a.transcript.turns[0].blocks;
     assert!(matches!(blocks[0], Block::Thinking(_)));
     assert!(matches!(blocks[1], Block::Text(_)));
     assert!(matches!(blocks[2], Block::Thinking(_)));
@@ -283,7 +304,7 @@ fn tool_start_then_text_starts_new_text_block() {
         name: "exec".to_string(),
     });
     a.apply_event(AgentEvent::Text("second".to_string()));
-    let blocks = &a.turns[0].blocks;
+    let blocks = &a.transcript.turns[0].blocks;
     assert_eq!(blocks.len(), 3);
     assert!(matches!(blocks[0], Block::Text(_)));
     assert!(matches!(blocks[1], Block::Tool(_)));
@@ -319,7 +340,7 @@ fn tool_input_and_end_land_under_matching_id() {
         is_error: false,
         elapsed_ms: 0,
     });
-    let blocks = &a.turns[0].blocks;
+    let blocks = &a.transcript.turns[0].blocks;
     let Block::Tool(t1) = &blocks[0] else {
         unreachable!()
     };
@@ -418,20 +439,22 @@ fn round_commit_releases_hidden_exec_result() {
         is_error: false,
         elapsed_ms: 1,
     });
-    let block_count = a.turns[0].blocks.len();
+    let block_count = a.transcript.turns[0].blocks.len();
 
     a.apply_event(AgentEvent::RoundCommitted {
         byte_start: start,
         byte_end: end,
     });
 
-    assert_eq!(a.turns[0].prompt, "go");
-    assert_eq!(a.turns[0].blocks.len(), block_count);
+    assert_eq!(a.transcript.turns[0].prompt, "go");
+    assert_eq!(a.transcript.turns[0].blocks.len(), block_count);
     assert!(
-        matches!(&a.turns[0].blocks[0], Block::Thinking(thinking) if thinking.text == "still visible thought")
+        matches!(&a.transcript.turns[0].blocks[0], Block::Thinking(thinking) if thinking.text == "still visible thought")
     );
-    assert!(matches!(&a.turns[0].blocks[1], Block::Text(text) if text == "still visible text"));
-    let Block::Tool(tool) = &a.turns[0].blocks[2] else {
+    assert!(
+        matches!(&a.transcript.turns[0].blocks[1], Block::Text(text) if text == "still visible text")
+    );
+    let Block::Tool(tool) = &a.transcript.turns[0].blocks[2] else {
         panic!("exec block preserved")
     };
     assert!(tool.result_committed);
@@ -461,7 +484,7 @@ fn turn_committed_extends_existing_range_across_silent_continuation() {
         byte_start: 250,
         byte_end: 300,
     });
-    assert_eq!(a.turn_byte_ranges, vec![Some((100, 300))]);
+    assert_eq!(a.transcript.turn_byte_ranges, vec![Some((100, 300))]);
 }
 
 #[test]
@@ -479,11 +502,11 @@ fn run_finished_keeps_latest_persisted_turn_visible_until_next_prompt() {
 
     a.run_finished();
 
-    assert!(a.turns[0]
+    assert!(a.transcript.turns[0]
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "visible response")));
-    assert_eq!(a.turn_byte_ranges, vec![Some((100, 200))]);
+    assert_eq!(a.transcript.turn_byte_ranges, vec![Some((100, 200))]);
 }
 
 #[test]
@@ -500,7 +523,7 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
     });
     a.run_finished();
 
-    assert!(a.turns[0]
+    assert!(a.transcript.turns[0]
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "previous response")));
@@ -509,9 +532,9 @@ fn next_turn_freezes_previous_response_atomically_with_new_prompt() {
         kind: lofi_types::PromptKind::User,
         prompt: "new prompt".into(),
     });
-    assert_eq!(a.turns.len(), 2);
-    assert!(a.turns[0].blocks.is_empty());
-    assert_eq!(a.turns[1].prompt, "new prompt");
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert!(a.transcript.turns[0].blocks.is_empty());
+    assert_eq!(a.transcript.turns[1].prompt, "new prompt");
 }
 
 #[test]
@@ -571,7 +594,7 @@ fn settled_first_turn_remains_visible_from_committed_cursor_range() {
     });
     a.run_finished();
 
-    assert!(a.turns[0]
+    assert!(a.transcript.turns[0]
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "visible response")));
@@ -593,7 +616,7 @@ fn run_finished_keeps_blocks_for_hard_cap_continuation() {
 
     a.run_finished();
 
-    assert!(!a.turns[0].blocks.is_empty());
+    assert!(!a.transcript.turns[0].blocks.is_empty());
 }
 
 #[test]

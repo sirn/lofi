@@ -16,6 +16,8 @@ mod input;
 mod replay;
 mod resume;
 mod text;
+mod transcript;
+use transcript::{Transcript, TranscriptLayout};
 mod tree;
 mod tty_events;
 pub mod view;
@@ -776,161 +778,6 @@ impl Popover for SlashComplete {
 // historical TreeEntry name for its picker state.
 use lofi_core::session::tree::TreeRow as TreeEntry;
 
-/// Retains compressed, width-independent display models so scrolling back
-/// into a resumed transcript does not rescan its JSONL file. Successful
-/// native results are reduced to their collapsed previews before insertion;
-/// per-turn compression avoids retaining the full Rust object graph. Entries
-/// are evicted least-recently-used past a hard budget, viewport-driven
-/// materializations being the only inserts — background height re-measure
-/// parses without caching, so the cache stays proportional to what the user
-/// has actually looked at, not to the whole transcript.
-struct CollapsedTurnCache {
-    map: HashMap<usize, Box<[u8]>>,
-    /// LRU order: front is the least recently used turn index.
-    order: VecDeque<usize>,
-    retained_bytes: usize,
-    frame_hits: usize,
-    frame_misses: usize,
-    frame_materialize_us: u128,
-}
-
-impl CollapsedTurnCache {
-    const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
-    /// A single entry above this size is never retained; it reparses from the
-    /// transcript on demand instead of flushing everyone else.
-    const MAX_ENTRY_BYTES: usize = 1024 * 1024;
-
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-            retained_bytes: 0,
-            frame_hits: 0,
-            frame_misses: 0,
-            frame_materialize_us: 0,
-        }
-    }
-
-    fn get(&mut self, idx: usize) -> Option<Arc<Turn>> {
-        let turn = self.map.get(&idx).and_then(|data| {
-            lz4_flex::decompress_size_prepended(data)
-                .ok()
-                .and_then(|json| serde_json::from_slice(&json).ok())
-                .map(|mut turn| {
-                    assign_detail_ids(&mut turn, idx);
-                    Arc::new(turn)
-                })
-        });
-        if turn.is_some() {
-            self.frame_hits += 1;
-            if let Some(pos) = self.order.iter().position(|entry| *entry == idx) {
-                self.order.remove(pos);
-            }
-            self.order.push_back(idx);
-        } else {
-            self.frame_misses += 1;
-        }
-        turn
-    }
-
-    fn finish_materialize(&mut self, elapsed_us: u128) {
-        self.frame_materialize_us += elapsed_us;
-    }
-
-    fn reset_frame_profile(&mut self) {
-        self.frame_hits = 0;
-        self.frame_misses = 0;
-        self.frame_materialize_us = 0;
-    }
-
-    fn insert(&mut self, idx: usize, turn: &Turn) {
-        if self.map.contains_key(&idx) {
-            return;
-        }
-        let Ok(json) = serde_json::to_vec(turn) else {
-            return;
-        };
-        let data = lz4_flex::compress_prepend_size(&json).into_boxed_slice();
-        let bytes = data.len();
-        if bytes > Self::MAX_ENTRY_BYTES {
-            return;
-        }
-        self.retained_bytes += bytes;
-        self.order.push_back(idx);
-        self.map.insert(idx, data);
-        while self.retained_bytes > Self::MAX_RETAINED_BYTES {
-            let Some(victim) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(data) = self.map.remove(&victim) {
-                self.retained_bytes = self.retained_bytes.saturating_sub(data.len());
-            }
-        }
-    }
-
-    fn remove(&mut self, idx: usize) {
-        if let Some(data) = self.map.remove(&idx) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(data.len());
-            if let Some(pos) = self.order.iter().position(|entry| *entry == idx) {
-                self.order.remove(pos);
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.map.clear();
-        self.order.clear();
-        self.retained_bytes = 0;
-        self.reset_frame_profile();
-    }
-}
-
-/// Retains only viewport-adjacent rendering to avoid holding the styled
-/// representation of the full session.
-struct FrozenCache {
-    order: VecDeque<usize>,
-    map: HashMap<usize, Vec<view::RenderLine>>,
-}
-
-impl FrozenCache {
-    fn new() -> Self {
-        Self {
-            order: VecDeque::new(),
-            map: HashMap::new(),
-        }
-    }
-
-    fn contains(&self, idx: usize) -> bool {
-        self.map.contains_key(&idx)
-    }
-
-    fn get(&self, idx: usize) -> Option<&Vec<view::RenderLine>> {
-        self.map.get(&idx)
-    }
-
-    fn clear(&mut self) {
-        self.order.clear();
-        self.map.clear();
-    }
-
-    fn insert(&mut self, idx: usize, entry: Vec<view::RenderLine>) {
-        if self.map.insert(idx, entry).is_none() {
-            self.order.push_back(idx);
-        }
-    }
-
-    fn retain_near(&mut self, visible: Option<(usize, usize)>, frozen_turns: usize) {
-        let Some((first, last)) = visible else {
-            self.clear();
-            return;
-        };
-        let first = first.saturating_sub(1);
-        let last = last.saturating_add(1).min(frozen_turns.saturating_sub(1));
-        self.map.retain(|idx, _| (first..=last).contains(idx));
-        self.order.retain(|idx| (first..=last).contains(idx));
-    }
-}
-
 struct Selection {
     start: (usize, usize),
     end: (usize, usize),
@@ -992,14 +839,8 @@ enum PickerLoad {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct App {
-    turns: Vec<Turn>,
-    /// Per-turn byte range in the transcript file (`None` for ephemeral or
-    /// not-yet-committed turns). Parallel to `turns`. A frozen turn's blocks
-    /// are cleared once committed; `materialize_turn` re-parses this range
-    /// from the file on demand so the UI's memory stays bounded by the
-    /// viewport, not the session length.
-    turn_byte_ranges: Vec<Option<(u64, u64)>>,
-    turn_event_offsets: Vec<Option<Vec<u64>>>,
+    transcript: Transcript,
+    layout: TranscriptLayout,
     input: String,
     input_cursor: usize,
     lifecycle: AgentLifecycle,
@@ -1130,39 +971,6 @@ pub(crate) struct App {
     log_total: usize,
     last_turn_height: usize,
     log_view_h: usize,
-    frozen_render: FrozenCache,
-    collapsed_turns: Box<RefCell<CollapsedTurnCache>>,
-    /// First durable-transcript read failure seen while rendering. Set from
-    /// interior-mutability paths that only hold `&App`; surfaced as a
-    /// notification after the frame so a turn silently rendering as an
-    /// empty shell gets a visible explanation instead of looking like
-    /// lost transcript.
-    transcript_alert: RefCell<Option<String>>,
-    /// Line count per frozen turn (all of them), so the viewport can be
-    /// located and `total` computed without fetching rendered lines. Synced
-    /// to the file-backed prefix (which may be all turns) for the active mode.
-    frozen_heights: Vec<usize>,
-    /// Parallel to `frozen_heights`: true while the entry is a placeholder
-    /// estimate derived from the turn byte range, still waiting for an exact
-    /// re-measure by the tick loop or the viewport pass. Resumed transcripts
-    /// seed estimates for every historical turn so the first frame paints
-    /// without re-reading the whole session file.
-    frozen_heights_estimated: Vec<bool>,
-    render_epoch: u64,
-    frozen_epoch: u64,
-    /// Viewport width the frozen cache was last built at. A resize changes
-    /// the wrap width, so a mismatch discards the cache just like an epoch
-    /// bump — otherwise background-padded lines keep the old (narrower)
-    /// width after the terminal grows.
-    frozen_width: usize,
-    /// After a width-only resize, frozen turns below this exclusive upper
-    /// bound still hold heights measured at the previous width. `ensure_frozen`
-    /// keeps those stale heights as the total/base source (they only differ by
-    /// re-wrap, so the thumb and bottom anchor stay stable); the tick loop
-    /// re-measures them back-to-front — visible bottom turns first — so a
-    /// resize never stalls a frame on a long transcript. `None` once every
-    /// height matches `frozen_width`.
-    height_remeasure_from: Option<usize>,
     render_profile: Box<RenderProfile>,
 }
 
@@ -1177,12 +985,9 @@ impl App {
     ) -> Result<()> {
         self.lifecycle
             .restore_history(cursor, index, history_start)?;
-        self.turns.clear();
+        self.transcript.clear();
         self.expanded_details.clear();
         self.detail_focus = None;
-        self.collapsed_turns.get_mut().clear();
-        self.turn_byte_ranges.clear();
-        self.turn_event_offsets.clear();
         self.cost = 0.0;
         self.total_in = 0;
         self.total_out = 0;
@@ -1298,7 +1103,10 @@ impl TerminalGuard {
         resize_started: Option<Instant>,
         resize_last: Option<Instant>,
     ) -> Result<()> {
-        app.collapsed_turns.get_mut().reset_frame_profile();
+        app.transcript
+            .collapsed_turns
+            .get_mut()
+            .reset_frame_profile();
         *app.render_profile = RenderProfile {
             resize_events,
             resize_batch_us: resize_started.map_or(0, |at| at.elapsed().as_micros()),
@@ -1317,7 +1125,7 @@ impl TerminalGuard {
             .map_err(Error::Io)?;
         let draw_us = draw_started.elapsed().as_micros();
         {
-            let cache = app.collapsed_turns.get_mut();
+            let cache = app.transcript.collapsed_turns.get_mut();
             app.render_profile.collapsed_cache_hits = cache.frame_hits;
             app.render_profile.collapsed_cache_misses = cache.frame_misses;
             app.render_profile.collapsed_cache_entries = cache.map.len();
@@ -1506,7 +1314,7 @@ async fn run_loop(
     app.no_models_hint = no_models_hint.clone();
     if let Some(hint) = no_models_hint {
         // Lead with the hint so the user sees why nothing will run.
-        app.insert_turn(
+        app.transcript.insert_turn(
             0,
             Turn {
                 prompt: String::new(),
@@ -1872,7 +1680,7 @@ async fn run_loop(
                 // content through each step instead of drifting (the cursor
                 // visibly jumps around while the user scrolls otherwise).
                 let navigating = matches!(app.mode, Mode::Navigate | Mode::Select);
-                if navigating && app.height_remeasure_from.is_some() {
+                if navigating && app.layout.height_remeasure_from.is_some() {
                     let nav_anchor = app.nav_content_anchor();
                     let sel_anchor = match app.mode {
                         Mode::Select => app.sel_content_anchor(),
@@ -1882,10 +1690,10 @@ async fn run_loop(
                     if let Some(anchor) = nav_anchor {
                         // The converging geometry is frozen-turn-only at
                         // rest, so an empty live last turn renders correctly.
-                        app.reseat_nav_cursor(anchor, &[], app.frozen_width);
+                        app.reseat_nav_cursor(anchor, &[], app.layout.frozen_width);
                     }
                     if let Some(anchor) = sel_anchor {
-                        app.reseat_sel_anchor(anchor, &[], app.frozen_width);
+                        app.reseat_sel_anchor(anchor, &[], app.layout.frozen_width);
                     }
                     app.nav_show_cursor();
                     dirty = true;

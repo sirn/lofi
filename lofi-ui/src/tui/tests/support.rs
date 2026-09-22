@@ -12,7 +12,7 @@ pub(super) fn app() -> App {
 }
 
 pub(super) fn push_turn(app: &mut App) {
-    app.push_turn(Turn {
+    app.transcript.push_turn(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "p".to_string(),
         blocks: Vec::new(),

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn frozen_cache_invalidates_on_width_change() {
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(30),
         blocks: Vec::new(),
@@ -12,16 +12,16 @@ fn frozen_cache_invalidates_on_width_change() {
 
     a.ensure_frozen(20);
     a.sync_frozen_cache_for_viewport(0, 24, 20);
-    let h_narrow = a.frozen_heights[0];
-    assert!(a.frozen_render.get(0).is_some());
+    let h_narrow = a.layout.frozen_heights[0];
+    assert!(a.layout.frozen_render.get(0).is_some());
 
     a.ensure_frozen(100);
     a.sync_frozen_cache_for_viewport(0, 24, 100);
     // A width-only resize defers the re-measure to the tick loop; drain it
     // here so the height reflects the new width.
     while a.remeasure_heights_step(16) {}
-    let h_wide = a.frozen_heights[0];
-    assert!(a.frozen_render.get(0).is_some());
+    let h_wide = a.layout.frozen_heights[0];
+    assert!(a.layout.frozen_render.get(0).is_some());
     assert!(
         h_wide < h_narrow,
         "frozen cache should re-wrap at the new width: narrow={h_narrow} wide={h_wide}"
@@ -32,7 +32,7 @@ fn frozen_cache_invalidates_on_width_change() {
 fn resize_defers_height_remeasure_off_the_frame() {
     let mut a = app();
     for _ in 0..40 {
-        a.turns.push(Turn {
+        a.transcript.turns.push(Turn {
             kind: lofi_types::PromptKind::User,
             prompt: "word ".repeat(40),
             blocks: Vec::new(),
@@ -41,37 +41,40 @@ fn resize_defers_height_remeasure_off_the_frame() {
     }
 
     a.ensure_frozen(24);
-    let narrow: Vec<usize> = a.frozen_heights.clone();
+    let narrow: Vec<usize> = a.layout.frozen_heights.clone();
     let frozen_n = narrow.len();
     // The live last turn is not frozen, so the frozen prefix is one shorter.
-    assert_eq!(frozen_n, a.turns.len() - 1);
+    assert_eq!(frozen_n, a.transcript.turns.len() - 1);
 
     // A width-only resize keeps the (stale) heights so the frame draws
     // immediately, and schedules an incremental re-measure instead of
     // recomputing all turns synchronously.
     a.ensure_frozen(100);
     assert_eq!(
-        a.frozen_heights, narrow,
+        a.layout.frozen_heights, narrow,
         "resize keeps prior heights until the tick loop re-measures them"
     );
-    assert!(a.height_remeasure_from.is_some());
+    assert!(a.layout.height_remeasure_from.is_some());
 
     // Re-measure works back-to-front: the visible bottom turns are exact
     // after the first step while the off-screen prefix is still pending.
     a.remeasure_heights_step(8);
     let last = frozen_n - 1;
     assert!(
-        a.frozen_heights[last] <= narrow[last],
+        a.layout.frozen_heights[last] <= narrow[last],
         "widening should not grow the bottom turn height: {:?} vs {:?}",
-        a.frozen_heights[last],
+        a.layout.frozen_heights[last],
         narrow[last]
     );
-    assert!(a.height_remeasure_from.is_some(), "prefix still pending");
+    assert!(
+        a.layout.height_remeasure_from.is_some(),
+        "prefix still pending"
+    );
 
     // Draining converges every height to the wide measurement.
     while a.remeasure_heights_step(8) {}
-    assert!(a.height_remeasure_from.is_none());
-    for (idx, (wide, narrow)) in a.frozen_heights.iter().zip(&narrow).enumerate() {
+    assert!(a.layout.height_remeasure_from.is_none());
+    for (idx, (wide, narrow)) in a.layout.frozen_heights.iter().zip(&narrow).enumerate() {
         assert!(
             wide <= narrow,
             "turn {idx} should re-wrap no taller at the wider width: {wide} vs {narrow}"
@@ -152,18 +155,18 @@ fn height_remeasure_does_not_populate_the_collapsed_cache() {
 
     a.ensure_frozen(40);
     assert!(
-        a.height_remeasure_from.is_some(),
+        a.layout.height_remeasure_from.is_some(),
         "estimated heights pending exact re-measure"
     );
     while a.remeasure_heights_step(16) {}
     assert!(
-        a.collapsed_turns.borrow().map.is_empty(),
+        a.transcript.collapsed_turns.borrow().map.is_empty(),
         "re-measure must not retain collapsed turns"
     );
 
     // Viewport materialization still caches what the user looks at.
     let _ = a.materialize_turn(0);
-    assert_eq!(a.collapsed_turns.borrow().map.len(), 1);
+    assert_eq!(a.transcript.collapsed_turns.borrow().map.len(), 1);
 }
 
 #[test]
@@ -173,7 +176,7 @@ fn resize_reanchors_scrolled_up_view_instead_of_snapping_to_bottom() {
     let mut a = app();
     // A long prompt that wraps to many lines when narrow and far fewer when
     // wide, so the re-wrap materially shrinks `total`/`base` on resize.
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(3000),
         blocks: Vec::new(),
@@ -214,7 +217,7 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     let prompt =
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
@@ -225,7 +228,7 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let (intra, c) = {
-        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let narrow = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 4.min(narrow.len().saturating_sub(1));
         let c: usize = narrow
             .iter()
@@ -243,7 +246,7 @@ fn resize_keeps_nav_cursor_on_same_content_line() {
     let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let (start, len, on_screen) = {
-        let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+        let wide = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let new_intra = a.nav_cursor - a.turn_start_line(0);
         assert!(new_intra < wide.len(), "cursor should land within turn 0");
         let start: usize = wide
@@ -271,7 +274,7 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
     let prompt =
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
@@ -282,7 +285,7 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let (intra, nav_col, char_pos) = {
-        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let narrow = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 4.min(narrow.len().saturating_sub(1));
         let rl = &narrow[intra];
         let nav_col = rl.content.0 + (rl.content_len() / 2).max(1);
@@ -297,7 +300,7 @@ fn resize_keeps_nav_cursor_cell_on_same_content_char() {
     let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let new_char_pos = {
-        let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+        let wide = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let new_intra = a.nav_cursor - a.turn_start_line(0);
         assert!(new_intra < wide.len(), "cursor should land within turn 0");
         app_nav::cursor_char_pos(wide, new_intra, a.nav_col)
@@ -316,7 +319,7 @@ fn resize_keeps_select_anchor_on_same_content_char() {
     let prompt =
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu "
             .repeat(2);
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt,
         blocks: Vec::new(),
@@ -326,14 +329,14 @@ fn resize_keeps_select_anchor_on_same_content_char() {
     let mut term = Terminal::new(TestBackend::new(28, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let (anchor_intra, anchor_col, anchor_char) = {
-        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let narrow = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 2.min(narrow.len().saturating_sub(1));
         let rl = &narrow[intra];
         let col = rl.content.0 + (rl.content_len() / 2).max(1);
         (intra, col, app_nav::cursor_char_pos(narrow, intra, col))
     };
     let (cur_intra, cur_col, cur_char) = {
-        let narrow = a.frozen_render.get(0).expect("turn 0 frozen");
+        let narrow = a.layout.frozen_render.get(0).expect("turn 0 frozen");
         let intra = 5.min(narrow.len().saturating_sub(1));
         let rl = &narrow[intra];
         let col = rl.content.0 + (rl.content_len() / 2).max(1);
@@ -348,7 +351,7 @@ fn resize_keeps_select_anchor_on_same_content_char() {
 
     let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
-    let wide = a.frozen_render.get(0).expect("turn 0 frozen");
+    let wide = a.layout.frozen_render.get(0).expect("turn 0 frozen");
 
     let new_anchor_char = {
         let intra = a.select_anchor.0 - a.turn_start_line(0);
@@ -379,7 +382,7 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
     let prompt =
         "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".to_string();
     for _ in 0..6 {
-        a.turns.push(Turn {
+        a.transcript.turns.push(Turn {
             kind: lofi_types::PromptKind::User,
             prompt: prompt.clone(),
             blocks: Vec::new(),
@@ -397,7 +400,14 @@ fn resize_keeps_nav_cursor_at_its_viewport_row() {
     // Place the cursor on a content line near the top (turn 2) and park the
     // viewport so it sits at row 4, unpinned (so the viewport can follow it).
     let k = 2;
-    let intra = 2.min(a.frozen_render.get(k).unwrap().len().saturating_sub(1));
+    let intra = 2.min(
+        a.layout
+            .frozen_render
+            .get(k)
+            .unwrap()
+            .len()
+            .saturating_sub(1),
+    );
     a.nav_cursor = a.turn_start_line(k) + intra;
     a.pinned = false;
     a.top_line = a.nav_cursor.saturating_sub(4);
@@ -422,7 +432,7 @@ fn resize_clamps_nav_cursor_to_edge_on_height_shrink() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "word ".repeat(4000),
         blocks: Vec::new(),
@@ -513,7 +523,7 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
     a.mode = Mode::Navigate;
 
     let line_text = |a: &App, abs: usize| -> String {
-        let n = a.turns.len();
+        let n = a.transcript.turns.len();
         let mut k = 0;
         for i in 0..n {
             if a.turn_start_line(i) <= abs {
@@ -543,13 +553,17 @@ fn resize_keeps_nav_cursor_on_exec_header_across_wrap() {
             let cx = view::component::Cx {
                 app: a,
                 theme: a.theme,
-                width: a.frozen_width,
+                width: a.layout.frozen_width,
                 active_turn: a.run_active(),
             };
-            let v = view::blocks::render_turn_lines(&cx, &a.turns[k]);
+            let v = view::blocks::render_turn_lines(&cx, &a.transcript.turns[k]);
             text_of(&v)
         } else {
-            a.frozen_render.get(k).map(text_of).unwrap_or_default()
+            a.layout
+                .frozen_render
+                .get(k)
+                .map(text_of)
+                .unwrap_or_default()
         }
     };
 
@@ -582,14 +596,14 @@ fn fence_renders_plain_backticks_on_full_width_tile() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Text(
             "before\n```rust\nlet x = 1;\n```\nafter".to_string(),
         )],
     });
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let w = 40usize;
     let cx = Cx {
         app: &a,

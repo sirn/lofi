@@ -139,16 +139,16 @@ fn slash_clear_help_session_resume_new() {
     let mut a = app();
     push_turn(&mut a);
     assert!(a.slash_command("/clear"));
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
 
     a.slash_command("/help");
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
     assert!(a.info.is_some());
     a.info = None;
 
     // Unknown commands notify on the rule line instead of pushing a turn.
     assert!(a.slash_command("/nope"));
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
     let (msg, kind) = a.notify_badge().expect("unknown command notified");
     assert_eq!(kind, NotifyKind::Error);
     assert!(msg.contains("unknown command"));
@@ -160,7 +160,7 @@ fn slash_clear_help_session_resume_new() {
     assert!(msg.contains("disabled"));
 
     assert!(a.slash_command("/new"));
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
     assert!(a.session.cursor.is_none());
     assert!(a.status_usage.is_none());
     assert_eq!(a.cost, 0.0);
@@ -175,7 +175,7 @@ fn slash_clear_help_session_resume_new() {
 fn session_info_opens_modal() {
     let mut a = app();
     assert!(a.slash_command("/session"));
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
     let info = a.info.as_ref().expect("modal opened");
     assert_eq!(info.title, "Session");
     let body = info
@@ -614,7 +614,7 @@ fn help_modal_scrolls_and_dismisses() {
     let mut a = app();
     let mut run = None;
     assert!(a.slash_command("/help"));
-    assert!(a.turns.is_empty());
+    assert!(a.transcript.turns.is_empty());
     // Render once so the modal publishes its scroll geometry
     // (total/view_h) for the key handler.
     let backend = TestBackend::new(64, 18);

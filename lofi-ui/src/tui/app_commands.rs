@@ -386,7 +386,11 @@ impl App {
             "messages",
             &self.lifecycle.history_stats().messages.to_string(),
         ));
-        lines.push(info_kv(t, "turns", &self.turns.len().to_string()));
+        lines.push(info_kv(
+            t,
+            "turns",
+            &self.transcript.turns.len().to_string(),
+        ));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_section("Workspace"));
         lines.push(info_kv(t, "root", &self.session.cwd.display().to_string()));
@@ -411,12 +415,9 @@ impl App {
         if let Err(error) = self.lifecycle.clear_history() {
             self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
         }
-        self.turns.clear();
+        self.transcript.clear();
         self.expanded_details.clear();
         self.detail_focus = None;
-        self.collapsed_turns.get_mut().clear();
-        self.turn_byte_ranges.clear();
-        self.turn_event_offsets.clear();
         if let Some(sink) = self.session.sink.as_mut() {
             sink.clear_cursor();
         }
@@ -628,7 +629,7 @@ impl App {
                     snapshot.contiguous,
                 );
                 if let Err(e) = loaded {
-                    self.push_turn(Turn {
+                    self.transcript.push_turn(Turn {
                         prompt: "/resume".to_string(),
                         kind: lofi_types::PromptKind::User,
                         blocks: vec![Block::Error(format!("load session: {e}"))],
@@ -636,9 +637,9 @@ impl App {
                     return;
                 }
                 self.reset_session_jobs();
-                if self.turns.len() > 1 {
-                    let n = self.turns.len();
-                    for turn in &mut self.turns[..n - 1] {
+                if self.transcript.turns.len() > 1 {
+                    let n = self.transcript.turns.len();
+                    for turn in &mut self.transcript.turns[..n - 1] {
                         turn.blocks.clear();
                     }
                 }
@@ -656,7 +657,7 @@ impl App {
                 self.pinned = true;
                 self.top_line = 0;
             }
-            Err(e) => self.push_turn(Turn {
+            Err(e) => self.transcript.push_turn(Turn {
                 prompt: "/resume".to_string(),
                 kind: lofi_types::PromptKind::User,
                 blocks: vec![Block::Error(format!("load session: {e}"))],
@@ -996,7 +997,7 @@ impl App {
             return false;
         }
         self.theme = next;
-        self.frozen_render.clear();
+        self.layout.frozen_render.clear();
         true
     }
 
@@ -1826,7 +1827,7 @@ impl App {
         // Rollback leaves no live run. Unlike resume, even the selected final
         // turn is immutable and file-backed, so retaining its potentially huge
         // blocks would recreate the RSS spike this path is meant to prevent.
-        for turn in &mut self.turns {
+        for turn in &mut self.transcript.turns {
             turn.blocks.clear();
         }
         self.bump_render_epoch();

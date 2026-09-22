@@ -221,7 +221,7 @@ async fn agent_task_panic_is_visible_and_task_settles() {
             run.handle.await.expect("agent task settled");
             a.run_finished();
 
-            assert!(a.turns[0].blocks.iter().any(|block| matches!(
+            assert!(a.transcript.turns[0].blocks.iter().any(|block| matches!(
                 block,
                 Block::Error(message)
                     if message == "agent task panicked: provider settlement panic"

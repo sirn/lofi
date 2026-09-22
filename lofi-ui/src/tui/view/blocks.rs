@@ -176,10 +176,10 @@ impl RenderWindow {
 pub fn render_turns(app: &App, width: u16) -> Text<'static> {
     let theme = app.theme;
     let w = width as usize;
-    let last = app.turns.len().saturating_sub(1);
+    let last = app.transcript.turns.len().saturating_sub(1);
     let running = app.run_active();
     let mut out: Vec<Line<'static>> = Vec::new();
-    for (i, turn) in app.turns.iter().enumerate() {
+    for (i, turn) in app.transcript.turns.iter().enumerate() {
         let cx = Cx {
             app,
             theme,

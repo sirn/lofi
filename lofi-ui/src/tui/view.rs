@@ -203,11 +203,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let content = scroll_area.content;
     let w = content.width as usize;
     let height = content.height as usize;
-    let width_changed = app.frozen_width != w;
+    let width_changed = app.layout.frozen_width != w;
     let log_started = std::time::Instant::now();
     app.render_profile.width = w;
     app.render_profile.height = height;
-    app.render_profile.turns = app.turns.len();
+    app.render_profile.turns = app.transcript.turns.len();
     app.render_profile.width_changed = width_changed;
     let nav_anchor = if width_changed && matches!(app.mode, Mode::Navigate | Mode::Select) {
         app.nav_content_anchor()
@@ -237,10 +237,10 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     let phase_started = std::time::Instant::now();
     app.ensure_frozen(w);
     app.render_profile.ensure_frozen_us = phase_started.elapsed().as_micros();
-    app.render_profile.frozen_turns = app.frozen_heights.len();
+    app.render_profile.frozen_turns = app.layout.frozen_heights.len();
     let theme = app.theme;
-    let n_turns = app.turns.len();
-    let frozen_turns = app.frozen_heights.len();
+    let n_turns = app.transcript.turns.len();
+    let frozen_turns = app.layout.frozen_heights.len();
     let has_live_turn = frozen_turns < n_turns;
     let running = app.run_active();
 
@@ -260,7 +260,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
             let turn = app.materialize_turn(live_idx);
             blocks::render_turn_height(&cx, &turn)
         } else {
-            blocks::render_turn_height(&cx, &app.turns[live_idx])
+            blocks::render_turn_height(&cx, &app.transcript.turns[live_idx])
         }
     } else {
         0
@@ -274,7 +274,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     // rollback onto an estimate-seeded restore). The dedicated pass at the
     // end of the frame stays: it converges what this provisional prediction
     // missed.
-    let est_total = app.frozen_heights.iter().sum::<usize>()
+    let est_total = app.layout.frozen_heights.iter().sum::<usize>()
         + last_h
         + if n_turns == 0 { 1 } else { n_turns - 1 };
     let est_base = est_total.saturating_sub(height);
@@ -285,7 +285,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     };
     app.sync_frozen_cache_for_viewport(est_off, height, w);
 
-    let frozen_total: usize = app.frozen_heights.iter().sum();
+    let frozen_total: usize = app.layout.frozen_heights.iter().sum();
     app.last_turn_height = last_h;
     let mut total: usize = frozen_total + last_h;
     total += if n_turns == 0 { 1 } else { n_turns - 1 };
@@ -318,7 +318,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 width: w,
                 active_turn: running,
             };
-            blocks::render_turn_lines(&cx, &app.turns[n_turns - 1])
+            blocks::render_turn_lines(&cx, &app.transcript.turns[n_turns - 1])
         } else {
             Vec::new()
         };
@@ -408,12 +408,12 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
             if i < frozen_turns {
-                let h = app.frozen_heights[i];
+                let h = app.layout.frozen_heights[i];
                 if pos + h <= off {
                     pos += h;
                 } else {
                     let turn_start = pos;
-                    if let Some(lines) = app.frozen_render.get(i) {
+                    if let Some(lines) = app.layout.frozen_render.get(i) {
                         feed_segment(
                             lines,
                             &mut pos,
@@ -461,7 +461,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                         let turn = app.materialize_turn(live_idx);
                         blocks::render_turn_window(&cx, &turn, start..stop)
                     } else {
-                        blocks::render_turn_window(&cx, &app.turns[live_idx], start..stop)
+                        blocks::render_turn_window(
+                            &cx,
+                            &app.transcript.turns[live_idx],
+                            start..stop,
+                        )
                     };
                     app.render_profile.live_window_us += phase_started.elapsed().as_micros();
                     pos = turn_start + start;

@@ -125,8 +125,8 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
     // One visible turn (turn 1); turn 2 is rolled back out of view. The
     // selected lineage stays file-backed: /tree must not retain a second copy
     // of historical response/tool bodies in the display turns.
-    assert_eq!(a.turns.len(), 1);
-    assert!(a.turns[0].blocks.is_empty());
+    assert_eq!(a.transcript.turns.len(), 1);
+    assert!(a.transcript.turns[0].blocks.is_empty());
     assert_eq!(a.lifecycle.history_stats().messages, 2); // user1 + assistant1
 
     // The final selected turn ends at its lineage event, not physical EOF.
@@ -145,7 +145,7 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .find(|event| event.kind == store::IndexKind::UserPrompt)
         .unwrap();
     assert_eq!(
-        a.turn_byte_ranges,
+        a.transcript.turn_byte_ranges,
         vec![Some((first_user.offset, selected_end))]
     );
     assert!(selected_end < file_size);
@@ -164,14 +164,14 @@ fn tree_opens_rolls_back_and_prefills_prompt() {
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "hello")));
-    let hits = a.collapsed_turns.borrow().frame_hits;
+    let hits = a.transcript.collapsed_turns.borrow().frame_hits;
     a.bump_render_epoch();
     let after_layout_invalidation = a.materialize_turn(0);
     assert!(after_layout_invalidation
         .blocks
         .iter()
         .any(|block| matches!(block, Block::Text(text) if text == "hello")));
-    assert_eq!(a.collapsed_turns.borrow().frame_hits, hits + 1);
+    assert_eq!(a.transcript.collapsed_turns.borrow().frame_hits, hits + 1);
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn oversized_turn_caches_the_bounded_display_projection() {
     let rendered = a.materialize_turn(0);
     assert!(!rendered.blocks.is_empty());
     assert_eq!(
-        a.collapsed_turns.borrow().map.len(),
+        a.transcript.collapsed_turns.borrow().map.len(),
         1,
         "the bounded projection should fit in one cache entry"
     );
@@ -321,8 +321,8 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     a.tree_picker.as_mut().unwrap().selected = selected;
     a.tree_picker_confirm();
 
-    assert_eq!(a.turns.len(), 2);
-    assert!(a.turns.iter().all(|turn| turn.blocks.is_empty()));
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert!(a.transcript.turns.iter().all(|turn| turn.blocks.is_empty()));
     let shared = a.materialize_turn(0);
     let chosen = a.materialize_turn(1);
     let text = |turn: &Turn| {
@@ -342,7 +342,7 @@ fn tree_file_backing_excludes_physically_interleaved_sibling_events() {
     let mut term = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
     term.draw(|frame| crate::tui::view::render(frame, &mut a))
         .unwrap();
-    assert_eq!(a.frozen_heights.len(), a.turns.len());
+    assert_eq!(a.layout.frozen_heights.len(), a.transcript.turns.len());
     let buf = term.backend().buffer();
     let screen = (0..20)
         .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
@@ -468,7 +468,7 @@ fn tree_shows_compaction_node_and_reverts_before_it() {
         Some(turn_end1_id)
     );
     assert_eq!(a.lifecycle.history_stats().messages, 2); // user1 + assistant1
-    assert_eq!(a.turns.len(), 1);
+    assert_eq!(a.transcript.turns.len(), 1);
 }
 
 #[test]
@@ -916,7 +916,7 @@ fn tree_revert_to_root_then_reopens() {
         .as_ref()
         .and_then(store::SessionCursor::leaf_id)
         .is_some());
-    assert_eq!(a.turns.len(), 0); // rolled back to before any user turn
+    assert_eq!(a.transcript.turns.len(), 0); // rolled back to before any user turn
     assert_eq!(a.input, "first");
     assert!(a.slash_command("/tree"));
     let picker = a.tree_picker.as_ref().expect("picker reopened");

@@ -117,13 +117,13 @@ pub(super) fn handle_event(
                 return;
             }
             let Some(agent) = agent else {
-                app.push_turn(Turn {
+                app.transcript.push_turn(Turn {
                     prompt,
                     kind: lofi_types::PromptKind::User,
                     blocks: Vec::new(),
                 });
                 if let Some(hint) = &app.no_models_hint {
-                    if let Some(turn) = app.turns.last_mut() {
+                    if let Some(turn) = app.transcript.turns.last_mut() {
                         turn.blocks.push(Block::Error(hint.clone()));
                     }
                 }
@@ -309,7 +309,7 @@ pub(super) fn finish_user_shell(
         cancelled: result.cancelled,
         exclude_from_context,
     });
-    if let (Some(range), Some(slot)) = (byte_range, app.turn_byte_ranges.last_mut()) {
+    if let (Some(range), Some(slot)) = (byte_range, app.transcript.turn_byte_ranges.last_mut()) {
         *slot = Some(range);
     }
 }
@@ -527,7 +527,7 @@ pub(super) fn spawn_prompt(
         return;
     }
     let Some(agent) = agent else {
-        app.push_turn(Turn {
+        app.transcript.push_turn(Turn {
             prompt,
             kind,
             blocks: app

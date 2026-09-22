@@ -37,7 +37,7 @@ fn failed_exec_settles_pending_native_tools() {
         is_error: true,
         elapsed_ms: 1,
     });
-    let Block::Tool(exec) = &a.turns[0].blocks[0] else {
+    let Block::Tool(exec) = &a.transcript.turns[0].blocks[0] else {
         panic!("expected exec")
     };
     assert!(exec.native[0].done);
@@ -68,7 +68,7 @@ fn cancelled_turn_settles_open_tool_rows() {
         usage: Usage::default(),
     });
 
-    let Block::Tool(tool) = &a.turns[0].blocks[0] else {
+    let Block::Tool(tool) = &a.transcript.turns[0].blocks[0] else {
         panic!("expected tool block");
     };
     assert!(tool.done);
@@ -77,7 +77,7 @@ fn cancelled_turn_settles_open_tool_rows() {
     assert!(tool.native[0].done);
     assert!(tool.native[0].is_error);
     assert!(matches!(
-        a.turns[0].blocks.last(),
+        a.transcript.turns[0].blocks.last(),
         Some(Block::TurnCancelled { .. })
     ));
 }
@@ -107,7 +107,7 @@ fn native_tool_events_nest_under_their_exec() {
         result: "file.txt".to_string(),
         is_error: false,
     });
-    let Block::Tool(exec) = &a.turns[0].blocks[0] else {
+    let Block::Tool(exec) = &a.transcript.turns[0].blocks[0] else {
         panic!("expected an exec tool block");
     };
     assert_eq!(exec.name, "exec");
@@ -159,7 +159,7 @@ fn cached_native_notice_remains_expandable() {
         width: 80,
         active_turn: true,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let header = lines
         .iter()
         .find(|line| line.line.to_string().contains("Tool jobRead"))
@@ -172,7 +172,7 @@ fn rich_header_suffix_for_read_and_bash() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Tool(ToolCall {
@@ -227,7 +227,7 @@ fn rich_header_suffix_for_read_and_bash() {
             elapsed: None,
         })],
     });
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -256,7 +256,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: "A long user prompt\nwith another line".to_string(),
         blocks: Vec::new(),
@@ -267,7 +267,7 @@ fn user_message_uses_full_height_rail_without_tile_or_padding() {
         width: 32,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
 
     assert_eq!(lines.len(), 2, "only the two message body rows");
     // The rail spans every row so the message stays visually grouped; blank
@@ -360,7 +360,7 @@ fn agent_response_uses_agent_rail_but_thinking_and_tools_do_not() {
         width: 40,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
 
     let response: Vec<_> = lines
         .iter()
@@ -401,7 +401,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: Vec::new(),
@@ -427,7 +427,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
         width: 80,
         active_turn: false,
     };
-    let collapsed = render_turn_lines(&cx, &a.turns[0]);
+    let collapsed = render_turn_lines(&cx, &a.transcript.turns[0]);
     assert_eq!(collapsed.len(), 2, "header and status start collapsed");
     assert!(collapsed[0].detail.is_some());
     a.expanded_details.insert(
@@ -443,7 +443,7 @@ fn exec_keeps_left_gutter_without_tile_or_vertical_padding() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     assert!(lines
         .iter()
         .any(|line| line.line.to_string().contains("lofi.bash")));
@@ -470,7 +470,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
@@ -492,7 +492,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
         width: 80,
         active_turn: false,
     };
-    let collapsed = render_turn_lines(&cx, &a.turns[0]);
+    let collapsed = render_turn_lines(&cx, &a.transcript.turns[0]);
     assert_eq!(collapsed.len(), 2);
     a.expanded_details.insert(
         DetailKey::UserShell(0),
@@ -507,7 +507,7 @@ fn user_shell_renders_as_shell_tree_with_exit_status() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let rendered: Vec<String> = lines
         .iter()
         .map(|line| {
@@ -571,7 +571,7 @@ fn focused_user_shell_detail_accentuates_its_scrollbar() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
@@ -606,7 +606,7 @@ fn focused_user_shell_detail_accentuates_its_scrollbar() {
             width: 80,
             active_turn: false,
         };
-        render_turn_lines(&cx, &a.turns[0])
+        render_turn_lines(&cx, &a.transcript.turns[0])
             .iter()
             .flat_map(|line| line.line.spans.iter())
             .find(|span| span.content.as_ref() == "┃")
@@ -628,7 +628,7 @@ fn short_detail_box_omits_the_scrollbar_line() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
@@ -658,7 +658,7 @@ fn short_detail_box_omits_the_scrollbar_line() {
         width: 80,
         active_turn: false,
     };
-    let spans = render_turn_lines(&cx, &a.turns[0])
+    let spans = render_turn_lines(&cx, &a.transcript.turns[0])
         .iter()
         .flat_map(|line| line.line.spans.iter())
         .filter(|span| {
@@ -678,7 +678,7 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::UserShell {
@@ -700,7 +700,7 @@ fn user_shell_nonzero_exit_is_visible_and_error_colored() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let status: String = lines[1]
         .line
         .spans
@@ -720,7 +720,7 @@ fn compaction_renders_as_a_marker_without_expansion() {
     use crate::tui::view::component::Cx;
 
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::Compaction {
@@ -735,7 +735,7 @@ fn compaction_renders_as_a_marker_without_expansion() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     assert_eq!(lines.len(), 1);
     assert!(lines[0].detail.is_none());
     let text = lines[0].line.to_string();
@@ -768,7 +768,7 @@ fn successful_exec_result_can_expand_when_it_has_distinct_content() {
             width: 80,
             active_turn: false,
         };
-        render_turn_lines(&cx, &app.turns[0])
+        render_turn_lines(&cx, &app.transcript.turns[0])
             .iter()
             .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
@@ -807,7 +807,7 @@ fn unloaded_result_caret_is_stable_when_another_detail_expands() {
         is_error: false,
         elapsed_ms: 1,
     });
-    let Block::Tool(tool) = &mut a.turns[0].blocks[0] else {
+    let Block::Tool(tool) = &mut a.transcript.turns[0].blocks[0] else {
         unreachable!();
     };
     tool.result = None;
@@ -819,7 +819,7 @@ fn unloaded_result_caret_is_stable_when_another_detail_expands() {
             width: 80,
             active_turn: false,
         };
-        render_turn_lines(&cx, &app.turns[0])
+        render_turn_lines(&cx, &app.transcript.turns[0])
             .iter()
             .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
@@ -867,7 +867,7 @@ fn expanded_detail_height_scales_to_its_content() {
         width: 80,
         active_turn: false,
     };
-    let collapsed = render_turn_lines(&collapsed_cx, &a.turns[0]);
+    let collapsed = render_turn_lines(&collapsed_cx, &a.transcript.turns[0]);
     assert_eq!(
         collapsed[2].detail.as_ref().map(|detail| detail.total),
         Some(0)
@@ -885,7 +885,7 @@ fn expanded_detail_height_scales_to_its_content() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     assert_eq!(lines.len(), collapsed.len() + 2);
     assert_eq!(lines[2].detail.as_ref().map(|detail| detail.total), Some(2));
     assert!(lines[3].line.to_string().contains("short detail one"));
@@ -932,7 +932,7 @@ fn expanded_detail_caps_at_ten_rows_and_keeps_a_right_margin() {
         width: 40,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let body_rows = lines
         .iter()
         .filter(|line| {
@@ -985,7 +985,7 @@ fn thinking_renders_inline_without_expansion() {
         width: 80,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let detail = lines
         .iter()
         .find(|line| line.line.to_string().contains("styled thinking"))
@@ -1080,7 +1080,7 @@ fn render_text_spans(markdown: &str) -> Vec<ratatui::text::Span<'static>> {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(markdown.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1132,7 +1132,7 @@ fn inline_markdown_link_strips_syntax_and_records_target() {
         width: 120,
         active_turn: false,
     };
-    let line = render_turn_lines(&cx, &a.turns[0])
+    let line = render_turn_lines(&cx, &a.transcript.turns[0])
         .into_iter()
         .find(|line| !line.links.is_empty())
         .expect("linked line");
@@ -1173,7 +1173,7 @@ fn inline_markdown_link_wraps_and_preserves_each_row_target() {
         width: 13,
         active_turn: false,
     };
-    let linked: Vec<_> = render_turn_lines(&cx, &a.turns[0])
+    let linked: Vec<_> = render_turn_lines(&cx, &a.transcript.turns[0])
         .into_iter()
         .filter(|line| !line.links.is_empty())
         .collect();
@@ -1202,7 +1202,7 @@ fn inline_markdown_table_records_links() {
         width: 80,
         active_turn: false,
     };
-    let line = render_turn_lines(&cx, &a.turns[0])
+    let line = render_turn_lines(&cx, &a.transcript.turns[0])
         .into_iter()
         .find(|line| !line.links.is_empty())
         .expect("linked table cell");
@@ -1240,7 +1240,7 @@ fn inline_markdown_code_wraps_across_lines() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1317,7 +1317,7 @@ fn raw_map_snaps_to_markers_for_bold() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1362,7 +1362,7 @@ fn yank_heading_includes_prefix() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1388,7 +1388,7 @@ fn yank_blockquote_includes_prefix() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1414,7 +1414,7 @@ fn yank_table_row_returns_markdown() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1455,7 +1455,7 @@ fn yank_table_header_separator_returns_markdown() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1485,7 +1485,7 @@ fn yank_table_border_returns_empty() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1511,7 +1511,7 @@ fn yank_nested_list_preserves_indent() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1537,7 +1537,7 @@ fn yank_code_block_preserves_indent() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1567,7 +1567,7 @@ fn selection_blockquote_to_text_preserves_blank() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1605,7 +1605,7 @@ fn blockquote_renders_with_bar_and_empty_lines() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1654,7 +1654,7 @@ fn selection_blank_line_between_paragraphs_preserved() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1680,7 +1680,7 @@ fn selection_nested_list_preserves_indent() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1709,7 +1709,7 @@ fn selection_table_returns_markdown_not_grid() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1747,7 +1747,7 @@ fn inline_markdown_header_all_levels_bold() {
         let mut a = app();
         push_turn(&mut a);
         a.apply_event(AgentEvent::Text(md.to_string()));
-        let turn = &a.turns[0];
+        let turn = &a.transcript.turns[0];
         let cx = Cx {
             app: &a,
             theme: a.theme,
@@ -1804,7 +1804,7 @@ fn inline_markdown_table_uses_terminal_width_for_medal_emoji() {
         width: 140,
         active_turn: false,
     };
-    let lines = render_turn_lines(&cx, &a.turns[0]);
+    let lines = render_turn_lines(&cx, &a.transcript.turns[0]);
     let rendered: Vec<String> = lines
         .iter()
         .map(|line| {
@@ -1843,7 +1843,7 @@ fn inline_markdown_table_fits_narrow_width() {
     let mut a = app();
     push_turn(&mut a);
     a.apply_event(AgentEvent::Text(md.to_string()));
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -1988,7 +1988,7 @@ fn native_tool_details_expand_independently_in_a_fixed_viewport() {
             width: 80,
             active_turn: false,
         };
-        render_turn_lines(&cx, &app.turns[0])
+        render_turn_lines(&cx, &app.transcript.turns[0])
             .iter()
             .map(|line| {
                 line.line

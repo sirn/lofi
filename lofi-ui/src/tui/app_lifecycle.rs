@@ -17,7 +17,8 @@ impl App {
         let service_label =
             (service_tier != ServiceTier::Auto).then(|| format!("@{}", service_tier.as_str()));
         Self {
-            turns: Vec::new(),
+            transcript: Transcript::new(),
+            layout: TranscriptLayout::new(),
             input: String::new(),
             input_cursor: 0,
             lifecycle: AgentLifecycle::new(
@@ -121,17 +122,6 @@ impl App {
             log_total: 0,
             last_turn_height: 0,
             log_view_h: 0,
-            frozen_render: FrozenCache::new(),
-            collapsed_turns: Box::new(RefCell::new(CollapsedTurnCache::new())),
-            transcript_alert: RefCell::new(None),
-            frozen_heights: Vec::new(),
-            frozen_heights_estimated: Vec::new(),
-            turn_byte_ranges: Vec::new(),
-            turn_event_offsets: Vec::new(),
-            render_epoch: 0,
-            frozen_epoch: 0,
-            frozen_width: 0,
-            height_remeasure_from: None,
             render_profile: Box::default(),
             // Cloned session job registry. Set by the caller from the running
             // agent; `None` until the agent attaches.
@@ -157,7 +147,7 @@ impl App {
     /// entire transcript.
     pub(super) fn apply_file_backed_replay_event(&mut self, ev: AgentEvent) {
         if matches!(ev, AgentEvent::Prompt { .. }) {
-            if let Some(turn) = self.turns.last_mut() {
+            if let Some(turn) = self.transcript.turns.last_mut() {
                 turn.blocks.clear();
             }
         }
@@ -177,13 +167,13 @@ impl App {
             // shows before the working indicator's first frame. The
             // matching Prompt is then a confirmation, not a new turn.
             let awaited = self.pending_prompt_start
-                && self.turns.last().is_some_and(|turn| {
+                && self.transcript.turns.last().is_some_and(|turn| {
                     turn.blocks.is_empty() && turn.prompt == prompt && turn.kind == kind
                 });
             self.pending_prompt_start = false;
             if !awaited {
-                self.freeze_previous_file_backed_turn();
-                self.push_turn(Turn {
+                self.transcript.freeze_previous_file_backed_turn();
+                self.transcript.push_turn(Turn {
                     prompt,
                     kind,
                     blocks: Vec::new(),
@@ -221,8 +211,8 @@ impl App {
                 byte_start,
                 byte_end,
             } => {
-                self.merge_last_turn_range(byte_start, byte_end);
-                if let Some(turn) = self.turns.last_mut() {
+                self.transcript.merge_last_turn_range(byte_start, byte_end);
+                if let Some(turn) = self.transcript.turns.last_mut() {
                     for block in &mut turn.blocks {
                         if let Block::Tool(tool) = block {
                             if tool.name == "exec" && tool.done && !tool.is_error {
@@ -248,7 +238,7 @@ impl App {
                 // The just-finished turn is now durably in the transcript
                 // file over this byte range. Record it so the turn becomes
                 // file-backed when the next prompt freezes it.
-                self.merge_last_turn_range(byte_start, byte_end);
+                self.transcript.merge_last_turn_range(byte_start, byte_end);
                 return;
             }
             AgentEvent::RoundUsage { cost, usage } => {
@@ -334,20 +324,21 @@ impl App {
         // `UserShell` does too unless it finalizes an already-streamed one.
         let starts_standalone_turn = match &ev {
             AgentEvent::UserShellStart { .. } => true,
-            AgentEvent::UserShell { .. } => !user_shell_running(&self.turns),
+            AgentEvent::UserShell { .. } => !user_shell_running(&self.transcript.turns),
             _ => false,
         };
         if starts_standalone_turn {
-            self.freeze_previous_file_backed_turn();
+            self.transcript.freeze_previous_file_backed_turn();
         }
-        let previous_turns = self.turns.len();
+        let previous_turns = self.transcript.turns.len();
         let native_end = match &ev {
             AgentEvent::NativeToolEnd { parent, id, .. } => Some((parent.clone(), *id)),
             _ => None,
         };
-        apply_event_to_turns(&mut self.turns, ev);
+        apply_event_to_turns(&mut self.transcript.turns, ev);
         if let Some((parent, id)) = native_end {
             if let Some(native) = self
+                .transcript
                 .turns
                 .last_mut()
                 .and_then(|turn| tool_mut(&mut turn.blocks, &parent))
@@ -357,9 +348,9 @@ impl App {
             }
         }
         if starts_standalone_turn {
-            debug_assert_eq!(self.turns.len(), previous_turns + 1);
-            self.turn_byte_ranges.push(None);
-            self.turn_event_offsets.push(None);
+            debug_assert_eq!(self.transcript.turns.len(), previous_turns + 1);
+            self.transcript.turn_byte_ranges.push(None);
+            self.transcript.turn_event_offsets.push(None);
             // The output of a direct `!cmd` is the point of running it:
             // show it expanded instead of hiding it behind a detail toggle.
             // Covers the live event and the file-backed replay paths, both
@@ -374,21 +365,8 @@ impl App {
         }
     }
 
-    fn freeze_previous_file_backed_turn(&mut self) {
-        let Some(previous) = self.turns.len().checked_sub(1) else {
-            return;
-        };
-        if self
-            .turn_byte_ranges
-            .get(previous)
-            .is_some_and(Option::is_some)
-        {
-            self.turns[previous].blocks.clear();
-        }
-    }
-
     pub(super) fn run_finished(&mut self) {
-        if let Some(turn) = self.turns.last_mut() {
+        if let Some(turn) = self.transcript.turns.last_mut() {
             finalize_open_thinking(turn);
         }
         // Keep the just-finished turn live in memory. It was built from the
@@ -416,474 +394,17 @@ impl App {
         self.compacted = false;
     }
 
-    pub(super) fn bump_render_epoch(&mut self) {
-        self.render_epoch = self.render_epoch.wrapping_add(1);
-    }
-
-    pub(super) fn turn_has_expanded_detail(&self, idx: usize) -> bool {
-        self.expanded_details
-            .values()
-            .any(|state| state.turn == idx)
-    }
-
-    /// True when the turn's in-memory blocks dropped released exec results
-    /// but the committed transcript range can restore them. Expanded details
-    /// need that durable content.
-    pub(super) fn needs_durable_materialize(&self, idx: usize) -> bool {
-        self.turn_has_expanded_detail(idx)
-            && self.turn_byte_ranges.get(idx).is_some_and(Option::is_some)
-    }
-
-    fn merge_last_turn_range(&mut self, byte_start: u64, byte_end: u64) {
-        if let Some(range) = self.turn_byte_ranges.last_mut() {
-            *range = Some(match *range {
-                Some((start, end)) => (start.min(byte_start), end.max(byte_end)),
-                None => (byte_start, byte_end),
-            });
-        }
-    }
-
     /// Push a submitted prompt immediately instead of waiting for the
     /// engine's `Prompt` event, so it renders before the working indicator's
     /// first frame.
     pub(super) fn begin_prompt_turn(&mut self, prompt: String, kind: lofi_types::PromptKind) {
-        self.freeze_previous_file_backed_turn();
-        self.push_turn(Turn {
+        self.transcript.freeze_previous_file_backed_turn();
+        self.transcript.push_turn(Turn {
             prompt,
             kind,
             blocks: Vec::new(),
         });
         self.pending_prompt_start = true;
-    }
-
-    pub(super) fn push_turn(&mut self, turn: Turn) {
-        self.turns.push(turn);
-        self.turn_byte_ranges.push(None);
-        self.turn_event_offsets.push(None);
-    }
-
-    pub(super) fn insert_turn(&mut self, idx: usize, turn: Turn) {
-        self.collapsed_turns.get_mut().clear();
-        self.turns.insert(idx, turn);
-        self.turn_byte_ranges.insert(idx, None);
-        self.turn_event_offsets.insert(idx, None);
-    }
-
-    /// Remember the first durable-transcript read failure seen this frame;
-    /// rendering holds `&App`, so interior mutability defers the notify to
-    /// the event loop.
-    fn note_transcript_failure(&self, message: String) {
-        let mut alert = self.transcript_alert.borrow_mut();
-        if alert.is_none() {
-            *alert = Some(message);
-        }
-    }
-
-    pub(super) fn take_transcript_alert(&mut self) -> Option<String> {
-        self.transcript_alert.get_mut().take()
-    }
-
-    fn restore_result_availability(
-        turn: &mut Turn,
-        available_exec_results: &std::collections::HashSet<String>,
-    ) {
-        for block in &mut turn.blocks {
-            if let Block::Tool(tool) = block {
-                if available_exec_results.contains(&tool.id) {
-                    tool.result_availability = ResultAvailability::Available;
-                }
-            }
-        }
-    }
-
-    /// Reconstruct a frozen turn's blocks. If the turn still holds its blocks
-    /// in memory (ephemeral session, or not yet frozen), clone them. Otherwise
-    /// re-parse the turn's byte range from the transcript file. On any read or
-    /// parse failure the turn's prompt is preserved with empty blocks.
-    pub(super) fn materialize_turn(&self, idx: usize) -> Arc<Turn> {
-        self.materialize_turn_caching(idx, true)
-    }
-
-    /// Materialize for a throwaway purpose (height measurement) that must not
-    /// claim a cache slot: background re-measure walks every resumed turn, and
-    /// caching its results would retain the whole transcript.
-    fn peek_transcript_turn(&self, idx: usize) -> Arc<Turn> {
-        self.materialize_turn_caching(idx, false)
-    }
-
-    fn materialize_turn_caching(&self, idx: usize, cache_insert: bool) -> Arc<Turn> {
-        if let Some(turn) = self.turns.get(idx) {
-            // A committed turn may have released its exec results from
-            // memory; an expanded detail still needs the durable content,
-            // so reparse the turn from the transcript instead.
-            if !turn.blocks.is_empty() && !self.needs_durable_materialize(idx) {
-                return Arc::new(turn.clone());
-            }
-        }
-        let cacheable = !self.turn_has_expanded_detail(idx);
-        if cacheable {
-            if let Some(turn) = self.collapsed_turns.borrow_mut().get(idx) {
-                return turn;
-            }
-        }
-        let materialize_started = Instant::now();
-        let turn = self.parse_transcript_turn(idx);
-        if cacheable && cache_insert {
-            let mut cache = self.collapsed_turns.borrow_mut();
-            cache.insert(idx, &turn);
-            cache.finish_materialize(materialize_started.elapsed().as_micros());
-        }
-        turn
-    }
-
-    fn parse_transcript_turn(&self, idx: usize) -> Arc<Turn> {
-        let prompt = self
-            .turns
-            .get(idx)
-            .map(|t| t.prompt.clone())
-            .unwrap_or_default();
-        let empty = Turn {
-            prompt,
-            kind: lofi_types::PromptKind::User,
-            blocks: Vec::new(),
-        };
-        let Some(cursor) = self.session.cursor.as_ref() else {
-            return Arc::new(empty);
-        };
-        let selected_offsets = self.turn_event_offsets.get(idx).and_then(Option::as_deref);
-        let events = if let Some(offsets) = selected_offsets {
-            cursor.display_events_at(offsets)
-        } else {
-            let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
-                return Arc::new(empty);
-            };
-            cursor.display_events_in_range(start, end)
-        };
-        let mut events = match events {
-            Ok(events) => events,
-            Err(error) => {
-                self.note_transcript_failure(format!(
-                    "transcript read failed (turn {}): {error}",
-                    idx + 1
-                ));
-                return Arc::new(empty);
-            }
-        };
-        let mut exec_ids = std::collections::HashSet::new();
-        let mut available_exec_results = std::collections::HashSet::new();
-        for event in &mut events {
-            // Successful exec results are not rendered at all in collapsed
-            // mode (the nested native-tool rows already show the work). Track
-            // exec call ids from assistant messages, then discard only their
-            // matching hidden result bodies. Results of other tools and all
-            // errors remain intact because their collapsed previews are
-            // visible. Expanded rows reparse the exact durable content.
-            if !self.turn_has_expanded_detail(idx) {
-                if let SessionEventKind::Message(message) = &mut event.kind {
-                    if message.role == Role::Assistant {
-                        exec_ids.extend(message.blocks.iter().filter_map(|block| match block {
-                            ContentBlock::ToolUse { id, name, .. } if name == "exec" => {
-                                Some(id.clone())
-                            }
-                            _ => None,
-                        }));
-                    }
-                    for block in &mut message.blocks {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error: false,
-                            ..
-                        } = block
-                        {
-                            if exec_ids.contains(tool_use_id) {
-                                if !content.is_empty() {
-                                    available_exec_results.insert(tool_use_id.clone());
-                                }
-                                content.clear();
-                                content.shrink_to_fit();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let turns = if selected_offsets.is_some() {
-            turns_from_selected_session_events(&events)
-        } else {
-            turns_from_session_events(&events)
-        };
-        let mut turn = turns.into_iter().next().unwrap_or(empty);
-        assign_detail_ids(&mut turn, idx);
-        Self::restore_result_availability(&mut turn, &available_exec_results);
-        if !self.turn_has_expanded_detail(idx) {
-            view::blocks::compact_native_previews(&mut turn);
-        }
-        Arc::new(turn)
-    }
-
-    pub(super) fn ensure_frozen_turn(&mut self, idx: usize, width: usize) {
-        const MAX_CACHED_TURN_ROWS: usize = 4096;
-        if self.frozen_render.contains(idx)
-            || self.frozen_heights.get(idx).copied().unwrap_or(usize::MAX) > MAX_CACHED_TURN_ROWS
-        {
-            return;
-        }
-        let theme = self.theme;
-        let turn = self.materialize_turn(idx);
-        let lines = {
-            let cx = view::component::Cx {
-                app: self,
-                theme,
-                width,
-                active_turn: false,
-            };
-            view::blocks::render_turn_lines(&cx, &turn)
-        };
-        self.frozen_render.insert(idx, lines);
-    }
-
-    pub(super) fn frozen_turn_window(
-        &self,
-        idx: usize,
-        width: usize,
-        range: std::ops::Range<usize>,
-    ) -> Vec<view::RenderLine> {
-        let theme = self.theme;
-        let turn = self.materialize_turn(idx);
-        let cx = view::component::Cx {
-            app: self,
-            theme,
-            width,
-            active_turn: false,
-        };
-        view::blocks::render_turn_window(&cx, &turn, range)
-    }
-
-    /// Sync the frozen-turn cache to the current `turns`. Normally frozen turns
-    /// are all but the live mutable last one; an idle fully file-backed view can
-    /// freeze the final turn too.
-    /// On a wholesale replacement (`bump_render_epoch`) the cache is dropped;
-    /// otherwise newly-superseded turns are rendered once, their height
-    /// recorded permanently in `frozen_heights`. Their temporary rendered lines
-    /// are dropped here; the viewport pass caches only nearby turns. Heights
-    /// are kept for every frozen turn so the viewport can be located and the
-    /// scroll total computed without holding all rendered lines in memory.
-    /// A viewport resize (width change) also drops the cache, since wrapping
-    /// and background padding depend on width.
-    pub(super) fn ensure_frozen(&mut self, width: usize) {
-        let epoch_changed = self.frozen_epoch != self.render_epoch;
-        let width_changed = self.frozen_width != width;
-        if epoch_changed {
-            // Content changed wholesale: every cached height is invalid, so
-            // drop and refill below. No incremental path here — the turns
-            // themselves are different.
-            self.frozen_render.clear();
-            self.frozen_heights.clear();
-            self.frozen_heights_estimated.clear();
-            self.frozen_epoch = self.render_epoch;
-            self.frozen_width = width;
-            self.height_remeasure_from = None;
-        } else if width_changed {
-            // Width-only resize: the styled lines in `frozen_render` are
-            // bound to the old width and must be rebuilt, but the turn
-            // content is identical — only its wrap changes. Keep the stale
-            // heights as the total/base source so the bottom anchor and
-            // thumb stay put, and re-measure incrementally (visible window
-            // now, the rest on the tick loop) instead of stalling this frame.
-            self.frozen_render.clear();
-            self.frozen_width = width;
-            // Stale heights are estimates at the new width: the tick loop
-            // re-measures them.
-            for estimated in &mut self.frozen_heights_estimated {
-                *estimated = true;
-            }
-            // Re-measure from the end: the cursor is an exclusive upper
-            // bound that remeasure_heights_step walks down to zero.
-            self.height_remeasure_from = Some(self.frozen_heights.len());
-        }
-        let n = self.turns.len();
-        // Normally the last turn is live (or retained in memory after resume),
-        // so only its prefix is frozen. /tree rollback deliberately drops the
-        // selected last turn's blocks too; when it is idle and file-backed,
-        // include it in the frozen set so production rendering materializes it
-        // through the bounded cache instead of treating an empty shell as live.
-        let target = if !self.run_active()
-            && self.turns.last().is_some_and(|turn| turn.blocks.is_empty())
-            && self.turn_byte_ranges.last().is_some_and(Option::is_some)
-        {
-            n
-        } else {
-            n.saturating_sub(1)
-        };
-        // A from-scratch fill (empty heights) over file-backed turns seeds
-        // byte-range estimates instead of measuring: exact heights for the
-        // whole transcript mean re-reading the whole session file before the
-        // first frame. Estimates are good enough for viewport math off screen;
-        // the viewport pass measures visible turns exactly and the tick loop
-        // converges the rest.
-        let seed = self.frozen_heights.is_empty();
-        while self.frozen_heights.len() < target {
-            // A frozen turn must not materialize its complete styled
-            // output; the viewport pass renders only rows it needs.
-            let idx = self.frozen_heights.len();
-            let estimate = seed && self.turn_byte_ranges.get(idx).copied().flatten().is_some();
-            if estimate {
-                self.frozen_heights
-                    .push(self.estimate_turn_height(idx, width));
-                self.frozen_heights_estimated.push(true);
-            } else {
-                let height = self.measure_turn_height(idx, width);
-                self.frozen_heights.push(height);
-                self.frozen_heights_estimated.push(false);
-            }
-        }
-        if self
-            .frozen_heights_estimated
-            .iter()
-            .any(|&estimated| estimated)
-        {
-            // Exact heights converge from the bottom: the remeasure cursor is
-            // an exclusive upper bound walked down by the tick loop.
-            if self.height_remeasure_from.is_none() {
-                self.height_remeasure_from = Some(self.frozen_heights.len());
-            }
-        }
-        if self.frozen_heights.len() > target {
-            self.frozen_heights.truncate(target);
-            self.frozen_heights_estimated.truncate(target);
-            self.frozen_render.map.retain(|idx, _| *idx < target);
-            self.frozen_render.order.retain(|idx| *idx < target);
-            // A truncated pending re-measure must not run past the new end.
-            if let Some(hi) = self.height_remeasure_from {
-                self.height_remeasure_from = if hi > target { Some(target) } else { Some(hi) };
-            }
-        }
-    }
-
-    /// Rough line-count guess for a file-backed turn. Used as a placeholder
-    /// until `remeasure_heights_step` or the viewport pass replace it with the
-    /// exact measured height, so it never has to be right — only cheap. Undershoot
-    /// vs overshoot merely jitter off-screen scroll offsets while they converge.
-    fn estimate_turn_height(&self, idx: usize, width: usize) -> usize {
-        let Some((start, end)) = self.turn_byte_ranges.get(idx).copied().flatten() else {
-            return 4;
-        };
-        let bytes = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
-        bytes / (width.max(1) * 2) + 3
-    }
-
-    /// Render-height of one frozen turn at `width`. Shared by the eager fill
-    /// in `ensure_frozen` and the incremental resize re-measure.
-    fn measure_turn_height(&self, idx: usize, width: usize) -> usize {
-        let theme = self.theme;
-        let turn = self.peek_transcript_turn(idx);
-        let cx = view::component::Cx {
-            app: self,
-            theme,
-            width,
-            active_turn: false,
-        };
-        view::blocks::render_turn_height(&cx, &turn)
-    }
-
-    /// Re-measure up to `budget` stale frozen heights at the current
-    /// `frozen_width`, advancing `height_remeasure_from`. Runs on the tick
-    /// loop after a width-only resize so no single frame pays the full cost.
-    /// Returns true while work remains (so the caller keeps the frame dirty).
-    pub(super) fn remeasure_heights_step(&mut self, budget: usize) -> bool {
-        let next_hi = match self.height_remeasure_from {
-            Some(hi) => hi.min(self.frozen_heights.len()),
-            None => return false,
-        };
-        if next_hi == 0 {
-            self.height_remeasure_from = None;
-            return false;
-        }
-        let width = self.frozen_width;
-        // Work back-to-front: the viewport is almost always pinned to the
-        // bottom, so the last frozen turns are the visible ones. Measuring
-        // those first makes the on-screen content exact on the first tick;
-        // the off-screen prefix converges over the following ticks. Heights
-        // already exact (measured by the viewport pass, or never estimated)
-        // are skipped without spending budget.
-        let mut idx = next_hi;
-        let mut measured = 0;
-        while idx > 0 && measured < budget {
-            idx -= 1;
-            if self.frozen_heights_estimated[idx] {
-                self.frozen_heights[idx] = self.measure_turn_height(idx, width);
-                self.frozen_heights_estimated[idx] = false;
-                measured += 1;
-            }
-        }
-        if idx == 0 {
-            self.height_remeasure_from = None;
-            false
-        } else {
-            self.height_remeasure_from = Some(idx);
-            true
-        }
-    }
-
-    pub(super) fn sync_frozen_cache_for_viewport(
-        &mut self,
-        off: usize,
-        height: usize,
-        width: usize,
-    ) {
-        let frozen = self.frozen_heights.len();
-        if frozen == 0 {
-            self.frozen_render.clear();
-            return;
-        }
-        // Stored heights drive which rows of a turn are drawn, so window and
-        // margin turns need exact values even while the off-screen prefix is
-        // still estimated. Measure those first, then recompute the window —
-        // one correction pass settles the selection in practice.
-        let mut visible = self.visible_frozen_range(off, height);
-        for _ in 0..2 {
-            let (first, last) = visible;
-            let lo = first.saturating_sub(1);
-            let hi = last.saturating_add(1).min(frozen - 1);
-            let mut measured = false;
-            for idx in lo..=hi {
-                if self.frozen_heights_estimated[idx] {
-                    self.frozen_heights[idx] = self.measure_turn_height(idx, width);
-                    self.frozen_heights_estimated[idx] = false;
-                    measured = true;
-                }
-            }
-            visible = self.visible_frozen_range(off, height);
-            if !measured {
-                break;
-            }
-        }
-        self.frozen_render.retain_near(Some(visible), frozen);
-        let (first, last) = visible;
-        let first = first.saturating_sub(1);
-        let last = last.saturating_add(1).min(frozen - 1);
-        for idx in first..=last {
-            self.ensure_frozen_turn(idx, width);
-        }
-    }
-
-    /// Turns whose stored height intersects the window
-    /// [off, off + height). Falls back to the last turn when the window is
-    /// past the end.
-    fn visible_frozen_range(&self, off: usize, height: usize) -> (usize, usize) {
-        let frozen = self.frozen_heights.len();
-        let end = off.saturating_add(height);
-        let mut pos = 0usize;
-        let mut visible: Option<(usize, usize)> = None;
-        for idx in 0..frozen {
-            let turn_end = pos.saturating_add(self.frozen_heights[idx]);
-            if turn_end > off && pos < end {
-                visible = Some(visible.map_or((idx, idx), |(first, _)| (first, idx)));
-            }
-            pos = turn_end.saturating_add(1);
-        }
-        visible.unwrap_or((frozen - 1, frozen - 1))
     }
 
     pub(super) fn run_active(&self) -> bool {
@@ -933,8 +454,8 @@ impl App {
             kept: compaction.kept_count,
             summary: compaction.summary.clone(),
         };
-        if self.turns.is_empty() {
-            self.push_turn(Turn {
+        if self.transcript.turns.is_empty() {
+            self.transcript.push_turn(Turn {
                 prompt: String::new(),
                 kind: lofi_types::PromptKind::User,
                 blocks: Vec::new(),
@@ -946,9 +467,9 @@ impl App {
         // real response from disk and the transcript collapses to just the
         // marker. Hydrate the turn first so the marker appends to, rather than
         // replaces, the visible content.
-        let last = self.turns.len().saturating_sub(1);
+        let last = self.transcript.turns.len().saturating_sub(1);
         let hydrated = (*self.materialize_turn(last)).clone();
-        if let Some(turn) = self.turns.get_mut(last) {
+        if let Some(turn) = self.transcript.turns.get_mut(last) {
             turn.blocks = hydrated.blocks;
         }
         self.apply_event(event);
@@ -1031,7 +552,7 @@ impl App {
     ) {
         match result {
             Ok(Some(outcome)) => {
-                self.push_turn(Turn {
+                self.transcript.push_turn(Turn {
                     prompt: line.trim().to_string(),
                     kind: lofi_types::PromptKind::User,
                     blocks: vec![Block::Text(outcome.text)],

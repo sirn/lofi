@@ -170,7 +170,7 @@ impl App {
 
     fn cursor_turn(&self) -> usize {
         let mut turn = 0;
-        for idx in 0..self.turns.len() {
+        for idx in 0..self.transcript.turns.len() {
             if self.turn_start_line(idx) <= self.nav_cursor {
                 turn = idx;
             } else {
@@ -181,16 +181,8 @@ impl App {
     }
 
     fn invalidate_detail_layout(&mut self, turn: usize) {
-        self.collapsed_turns.get_mut().remove(turn);
-        self.frozen_render.clear();
-        if let Some(height) = self.frozen_heights_estimated.get_mut(turn) {
-            *height = true;
-            self.height_remeasure_from = Some(
-                self.height_remeasure_from
-                    .unwrap_or_default()
-                    .max(turn.saturating_add(1)),
-            );
-        }
+        self.transcript.collapsed_turns.get_mut().remove(turn);
+        self.layout.invalidate_turn(turn);
     }
 
     pub(super) fn set_cursor_detail_expanded(&mut self, expanded: bool) -> bool {
@@ -594,7 +586,7 @@ impl App {
     /// text is unchanged by a width change, so a content offset is a stable
     /// anchor where an absolute line index is not.
     fn content_anchor_for(&self, cursor: usize, col: usize) -> Option<(usize, usize)> {
-        let n = self.turns.len();
+        let n = self.transcript.turns.len();
         if n == 0 {
             return None;
         }
@@ -608,14 +600,14 @@ impl App {
         }
         let intra = cursor.saturating_sub(self.turn_start_line(k));
         let last = k + 1 == n;
-        let live = last && self.frozen_heights.len() < n;
+        let live = last && self.layout.frozen_heights.len() < n;
         let char_pos = if live {
-            let v = self.render_turn_at(k, self.frozen_width, self.run_active());
+            let v = self.render_turn_at(k, self.layout.frozen_width, self.run_active());
             cursor_char_pos(&v, intra, col)
-        } else if let Some(v) = self.frozen_render.get(k) {
+        } else if let Some(v) = self.layout.frozen_render.get(k) {
             cursor_char_pos(v, intra, col)
         } else {
-            let v = self.render_turn_at(k, self.frozen_width, false);
+            let v = self.render_turn_at(k, self.layout.frozen_width, false);
             cursor_char_pos(&v, intra, col)
         };
         Some((k, char_pos))
@@ -636,17 +628,17 @@ impl App {
         width: usize,
     ) -> Option<(usize, usize)> {
         let (k, char_pos) = anchor;
-        let n = self.turns.len();
+        let n = self.transcript.turns.len();
         if k >= n {
             return None;
         }
-        let live = k + 1 == n && self.frozen_heights.len() < n;
+        let live = k + 1 == n && self.layout.frozen_heights.len() < n;
         // Find the (new-width) line containing `char_pos` and the display
         // column that lands on that character, so the cell stays on the same
         // content char instead of drifting to the new line's start.
         let seated = if live {
             reseat_at(last_lines, char_pos)
-        } else if let Some(v) = self.frozen_render.get(k) {
+        } else if let Some(v) = self.layout.frozen_render.get(k) {
             reseat_at(v, char_pos)
         } else {
             let v = self.render_turn_at(k, width, false);
@@ -683,13 +675,14 @@ impl App {
     }
 
     pub(super) fn turn_start_line(&self, i: usize) -> usize {
-        let n = self.turns.len();
+        let n = self.transcript.turns.len();
         if i == 0 || n == 0 {
             return 0;
         }
         let mut start = 0usize;
         for j in 0..i.min(n) {
             let h = self
+                .layout
                 .frozen_heights
                 .get(j)
                 .copied()
@@ -702,7 +695,7 @@ impl App {
     /// Jump the cursor to the start of the next (`dir > 0`) or previous turn.
     /// In Select the selection extends; otherwise it is cleared.
     pub(super) fn nav_jump_turn(&mut self, dir: i32) {
-        let n = self.turns.len();
+        let n = self.transcript.turns.len();
         if n == 0 {
             return;
         }
@@ -979,12 +972,9 @@ impl App {
     }
 
     pub(super) fn clear_log(&mut self) {
-        self.turns.clear();
+        self.transcript.clear();
         self.expanded_details.clear();
         self.detail_focus = None;
-        self.collapsed_turns.get_mut().clear();
-        self.turn_byte_ranges.clear();
-        self.turn_event_offsets.clear();
         self.pinned = true;
         self.top_line = 0;
         self.bump_render_epoch();

@@ -5,7 +5,7 @@ fn turn_failed_wraps_error_below_header() {
     use crate::tui::view::blocks::render_turn_lines;
     use crate::tui::view::component::Cx;
     let mut a = app();
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![Block::TurnFailed {
@@ -14,7 +14,7 @@ fn turn_failed_wraps_error_below_header() {
             error: "the provider returned a 503 with a very long service-unavailable message that must wrap".to_string(),
         }],
     });
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -66,7 +66,7 @@ fn turn_failed_dedups_after_fatal_error_block() {
     use crate::tui::view::component::Cx;
     let mut a = app();
     let msg = "stream interrupted by upstream gateway";
-    a.turns.push(Turn {
+    a.transcript.turns.push(Turn {
         kind: lofi_types::PromptKind::User,
         prompt: String::new(),
         blocks: vec![
@@ -78,7 +78,7 @@ fn turn_failed_dedups_after_fatal_error_block() {
             },
         ],
     });
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -142,7 +142,7 @@ fn exec_result_wraps_long_lines_instead_of_truncating() {
             scroll: None,
         },
     );
-    let turn = &a.turns[0];
+    let turn = &a.transcript.turns[0];
     let cx = Cx {
         app: &a,
         theme: a.theme,
@@ -878,7 +878,7 @@ fn footer_shows_cache_percentage_without_cumulative_cache_counts() {
 fn retry_notice_is_transient_status_and_resets_on_success() {
     let mut a = app();
     push_turn(&mut a);
-    let before = a.turns[0].blocks.len();
+    let before = a.transcript.turns[0].blocks.len();
 
     a.apply_event(AgentEvent::RetryStart {
         attempt: 2,
@@ -889,7 +889,7 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
 
     assert_eq!(a.retry_badge().as_deref(), Some("Retry: 2 of 10"));
     assert_eq!(
-        a.turns[0].blocks.len(),
+        a.transcript.turns[0].blocks.len(),
         before,
         "retry status must not enter the transcript"
     );
@@ -900,7 +900,7 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
         final_error: None,
     });
     assert!(a.retry_badge().is_none());
-    assert_eq!(a.turns[0].blocks.len(), before);
+    assert_eq!(a.transcript.turns[0].blocks.len(), before);
 }
 
 #[test]
@@ -1040,7 +1040,7 @@ fn no_model_submit_surfaces_hint_without_running() {
     handle_event(&ev, &mut a, None, &mut run);
     assert!(run.is_none(), "no run should be started without a model");
     assert!(a.run.is_none());
-    let last = a.turns.last().unwrap();
+    let last = a.transcript.turns.last().unwrap();
     assert_eq!(last.prompt, "hello");
     assert!(
         last.blocks

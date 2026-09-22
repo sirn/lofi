@@ -41,8 +41,8 @@ pub(super) fn replay_indexed_session(
     for ((turn, _), prompt) in prompt_entries.into_iter().zip(prompt_texts) {
         prompts[turn] = prompt;
     }
-    app.turn_byte_ranges.clear();
-    app.turn_event_offsets.clear();
+    app.transcript.turn_byte_ranges.clear();
+    app.transcript.turn_event_offsets.clear();
     // Read every turn-outcome event in one sweep of the file: per-turn
     // `event_at` would open and seek the transcript once per turn — over a
     // thousand opens on a long resume.
@@ -102,22 +102,17 @@ pub(super) fn replay_indexed_session(
         let end = starts
             .get(turn + 1)
             .map_or(lineage_end, |&p| index[visible[p]].offset);
-        if let Some(range) = app.turn_byte_ranges.last_mut() {
-            *range = Some((start, end));
-        }
-        if let Some(event_offsets) = app.turn_event_offsets.last_mut() {
-            if contiguous {
-                *event_offsets = None;
-            } else {
-                *event_offsets = Some(offsets);
-            }
-        }
-        if let Some(shell_turn) = app.turns.last_mut() {
-            shell_turn.blocks.clear();
-        }
+        app.transcript
+            .restore_last_turn(start, end, offsets, contiguous);
     }
-    debug_assert_eq!(app.turns.len(), app.turn_byte_ranges.len());
-    debug_assert_eq!(app.turns.len(), app.turn_event_offsets.len());
+    debug_assert_eq!(
+        app.transcript.turns.len(),
+        app.transcript.turn_byte_ranges.len()
+    );
+    debug_assert_eq!(
+        app.transcript.turns.len(),
+        app.transcript.turn_event_offsets.len()
+    );
     Ok(())
 }
 

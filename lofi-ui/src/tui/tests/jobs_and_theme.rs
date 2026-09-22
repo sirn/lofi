@@ -142,27 +142,27 @@ fn theme_picker_confirm_updates_mode_and_clears_frozen_cache() {
     let mut a = app();
     a.theme_mode = ThemeMode::Dark;
     // Seed the frozen cache so we can prove confirm clears it.
-    a.frozen_render.insert(0, Vec::new());
-    assert!(a.frozen_render.contains(0));
+    a.layout.frozen_render.insert(0, Vec::new());
+    assert!(a.layout.frozen_render.contains(0));
     a.open_theme_picker();
     // Move from Dark (idx 2) to Light (idx 1).
     a.theme_picker.as_mut().unwrap().selected = 1;
     a.theme_picker_confirm();
     assert!(a.theme_picker.is_none());
     assert_eq!(a.theme_mode, ThemeMode::Light);
-    assert!(!a.frozen_render.contains(0));
+    assert!(!a.layout.frozen_render.contains(0));
 }
 
 #[test]
 fn apply_resolved_theme_clears_frozen_only_on_change() {
     let mut a = app();
     a.theme = Theme::dark();
-    a.frozen_render.insert(0, Vec::new());
+    a.layout.frozen_render.insert(0, Vec::new());
     assert!(!a.apply_resolved_theme(Theme::dark()));
-    assert!(a.frozen_render.contains(0));
+    assert!(a.layout.frozen_render.contains(0));
     assert!(a.apply_resolved_theme(Theme::light()));
     assert_eq!(a.theme, Theme::light());
-    assert!(!a.frozen_render.contains(0));
+    assert!(!a.layout.frozen_render.contains(0));
 }
 
 #[test]
@@ -183,14 +183,14 @@ fn prompt_event_confirms_a_pre_pushed_prompt() {
     let mut a = app();
     push_turn(&mut a);
     a.begin_prompt_turn("hi".to_string(), lofi_types::PromptKind::User);
-    assert_eq!(a.turns.len(), 2);
-    assert_eq!(a.turns[1].prompt, "hi");
-    assert!(a.turns[1].blocks.is_empty());
+    assert_eq!(a.transcript.turns.len(), 2);
+    assert_eq!(a.transcript.turns[1].prompt, "hi");
+    assert!(a.transcript.turns[1].blocks.is_empty());
     a.apply_event(AgentEvent::Prompt {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.transcript.turns.len(), 2);
     assert!(!a.pending_prompt_start);
 }
 
@@ -205,7 +205,7 @@ fn prompt_event_pushes_when_no_prompt_is_awaited() {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.transcript.turns.len(), 2);
 }
 
 #[test]
@@ -218,5 +218,5 @@ fn run_finished_disarms_a_pending_prompt_start() {
         prompt: "hi".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    assert_eq!(a.turns.len(), 2);
+    assert_eq!(a.transcript.turns.len(), 2);
 }

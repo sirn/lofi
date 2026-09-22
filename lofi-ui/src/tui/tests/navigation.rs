@@ -558,9 +558,9 @@ fn esc_discards_select_back_to_nav() {
 #[test]
 fn turn_start_line_accounts_for_blanks() {
     let mut a = app();
-    a.frozen_heights = vec![3, 2];
+    a.layout.frozen_heights = vec![3, 2];
     a.last_turn_height = 4;
-    a.turns.clear();
+    a.transcript.turns.clear();
     for _ in 0..3 {
         push_turn(&mut a);
     }
@@ -573,11 +573,11 @@ fn turn_start_line_accounts_for_blanks() {
 fn bracket_jumps_between_turns() {
     let mut a = app();
     a.mode = Mode::Navigate;
-    a.frozen_heights = vec![3, 2];
+    a.layout.frozen_heights = vec![3, 2];
     a.last_turn_height = 4;
     a.log_total = 3 + 1 + 2 + 1 + 4;
     a.log_view_h = 10;
-    a.turns.clear();
+    a.transcript.turns.clear();
     for _ in 0..3 {
         push_turn(&mut a);
     }
