@@ -618,6 +618,100 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_user_and_tool_images_across_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let mut events = Vec::new();
+        for turn in 0..3 {
+            for role in [Role::User, Role::Assistant] {
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::Message(Message {
+                        origin: None,
+                        role,
+                        blocks: vec![ContentBlock::Text {
+                            text: format!("turn {turn}"),
+                        }],
+                        kind: PromptKind::default(),
+                    }),
+                });
+            }
+        }
+        let kept = vec![
+            Message {
+                origin: None,
+                role: Role::User,
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "inspect this image".into(),
+                    },
+                    ContentBlock::Image {
+                        bytes: vec![1; 128 * 1024],
+                        media_type: "image/png".into(),
+                    },
+                ],
+                kind: PromptKind::default(),
+            },
+            Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    id: "read-image".into(),
+                    name: "exec".into(),
+                    input: serde_json::json!({"code": "return await lofi.read('screenshot.png')"}),
+                }],
+                kind: PromptKind::default(),
+            },
+            Message {
+                origin: None,
+                role: Role::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "read-image".into(),
+                    content: "screenshot".into(),
+                    is_error: false,
+                    images: vec![lofi_types::ToolResultImage {
+                        bytes: vec![2; 128 * 1024],
+                        media_type: "image/png".into(),
+                    }],
+                }],
+                kind: PromptKind::default(),
+            },
+        ];
+        events.extend(kept.iter().cloned().map(|message| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: SessionEventKind::Message(message),
+        }));
+        cursor.append_events(&mut events).unwrap();
+        let mut lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
+
+        let compaction = lifecycle.compact(Some(&cursor), "system").unwrap().unwrap();
+        assert_eq!(compaction.kept_messages, kept);
+        let history = lifecycle.shared_history();
+        assert_eq!(&history.lock().unwrap()[2..], kept.as_slice());
+
+        let reopened = SessionCursor::open(cursor.path().to_path_buf()).unwrap();
+        let snapshot = reopened.snapshot().unwrap();
+        lifecycle
+            .restore_history(&reopened, &snapshot.index, snapshot.history_start)
+            .unwrap();
+        assert_eq!(&history.lock().unwrap()[2..], kept.as_slice());
+        let restored_events = reopened.load_compaction_events().unwrap();
+        let restored_messages: Vec<_> = restored_events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                SessionEventKind::Message(message) if message.role != Role::System => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored_messages, kept);
+    }
+
+    #[test]
     fn seed_system_populates_empty_history_once() {
         let lifecycle = AgentLifecycle::new(CompactionConfig::default(), 100_000);
         assert!(lifecycle.seed_system("sys").unwrap());

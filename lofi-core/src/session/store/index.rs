@@ -804,10 +804,17 @@ pub(super) fn load_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<Session
 }
 
 pub(super) fn load_display_events_at(path: &Path, offsets: &[u64]) -> Result<Vec<SessionEvent>> {
+    load_projected_events_at(path, offsets, ProjectionBudget::collection())
+}
+
+fn load_projected_events_at(
+    path: &Path,
+    offsets: &[u64],
+    mut budget: ProjectionBudget,
+) -> Result<Vec<SessionEvent>> {
     use std::io::{BufReader, Seek, SeekFrom};
 
     let mut reader = BufReader::new(std::fs::File::open(path)?);
-    let mut budget = ProjectionBudget::collection();
     let mut out = Vec::with_capacity(offsets.len());
     for &offset in offsets.iter().rev() {
         reader.seek(SeekFrom::Start(offset))?;
@@ -923,7 +930,7 @@ pub(super) fn load_compaction_path(
             };
         }
     }
-    load_display_index_entries(path, index, &lineage[start..])
+    load_compaction_index_entries(path, index, &lineage[start..])
 }
 
 /// Resolve the selected lineage of an index to event positions in root-to-leaf
@@ -983,12 +990,14 @@ fn load_index_entries(
     load_index_entries_with(path, index, selected, load_events_at)
 }
 
-fn load_display_index_entries(
+fn load_compaction_index_entries(
     path: &Path,
     index: &[EventIndex],
     selected: &[usize],
 ) -> Result<Vec<SessionEvent>> {
-    load_index_entries_with(path, index, selected, load_display_events_at)
+    load_index_entries_with(path, index, selected, |path, offsets| {
+        load_projected_events_at(path, offsets, ProjectionBudget::compaction())
+    })
 }
 
 fn load_index_entries_with(

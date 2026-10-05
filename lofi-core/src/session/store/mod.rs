@@ -2043,6 +2043,117 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_images_without_restoring_oversized_result_text() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/compaction-image"), &"p/m".into())
+            .unwrap();
+        let image = lofi_types::ToolResultImage {
+            bytes: vec![1; 512 * 1024],
+            media_type: "image/png".into(),
+        };
+        let mut events = [ev(Message {
+            origin: None,
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "image-result".into(),
+                content: "x".repeat(4 * 1024 * 1024),
+                is_error: false,
+                images: vec![image.clone()],
+            }],
+            kind: PromptKind::default(),
+        })];
+        cursor.append_events(&mut events).unwrap();
+        let assert_result =
+            |events: &[SessionEvent], expected_image: &lofi_types::ToolResultImage| {
+                let SessionEventKind::Message(message) = &events[0].kind else {
+                    panic!("expected message");
+                };
+                let ContentBlock::ToolResult {
+                    content, images, ..
+                } = &message.blocks[0]
+                else {
+                    panic!("expected tool result");
+                };
+                assert!(content.len() <= crate::agent::MAX_EXEC_RESULT_BYTES);
+                assert!(content.contains("transcript content truncated for display"));
+                assert_eq!(images, std::slice::from_ref(expected_image));
+            };
+        assert_result(&cursor.load_compaction_events().unwrap(), &image);
+        let displayed = cursor
+            .display_events_at(&[cursor.snapshot().unwrap().index[0].offset])
+            .unwrap();
+        assert_result(
+            &displayed,
+            &lofi_types::ToolResultImage {
+                bytes: Vec::new(),
+                media_type: image.media_type.clone(),
+            },
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_images_after_text_budget_is_exhausted() {
+        let (_guard, store) = isolated_store();
+        let cursor = store
+            .create_cursor(Path::new("/tmp/compaction-image-budget"), &"p/m".into())
+            .unwrap();
+        let image = lofi_types::ToolResultImage {
+            bytes: vec![2; 512 * 1024],
+            media_type: "image/jpeg".into(),
+        };
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "inspect image".into(),
+            },
+            ContentBlock::Image {
+                bytes: vec![1; 512 * 1024],
+                media_type: "image/png".into(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "image-result".into(),
+                content: "image result".into(),
+                is_error: false,
+                images: vec![image.clone()],
+            },
+        ];
+        let mut events = [
+            ev(Message {
+                origin: None,
+                role: Role::User,
+                blocks: blocks.clone(),
+                kind: PromptKind::default(),
+            }),
+            ev(Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "x".repeat(2 * crate::agent::MAX_EXEC_RESULT_BYTES),
+                    };
+                    11
+                ],
+                kind: PromptKind::default(),
+            }),
+        ];
+        cursor.append_events(&mut events).unwrap();
+        let projected = cursor.load_compaction_events().unwrap();
+        let SessionEventKind::Message(message) = &projected[0].kind else {
+            panic!("expected message");
+        };
+        assert!(matches!(&message.blocks[0], ContentBlock::Text { text } if text.is_empty()));
+        assert_eq!(message.blocks[1], blocks[1]);
+        let ContentBlock::ToolResult {
+            content, images, ..
+        } = &message.blocks[2]
+        else {
+            panic!("expected tool result");
+        };
+        assert!(content.is_empty());
+        assert_eq!(images, std::slice::from_ref(&image));
+    }
+
+    #[test]
     fn cursor_compaction_cache_replaces_history_with_checkpoint_suffix() {
         let (_guard, store) = isolated_store();
         let path = store

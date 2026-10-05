@@ -526,6 +526,77 @@ fn image_tool_results_use_each_provider_native_wire_format() {
 }
 
 #[test]
+fn responses_compaction_preserves_tool_image_data_before_and_after_resume() {
+    use crate::support::WAIT;
+
+    let server = MockServer::start(vec![
+        responses_response("", "image prefix one"),
+        responses_response("", "image prefix two"),
+        responses_response("", "image prefix three"),
+        responses_tool_response("retained-image", r#"return await lofi.read("pixel.png");"#),
+        responses_response("", "image retained answer"),
+        responses_response("", "image after compact"),
+        responses_response("", "image after resume"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(fixture.workspace.join("pixel.png"), one_pixel_png()).unwrap();
+    let args = [
+        "--model",
+        "responses/reasoning",
+        "-e",
+        "LOFI__PROVIDERS__RESPONSES__MODELS__REASONING__SUPPORTS_IMAGE=true",
+    ];
+    let mut tui = fixture.spawn(&args);
+    for (turn, answer) in [
+        "image prefix one",
+        "image prefix two",
+        "image prefix three",
+        "image retained answer",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tui.submit(&format!("prompt {turn}"));
+        tui.wait_for(answer, WAIT);
+        fixture.wait_for_event_count("turn_end", turn + 1);
+        tui.clear_output();
+    }
+    tui.submit("/compact");
+    tui.wait_for("Compacted", WAIT);
+    tui.submit("inspect retained screenshot again");
+    tui.wait_for("image after compact", WAIT);
+    fixture.wait_for_event_count("turn_end", 5);
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    let mut resume_args = args.to_vec();
+    resume_args.push("--continue");
+    let mut resumed = fixture.spawn(&resume_args);
+    resumed.submit("inspect retained screenshot after resume");
+    resumed.wait_for("image after resume", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 7);
+    let image_urls = |body: &str| {
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "input_image")
+            .map(|part| part["image_url"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let original = image_urls(&requests[4].body);
+    assert_eq!(original.len(), 1);
+    assert!(original[0].starts_with("data:image/jpeg;base64,"));
+    assert!(original[0].len() > "data:image/jpeg;base64,".len());
+    assert_eq!(image_urls(&requests[5].body), original);
+    assert_eq!(image_urls(&requests[6].body), original);
+}
+
+#[test]
 fn anthropic_redacted_thinking_round_trips_a_signed_omission() {
     // Round 1 emits a redacted thinking block followed by a tool call. Round
     // 2 must replay the opaque blob back as a redacted_thinking block so the

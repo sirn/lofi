@@ -19,6 +19,7 @@ pub(super) struct ProjectionBudget {
     metadata_bytes: usize,
     array_items: usize,
     object_fields: usize,
+    preserve_images: bool,
 }
 
 impl ProjectionBudget {
@@ -28,11 +29,19 @@ impl ProjectionBudget {
             metadata_bytes: 256 * 1024,
             array_items: MAX_COLLECTION_ITEMS,
             object_fields: MAX_OBJECT_FIELDS,
+            preserve_images: false,
         }
     }
 
     pub(super) fn event() -> Self {
         Self::collection()
+    }
+
+    pub(super) fn compaction() -> Self {
+        Self {
+            preserve_images: true,
+            ..Self::collection()
+        }
     }
 
     fn begin_value(&mut self) {
@@ -310,8 +319,13 @@ where
         key: Option<&str>,
     ) -> Result<()> {
         if key == Some("bytes") {
-            self.skip_string()?;
-            out.extend_from_slice(br#""""#);
+            // Image payloads cannot be truncated into valid model context.
+            if budget.preserve_images {
+                self.scan_string(Some((out, usize::MAX)))?;
+            } else {
+                self.skip_string()?;
+                out.extend_from_slice(br#""""#);
+            }
             return Ok(());
         }
         self.expect(b'"')?;
@@ -775,6 +789,7 @@ fn is_structural_key(key: &str) -> bool {
             | "id"
             | "parent_id"
             | "tool_use_id"
+            | "media_type"
             | "parent"
             | "name"
             | "provider"
