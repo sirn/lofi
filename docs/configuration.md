@@ -1,141 +1,178 @@
 # Configuration
 
-Lofi reads its main configuration from `$XDG_CONFIG_HOME/lofi/config.toml` (default: `~/.config/lofi/config.toml`). Shell policy is configured separately in `policy.toml` in the same directory.
+Lofi reads `config.toml` from `$XDG_CONFIG_HOME/lofi/`.
+The default path is `~/.config/lofi/config.toml`.
+Shell approval settings are in `policy.toml` in the same directory.
 
-The configuration directory is read-only from lofi's perspective, so it can be managed declaratively with tools such as Nix or stow. Writable data—including model-discovery cache files and session transcripts—is stored under `$XDG_STATE_HOME/lofi/` (default: `~/.local/state/lofi/`).
+Set `$LOFI_CONFIG` to use another configuration file.
+Set `$LOFI_POLICY` to use another shell policy file.
+Lofi stores sessions and model-discovery data in `$XDG_STATE_HOME/lofi/`,
+which defaults to `~/.local/state/lofi/`.
+The configuration directory remains read-only.
 
-Set `$LOFI_CONFIG` to use a different main configuration file, or `$LOFI_POLICY` to use a different shell-policy file.
+## Quick start
 
-Any configuration value can be overridden per invocation with an environment variable of the form `LOFI__SECTION__KEY=VALUE`. Use `__` to walk into nested tables; segment names are lowercased before lookup. The value parses as TOML when possible (`200`, `true`, `["a", "b"]`, `'quoted'`), otherwise it is used as a plain string.
+Configure a model provider or an agent backend.
+Provider models use Lofi's agent loop.
+Backend models use an external agent with Lofi's tools and shell policy.
+Both appear in `lofi --list-models` and the `/model` command.
 
-```sh
-LOFI__RETRY__MAX_RETRIES=0 LOFI__CREDENTIAL__TIMEOUT_MS=1000 lofi
-```
+### Model provider
 
-The `[credential] timeout_ms` setting controls how long a `!command` credential helper may run before it is rejected (default: 30000). Credential helper output is bounded and a timeout or failure kills the helper's process group.
-
-When `config.toml` is absent, lofi falls back to built-in OpenAI Responses, Anthropic Messages, and Google Generative AI definitions. They become available when `$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, or `$GEMINI_API_KEY` is set. An explicit config file replaces that built-in provider tree.
-
-## Agent backends
-
-Native models use Lofi's model providers and agent loop. Backend models are
-part of the same model list and use the same startup selection rules.
-The supported external backend is `claude-code`. It uses the installed Claude Code
-CLI, not ACP. The external agent owns login, credentials, model requests, context,
-and compaction. Lofi supplies its running session's `exec` tool through MCP, with
-the same shell policy, jobs, skills, and tool events as the native backend.
-Generic ACP adapters are not supported.
-
-Select a configured backend with `lofi --backend claude` or return to native mode
-with `lofi --backend native`. Both interactive and `--print` mode support selection.
-External mode resolves provider credentials only for the configured Lofi auto-mode
-evaluator, when enabled. Authenticate with the external agent's own login command
-before starting Lofi.
-
-`/model` lists native models and configured external models together. Switching
-backends keeps the conversation history and the same tools, jobs, and shell policy.
-A new external session receives prior messages from Lofi's conversation history.
-Switching models within an external backend keeps its existing session.
-Use `--continue` or `--resume` to resume the last backend used. Claude Code reuses
-its saved session ID only when its context matches the current conversation.
-Disconnects and cancellation require explicit resume. Prompts are not retried.
-
-Claude Code receives Lofi instructions through `--system-prompt`, not through
-user messages.
-
-External mode does not yet support prompt attachments, thinking changes, local
-compaction, rollback, or in-app session switching. Claude Code reports per-turn
-token usage and cumulative USD cost; its context gauge uses the last model
-response, not accumulated token totals. The gauge shows `context unknown` when
-the backend provides no context data. Backend reports are saved in the Lofi
-transcript. Configure a static `models` list in the backend block to add models
-to `/model`. Without a list, the configured model or `default` is listed.
-Selection applies to the next turn. Use `--model <backend>/<id>` to select an
-external model at startup, or use `--model <id>` with `--backend <backend>`. Resume restores the
-last selected model unless `--model` overrides it. Model labels use
-`<backend>/<model>`. Without a selection, the label starts as `claude/default`
-and changes to the initialization model reported by Claude Code, including
-suffixes such as `[1m]`. Response model IDs do not replace that display label.
-If initialization omits the model, the first response model ID supplies the label.
-Resume restores the display label. Turn records save the response model ID.
-Model selection and resume retain the selected alias, such as `sonnet`.
-Shell approval still uses `policy.toml`, including `[auto_mode]`. The evaluator
-uses its configured Lofi provider and model, independently of the external agent.
-Evaluator errors or requests for confirmation do not approve commands.
-
-### Claude Code
-
-Install Claude Code and authenticate with `claude auth login`. Lofi uses that
-installation and its credentials. No Node.js adapter or Agent SDK is required.
-
-```toml
-[backends.claude]
-type = "claude-code"
-# command = "/absolute/path/to/claude" # Default: claude on PATH
-model = "sonnet"                      # Optional initial model
-models = ["sonnet", "opus", "haiku"]   # Choices for /model
-```
-
-Run `lofi` or `lofi --print "Your prompt"`. With only backend models configured,
-startup selects `model`, or the first item in `models` when `model` is absent.
-Set `default_model = "claude/sonnet"` or `default_provider = "claude"` at the top
-of the configuration to select a backend model by default. Backend models always
-appear in `--list-models` and `/model`, without a `--backend` flag.
-
-Lofi starts Claude Code in streaming print mode. It disables built-in tools,
-slash commands, hooks, Chrome integration, and user/project/local settings.
-Only Lofi's MCP server is configured. Lofi checks the reported tool and server
-lists and stops if they contain anything other than the connected Lofi `exec`
-tool. The tool is pre-approved in Claude Code; shell approval remains in Lofi.
-Managed Claude Code policy can still apply. The process is not a security sandbox.
-
-Lofi supplies its system prompt. Claude Code owns context and compaction and
-persists its own conversation in addition to Lofi's display transcript.
-Cancelling a turn stops the process group. Use `--continue` or `--resume` to
-start it again. Missing Claude Code sessions produce an error, not a new conversation.
-Lofi's `--no-session` disables only the Lofi transcript, not Claude Code persistence.
-
-## UI theme
-
-Set `[ui] theme` to `auto`, `light`, or `dark`:
-
-```toml
-[ui]
-theme = "auto"
-```
-
-The default is `auto`. It queries the terminal background with OSC 11 and selects a matching palette. If the terminal does not reply, Lofi uses the dark palette. The `/theme` command changes the palette only for the current session.
-
-## Minimal configuration
-
-A provider and at least one model are enough to get started:
+`config.toml`:
 
 ```toml
 default_model = "openai/gpt-4o"
 
 [providers.openai]
 api_type = "openai-completions"
-api_key = "$OPENAI_API_KEY"
+env_name = "OPENAI_API_KEY"
 
 [providers.openai.models]
 gpt-4o = { name = "GPT-4o", supports_image = true, context_window = 128000 }
 ```
 
-The default base URL and endpoint path are inferred from `api_type`. Run `lofi --list-models` to verify the resulting model registry.
+Set `OPENAI_API_KEY` in the environment before starting Lofi.
+The provider's host and endpoint path come from `api_type`.
+
+When `config.toml` is absent, Lofi uses built-in OpenAI Responses,
+Anthropic Messages, and Google Generative AI definitions.
+Set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` to make
+those providers available.
+An explicit configuration file replaces the built-in provider definitions.
+
+### Claude Code
+
+Install Claude Code and run `claude auth login`.
+Then add this configuration:
+
+```toml
+default_model = "claude/sonnet"
+
+[backends.claude]
+type = "claude-code"
+model = "sonnet"
+models = ["sonnet", "opus", "haiku"]
+```
+
+Lofi starts the installed `claude` command.
+Claude Code uses its own login and credentials.
+It manages model requests, context, and compaction.
+Lofi supplies the system prompt and the session's `exec` tool through MCP.
+Shell approval uses Lofi's `policy.toml`.
+
+### Run Lofi
+
+```sh
+lofi --list-models
+lofi
+lofi --model claude/sonnet --print "Describe this project"
+```
+
+## Model selection
+
+Models use qualified names such as `openai/gpt-4o` or `claude/sonnet`.
+The first part is the configured provider or backend name.
+
+| Setting | Type | Description |
+| --- | --- | --- |
+| `default_model` | string | Model selected at startup. Takes precedence over `default_provider`. |
+| `default_provider` | string | Select the first available model from this provider or backend. |
+
+Place these settings at the top of `config.toml`, before any table:
+
+```toml
+default_model = "claude/sonnet"
+```
+
+`--model <name>/<id>` overrides the configuration for one invocation.
+Use `/model` to select a model in the TUI.
+Configured backend models are always included in the model list.
+Provider models in the TUI require credentials or `no_auth = true`.
+
+Without a default, startup selects the first available provider model in
+configuration order, then the first configured backend model.
+For a backend, `model` comes first, followed by its `models` list.
+An empty backend model configuration supplies the choice `default`.
+
+`--continue` and `--resume <id>` restore the session's selected model.
+An explicit `--model` overrides that selection.
+Switching between provider and backend models keeps the conversation history,
+tools, jobs, and shell policy.
+
+Provider models accept optional thinking and service-tier suffixes:
+`--model provider/id[:level][@tier]`.
+See [Thinking levels](#thinking-levels) and [Service tiers](#service-tiers).
+
+## Agent backends
+
+Each `[backends.<name>]` table defines an agent and its model choices.
+The supported backend type is `claude-code`.
+
+### Backend fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `type` | string | required | Agent type: `claude-code`. |
+| `command` | string | `claude` | Executable name on PATH or path to the executable. |
+| `model` | string | none | Initial model. Also included in the model list. |
+| `models` | string array | empty | Additional model choices. |
+
+For a specific installation, set `command`:
+
+```toml
+[backends.claude]
+type = "claude-code"
+command = "/absolute/path/to/claude"
+models = ["sonnet", "opus", "haiku"]
+```
+
+Model selection applies to the next turn.
+Switching models within a backend keeps its current session.
+Selected aliases, such as `sonnet`, are preserved when a session resumes.
+
+### Claude Code sessions
+
+Lofi runs Claude Code in streaming print mode with the Lofi MCP server.
+Claude Code's built-in tools, slash commands, hooks, Chrome integration, and
+user/project/local settings are disabled for this process.
+Managed Claude Code policy can still apply.
+
+Claude Code saves its conversation alongside Lofi's transcript.
+Lofi reuses the Claude Code session ID when its context matches the conversation.
+After cancellation or a disconnect, use `--continue` or `--resume <id>`.
+Cancelling a turn stops the process group.
+A missing Claude Code session produces an error.
+`--no-session` disables the Lofi transcript; Claude Code still saves its session.
+
+### Model and usage display
+
+The header uses the model reported when Claude Code starts, including suffixes
+such as `[1m]`.
+If that report omits the model, the first response supplies the label.
+The turn indicator and saved turn records use the model reported for that turn.
+Resume restores the header label and the selected model alias.
+
+Claude Code reports token usage per turn and cumulative USD cost.
+The context gauge uses the last response's context usage.
+It shows `context unknown` when no context data is available.
+
+Automatic shell approval uses the Lofi provider and model configured in
+`policy.toml` under `[auto_mode]`.
+Only an `allow` result approves a command.
+Evaluator errors and requests for confirmation keep the normal approval prompt.
 
 ## Value resolution
 
-`api_key` and custom header values support the following forms:
+Provider credentials, headers, and endpoint values support these forms:
 
 | Form | Meaning |
 | --- | --- |
 | `!command` | Run `sh -c command` and use its trimmed stdout. |
-| `$VAR` or `${VAR}` | Read an environment variable; a missing variable is an error. |
+| `$VAR` or `${VAR}` | Read an environment variable. |
 | `$$` | A literal `$`. |
 | `$!` | A literal `!`. |
-| Any other value | Use it literally. |
-
-For example:
+| Any other value | Use the value as written. |
 
 ```toml
 [providers.example]
@@ -147,42 +184,66 @@ x-organization = "$EXAMPLE_ORGANIZATION"
 x-literal = "$$5"
 ```
 
-Only `env_name` discovery is lenient: an `env_name` variable that is missing or empty leaves the provider keyless and unavailable. Every explicitly configured value is strict. An `api_key`, provider or model `base_url`, or header value that fails to resolve (missing variable, failed or timed-out command) is a startup error that names the provider and field. A value that resolves to an empty string is treated as unset.
+`env_name` names the environment variable that supplies the API key.
+An unset or empty variable leaves the provider unavailable.
+Explicit `api_key`, provider or model `base_url`, and header values are strict.
+A missing variable or failed command produces a configuration error that names
+the provider and field.
+A value that resolves to an empty string is treated as unset.
 
-`base_url` (per provider or per model) and `env_name` also resolve the same `$VAR` / `!command` forms, so an endpoint or key can be supplied by an environment variable rather than edited into the config.
+### Credential command timeout
 
-To inject values for a single invocation without touching the config, use `-e`/`--env` (repeatable). A bare `NAME` forwards the parent shell's value; `NAME=VALUE` sets it explicitly. These variables are available to `$VAR`/env_name resolution and to `lofi.bash` child processes during that run. For example:
+```toml
+[credential]
+timeout_ms = 30000
+```
+
+`timeout_ms` limits how long a `!command` helper can run.
+The default is 30000 milliseconds.
+Helper output is bounded.
+A timeout or failure stops the helper's process group.
+
+### Environment overrides
+
+Use `LOFI__SECTION__KEY=VALUE` to override a setting for one invocation.
+Double underscores select nested tables.
+Key names are converted to lowercase.
+Values are parsed as TOML when possible and as strings otherwise.
+
+```sh
+LOFI__DEFAULT_MODEL=claude/opus lofi
+LOFI__RETRY__MAX_RETRIES=0 lofi
+```
+
+Use `-e` or `--env` to supply environment variables.
+A bare name forwards the parent shell's value.
+`NAME=VALUE` sets a value explicitly.
+Repeat the flag to supply more variables.
+These values are available during configuration resolution and to
+`lofi.bash` child processes.
 
 ```sh
 lofi -e EXAMPLE_API_KEY -e EXAMPLE_BASE_URL="https://api.example.com"
 ```
 
-## Model selection
-
-### `default_provider`
-
-- Type: string
-- Optional.
-
-Provider used when no model is selected on the command line. Its first available model is selected unless `default_model` is also set.
-
-### `default_model`
-
-- Type: string
-- Optional.
-
-Default model as `provider/id`. This takes precedence over `default_provider`.
-
-`--model provider/id[:level][@tier]` overrides both values for one invocation. The provider qualifier is required. The thinking and service-tier suffixes are optional.
+## UI theme
 
 ```toml
-default_provider = "anthropic"
-default_model = "anthropic/claude-opus-4"
+[ui]
+theme = "auto"
 ```
+
+`theme` accepts `auto`, `light`, or `dark`.
+The default is `auto`.
+Lofi queries the terminal background with OSC 11 to select a theme.
+It uses the dark theme if the terminal gives no reply.
+Use `/theme` to change the theme for the current session.
 
 ## Thinking levels
 
-The default thinking effort can be selected globally, per provider, or per model. Supported values are `off`, `low`, `medium`, `high`, and `xhigh`.
+For provider models, select the default thinking effort globally, per provider,
+or per model.
+Supported values are `off`, `low`, `medium`, `high`, and `xhigh`.
 
 ```toml
 [agent]
@@ -201,10 +262,11 @@ A command-line suffix such as `--model openai/o3:high` selects the level for tha
 
 ## Automatic turn continuation
 
-Lofi can recover when a provider reports that it stopped for a tool call but
-its template parser emits no structured tool call. This recovery is enabled by
-default. A separate clean-stop intent detector is disabled by default because
-it uses the assistant text as a bounded heuristic.
+`auto_continue` controls recovery in Lofi's agent loop for provider models.
+`lost_tool_call` is enabled by default.
+It recovers when a provider reports a tool-call stop without a structured tool call.
+`intent` is disabled by default.
+It uses the final assistant paragraph to detect unfinished tool work.
 
 ```toml
 [agent.auto_continue]
@@ -225,8 +287,7 @@ The settings are resolved field by field in this order:
 3. `[providers.<name>.auto_continue]`.
 4. The static model override, when present.
 
-Auto-discovered models use the provider policy. Remote model metadata does not
-currently set per-model continuation policy.
+Auto-discovered models use the provider policy.
 
 `lost_tool_call` recovers a protocol contradiction: the provider reports a
 tool-use stop but sends no tool call. Its built-in default is `true`.
@@ -242,7 +303,10 @@ input.
 
 ## Service tiers
 
-Service tiers are per-request routing hints forwarded to the provider. They are useful with OpenAI's own plans and with proxies that expose multiple service classes. Supported values are `auto`, `flex`, `priority`, and any provider-defined value (custom values serialize verbatim). `auto` omits the field so the provider uses its default.
+Service tiers select the request service class for provider models.
+Supported values are `auto`, `flex`, `priority`, and provider-defined values.
+`auto` uses the provider's default.
+Provider-defined values are sent as written.
 
 The default tier can be selected globally, per provider, or per model, mirroring thinking levels:
 
@@ -256,10 +320,10 @@ api_key = "$OPENAI_API_KEY"
 service_tier = "priority"
 
 [providers.openai.models]
-"gpt-5.6-sol" = { service_tier = "flex", service_tiers = ["flex", "priority"] }
+o3 = { reasoning = true, thinking_levels = ["low", "medium", "high"], service_tier = "flex", service_tiers = ["flex", "priority"] }
 ```
 
-A command-line suffix such as `--model openai/gpt-5.6-sol:high@flex` selects the tier for that run (the `@tier` suffix is optional and combines with the `:level` suffix). Default precedence is model, provider, then `[agent]`; the command line overrides all three. Non-`auto` tiers must appear in the model `service_tiers` list.
+A command-line suffix such as `--model openai/o3:high@flex` selects the tier for that run (the `@tier` suffix is optional and combines with the `:level` suffix). Default precedence is model, provider, then `[agent]`; the command line overrides all three. Non-`auto` tiers must appear in the model `service_tiers` list.
 
 ## Providers
 
@@ -297,7 +361,9 @@ Supported protocols are:
 
 ### Endpoint routing with `api_types`
 
-`base_url` is always a host root. The selected protocol's endpoint path is joined to it; lofi does not append another hardcoded suffix.
+A provider's `base_url` is a host root.
+Lofi joins the selected protocol's endpoint path to it.
+A model-level `base_url` is a full endpoint URL.
 
 A single-protocol provider normally only needs `api_type`:
 
@@ -517,7 +583,9 @@ All mappings are optional. The defaults are the four `pricing.*` token paths sho
 
 ## Compaction
 
-`[compaction]` controls automatic context compaction. The `/compact` command remains available regardless of these settings.
+`[compaction]` controls context compaction for provider models.
+Use `/compact` to compact their context manually.
+Claude Code manages compaction for its backend models.
 
 ```toml
 [compaction]
@@ -655,7 +723,8 @@ Maximum size of the re-encoded JPEG payload.
 
 ## Retries
 
-`[retry]` controls retries for transient provider and transport failures.
+`[retry]` controls retries for provider models.
+Claude Code backend turns require explicit resume after a disconnect.
 
 ```toml
 [retry]
