@@ -526,6 +526,104 @@ fn image_tool_results_use_each_provider_native_wire_format() {
 }
 
 #[test]
+fn vision_model_switches_preserve_tool_image_data() {
+    use crate::support::WAIT;
+
+    let models = [
+        "anthropic/tools",
+        "google/tools",
+        "mock/alt",
+        "mock/chat",
+        "responses/reasoning",
+    ];
+    for (source_index, source) in models.iter().enumerate() {
+        for (target_index, target) in models.iter().enumerate() {
+            if source_index == target_index {
+                continue;
+            }
+            let read_image = r#"return await lofi.read("pixel.png");"#;
+            let tool = match *source {
+                "anthropic/tools" => anthropic_tool_response("switch-image", read_image),
+                "google/tools" => google_tool_response("switch-image", read_image),
+                "responses/reasoning" => responses_tool_response("switch-image", read_image),
+                _ => tool_response("switch-image", read_image),
+            };
+            let answer = |model: &str, text: &str| match model {
+                "anthropic/tools" => anthropic_text_response(text),
+                "google/tools" => google_text_response(text),
+                "responses/reasoning" => responses_response("", text),
+                _ => text_response(text),
+            };
+            let server = MockServer::start(vec![
+                tool,
+                answer(source, "image before switch"),
+                answer(target, "image after switch"),
+            ]);
+            let fixture = Fixture::new(&server);
+            std::fs::write(fixture.workspace.join("pixel.png"), one_pixel_png()).unwrap();
+            let mut tui = fixture.spawn(&[
+                "--model",
+                source,
+                "-e",
+                "LOFI__PROVIDERS__ANTHROPIC__MODELS__TOOLS__SUPPORTS_IMAGE=true",
+                "-e",
+                "LOFI__PROVIDERS__RESPONSES__MODELS__REASONING__SUPPORTS_IMAGE=true",
+                "-e",
+                "LOFI__PROVIDERS__MOCK__MODELS__ALT__SUPPORTS_IMAGE=true",
+            ]);
+            tui.submit("read the image");
+            tui.wait_for("image before switch", WAIT);
+            fixture.wait_for_event_count("turn_end", 1);
+            tui.clear_output();
+            tui.submit("/model");
+            tui.wait_for("Switch model", WAIT);
+            let direction: &[u8] = if target_index > source_index {
+                b"\x1b[B"
+            } else {
+                b"\x1b[A"
+            };
+            tui.send(&direction.repeat(source_index.abs_diff(target_index)));
+            tui.send(b"\r");
+            tui.wait_for(&format!("switched to {target}"), WAIT);
+            tui.submit("inspect the image again");
+            tui.wait_for("image after switch", WAIT);
+            fixture.wait_for_event_count("turn_end", 2);
+
+            let requests = server.requests();
+            assert_eq!(requests.len(), 3, "{source} -> {target}");
+            let image_data = |model: &str, body: &str| {
+                let request: serde_json::Value = serde_json::from_str(body).unwrap();
+                let (collection, pointer) = match model {
+                    "anthropic/tools" => ("messages", "/content/0/content/1/source/data"),
+                    "google/tools" => (
+                        "contents",
+                        "/parts/0/functionResponse/parts/0/inlineData/data",
+                    ),
+                    "responses/reasoning" => ("input", "/content/0/image_url"),
+                    _ => ("messages", "/content/0/image_url/url"),
+                };
+                let data = request[collection]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find_map(|message| message.pointer(pointer).and_then(|data| data.as_str()))
+                    .unwrap_or_else(|| panic!("missing image for {model}: {body}"));
+                data.strip_prefix("data:image/jpeg;base64,")
+                    .unwrap_or(data)
+                    .to_string()
+            };
+            let original = image_data(source, &requests[1].body);
+            assert!(!original.is_empty());
+            assert_eq!(
+                image_data(target, &requests[2].body),
+                original,
+                "{source} -> {target}"
+            );
+        }
+    }
+}
+
+#[test]
 fn responses_compaction_preserves_tool_image_data_before_and_after_resume() {
     use crate::support::WAIT;
 
