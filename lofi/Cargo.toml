@@ -10,6 +10,7 @@ lofi-ui = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing-subscriber = { workspace = true }
+nix = { workspace = true }
 
 [dev-dependencies]
 nix = { workspace = true, features = ["process", "term", "ioctl"] }

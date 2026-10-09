@@ -1,17 +1,16 @@
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // Cap glibc malloc arenas. Background work (transcript snapshots,
-    // compaction, the sandbox runtime) runs on spawned threads, and glibc
-    // lazily creates a 64 MB-reserved arena per allocating thread that it
-    // never returns. Under the default 8-arenas-per-core cap a single agent
-    // turn or compaction can retain tens of MB in idle arenas even though the
-    // application's measured footprint is only a few MB. Limiting to two
-    // arenas keeps the burst transient without materially serializing the
-    // mostly-I/O-bound background tasks. This must run before any worker
-    // thread allocates, hence first in main; glibc reads it lazily at arena
-    // creation. Safe here because main is still single-threaded.
+    // glibc reads MALLOC_ARENA_MAX before main, so setting the environment
+    // here cannot limit arenas. Apply the limit before spawning workers to
+    // keep concurrent file reads from retaining an arena per thread.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
-        std::env::set_var("MALLOC_ARENA_MAX", "2");
+        #[allow(unsafe_code)]
+        unsafe {
+            // SAFETY: mallopt locks the allocator while changing its arena
+            // limit. Existing allocations remain valid.
+            nix::libc::mallopt(nix::libc::M_ARENA_MAX, 2);
+        }
     }
 
     // The TUI owns the alternate screen, so tracing stays opt-in to avoid

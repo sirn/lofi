@@ -573,6 +573,21 @@ fn option_delta(current: Option<u64>, previous: Option<u64>) -> Option<i128> {
 }
 
 fn read_allocator_memory() -> AllocatorMemory {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[allow(unsafe_code)]
+    {
+        // SAFETY: glibc locks each arena while reading its allocation totals.
+        // No allocator settings are changed here. Thread caches count as used.
+        let info = unsafe { nix::libc::mallinfo2() };
+        AllocatorMemory {
+            allocated: Some((info.uordblks + info.hblkhd) as u64),
+            free: Some(info.fordblks as u64),
+            arena: Some(info.arena as u64),
+            mmap: Some(info.hblkhd as u64),
+            releasable: Some(info.keepcost as u64),
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     AllocatorMemory::default()
 }
 

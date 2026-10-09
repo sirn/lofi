@@ -428,6 +428,99 @@ fn resuming_a_large_transcript_releases_replay_memory() {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn repeated_tool_turns_and_compaction_keep_memory_bounded() {
+    let turns = 32;
+    let code = r#"
+        const results = await Promise.all([
+            ...Array.from({ length: 16 }, () => lofi.read("payload.txt")),
+            lofi.bash({ cmd: "printf memory-probe", timeoutMs: 1000 }),
+        ]);
+        return { bytes: JSON.stringify(results).length };
+    "#;
+    let responses = (0..turns)
+        .flat_map(|n| {
+            [
+                tool_response(&format!("memory-{n}"), code),
+                text_response(&format!("MEMORY_TURN_{n}")),
+            ]
+        })
+        .collect();
+    let server = MockServer::start(responses);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.workspace.join("payload.txt"),
+        "p".repeat(2 * 1024 * 1024),
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("/debug");
+    tui.wait_for("Debug mode activated", WAIT);
+    let mut samples = Vec::new();
+    for n in 0..turns {
+        tui.clear_output();
+        tui.submit(&format!("memory prompt {n}"));
+        tui.wait_for(&format!("MEMORY_TURN_{n}"), WAIT);
+        fixture.wait_for_event_count("turn_end", n + 1);
+        if n % 4 == 3 {
+            tui.submit("/compact");
+            tui.wait_for("Compacted", WAIT);
+            samples.push(tui.resident_kib());
+        }
+    }
+    tui.submit("/quit");
+    tui.wait_exit();
+    let log = fixture
+        .state
+        .join("lofi")
+        .join("debug")
+        .join(fixture.session_files()[0].file_name().unwrap());
+    let records = std::fs::read_to_string(log).unwrap();
+    let records = records
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|record| record["event"] == "compaction")
+        .collect::<Vec<_>>();
+    let allocated = records
+        .iter()
+        .map(|record| record["allocator"]["allocated_bytes"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    let arenas = records
+        .iter()
+        .map(|record| record["allocator"]["arena_bytes"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        samples.iter().all(|kib| *kib <= 50 * 1024),
+        "concurrent reads retained too much memory: RSS={samples:?} KiB; allocated={allocated:?}; arenas={arenas:?}"
+    );
+    let events = fixture.events();
+    let results = events
+        .iter()
+        .filter(|event| event["type"] == "message" && event["role"] == "tool")
+        .flat_map(|event| event["blocks"].as_array().into_iter().flatten())
+        .filter(|block| block["type"] == "tool_result")
+        .collect::<Vec<_>>();
+    // Compaction can persist edited copies of kept tool results. Count calls,
+    // not copies, and require every persisted result to be successful.
+    let calls = results
+        .iter()
+        .map(|block| block["tool_use_id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(calls.len(), turns);
+    assert!(results.iter().all(|block| block["is_error"] == false));
+    assert_eq!(allocated.len(), turns / 4);
+    assert_eq!(allocated.len(), samples.len());
+    assert!(
+        allocated.last().unwrap() <= &(allocated[0] + 4 * 1024 * 1024),
+        "live allocations grew across compacted tool turns: {allocated:?}"
+    );
+    assert!(
+        samples.last().unwrap() <= &(samples[0] + 16 * 1024),
+        "RSS grew across compacted tool turns: {samples:?} KiB; allocated={allocated:?}"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn input_stays_responsive_while_compaction_reads_large_history() {
     let server = MockServer::start(vec![text_response("responsive compact seed")]);
     let fixture = Fixture::new(&server);
