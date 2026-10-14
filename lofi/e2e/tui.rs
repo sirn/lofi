@@ -651,7 +651,7 @@ fn policy_dialog_deny_all_blocks_exec_without_prompting() {
     tui.wait_for("Bash policy", WAIT);
     // Without auto mode the rows are allow all / ask (manual) / deny all.
     tui.send(b"\x1b[B\x1b[B\r");
-    tui.wait_for("policy: deny all", WAIT);
+    tui.wait_for("deny all · $0.00", WAIT);
 
     tui.submit("run the touch please");
     tui.wait_for("policy deny all answer", WAIT);
@@ -684,7 +684,7 @@ fn policy_dialog_allow_all_runs_exec_without_prompting() {
     tui.wait_for("Bash policy", WAIT);
     // The dialog opens pre-selected on ask (manual); one up selects allow all.
     tui.send(b"\x1b[A\r");
-    tui.wait_for("policy: allow all", WAIT);
+    tui.wait_for("allow all · $0.00", WAIT);
 
     tui.submit("run the touch please");
     tui.wait_for("policy allow all answer", WAIT);

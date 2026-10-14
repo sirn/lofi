@@ -270,7 +270,7 @@ fn policy_badge_shows_a_non_default_pick() {
     a.open_policy_picker();
     a.policy_picker.as_mut().unwrap().selected = 2; // deny all
     a.policy_picker_confirm();
-    assert_eq!(a.policy_badge().as_deref(), Some("policy: deny all"));
+    assert_eq!(a.policy_badge().as_deref(), Some("deny all"));
 }
 
 #[test]

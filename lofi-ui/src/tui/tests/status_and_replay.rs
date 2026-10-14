@@ -1170,7 +1170,7 @@ fn policy_override_renders_left_of_cost_in_footer() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert_eq!(cost_line, "policy: deny all · $0.00");
+    assert_eq!(cost_line, "deny all · $0.00");
 }
 
 #[test]

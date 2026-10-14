@@ -168,7 +168,7 @@ impl App {
         if mode == lofi_core::default_approval_mode(self.auto_mode_configured) {
             return None;
         }
-        Some(format!("policy: {}", policy_mode_label(mode)))
+        Some(policy_mode_label(mode).to_string())
     }
 
     /// Rows the toast body occupies inside its border at the given terminal width.
