@@ -361,6 +361,9 @@ fn tree_rollback_after_compacted_failure_keeps_retained_context() {
     for expected in [
         "tree compact retained prompt",
         "tree compact retained answer",
+        // The failed turn precedes the rollback point: its prompt is
+        // retained work, only its failed round was discarded.
+        "tree compact failed prompt",
         "tree compact n+8 prompt",
     ] {
         assert!(
@@ -370,7 +373,7 @@ fn tree_rollback_after_compacted_failure_keeps_retained_context() {
             "missing {expected:?} from rollback request: {messages:?}"
         );
     }
-    for abandoned in ["tree compact failed prompt", "tree compact n+9 prompt"] {
+    for abandoned in ["tree compact failed turn", "tree compact n+9 prompt"] {
         assert!(
             !messages
                 .iter()
@@ -756,7 +759,7 @@ fn continue_is_scoped_to_the_exact_workspace() {
 }
 
 #[test]
-fn failed_turn_is_visible_but_excluded_from_history_after_restart() {
+fn failed_turn_is_visible_and_keeps_its_prompt_after_restart() {
     let server = MockServer::start(vec![
         text_response("successful baseline answer"),
         MockResponse::error(401, "failed lifecycle marker"),
@@ -783,12 +786,47 @@ fn failed_turn_is_visible_but_excluded_from_history_after_restart() {
     assert!(recovered.contains("successful baseline prompt"));
     assert!(recovered.contains("successful baseline answer"));
     assert!(recovered.contains("failed lifecycle recovery prompt"));
-    assert!(!recovered.contains("failed lifecycle prompt"));
+    // The failed turn's prompt survives: only the failed round itself is
+    // discarded, so a restart does not lose what the user asked.
+    assert!(recovered.contains("failed lifecycle prompt"));
+    // The provider error text lives only on the failure marker, which never
+    // enters model context.
     assert!(!recovered.contains("failed lifecycle marker"));
 
     let events = fixture.events();
     assert!(event_types(&events).contains(&"turn_failed"));
     assert!(transcript_text(&events).contains("failed lifecycle prompt"));
+}
+
+#[test]
+fn failed_turn_retains_prompt_and_completed_rounds() {
+    let server = MockServer::start(vec![
+        tool_response("work", "return { retainedWork: true };"),
+        MockResponse::error(401, "mid turn failure marker"),
+        text_response("post failure answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("retained work prompt");
+    tui.wait_for("mid turn failure marker", WAIT);
+    fixture.wait_for_event_count("turn_failed", 1);
+
+    // The turn failed mid-way, after one tool round completed. The next
+    // prompt must continue with the failed turn's work still in context.
+    tui.submit("post failure prompt");
+    tui.wait_for("post failure answer", WAIT);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let recovery = &requests[2].body;
+    assert!(recovery.contains("retained work prompt"));
+    assert!(
+        recovery.contains("retainedWork"),
+        "completed tool round must survive the failed round: {recovery}"
+    );
+    assert!(recovery.contains("post failure prompt"));
+    assert!(!recovery.contains("mid turn failure marker"));
 }
 
 #[test]

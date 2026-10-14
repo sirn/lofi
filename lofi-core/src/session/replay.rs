@@ -418,7 +418,12 @@ impl LeafFirstContextFilter {
                 self.discarding_assistant = false;
                 None
             }
-            SessionEventKind::RoundDiscarded { .. } if !self.skipping_failed_turn => {
+            SessionEventKind::RoundDiscarded { .. } => {
+                // A failed turn's discard marker bounds the skip to the
+                // failed round only: the turn's prompt and completed rounds
+                // stay in context. Logs from before this marker existed have
+                // no discard and skip the whole failed turn instead.
+                self.skipping_failed_turn = false;
                 self.discarding_assistant = true;
                 None
             }
@@ -895,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn discarded_round_in_failed_turn_does_not_hide_prior_reply() {
+    fn failed_turn_keeps_prompt_and_completed_rounds_in_context() {
         let mut events = vec![
             user_msg("previous prompt"),
             assistant_msg("previous reply"),
@@ -904,6 +909,44 @@ mod tests {
             assistant_msg("discarded attempt"),
             round_discarded("loop"),
             user_msg_with_kind("retry notice", lofi_types::PromptKind::Notice),
+            assistant_msg("failed partial"),
+            round_discarded("discarding partial response after failure: boom"),
+            turn_failed(),
+        ];
+        chain(&mut events);
+
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+
+        // Each discard marker drops the assistant round it ends; the failed
+        // turn's prompt and notices stay in context for the next prompt.
+        assert_eq!(
+            texts,
+            [
+                "previous prompt",
+                "previous reply",
+                "failed prompt",
+                "retry notice"
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_turn_without_discard_marker_hides_the_whole_turn() {
+        // Logs from before the failure arm wrote a discard marker have no
+        // boundary inside the failed turn, so the skip runs to the previous
+        // turn boundary as before.
+        let mut events = vec![
+            user_msg("previous prompt"),
+            assistant_msg("previous reply"),
+            turn_end(),
+            user_msg("failed prompt"),
             assistant_msg("failed partial"),
             turn_failed(),
         ];

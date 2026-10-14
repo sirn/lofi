@@ -515,6 +515,24 @@ impl Agent {
                             })
                             .await;
                     }
+                    // Keep the prompt and every completed round: only the
+                    // failed round's partial messages leave the context.
+                    // The discard marker bounds the failed-turn skip on
+                    // replay so live and resumed context agree.
+                    if let Err(record_error) = record_round_removal(
+                        recorder.as_mut(),
+                        messages,
+                        prev_len,
+                        messages.len() - round_start,
+                        &stats,
+                        &tx,
+                        &format!("discarding partial response after failure: {error}"),
+                    )
+                    .await
+                    {
+                        break Err(record_error);
+                    }
+                    messages.truncate(round_start);
                     break Err(error);
                 }
             }
@@ -525,7 +543,7 @@ impl Agent {
 
     async fn settle_turn(
         &self,
-        messages: &mut Vec<Message>,
+        messages: &mut [Message],
         prev_len: usize,
         mut recorder: Option<SessionRecorder>,
         stats: TurnStats,
@@ -600,13 +618,11 @@ impl Agent {
                     .await;
             }
         }
-        if matches!(&outcome, TurnOutcome::Failed(_)) {
-            // `TurnFailed` is a durable display boundary: replay keeps the
-            // failed branch visible but context rebuild excludes it. User
-            // cancellation deliberately does not enter this path: an aborted
-            // assistant message stays in context for the next prompt.
-            messages.truncate(prev_len);
-        }
+        // A failed turn keeps the prompt and completed rounds in context:
+        // the failure arm recorded the failed round as discarded and
+        // truncated it already. `TurnFailed` stays a durable display
+        // boundary so replay shows the failed branch while context rebuild
+        // skips only the discarded round.
         match err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -1020,9 +1036,10 @@ impl Agent {
             // The live UI has already rendered every accepted delta. Preserve
             // that same partial assistant message on failed/cancelled turns so
             // durable replay cannot make visible output disappear. The
-            // terminal outcome decides context semantics: failures
-            // are rolled back, while explicit user cancellation retains the
-            // partial assistant message.
+            // terminal outcome decides context semantics: failures discard
+            // this failed round but retain the turn's completed rounds, while
+            // explicit user cancellation retains the partial assistant
+            // message.
             let mut partial = assembler.finish();
             stamp_message_origin(&mut partial, &model);
             if !partial.blocks.is_empty() {
