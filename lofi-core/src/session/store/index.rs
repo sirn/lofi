@@ -330,6 +330,9 @@ fn scan_linear_session(
             (Some(parent), Some(previous)) => parent == previous,
             _ => false,
         };
+        if !linear {
+            return Ok(None);
+        }
         if kind == IndexKind::Compaction {
             let start = if skel.first_kept_entry_id.is_empty() {
                 id.clone()
@@ -718,6 +721,159 @@ pub(super) fn load_event_at(path: &Path, offset: u64) -> Result<SessionEvent> {
 /// # Errors
 /// Returns an error when the transcript/offset cannot be read or projected
 /// JSON is invalid.
+fn is_message_kind(kind: IndexKind) -> bool {
+    matches!(
+        kind,
+        IndexKind::UserPrompt
+            | IndexKind::AssistantMessage
+            | IndexKind::ToolResult
+            | IndexKind::SystemMessage
+    )
+}
+
+fn is_preview_kind(kind: IndexKind) -> bool {
+    matches!(
+        kind,
+        IndexKind::UserPrompt
+            | IndexKind::AssistantMessage
+            | IndexKind::SystemMessage
+            | IndexKind::TurnFailed
+            | IndexKind::TurnCancelled
+            | IndexKind::Compaction
+            | IndexKind::NativeTool
+    )
+}
+
+fn first_preview_at<T: serde::de::DeserializeOwned>(
+    reader: &mut std::io::BufReader<std::fs::File>,
+    offsets: impl IntoIterator<Item = u64>,
+    mut preview_for: impl FnMut(&T) -> String,
+) -> Result<String> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut budget = ProjectionBudget::event();
+    for offset in offsets {
+        reader.seek(SeekFrom::Start(offset))?;
+        let Some((_, _, value)) = read_projected_value::<T, _>(reader, &mut budget)? else {
+            continue;
+        };
+        let preview = preview_for(&value);
+        if !preview.is_empty() {
+            return Ok(preview);
+        }
+    }
+    Ok(String::new())
+}
+
+pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    preview_for: impl FnMut(&T) -> String,
+) -> Result<(SessionMeta, usize, String)> {
+    use std::io::{BufReader, Seek};
+
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let Some((_start, _event_start, header)) = read_jsonl_value::<Header, _>(&mut reader)? else {
+        return Err(Error::State(format!(
+            "session file has no header: {}",
+            path.display()
+        )));
+    };
+    if header.meta.version != SESSION_VERSION {
+        return Err(Error::State(format!(
+            "unsupported session version {} in {}",
+            header.meta.version,
+            path.display()
+        )));
+    }
+
+    let mut message_count = 0usize;
+    let mut preview_offsets = Vec::new();
+    let mut previous: Option<IndexId> = None;
+    let mut latest_cursor: Option<Option<IndexId>> = None;
+    let mut linear = true;
+    let mut line = Vec::with_capacity(4 * 1024);
+    loop {
+        let record_start = reader.stream_position()?;
+        let event = read_index_skeleton(&mut reader, &mut line);
+        let Some((line_start, _line_end, skel)) = (match event {
+            Ok(event) => event,
+            Err(error) => {
+                if malformed_record_is_final(&mut reader, record_start)? {
+                    break;
+                }
+                return Err(Error::State(format!(
+                    "parse index event in {}: {error}",
+                    path.display()
+                )));
+            }
+        }) else {
+            break;
+        };
+        if skel.kind == IndexKind::Cursor {
+            latest_cursor = Some(skel.cursor_leaf);
+            continue;
+        }
+        latest_cursor = None;
+        let linked = match (&skel.parent_id, &previous) {
+            (None, None) => true,
+            (Some(parent), Some(prev)) => parent == prev,
+            _ => false,
+        };
+        if !linked {
+            linear = false;
+            break;
+        }
+        if is_message_kind(skel.kind) {
+            message_count = message_count.saturating_add(1);
+        }
+        if is_preview_kind(skel.kind) {
+            preview_offsets.push(line_start);
+        }
+        previous = Some(skel.id);
+    }
+
+    if linear {
+        if latest_cursor == Some(None) {
+            return Ok((header.meta, 0, String::new()));
+        }
+        if latest_cursor
+            .as_ref()
+            .is_none_or(|leaf| leaf.as_ref() == previous.as_ref())
+        {
+            let last_message =
+                first_preview_at(&mut reader, preview_offsets.into_iter().rev(), preview_for)?;
+            return Ok((header.meta, message_count, last_message));
+        }
+    }
+
+    let (meta, index, _size) = load_index(path)?;
+    let leaf = index
+        .iter()
+        .rev()
+        .find(|e| e.kind == IndexKind::Cursor)
+        .map(|e| e.id.to_event_id())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            index
+                .iter()
+                .rev()
+                .find(|e| e.kind != IndexKind::Cursor)
+                .map(|e| e.id.to_event_id())
+        });
+    let lineage = super::lineage_indices(&index, leaf.as_deref())?;
+    let message_count = lineage
+        .iter()
+        .filter(|&&i| is_message_kind(index[i].kind))
+        .count();
+    let offsets = lineage
+        .into_iter()
+        .rev()
+        .filter(|&i| is_preview_kind(index[i].kind))
+        .map(|i| index[i].offset);
+    let last_message = first_preview_at(&mut reader, offsets, preview_for)?;
+    Ok((meta, message_count, last_message))
+}
+
 pub(super) fn load_event_values<T: serde::de::DeserializeOwned>(
     path: &Path,
     offsets: &[u64],

@@ -236,6 +236,8 @@ impl SessionCursor {
         let (resume_index, history_start) = session_index_from_lineage(&path, &selected)?;
         let cursor = Self::new(path, leaf);
         *cursor.lock_compaction_index() = Some(compaction_index_suffix(&cursor.path, &selected)?);
+        drop(selected);
+        lofi_code::memory::release_freed_memory();
         Ok((
             cursor,
             SessionSnapshot {
@@ -325,6 +327,8 @@ impl SessionCursor {
         let lineage = indexed_lineage(index, leaf.as_deref())?;
         let (index, history_start) = session_index_from_lineage(&self.path, &lineage)?;
         *self.lock_compaction_index() = Some(compaction_index_suffix(&self.path, &lineage)?);
+        drop(lineage);
+        lofi_code::memory::release_freed_memory();
         Ok(SessionSnapshot {
             meta,
             index,
@@ -1493,49 +1497,8 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
 /// session at open; reusing `load_index` avoids the per-call map that kept
 /// worker-arena pages mapped at the high-water mark.
 fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
-    let (meta, index, _size) = index::load_index(path).ok()?;
-    if meta.version != SESSION_VERSION {
-        return None;
-    }
-    let leaf = index
-        .iter()
-        .rev()
-        .find(|e| e.kind == IndexKind::Cursor)
-        .map(|e| e.id.to_event_id())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            index
-                .iter()
-                .rev()
-                .find(|e| e.kind != IndexKind::Cursor)
-                .map(|e| e.id.to_event_id())
-        });
-    let lineage = index::lineage_indices(&index, leaf.as_deref()).ok()?;
-    let message_count = lineage
-        .iter()
-        .filter(|&&i| {
-            matches!(
-                index[i].kind,
-                IndexKind::UserPrompt
-                    | IndexKind::AssistantMessage
-                    | IndexKind::ToolResult
-                    | IndexKind::SystemMessage
-            )
-        })
-        .count();
-    let mut last_message = String::new();
-    for &i in lineage.iter().rev() {
-        let offset = index[i].offset;
-        let preview = index::load_event_values::<EntryPreview>(path, &[offset])
-            .ok()?
-            .first()
-            .map(entry_preview)
-            .unwrap_or_default();
-        if !preview.is_empty() {
-            last_message = preview;
-            break;
-        }
-    }
+    let (meta, message_count, last_message) =
+        index::scan_entry_summary::<EntryPreview>(path, entry_preview).ok()?;
     Some(SessionEntry {
         meta,
         file: SessionFile {
