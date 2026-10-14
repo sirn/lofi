@@ -693,7 +693,6 @@ impl SessionCursor {
             summary,
             summarized_range,
             counts,
-            true,
         )?;
         let suffix = load_index_range(&self.path, start, end).ok();
         *leaf = Some(marker_id);
@@ -875,18 +874,8 @@ fn append_cursor_events(
         }
         next = Some(event.id.clone());
     }
-    let byte_start = std::fs::metadata(path).map_or(0, |m| m.len());
-    let head = cursor_event(next.as_deref());
-    match append_events_with_cursor(path, events, &head) {
-        Ok((_, end)) => Ok((byte_start, end, next)),
-        Err(error) => {
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .open(path)
-                .and_then(|file| file.set_len(byte_start));
-            Err(error)
-        }
-    }
+    let (byte_start, end) = append_prepared_events(path, events)?;
+    Ok((byte_start, end, next))
 }
 
 /// Owns the sessions root directory and scopes all per-cwd listings/creates
@@ -935,7 +924,6 @@ impl SessionStore {
     /// header-serialization failure.
     pub fn create_cursor(&self, cwd: &Path, model: &RunModel) -> Result<SessionCursor> {
         let path = self.create(cwd, model)?;
-        persist_cursor(&path, None, false)?;
         let cursor = SessionCursor::new(path, None);
         *cursor.lock_compaction_index() = Some(Vec::new());
         Ok(cursor)
@@ -1180,7 +1168,6 @@ pub(crate) fn append_compaction(
         summary,
         summarized_range,
         counts,
-        false,
     )
 }
 
@@ -1191,7 +1178,6 @@ fn append_compaction_from(
     summary: &str,
     summarized_range: &[String; 2],
     counts: CompactionCounts,
-    persist_head: bool,
 ) -> Result<(u64, u64, String)> {
     #[derive(Serialize)]
     struct MessageCheckpoint<'a> {
@@ -1264,25 +1250,9 @@ fn append_compaction_from(
             kept: counts.kept,
         };
         writer.record(&marker)?;
-        if persist_head {
-            writer.record(&cursor_event(Some(&ids[marker_index])))?;
-        }
         Ok(())
     })?;
     Ok((byte_start, byte_end, ids[kept_messages.len()].clone()))
-}
-
-fn append_events_with_cursor(
-    path: &Path,
-    events: &[SessionEvent],
-    cursor: &SessionEvent,
-) -> Result<(u64, u64)> {
-    append_records(path, |writer| {
-        for event in events.iter().chain(std::iter::once(cursor)) {
-            writer.record(event)?;
-        }
-        Ok(())
-    })
 }
 
 fn append_prepared_events(path: &Path, events: &[SessionEvent]) -> Result<(u64, u64)> {
@@ -2208,10 +2178,20 @@ mod tests {
         let cursor = SessionCursor::new(path.clone(), None);
         let mut trunk = [ev(user("root")), ev(assistant("old leaf"))];
         cursor.append_events(&mut trunk).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"type\":\"cursor\""));
         let root_id = trunk[0].id.clone();
         let old_leaf = trunk[1].id.clone();
 
         cursor.branch_from(root_id.clone()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .matches("\"type\":\"cursor\"")
+                .count(),
+            1
+        );
         drop(cursor);
 
         let resumed = SessionCursor::open(path.clone()).unwrap();
@@ -2223,6 +2203,13 @@ mod tests {
 
         let mut branch = [ev(user("new branch"))];
         resumed.append_events(&mut branch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .matches("\"type\":\"cursor\"")
+                .count(),
+            1
+        );
         assert_eq!(branch[0].parent_id.as_deref(), Some(trunk[0].id.as_str()));
         assert_ne!(branch[0].parent_id.as_deref(), Some(old_leaf.as_str()));
 

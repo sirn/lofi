@@ -1285,6 +1285,12 @@ impl Fixture {
             .unwrap();
             writer.write_all(b"\n").unwrap();
         }
+        serde_json::to_writer(
+            &mut writer,
+            &json!({ "type": "cursor", "leaf_id": parent_id }),
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
         writer.flush().unwrap();
     }
 }

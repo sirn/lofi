@@ -322,6 +322,7 @@ fn scan_linear_session(
             latest_cursor = Some(skel.cursor_leaf);
             continue;
         }
+        latest_cursor = None;
         let id = skel.id;
         let parent = skel.parent_id;
         linear &= match (&parent, &previous) {
@@ -606,6 +607,7 @@ pub(super) fn load_index(path: &Path) -> Result<(SessionMeta, Vec<EventIndex>, u
         if kind == IndexKind::Cursor {
             latest_cursor = Some(entry);
         } else {
+            latest_cursor = None;
             indices.push(entry);
         }
     }
