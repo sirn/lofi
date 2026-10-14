@@ -2519,6 +2519,34 @@ fn navigate_mode_scrolls_the_restored_transcript_after_continue() {
     tui.wait_for("navigate continue answer 027", WAIT);
 }
 
+/// The /resume picker lists each saved session with a transcript preview of
+/// its latest message, so the user can tell sessions apart before resuming.
+#[test]
+fn resume_picker_shows_transcript_previews() {
+    let server = MockServer::start(vec![
+        text_response("picker preview first answer"),
+        text_response("picker preview second answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("picker preview first prompt");
+    tui.wait_for("picker preview first answer", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/new");
+    tui.submit("picker preview second prompt");
+    tui.wait_for("picker preview second answer", WAIT);
+    fixture.wait_for_event_count("turn_end", 1);
+
+    tui.submit("/resume");
+    tui.wait_for("Resume a session", WAIT);
+    // The picker prefixes previews with the role label; the transcript
+    // behind the modal renders answers without it.
+    tui.wait_for("agent: picker preview second answer", WAIT);
+    tui.wait_for("agent: picker preview first answer", WAIT);
+    tui.send(b"\x1b");
+}
+
 /// The /resume picker must restore the chosen session's tall transcript, keep
 /// it navigable in navigate mode, and shape the next request only from the
 /// restored history.
