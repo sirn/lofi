@@ -44,9 +44,12 @@ pub(super) fn handle_event(
         app.collapse_detail_focus();
         return;
     }
+    // Escape aborts the run only from the input area. In NAV and SELECT it
+    // peels a mode layer instead (SELECT -> NAV -> input).
     if k.code == KeyCode::Esc
         && current_run.is_some()
-        && (app.mode != Mode::Input || app.slash_complete.is_none())
+        && app.mode == Mode::Input
+        && app.slash_complete.is_none()
     {
         interrupt_run(app, current_run);
         return;
@@ -755,7 +758,7 @@ pub(super) fn handle_nav_key(k: &KeyEvent, app: &mut App) {
             app.yank_line();
             app.enter_input();
         }
-        KeyCode::Char('i') | KeyCode::Tab => app.enter_input(),
+        KeyCode::Char('i') | KeyCode::Tab | KeyCode::Esc => app.enter_input(),
         KeyCode::Char('[') if app.detail_focus.is_none() => app.nav_jump_turn(-1),
         KeyCode::Char(']') if app.detail_focus.is_none() => app.nav_jump_turn(1),
         KeyCode::PageUp => app.page_up(),

@@ -395,6 +395,52 @@ async fn escape_interrupts_run_and_restores_queue_like_pi() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn esc_in_nav_returns_to_input_without_interrupting_run() {
+    let mut a = app();
+    a.enter_nav();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+
+    assert!(!cancel.load(Ordering::Relaxed), "run must survive");
+    assert_eq!(a.mode, Mode::Input);
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn esc_in_select_peels_to_nav_without_interrupting_run() {
+    let mut a = app();
+    a.enter_nav();
+    a.enter_select();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+
+    assert!(!cancel.load(Ordering::Relaxed), "run must survive");
+    assert_eq!(a.mode, Mode::Navigate);
+    assert!(a.sel.is_none());
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn escape_dismisses_completion_before_interrupting_run() {
     let mut a = app();
     a.set_input("/".to_string());

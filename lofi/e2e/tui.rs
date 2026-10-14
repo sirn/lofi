@@ -400,6 +400,30 @@ fn esc_collapses_an_expanded_detail_without_cancelling_the_turn() {
 }
 
 #[test]
+fn esc_in_nav_and_select_modes_does_not_cancel_the_turn() {
+    let server = MockServer::start(vec![
+        tool_response("esc-mode-call", "return \"esc-mode-payload\";"),
+        delayed_text_response("esc modes survived", std::time::Duration::from_secs(4)),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("press esc in nav and select modes while running");
+    tui.wait_for("Succeed", WAIT);
+
+    // Escape peels Select back to Navigate, then Navigate back to the input
+    // area. Neither press aborts the running turn.
+    enter_navigation(&mut tui);
+    select_transcript_row(&mut tui, "Exec");
+    tui.send(b"v");
+    wait_select_cursor_row(&tui, "Exec");
+    tui.send(b"\x1b");
+    tui.send(b"\x1b");
+
+    tui.wait_for("esc modes survived", WAIT);
+}
+
+#[test]
 fn tab_collapses_an_expanded_detail_without_leaving_navigation() {
     let server = MockServer::start(vec![
         tool_response("tab-detail-call", "return \"tab-detail-payload\";"),
