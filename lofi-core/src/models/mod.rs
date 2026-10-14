@@ -65,9 +65,9 @@ impl ModelRegistry {
     /// discovery for that provider is reused; with no cache the provider
     /// contributes only its static models.
     /// # Errors
-    /// Returns [`Error::Http`] on a transport failure that is not covered by
-    /// the cache fallback, or [`Error::Io`] / [`Error::State`] on cache
-    /// write failure.
+    /// Returns [`Error::ProviderTransport`] on a transport failure that is
+    /// not covered by the cache fallback, or [`Error::Io`] / [`Error::State`]
+    /// on cache write failure.
     pub async fn load_async(config: &Config) -> Result<Self> {
         let mut augmented = config.clone();
         let cache_path = state::discovery_cache_path()?;

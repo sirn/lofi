@@ -189,25 +189,27 @@ fn error_text(e: &Error) -> String {
 #[must_use]
 pub fn is_retryable_error(e: &Error) -> bool {
     match e {
-        Error::Http(_)
-        | Error::ProviderTimeout { .. }
+        Error::ProviderTimeout { .. }
         | Error::ProviderTransport {
             kind: lofi_error::ProviderTransportKind::Network,
             ..
-        } => {
-            return true;
-        }
-        Error::ProviderTransport { .. } | Error::Cancelled => return false,
+        } => true,
         Error::ProviderStatus { status, .. } => {
-            return matches!(*status, 408 | 409 | 425 | 429 | 500..=599);
+            matches!(*status, 408 | 409 | 425 | 429 | 500..=599)
         }
-        _ => {}
+        // Text matching is a narrow fallback for provider-specific messages
+        // (mid-stream error payloads, quota wording); every other variant is
+        // a permanent local failure (config, HTTP client setup, tool, io)
+        // that retrying the provider request cannot fix.
+        Error::Provider(_) => {
+            let text = error_text(e);
+            if non_retryable().is_match(&text) {
+                return false;
+            }
+            retryable().is_match(&text)
+        }
+        _ => false,
     }
-    let text = error_text(e);
-    if non_retryable().is_match(&text) {
-        return false;
-    }
-    retryable().is_match(&text)
 }
 
 #[cfg(test)]
@@ -263,9 +265,6 @@ mod tests {
 
     #[test]
     fn transport_errors_are_retryable() {
-        assert!(is_retryable_error(&Error::Http(
-            "error decoding response body".into()
-        )));
         assert!(is_retryable_error(&Error::ProviderTimeout {
             phase: lofi_error::ProviderPhase::ResponseStart,
             timeout_ms: 90_000,
@@ -275,6 +274,20 @@ mod tests {
             phase: lofi_error::ProviderPhase::ResponseBody,
             detail: "connection reset".to_string(),
         }));
+    }
+
+    #[test]
+    fn permanent_local_failures_are_not_retried() {
+        // Client setup and config failures are permanent even when their
+        // message contains retryable-looking wording.
+        assert!(!is_retryable_error(&Error::Http("timeout".into())));
+        assert!(!is_retryable_error(&Error::Config(
+            "value resolution timed out".into()
+        )));
+        assert!(!is_retryable_error(&Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ))));
     }
 
     #[test]

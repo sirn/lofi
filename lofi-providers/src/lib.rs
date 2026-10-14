@@ -330,8 +330,9 @@ fn authed_get(
 /// credentials or provider headers so no configured credential headers leak
 /// to a public or alternate `models_url`.
 /// # Errors
-/// Returns [`Error::Http`] on transport failure, [`Error::Provider`] on a
-/// non-2xx response or body that exceeds the size cap, or a decode error.
+/// Returns [`Error::ProviderTransport`] on transport failure,
+/// [`Error::Http`] on client construction failure, or [`Error::Provider`] on
+/// a non-2xx response, an oversized body, or a decode error.
 #[allow(clippy::missing_errors_doc, clippy::implicit_hasher)]
 pub async fn fetch_models(
     url: &str,
@@ -354,10 +355,9 @@ pub async fn fetch_models(
     } else {
         req
     };
-    let resp = req
-        .send()
-        .await
-        .map_err(|error| Error::Http(transport_error_detail(error)))?;
+    let resp = req.send().await.map_err(|error| {
+        provider_transport_error(error, lofi_error::ProviderPhase::ResponseStart)
+    })?;
     let resp = ensure_ok(resp, None).await?;
     read_json_capped(resp, MAX_DISCOVERY_BODY_BYTES).await
 }
