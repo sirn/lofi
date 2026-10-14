@@ -309,9 +309,12 @@ impl ToolExecutor {
             let parent = id.to_string();
             let native_pending: Arc<Mutex<HashMap<u64, (String, String)>>> =
                 Arc::new(Mutex::new(HashMap::new()));
+            let native_records: Arc<Mutex<Vec<NativeToolRecord>>> =
+                Arc::new(Mutex::new(Vec::new()));
             let on_tool_event: Arc<dyn Fn(ToolEvent) + Send + Sync> = {
                 let native_pending = native_pending.clone();
-                let native_cursor = native_cursor.clone();
+                let native_records = native_records.clone();
+                let retain_records = native_cursor.is_some();
                 let event_parent = parent.clone();
                 Arc::new(move |ev: ToolEvent| match ev {
                     ToolEvent::Start { id, name, args } => {
@@ -330,22 +333,15 @@ impl ToolExecutor {
                     } => {
                         let display_result = cap_tool_result(&result);
                         if let Some((name, args)) = lock(&native_pending).remove(&id) {
-                            if let Some(cursor) = native_cursor.as_ref() {
-                                let record = NativeToolRecord {
+                            if retain_records {
+                                lock(&native_records).push(NativeToolRecord {
                                     parent: event_parent.clone(),
                                     call_id: id,
                                     name,
                                     args,
                                     result,
                                     is_error,
-                                };
-                                if let Err(error) = cursor.record(
-                                    crate::session::recorder::SessionRecord::NativeTool { record },
-                                ) {
-                                    let _ = native_tx.send(AgentEvent::Notice(format!(
-                                        "transcript write failed for native tool result: {error}"
-                                    )));
-                                }
+                                });
                             }
                         }
                         let _ = native_tx.send(AgentEvent::NativeToolEnd {
@@ -458,22 +454,15 @@ impl ToolExecutor {
                 };
                 for (call_id, (name, args)) in pending {
                     let result = "cancelled because parent exec failed".to_string();
-                    if let Some(cursor) = native_cursor.as_ref() {
-                        let record = NativeToolRecord {
+                    if native_cursor.is_some() {
+                        lock(&native_records).push(NativeToolRecord {
                             parent: parent.clone(),
                             call_id,
                             name,
                             args,
                             result: result.clone(),
                             is_error: true,
-                        };
-                        if let Err(error) = cursor
-                            .record(crate::session::recorder::SessionRecord::NativeTool { record })
-                        {
-                            let _ = relay_tx.send(AgentEvent::Notice(format!(
-                                "transcript write failed for native tool result: {error}"
-                            )));
-                        }
+                        });
                     }
                     let _ = relay_tx.send(AgentEvent::NativeToolEnd {
                         parent: parent.clone(),
@@ -481,6 +470,16 @@ impl ToolExecutor {
                         result,
                         is_error: true,
                     });
+                }
+            }
+            if let Some(cursor) = native_cursor.as_ref() {
+                let records = std::mem::take(&mut *lock(&native_records));
+                if let Err(error) =
+                    cursor.record(crate::session::recorder::SessionRecord::NativeTools { records })
+                {
+                    let _ = relay_tx.send(AgentEvent::Notice(format!(
+                        "transcript write failed for native tool result: {error}"
+                    )));
                 }
             }
             let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));

@@ -71,8 +71,8 @@ pub enum SessionRecord<'a> {
     RoundDiscarded {
         detail: &'a str,
     },
-    NativeTool {
-        record: NativeToolRecord,
+    NativeTools {
+        records: Vec<NativeToolRecord>,
     },
     /// Incremental turn suffix. Built only by [`SessionRecorder`].
     Turn(TurnBatch<'a>),
@@ -169,12 +169,18 @@ impl store::SessionCursor {
                 }];
                 self.append_events(&mut events)
             }
-            SessionRecord::NativeTool { record } => {
-                let mut events = [SessionEvent {
-                    id: String::new(),
-                    parent_id: None,
-                    kind: SessionEventKind::NativeTool(record),
-                }];
+            SessionRecord::NativeTools { records } => {
+                if records.is_empty() {
+                    return Ok((0, 0));
+                }
+                let mut events: Vec<SessionEvent> = records
+                    .into_iter()
+                    .map(|record| SessionEvent {
+                        id: String::new(),
+                        parent_id: None,
+                        kind: SessionEventKind::NativeTool(record),
+                    })
+                    .collect();
                 self.append_events(&mut events)
             }
             SessionRecord::System { prompt } => self.append_system(prompt),
@@ -602,15 +608,15 @@ mod tests {
             .unwrap()
             .expect("assistant call persisted");
         cursor
-            .record(SessionRecord::NativeTool {
-                record: NativeToolRecord {
+            .record(SessionRecord::NativeTools {
+                records: vec![NativeToolRecord {
                     parent: "t1".into(),
                     call_id: 0,
                     name: "bash".into(),
                     args: "ls".into(),
                     result: "file".into(),
                     is_error: false,
-                },
+                }],
             })
             .unwrap();
         let range = rec
