@@ -944,6 +944,127 @@ fn anthropic_thinking_truncated_before_a_signature_is_not_replayed() {
     );
 }
 
+/// Record one turn whose exec call fails, then rewrite the persisted error
+/// `tool_result` to carry empty content — the shape sessions had before tool
+/// results always carried text.
+fn fixture_with_empty_error_result(server: &MockServer) -> Fixture {
+    use crate::support::WAIT;
+
+    let fixture = Fixture::new(server);
+    let mut tui = fixture.spawn(&["--model", "anthropic/tools"]);
+    tui.submit("run the failing tool");
+    tui.wait_for("recorded error answer", WAIT);
+    tui.submit("/quit");
+    tui.wait_exit();
+    let path = fixture
+        .session_files()
+        .into_iter()
+        .next()
+        .expect("session transcript");
+    let events = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|mut event| {
+            if event["type"] == "message" && event["role"] == "tool" {
+                for block in event["blocks"].as_array_mut().into_iter().flatten() {
+                    if block["type"] == "tool_result" && block["is_error"] == true {
+                        block["content"] = json!("");
+                    }
+                }
+            }
+            event
+        })
+        .collect::<Vec<_>>();
+    let mut text = String::new();
+    for event in events {
+        writeln!(text, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+    }
+    std::fs::write(path, text).unwrap();
+    fixture
+}
+
+#[test]
+fn anthropic_replays_an_empty_error_tool_result_with_non_empty_content() {
+    use crate::support::WAIT;
+
+    // The Messages API answers 400 "content cannot be empty if `is_error` is
+    // true"; a resumed session must never send an empty error tool_result.
+    let server = MockServer::start(vec![
+        anthropic_tool_response("anthropic-empty-error", "throw new Error('recorded boom');"),
+        anthropic_text_response("recorded error answer"),
+        anthropic_text_response("resumed final answer"),
+    ]);
+    let fixture = fixture_with_empty_error_result(&server);
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "anthropic/tools"]);
+    resumed.submit("continue after the recorded error");
+    resumed.wait_for("resumed final answer", WAIT);
+    resumed.submit("/quit");
+    resumed.wait_exit();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let resumed: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    let results = resumed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "tool_result" && b["is_error"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        1,
+        "resume must replay the recorded error: {resumed}"
+    );
+    assert_ne!(
+        results[0]["content"],
+        json!(""),
+        "the API rejects an empty error tool_result"
+    );
+}
+
+#[test]
+fn anthropic_resume_with_an_empty_error_tool_result_survives_api_validation() {
+    use crate::support::WAIT;
+
+    // The same scenario against a server enforcing the real contract: an
+    // error tool_result with empty content is a 400, so without the
+    // placeholder the resumed turn fails.
+    let server = MockServer::start(vec![
+        anthropic_tool_response("anthropic-empty-error", "throw new Error('recorded boom');"),
+        anthropic_text_response("recorded error answer"),
+        anthropic_text_response("resumed final answer"),
+    ]);
+    server.validate_with(|request| {
+        let body: serde_json::Value = serde_json::from_str(&request.body).ok()?;
+        let rejected = body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|m| m["content"].as_array().into_iter().flatten())
+            .any(|b| {
+                b["type"] == "tool_result"
+                    && b["is_error"] == true
+                    && b["content"].as_str().is_some_and(str::is_empty)
+            });
+        rejected.then(|| {
+            MockResponse::error(
+                400,
+                "messages.2.content.0.tool_result: content cannot be empty if `is_error` is true",
+            )
+        })
+    });
+    let fixture = fixture_with_empty_error_result(&server);
+
+    let mut resumed = fixture.spawn(&["--continue", "--model", "anthropic/tools"]);
+    resumed.submit("continue after the recorded error");
+    resumed.wait_for("resumed final answer", WAIT);
+    resumed.submit("/quit");
+    resumed.wait_exit();
+}
+
 #[test]
 fn google_prompt_block_fails_with_the_block_reason() {
     // A blocked prompt carries promptFeedback.blockReason and no candidate;

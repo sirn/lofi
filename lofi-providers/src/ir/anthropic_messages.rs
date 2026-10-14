@@ -56,7 +56,7 @@ fn to_anthropic_request_parts<'a>(
                         } => Some(json!({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": anthropic_tool_result_content(content, images),
+                            "content": anthropic_tool_result_content(content, *is_error, images),
                             "is_error": is_error,
                         })),
                         _ => None,
@@ -81,8 +81,18 @@ fn to_anthropic_request_parts<'a>(
 /// it becomes an array of content blocks — a text part (the string, or a note
 /// when empty) followed by one `image` source block per attached image — so
 /// the model sees the image in the same round as the tool result.
-fn anthropic_tool_result_content(text: &str, images: &[lofi_types::ToolResultImage]) -> Value {
+fn anthropic_tool_result_content(
+    text: &str,
+    is_error: bool,
+    images: &[lofi_types::ToolResultImage],
+) -> Value {
     if images.is_empty() {
+        // The API rejects an error result with empty content ("content cannot
+        // be empty if `is_error` is true"); sessions recorded before results
+        // always carried text can still hold an empty error.
+        if is_error && text.is_empty() {
+            return Value::String("(tool failed without output)".to_string());
+        }
         return Value::String(text.to_string());
     }
     let mut parts: Vec<Value> = Vec::with_capacity(images.len() + 1);
@@ -131,7 +141,7 @@ fn block_to_anthropic(b: &ContentBlock) -> Value {
         } => json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": anthropic_tool_result_content(content, images),
+            "content": anthropic_tool_result_content(content, *is_error, images),
             "is_error": is_error,
         }),
         ContentBlock::Thinking {
@@ -858,6 +868,28 @@ mod tests {
         assert_eq!(result["type"], json!("tool_result"));
         assert_eq!(result["tool_use_id"], json!("tool-1"));
         assert_eq!(result["is_error"], json!(true));
+    }
+
+    #[test]
+    fn empty_error_tool_result_content_gets_placeholder() {
+        // The API answers 400 "content cannot be empty if `is_error` is true";
+        // a session can still carry an empty error result from before results
+        // always carried text.
+        let msgs = [Message {
+            origin: None,
+            role: Role::Tool,
+            blocks: vec![lofi_types::ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: String::new(),
+                is_error: true,
+                images: Vec::new(),
+            }],
+            kind: PromptKind::default(),
+        }];
+        let req = build_anthropic_request(&model(), &msgs, &[]);
+        let result = &req["messages"][0]["content"][0];
+        assert_eq!(result["is_error"], json!(true));
+        assert_ne!(result["content"], json!(""));
     }
 
     #[test]

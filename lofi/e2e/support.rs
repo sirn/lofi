@@ -137,10 +137,13 @@ pub struct MockServer {
     addr: SocketAddr,
     responses: Arc<Mutex<VecDeque<MockResponse>>>,
     requests: Arc<Mutex<Vec<MockRequest>>>,
+    validator: Arc<Mutex<Option<Validator>>>,
     workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
+
+type Validator = Box<dyn Fn(&MockRequest) -> Option<MockResponse> + Send + Sync>;
 
 impl MockServer {
     pub fn start(responses: Vec<MockResponse>) -> Self {
@@ -149,44 +152,66 @@ impl MockServer {
         let addr = listener.local_addr().unwrap();
         let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let validator: Arc<Mutex<Option<Validator>>> = Arc::new(Mutex::new(None));
         let workers = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_responses = Arc::clone(&responses);
         let thread_requests = Arc::clone(&requests);
+        let thread_validator = Arc::clone(&validator);
         let thread_workers = Arc::clone(&workers);
         let thread_stop = Arc::clone(&stop);
-        let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if thread_stop.load(Ordering::Relaxed) {
-                            break;
+        let thread =
+            thread::spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            if thread_stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let request = read_request(&mut stream);
+                            let validated = thread_validator
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .and_then(|validator| validator(&request));
+                            thread_requests.lock().unwrap().push(request);
+                            let response =
+                                validated.unwrap_or_else(|| {
+                                    thread_responses.lock().unwrap().pop_front().unwrap_or_else(
+                                        || MockResponse::error(500, "unexpected mock request"),
+                                    )
+                                });
+                            let worker =
+                                thread::spawn(move || write_response(&mut stream, &response));
+                            thread_workers.lock().unwrap().push(worker);
                         }
-                        let request = read_request(&mut stream);
-                        thread_requests.lock().unwrap().push(request);
-                        let response = thread_responses
-                            .lock()
-                            .unwrap()
-                            .pop_front()
-                            .unwrap_or_else(|| MockResponse::error(500, "unexpected mock request"));
-                        let worker = thread::spawn(move || write_response(&mut stream, &response));
-                        thread_workers.lock().unwrap().push(worker);
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
                 }
-            }
-        });
+            });
         Self {
             addr,
             responses,
             requests,
+            validator,
             workers,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Install a server-side contract check. When the validator returns a
+    /// response for an incoming request, that response is served instead of
+    /// the next queued one — e.g. the Messages API rejecting an error
+    /// `tool_result` with empty content.
+    pub fn validate_with(
+        &self,
+        validator: impl Fn(&MockRequest) -> Option<MockResponse> + Send + Sync + 'static,
+    ) {
+        *self.validator.lock().unwrap() = Some(Box::new(validator));
     }
 
     pub fn url(&self) -> String {
