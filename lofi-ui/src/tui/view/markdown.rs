@@ -1522,7 +1522,16 @@ fn build_content_map(source_len: usize, spans: &[MappedSpan]) -> Vec<usize> {
     let mut full = Vec::new();
     for m in spans {
         let c = m.span.content.chars().count();
-        full.push(m.boundary_start);
+        // A span deep inside a formatting run reports the outermost opening
+        // marker as its boundary, which precedes the previous span's content
+        // (e.g. bold text after an inline code span). Fall back to the
+        // span's own content start so the map never moves backwards; a
+        // backwards entry panics selection slicing with begin > end.
+        let boundary = match full.last() {
+            Some(&prev) if m.boundary_start < prev => m.content_start,
+            _ => m.boundary_start,
+        };
+        full.push(boundary);
         let chars: Vec<(usize, char)> = m.span.content.char_indices().collect();
         for k in 1..c {
             let off = chars.get(k).map_or(m.span.content.len(), |(b, _)| *b);
@@ -1956,6 +1965,32 @@ mod tests {
     #[test]
     fn analyze_empty_yields_no_blocks() {
         assert!(analyze_blocks("").is_empty());
+    }
+
+    #[test]
+    fn raw_map_stays_monotonic_across_formatting_runs() {
+        // Bold text containing an inline code span: the span after the code
+        // reports the `**` marker as its boundary, which precedes the code
+        // span's content. The map must never move backwards or selection
+        // slicing panics with begin > end.
+        let lines = render_markdown_body(
+            "2. **That `TruncAPr2` fixes the test.** If assumption 1 is wrong, \
+             `TruncAPr2` may not fix it.",
+            Theme::default(),
+            80,
+            78,
+            Style::default(),
+            |_| vec![],
+        );
+        for line in &lines {
+            if let Some(raw) = &line.raw {
+                assert!(
+                    raw.map.windows(2).all(|w| w[0] <= w[1]),
+                    "raw map must be monotonic: {:?}",
+                    raw.map
+                );
+            }
+        }
     }
 
     #[test]
