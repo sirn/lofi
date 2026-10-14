@@ -440,7 +440,7 @@ fn quit_persists_queued_prompts_instead_of_dropping_them() {
 
     tui.submit("first prompt marker");
     tui.submit("queued while running marker");
-    tui.wait_for_screen("Queue: queued while running marker", WAIT);
+    tui.wait_for_screen("queued while running marker", WAIT);
     tui.submit("/exit");
     tui.wait_exit();
 
@@ -757,6 +757,7 @@ fn mid_run_model_switch_keeps_the_working_line_model() {
     tui.wait_for("switched to mock/alt", WAIT);
 
     let working = tui.screen_row("Working for").expect("working row");
+    let working = working.split('│').next().unwrap_or(&working);
     assert!(
         working.contains("mock/chat"),
         "working line must keep the run model: {working}"

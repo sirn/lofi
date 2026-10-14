@@ -319,8 +319,8 @@ fn notice_message_uses_muted_bar_marker_and_italic_muted_body() {
     };
     let lines = render_turn_lines(&cx, &turn);
     assert!(!lines.is_empty());
-    // Bar marker in muted, matching user/agent message structure.
-    assert_eq!(lines[0].line.spans[0].content, "▌ ");
+    // Left quarter-block bar marker in muted for job notifications.
+    assert_eq!(lines[0].line.spans[0].content, "▎ ");
     assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.muted));
     // Body is muted and italic, not the regular user fg.
     let body = &lines[0].line.spans[1];
@@ -330,7 +330,7 @@ fn notice_message_uses_muted_bar_marker_and_italic_muted_body() {
     turn.prompt = "a long notice text that wraps to a second row easily".to_string();
     let lines = render_turn_lines(&cx, &turn);
     assert!(lines.iter().all(|line| {
-        line.line.spans[0].content == "▌ " && line.line.spans[0].style.fg == Some(a.theme.muted)
+        line.line.spans[0].content == "▎ " && line.line.spans[0].style.fg == Some(a.theme.muted)
     }));
 }
 

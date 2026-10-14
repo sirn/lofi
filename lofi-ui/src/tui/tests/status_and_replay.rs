@@ -1015,21 +1015,26 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
 }
 
 #[test]
-fn queue_badge_shows_preview_and_count() {
+fn queued_prompts_render_in_transcript_with_muted_bars() {
     let mut a = app();
-    assert!(a.queue_badge().is_none());
     a.prompt_queue.push(QueuedPrompt {
         text: "fix the bug".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    let badge = a.queue_badge().expect("badge for one item");
-    assert!(badge.contains("Queue: fix the bug"), "badge: {badge}");
     a.prompt_queue.push(QueuedPrompt {
         text: "also add tests".to_string(),
         kind: lofi_types::PromptKind::User,
     });
-    let badge = a.queue_badge().expect("badge for two items");
-    assert!(badge.contains("Queue: fix the bug (+1)"), "badge: {badge}");
+    let rendered = view::blocks::render_turns(&a, 80);
+    let lines: Vec<String> = rendered
+        .lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert!(lines.iter().any(|l| l == "▌ fix the bug"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "▌ also add tests"), "{lines:?}");
+    assert_eq!(rendered.lines[0].spans[0].style.fg, Some(a.theme.muted));
+    assert_eq!(rendered.lines[0].spans[1].style.fg, Some(a.theme.muted));
 }
 
 #[test]
@@ -1054,36 +1059,77 @@ fn interrupt_run_restores_user_prompts_and_keeps_notices_queued() {
 }
 
 #[test]
-fn queue_badge_marks_notice_with_hollow_bullet() {
+fn queued_notice_renders_with_quarter_block_and_italic_body() {
     let mut a = app();
     a.prompt_queue.push(QueuedPrompt {
         text: "job 1786 completed: sleep 1".to_string(),
         kind: lofi_types::PromptKind::Notice,
     });
-    let badge = a.queue_badge().expect("badge");
+    let rendered = view::blocks::render_turns(&a, 80);
+    assert_eq!(rendered.lines[0].spans[0].content, "▎ ");
+    assert_eq!(rendered.lines[0].spans[0].style.fg, Some(a.theme.muted));
+    assert!(rendered.lines[0].spans[1]
+        .style
+        .add_modifier
+        .contains(Modifier::ITALIC));
+}
+
+#[test]
+fn toast_renders_with_rounded_border_on_bottom_right_above_input() {
+    use ratatui::Terminal;
+    let mut a = app();
+    a.notify(NotifyKind::Warn, "something happened".to_string());
+    let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol()).collect() };
+    // Footer panel occupies rows 8..12; the 3-row rounded toast sits on rows 5..8 at the right edge.
+    assert!(row(5).trim_end().ends_with('╮'), "top border: {}", row(5));
+    assert!(row(6).contains("something happened"), "body: {}", row(6));
     assert!(
-        badge.starts_with("Queue: ▷ "),
-        "queued Notice should render with the hollow bullet, got: {badge}"
+        row(7).trim_end().ends_with('╯'),
+        "bottom border: {}",
+        row(7)
     );
 }
 
 #[test]
-fn queue_badge_truncates_long_prompt() {
+fn select_mode_colors_cursor_cell_distinctly_from_navigate_mode() {
+    use ratatui::Terminal;
     let mut a = app();
-    let long = "x".repeat(100);
-    a.prompt_queue.push(QueuedPrompt {
-        text: long,
-        kind: lofi_types::PromptKind::User,
-    });
-    let badge = a.queue_badge().expect("badge");
-    assert!(
-        badge.ends_with("…"),
-        "badge should end with ellipsis: {badge}"
-    );
-    assert!(
-        !badge.contains(&"x".repeat(50)),
-        "badge should be truncated: {badge}"
-    );
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::Text("select cursor test".into()));
+    let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+
+    a.enter_nav();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    let nav_y = a.log_rect.y + (a.nav_cursor - a.log_off) as u16;
+    assert!((0..60).any(|x| buf[(x, nav_y)].bg == a.theme.cursor_line));
+    assert!((0..60).any(|x| buf[(x, nav_y)].bg == a.theme.select_cursor));
+    assert!(!(0..60).any(|x| buf[(x, nav_y)].bg == a.theme.warn));
+
+    a.enter_select();
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let buf = term.backend().buffer();
+    assert!(!(0..60).any(|x| buf[(x, nav_y)].bg == a.theme.cursor_line));
+    assert!((0..60).any(|x| buf[(x, nav_y)].bg == a.theme.warn));
+}
+
+#[test]
+fn policy_override_renders_left_of_cost_in_footer() {
+    let mut a = app();
+    let policy = lofi_core::PolicyOverride::default();
+    policy.set(Some(lofi_core::BashApprovalMode::DenyAll));
+    a.policy_override = Some(policy);
+    let cost_line: String = a
+        .render_footer_cost()
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(cost_line, "policy: deny all · $0.00");
 }
 
 #[test]

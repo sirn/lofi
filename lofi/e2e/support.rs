@@ -1744,6 +1744,9 @@ impl TerminalScreen {
                 23 => self.italic = false,
                 9 => self.crossed_out = true,
                 29 => self.crossed_out = false,
+                40..=47 => {
+                    self.bg = Some(ScreenBg::Indexed((params[i] - 40) as u8));
+                }
                 38 | 48 => {
                     let is_bg = params[i] == 48;
                     match params.get(i + 1).copied() {
@@ -1827,7 +1830,7 @@ impl TerminalScreen {
     }
 
     fn tinted_row_index(&self) -> Option<usize> {
-        self.cells[2..self.cells.len().saturating_sub(6)]
+        self.cells[2..self.cells.len().saturating_sub(5)]
             .iter()
             .position(|row| {
                 row.iter()
@@ -1837,11 +1840,11 @@ impl TerminalScreen {
     }
 
     fn select_cursor_row_text(&self) -> Option<String> {
-        self.cells[2..self.cells.len().saturating_sub(6)]
+        self.cells[2..self.cells.len().saturating_sub(5)]
             .iter()
             .find(|row| {
                 row.iter()
-                    .any(|cell| cell.bg == Some(ScreenBg::Indexed(60)))
+                    .any(|cell| matches!(cell.bg, Some(ScreenBg::Indexed(60 | 3))))
             })
             .map(|row| row.iter().map(|cell| cell.ch).collect())
     }
@@ -2049,6 +2052,20 @@ impl Tui {
     /// Text of the row containing the Select cursor cell in the transcript log.
     pub fn select_cursor_row_text(&self) -> Option<String> {
         self.output.lock().unwrap().screen.select_cursor_row_text()
+    }
+
+    pub fn wait_for_navigation(&self, timeout: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.tinted_row_text().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for navigate cursor; screen:\n{}",
+            self.screen_text()
+        );
     }
 
     pub fn screen_text(&self) -> String {

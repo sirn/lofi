@@ -35,6 +35,20 @@ pub fn apply_line_bg(line: &mut Line<'static>, bg: Color) {
 }
 
 pub fn apply_selection(line: &mut Line<'static>, start: usize, end: usize, bg: Color) {
+    apply_range_style(line, start, end, None, bg);
+}
+
+pub fn apply_cursor(line: &mut Line<'static>, start: usize, end: usize, fg: Color, bg: Color) {
+    apply_range_style(line, start, end, Some(fg), bg);
+}
+
+fn apply_range_style(
+    line: &mut Line<'static>,
+    start: usize,
+    end: usize,
+    fg: Option<Color>,
+    bg: Color,
+) {
     if start >= end {
         return;
     }
@@ -58,7 +72,10 @@ pub fn apply_selection(line: &mut Line<'static>, start: usize, end: usize, bg: C
         if lo > 0 {
             out.push(Span::styled(content[..b_lo].to_string(), style));
         }
-        let sel_style = style.bg(bg);
+        let mut sel_style = style.bg(bg);
+        if let Some(fg) = fg {
+            sel_style = sel_style.fg(fg);
+        }
         out.push(Span::styled(content[b_lo..b_hi].to_string(), sel_style));
         if hi < n {
             out.push(Span::styled(content[b_hi..].to_string(), style));

@@ -3,15 +3,6 @@
 use super::*;
 
 impl App {
-    pub(crate) fn mode_badge(&self) -> (&'static str, Color) {
-        let t = self.theme;
-        match self.mode {
-            Mode::Input => ("INPUT", t.muted),
-            Mode::Navigate => ("NAV", t.primary),
-            Mode::Select => ("SELECT", t.warn),
-        }
-    }
-
     pub(crate) fn render_header_line(&self, width: usize) -> Line<'static> {
         let t = self.theme;
         let wordmark = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
@@ -102,46 +93,17 @@ impl App {
             .map(|retry| format!("Retry: {} of {}", retry.attempt, retry.max_attempts))
     }
 
-    /// Persistent count of running background jobs, e.g. "1 job" / "2 jobs".
-    /// Always visible while any job runs, unlike the transient badges.
-    pub(crate) fn jobs_badge(&self) -> Option<String> {
-        let jobs = self.jobs.as_ref()?;
-        let n = jobs.running_count();
-        if n == 0 {
-            None
-        } else if n == 1 {
-            Some("1 job".to_string())
-        } else {
-            Some(format!("{n} jobs"))
-        }
+    pub(crate) fn running_jobs(&self) -> Vec<lofi_core::JobInfo> {
+        self.jobs_snapshot()
+            .into_iter()
+            .filter(|job| job.running)
+            .collect()
     }
 
-    pub(crate) fn queue_badge(&self) -> Option<String> {
-        if self.prompt_queue.is_empty() {
-            return None;
-        }
-        let n = self.prompt_queue.len();
-        let head = &self.prompt_queue[0];
-        // Match the transcript marker so a queued Notice reads the same
-        // everywhere: a hollow bullet signals "system-injected" the way the
-        // user's solid mark signals "you typed this".
-        let marker = match head.kind {
-            lofi_types::PromptKind::User => "",
-            lofi_types::PromptKind::Notice => "▷ ",
-        };
-        let preview = head.text.as_str();
-        let truncated = if preview.chars().count() > 40 {
-            let mut s: String = preview.chars().take(39).collect();
-            s.push('…');
-            s
-        } else {
-            preview.to_string()
-        };
-        Some(if n == 1 {
-            format!("Queue: {marker}{truncated}")
-        } else {
-            format!("Queue: {marker}{truncated} (+{})", n - 1)
-        })
+    pub(crate) fn has_running_jobs(&self) -> bool {
+        self.jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.running_count() > 0)
     }
 
     pub(crate) fn yank_badge(&self) -> Option<&'static str> {
@@ -165,6 +127,44 @@ impl App {
         }
     }
 
+    pub(crate) fn active_toast(&self) -> Option<(String, Color)> {
+        let t = self.theme;
+        if let Some(badge) = self.quit_badge() {
+            Some((badge.to_string(), t.warn))
+        } else if let Some(badge) = self.yank_badge() {
+            Some((badge.to_string(), t.primary))
+        } else if let Some(retry) = self.retry_badge() {
+            Some((retry, t.warn))
+        } else if let Some((msg, kind)) = self.notify_badge() {
+            let color = match kind {
+                NotifyKind::Info => t.primary,
+                NotifyKind::Warn => t.warn,
+                NotifyKind::Error => t.error,
+            };
+            Some((msg.to_string(), color))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn toast_lines(&self, w: usize) -> Option<(Vec<String>, Color)> {
+        let (msg, color) = self.active_toast()?;
+        let avail = w.saturating_sub(4);
+        if avail == 0 {
+            return None;
+        }
+        let mut lines = super::view::wrap(&msg, avail);
+        let overflow = lines.len() > NOTIFY_MAX_LINES;
+        lines.truncate(NOTIFY_MAX_LINES);
+        if overflow {
+            if let Some(last) = lines.last_mut() {
+                *last = super::view::truncate(last, avail.saturating_sub(1));
+                last.push('…');
+            }
+        }
+        Some((lines, color))
+    }
+
     /// Persistent chip while `/policy` set a non-default approval mode.
     pub(crate) fn policy_badge(&self) -> Option<String> {
         let mode = self.policy_override.as_ref()?.current()?;
@@ -174,31 +174,28 @@ impl App {
         Some(format!("policy: {}", policy_mode_label(mode)))
     }
 
-    /// Rows the notification area occupies at the given terminal width.
-    /// Only the transient notify badge can overflow one line — quit, yank,
-    /// retry, and queue badges are short by construction and always take a
-    /// single row. A long notify wraps to at most [`NOTIFY_MAX_LINES`] rows.
+    /// Rows the toast body occupies inside its border at the given terminal width.
+    #[cfg(test)]
     pub(crate) fn notify_lines(&self, w: usize) -> u16 {
-        let Some((msg, _)) = self.notify_badge() else {
-            return 1;
-        };
-        let (label, _) = self.mode_badge();
-        let mode_w = super::view::width(label) + 2;
-        let avail = w.saturating_sub(4).saturating_sub(mode_w);
-        if avail == 0 {
-            return 1;
-        }
-        super::view::wrap(msg, avail).len().min(NOTIFY_MAX_LINES) as u16
+        self.toast_lines(w)
+            .map_or(0, |(lines, _)| lines.len() as u16)
     }
 
-    /// Footer cost, shown on the right edge of the usage line. Includes the
-    /// current turn's running cost (`turn_cost`) so a multi-round turn shows
-    /// a live total before `TurnEnd` folds it into `cost`.
+    /// Footer cost and active policy override, shown on the right edge of the
+    /// usage line. Includes the current turn's running cost (`turn_cost`) so a
+    /// multi-round turn shows a live total before `TurnEnd` folds it into `cost`.
     pub(crate) fn render_footer_cost(&self) -> Line<'static> {
-        Line::from(vec![Span::styled(
+        let t = self.theme;
+        let mut spans = Vec::new();
+        if let Some(badge) = self.policy_badge() {
+            spans.push(Span::styled(badge, Style::new().fg(t.warn)));
+            spans.push(Span::styled(" · ", Style::new().fg(t.muted)));
+        }
+        spans.push(Span::styled(
             fmt_cost(self.cost + self.turn_cost),
-            Style::new().fg(self.theme.muted),
-        )])
+            Style::new().fg(t.muted),
+        ));
+        Line::from(spans)
     }
 
     pub(crate) fn render_footer_right(&self) -> Line<'static> {

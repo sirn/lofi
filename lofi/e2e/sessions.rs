@@ -2446,7 +2446,7 @@ fn navigate_cursor_stays_on_its_content_while_resumed_heights_converge() {
     // Enter Navigate and browse immediately, before the resumed geometry has
     // converged: the cursor starts on the last turn and walks up a few lines.
     tui.send(b"\t");
-    tui.wait_for("NAV", WAIT);
+    tui.wait_for_navigation(WAIT);
     for _ in 0..3 {
         tui.send(b"k");
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -2501,7 +2501,7 @@ fn navigate_mode_scrolls_the_restored_transcript_after_continue() {
     tui.wait_for("navigate continue answer 027", WAIT);
     tui.clear_output();
     tui.send(b"\t");
-    tui.wait_for("NAV", WAIT);
+    tui.wait_for_navigation(WAIT);
     // Browse a little before jumping: the cursor walks up from the bottom of
     // the restored transcript a line at a time.
     for _ in 0..3 {
@@ -2551,7 +2551,7 @@ fn resume_picker_restores_a_tall_session_and_stays_navigable() {
     tui.wait_for("resume alpha answer 025", WAIT);
 
     tui.send(b"\t");
-    tui.wait_for("NAV", WAIT);
+    tui.wait_for_navigation(WAIT);
     for _ in 0..3 {
         tui.send(b"k");
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -2593,12 +2593,12 @@ fn resumed_notice_turn_keeps_its_notice_marker() {
 
     tui.submit("spawn a notifying job");
     tui.wait_for("notice resume answer", WAIT);
-    tui.wait_for("\u{258C} job", WAIT);
+    tui.wait_for("\u{258E} job", WAIT);
     tui.wait_for("notice acknowledged", WAIT);
     tui.submit("/quit");
     tui.wait_exit();
 
     let mut tui = fixture.spawn(&["--continue"]);
     tui.wait_for("notice acknowledged", WAIT);
-    tui.wait_for("\u{258C} job", WAIT);
+    tui.wait_for("\u{258E} job", WAIT);
 }

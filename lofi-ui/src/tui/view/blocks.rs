@@ -191,7 +191,44 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
         }
         out.extend(render_turn_lines(&cx, turn).into_iter().map(|rl| rl.line));
     }
+    let tail_cx = Cx {
+        app,
+        theme,
+        width: w,
+        active_turn: running,
+    };
+    out.extend(
+        render_transcript_tail(&tail_cx, !app.transcript.turns.is_empty())
+            .into_iter()
+            .map(|rl| rl.line),
+    );
     Text::from(out)
+}
+
+pub fn render_transcript_tail(cx: &Cx, has_prior: bool) -> Vec<RenderLine> {
+    let mut out = Vec::new();
+    let mut any = has_prior;
+    for job in cx.app.running_jobs() {
+        if any {
+            out.push(prim::rblank());
+        }
+        out.extend(RunningJobLine { job: &job }.lines(cx));
+        any = true;
+    }
+    for queued in &cx.app.prompt_queue {
+        if any {
+            out.push(prim::rblank());
+        }
+        out.extend(
+            QueuedPromptLine {
+                text: &queued.text,
+                kind: queued.kind,
+            }
+            .lines(cx),
+        );
+        any = true;
+    }
+    out
 }
 
 pub fn render_turn_lines(cx: &Cx, turn: &Turn) -> Vec<RenderLine> {
@@ -343,14 +380,14 @@ impl Component for NoticeMessage<'_> {
         let t = cx.theme;
         let w = cx.width;
         let content_w = w.saturating_sub(2);
-        // Notices (job wake-ups, future automation) share the bar marker
-        // and row rhythm of user/agent messages but stay de-emphasized so
-        // an app-injected prompt never competes visually with typed input:
-        // muted color for marker and body, italic body.
+        // Notices (job wake-ups, future automation) use the thinner left
+        // quarter-block bar and stay de-emphasized so an app-injected prompt
+        // never competes visually with typed input: muted color for marker
+        // and body, italic body.
         let mark = Style::new().fg(t.muted);
         let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
         render_markdown_body(self.prompt.trim(), t, w, content_w, body_style, move |_| {
-            vec![Span::styled("▌ ", mark)]
+            vec![Span::styled("▎ ", mark)]
         })
     }
 
@@ -368,8 +405,58 @@ impl Component for NoticeMessage<'_> {
             cx.width,
             cx.width.saturating_sub(2),
             body_style,
-            move |_| vec![Span::styled("▌ ", mark)],
+            move |_| vec![Span::styled("▎ ", mark)],
             range,
+        )
+    }
+}
+
+struct RunningJobLine<'a> {
+    job: &'a lofi_core::JobInfo,
+}
+
+impl Component for RunningJobLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let dur = prim::fmt_duration(Duration::from_millis(self.job.duration_ms));
+        let cmd = self.job.cmd.trim();
+        let text = format!("job {} running ({dur}): {cmd}", self.job.id);
+        let mark = Style::new().fg(t.info);
+        let body_style = Style::new().fg(t.muted);
+        render_markdown_body(
+            &text,
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            body_style,
+            move |_| vec![Span::styled("┆ ", mark)],
+        )
+    }
+}
+
+struct QueuedPromptLine<'a> {
+    text: &'a str,
+    kind: lofi_types::PromptKind,
+}
+
+impl Component for QueuedPromptLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let mark = Style::new().fg(t.muted);
+        let (bar, body_style) = match self.kind {
+            lofi_types::PromptKind::Notice => (
+                "▎ ",
+                Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
+            ),
+            lofi_types::PromptKind::User => ("▌ ", Style::new().fg(t.muted)),
+        };
+        render_markdown_body(
+            self.text.trim(),
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            body_style,
+            move |_| vec![Span::styled(bar, mark)],
         )
     }
 }
@@ -1627,6 +1714,47 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::{native_body, native_preview_range, summarize_tool_args, trim_reasoning_summary};
     use crate::tui::NativeTool;
+
+    #[test]
+    fn running_job_line_renders_with_dashed_bar() {
+        use super::{Component, Cx, RunningJobLine};
+        let a = crate::tui::App::new(
+            "m".to_string(),
+            lofi_types::ThinkingLevel::Off,
+            lofi_types::ServiceTier::Auto,
+            200_000,
+            lofi_types::CompactionConfig::default(),
+            String::new(),
+        );
+        let cx = Cx {
+            app: &a,
+            theme: a.theme,
+            width: 80,
+            active_turn: false,
+        };
+        let job = lofi_core::JobInfo {
+            id: 42,
+            cmd: "cargo test --workspace".to_string(),
+            state: "running".to_string(),
+            running: true,
+            pid: Some(1234),
+            exit_code: None,
+            duration_ms: 12_000,
+            log_path: String::new(),
+            tty: false,
+        };
+        let lines = (RunningJobLine { job: &job }).lines(&cx);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line.spans[0].content, "┆ ");
+        assert_eq!(lines[0].line.spans[0].style.fg, Some(a.theme.info));
+        let rendered: String = lines[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(rendered, "┆ job 42 running (12s): cargo test --workspace");
+    }
 
     #[test]
     fn bash_preview_keeps_tail_while_other_tools_keep_head() {

@@ -379,19 +379,18 @@ fn compact_keeps_file_backed_turn_content_visible() {
 }
 
 #[test]
-fn notify_lines_is_one_without_notification() {
+fn notify_lines_is_zero_without_notification() {
     let a = app();
-    assert_eq!(a.notify_lines(80), 1);
+    assert_eq!(a.notify_lines(80), 0);
 }
 
 #[test]
 fn notify_lines_grows_with_a_long_message_and_caps_at_max() {
-    let mut a = app(); // mode INPUT; " INPUT " is 7 cells
+    let mut a = app();
     a.notify(
         NotifyKind::Error,
         "quite a long error message that absolutely refuses to fit on a single line of a reasonably wide terminal".to_string(),
     );
-    // Width 60: avail = 60-4-7 = 49 → more than one row for the message.
     let lines_60 = a.notify_lines(60);
     assert!(lines_60 >= 2, "expected wrapping, got {lines_60}");
     // Narrow enough to need more than the cap → stops at NOTIFY_MAX_LINES.

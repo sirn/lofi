@@ -436,10 +436,8 @@ fn prompt_panel_uses_full_height_user_rail() {
     let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let buf = term.backend().buffer();
-    let rule_y = (0..20)
-        .find(|&y| buf[(0, y)].symbol() == "╱")
-        .expect("prompt rule");
-    for y in rule_y + 1..20 {
+    let panel_top = 16;
+    for y in panel_top..20 {
         assert_eq!(buf[(0, y)].symbol(), "▌", "panel row {y}");
         assert_eq!(buf[(0, y)].fg, a.theme.user, "focused rail row {y}");
     }
@@ -447,7 +445,7 @@ fn prompt_panel_uses_full_height_user_rail() {
     a.mode = Mode::Navigate;
     term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
     let buf = term.backend().buffer();
-    for y in rule_y + 1..20 {
+    for y in panel_top..20 {
         assert_eq!(buf[(0, y)].symbol(), "▌", "panel row {y}");
         assert_eq!(buf[(0, y)].fg, a.theme.subtle, "unfocused rail row {y}");
     }

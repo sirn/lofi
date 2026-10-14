@@ -1786,7 +1786,7 @@ async fn run_loop(
                     }
                     dirty = true;
                 }
-                if app.retry.is_some() {
+                if app.retry.is_some() || app.has_running_jobs() {
                     dirty = true;
                 }
                 if app
