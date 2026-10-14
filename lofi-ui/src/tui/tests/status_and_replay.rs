@@ -986,6 +986,40 @@ fn footer_shows_cache_percentage_without_cumulative_cache_counts() {
 }
 
 #[test]
+fn footer_left_hides_labels_then_elements_when_narrow() {
+    let mut a = app();
+    push_turn(&mut a);
+    a.apply_event(AgentEvent::TurnEnd {
+        model: "m".into(),
+        elapsed_ms: 0,
+        cost: 1.0,
+        usage: Usage {
+            input_tokens: 100_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 800_000,
+            cache_write_tokens: 200_000,
+        },
+        stop_reason: None,
+    });
+    let footer = |a: &App, width: usize| {
+        a.render_footer_left(width)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    };
+    let full = footer(&a, 120);
+    assert!(full.contains("↑100k ↓100k"), "full: {full}");
+    assert!(
+        full.contains("context 1.2M/200k · 73% cached"),
+        "full: {full}"
+    );
+    assert_eq!(footer(&a, 30), "↑100k ↓100k · 1.2M/200k");
+    assert_eq!(footer(&a, 10), "1.2M/200k");
+    assert_eq!(footer(&a, 5), "");
+}
+
+#[test]
 fn retry_notice_is_transient_status_and_resets_on_success() {
     let mut a = app();
     push_turn(&mut a);

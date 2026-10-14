@@ -829,8 +829,11 @@ fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
-    let left = app.render_footer_left(w).spans;
     let right = app.render_footer_cost().spans;
+    let right_w: usize = right.iter().map(|s| prim::width(&s.content)).sum();
+    let left = app
+        .render_footer_left(w.saturating_sub(right_w).saturating_sub(1))
+        .spans;
     let line = HStack::new(w).left(left).right(right).build();
     f.render_widget(
         Paragraph::new(line).style(Style::new().bg(app.theme.panel_bg)),

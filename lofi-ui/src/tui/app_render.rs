@@ -30,11 +30,32 @@ impl App {
             .build()
     }
 
-    pub(crate) fn render_footer_left(&self, _width: usize) -> Line<'static> {
+    /// Usage side of the footer, compacted in steps when it exceeds the
+    /// width budget: first the `context` and `cached` labels, then the
+    /// token-io counts, then everything.
+    pub(crate) fn render_footer_left(&self, width: usize) -> Line<'static> {
         let t = self.theme;
-        let sep = " · ";
+        let mut segments = self.footer_left_segments(true, true);
+        if footer_segments_width(&segments) > width {
+            segments = self.footer_left_segments(false, true);
+        }
+        if footer_segments_width(&segments) > width {
+            segments = self.footer_left_segments(false, false);
+        }
+        if footer_segments_width(&segments) > width {
+            segments.clear();
+        }
+        Line::from(vec![Span::styled(
+            segments.join(" · "),
+            Style::new().fg(t.muted),
+        )])
+    }
+
+    /// `labels` keeps the `context` word and the `N% cached` suffix;
+    /// `io` keeps the in/out token counts.
+    fn footer_left_segments(&self, labels: bool, io: bool) -> Vec<String> {
         let mut segments: Vec<String> = Vec::new();
-        if self.total_in > 0 || self.total_out > 0 {
+        if io && (self.total_in > 0 || self.total_out > 0) {
             segments.push(format!(
                 "↑{} ↓{}",
                 compact_count(self.total_in),
@@ -46,26 +67,32 @@ impl App {
         // policy reads the same `context_tokens` value. When the provider
         // reports cache activity, append the hit rate as `N% cached`.
         let used = self.status_usage.map_or(0, |u| u.context_tokens());
-        let cached_suffix = self.status_usage.and_then(|u| {
-            let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
-            if prompt > 0 && (u.cache_read_tokens > 0 || u.cache_write_tokens > 0) {
-                let rate = u.cache_read_tokens as f64 / prompt as f64 * 100.0;
-                Some(format!(" · {rate:.0}% cached"))
-            } else {
-                None
-            }
-        });
+        let cached_suffix = if labels {
+            self.status_usage.and_then(|u| {
+                let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
+                if prompt > 0 && (u.cache_read_tokens > 0 || u.cache_write_tokens > 0) {
+                    let rate = u.cache_read_tokens as f64 / prompt as f64 * 100.0;
+                    Some(format!(" · {rate:.0}% cached"))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         let used_str = if self.compacted {
             "c".to_string()
         } else {
             compact_count(used)
         };
+        let context_label = if labels { "context " } else { "" };
         if self.external_backend {
             segments.push(self.backend_context.map_or_else(
                 || "context unknown".to_string(),
                 |context| {
                     format!(
-                        "context {}/{}",
+                        "{}{}/{}",
+                        context_label,
                         compact_count(context.used),
                         context
                             .size
@@ -75,16 +102,14 @@ impl App {
             ));
         } else {
             segments.push(format!(
-                "context {}/{}{}",
+                "{}{}/{}{}",
+                context_label,
                 used_str,
                 compact_count(self.ctx_limit),
                 cached_suffix.unwrap_or_default()
             ));
         }
-        Line::from(vec![Span::styled(
-            segments.join(sep),
-            Style::new().fg(t.muted),
-        )])
+        segments
     }
 
     pub(crate) fn retry_badge(&self) -> Option<String> {
@@ -205,6 +230,15 @@ impl App {
         }
         Line::from(vec![Span::styled(label, Style::new().fg(self.theme.muted))])
     }
+}
+
+/// Display width of footer segments joined by ` · `.
+fn footer_segments_width(segments: &[String]) -> usize {
+    let body: usize = segments
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.as_str()))
+        .sum();
+    body + 3 * segments.len().saturating_sub(1)
 }
 
 /// Jobs the transcript tail still shows as running. The registry flips a
