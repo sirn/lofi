@@ -453,14 +453,17 @@ async fn run_external(
     };
     let prior_leaf = work.cursor.as_ref().and_then(SessionCursor::leaf_id);
     let start = Instant::now();
-    let mut journal = Journal::new(work.cursor.clone(), model.clone());
-    journal.history = Some(turn_messages.clone());
+    let journal = Arc::new(Mutex::new(Journal::new(
+        work.cursor.clone(),
+        model.clone(),
+        turn_messages,
+    )));
     work.events
         .send(AgentEvent::RunStart)
         .await
         .map_err(|_| Error::Cancelled)?;
     for notice in &work.request.notices {
-        journal.prompt(notice, PromptKind::Notice)?;
+        lock_journal(&journal)?.prompt(notice, PromptKind::Notice)?;
         work.events
             .send(AgentEvent::Prompt {
                 prompt: notice.clone(),
@@ -469,7 +472,7 @@ async fn run_external(
             .await
             .map_err(|_| Error::Cancelled)?;
     }
-    journal.prompt(text, *kind)?;
+    lock_journal(&journal)?.prompt(text, *kind)?;
     work.events
         .send(AgentEvent::Prompt {
             prompt: text.clone(),
@@ -539,7 +542,7 @@ async fn run_external(
             }
         }
         let (tx, mut rx) = mpsc::channel(64);
-        let context = tool_context(work, tx, model.clone(), turn_messages.clone());
+        let context = tool_context(work, tx, journal.clone());
         let prompt = if work.request.notices.is_empty() {
             text.clone()
         } else {
@@ -563,11 +566,11 @@ async fn run_external(
                         }
                     }
                     model.id.clone_from(id);
-                    if let Some(recorder) = &mut journal.recorder {
+                    if let Some(recorder) = &mut lock_journal(&journal)?.recorder {
                         recorder.set_model(model.clone());
                     }
                 }
-                journal.event(&event)?;
+                lock_journal(&journal)?.event(&event)?;
                 work.events
                     .send(event)
                     .await
@@ -591,7 +594,12 @@ async fn run_external(
             Err(e) => TurnOutcome::Failed(e.to_string()),
         }
     };
-    if let Some((byte_start, byte_end)) = journal.finish(&outcome, elapsed_ms)? {
+    let (committed, usage) = {
+        let mut journal = lock_journal(&journal)?;
+        let committed = journal.finish(&outcome, elapsed_ms)?;
+        (committed, journal.summary.usage)
+    };
+    if let Some((byte_start, byte_end)) = committed {
         let _ = work
             .events
             .send(AgentEvent::TurnCommitted {
@@ -600,7 +608,6 @@ async fn run_external(
             })
             .await;
     }
-    let usage = journal.summary.usage;
     let event = match outcome {
         TurnOutcome::Cancelled => AgentEvent::TurnCancelled {
             model,
@@ -637,11 +644,16 @@ async fn run_external(
     }
 }
 
+fn lock_journal(journal: &Arc<Mutex<Journal>>) -> Result<std::sync::MutexGuard<'_, Journal>> {
+    journal
+        .lock()
+        .map_err(|_| Error::State("backend journal lock poisoned".into()))
+}
+
 fn tool_context(
     work: &Work,
     events: mpsc::Sender<AgentEvent>,
-    model: RunModel,
-    history: Arc<Mutex<Vec<Message>>>,
+    journal: Arc<Mutex<Journal>>,
 ) -> ToolCallContext {
     let recall = work.cursor.clone().map(|cursor| {
         Arc::new(move |request: &lofi_types::recall::RecallRequest| {
@@ -674,16 +686,13 @@ fn tool_context(
         result,
         on_job_acquired,
         record_tool: Some({
-            let cursor = work.cursor.clone();
             Arc::new(move |block: ContentBlock| {
                 let role = if matches!(block, ContentBlock::ToolUse { .. }) {
                     Role::Assistant
                 } else {
                     Role::Tool
                 };
-                let mut journal = Journal::new(cursor.clone(), model.clone());
-                journal.history = Some(history.clone());
-                journal.push(role, PromptKind::User, block)
+                lock_journal(&journal)?.push(role, PromptKind::User, block)
             }) as Arc<dyn Fn(ContentBlock) -> Result<()> + Send + Sync>
         }),
     }
@@ -693,17 +702,21 @@ struct Journal {
     recorder: Option<SessionRecorder>,
     messages: Vec<Message>,
     pending_blocks: Vec<ContentBlock>,
-    history: Option<Arc<Mutex<Vec<Message>>>>,
+    history: Arc<Mutex<Vec<Message>>>,
     summary: TurnSummary,
 }
 
 impl Journal {
-    fn new(cursor: Option<SessionCursor>, model: RunModel) -> Self {
+    fn new(
+        cursor: Option<SessionCursor>,
+        model: RunModel,
+        history: Arc<Mutex<Vec<Message>>>,
+    ) -> Self {
         Self {
             recorder: cursor.map(|cursor| SessionRecorder::new(cursor, model)),
             messages: Vec::new(),
             pending_blocks: Vec::new(),
-            history: None,
+            history,
             summary: TurnSummary {
                 elapsed_ms: 0,
                 cost: 0.0,
@@ -716,12 +729,10 @@ impl Journal {
     }
 
     fn append_message(&mut self, message: Message) -> Result<()> {
-        if let Some(history) = &self.history {
-            history
-                .lock()
-                .map_err(|_| Error::State("backend history lock poisoned".into()))?
-                .push(message.clone());
-        }
+        self.history
+            .lock()
+            .map_err(|_| Error::State("backend history lock poisoned".into()))?
+            .push(message.clone());
         self.messages.push(message);
         Ok(())
     }
