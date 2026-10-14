@@ -1218,3 +1218,28 @@ fn external_backend_rejects_unknown_models() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown backend model"));
 }
+
+#[test]
+fn corrupt_backend_binding_falls_back_to_history_transfer() {
+    let fixture = claude_fixture();
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("first prompt marker");
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/quit");
+    tui.wait_exit();
+    let binding = fixture.session_files()[0].with_extension("backend.json");
+    std::fs::write(&binding, "{truncated").unwrap();
+    let mut tui = fixture.spawn(&["--continue"]);
+    tui.submit("second prompt marker");
+    fixture.wait_for_event_count("turn_end", 2);
+    tui.submit("/quit");
+    tui.wait_exit();
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("claude-method")).unwrap(),
+        "--session-id"
+    );
+    let prompt = std::fs::read_to_string(fixture.workspace.join("claude-prompt")).unwrap();
+    assert!(prompt.contains("first prompt marker"), "{prompt}");
+    let rewritten: Value = serde_json::from_slice(&std::fs::read(&binding).unwrap()).unwrap();
+    assert_eq!(rewritten["backend"], "claude");
+}

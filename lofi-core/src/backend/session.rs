@@ -382,31 +382,39 @@ pub fn saved_model_label(cursor: &SessionCursor) -> Result<Option<String>> {
 
 fn read_binding(cursor: &SessionCursor) -> Result<Option<Binding>> {
     match std::fs::read(cursor.path().with_extension("backend.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| Error::State(format!("invalid backend session binding: {e}"))),
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-fn save_binding(cursor: &SessionCursor, binding: &Binding) -> Result<()> {
+fn write_binding(cursor: &SessionCursor, binding: &Binding) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(cursor.path().with_extension("backend.json"))?;
+    let path = cursor.path().with_extension("backend.json");
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::State("session path has no parent".into()))?;
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("backend.json")
+    ));
     let bytes = serde_json::to_vec(binding).map_err(|e| Error::State(e.to_string()))?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn update_binding(cursor: &SessionCursor, binding: &Binding) -> Result<()> {
-    let bytes = serde_json::to_vec(binding).map_err(|e| Error::State(e.to_string()))?;
-    std::fs::write(cursor.path().with_extension("backend.json"), bytes)?;
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    crate::state::ensure_private_file(&path)?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
@@ -514,11 +522,7 @@ async fn run_external(
                         display_model: None,
                         leaf_id: prior_leaf.clone(),
                     };
-                    if read_binding(cursor)?.is_some() {
-                        update_binding(cursor, &binding)?;
-                    } else {
-                        save_binding(cursor, &binding)?;
-                    }
+                    write_binding(cursor, &binding)?;
                 }
             }
             *owner = path;
@@ -538,7 +542,7 @@ async fn run_external(
             if binding.model != work.model {
                 binding.model.clone_from(&work.model);
                 binding.display_model = None;
-                update_binding(cursor, binding)?;
+                write_binding(cursor, binding)?;
             }
         }
         let (tx, mut rx) = mpsc::channel(64);
@@ -562,7 +566,7 @@ async fn run_external(
                     if let (Some(cursor), Some(binding)) = (&work.cursor, &mut binding) {
                         if binding.display_model.as_ref() != Some(display) {
                             binding.display_model = Some(display.clone());
-                            update_binding(cursor, binding)?;
+                            write_binding(cursor, binding)?;
                         }
                     }
                     model.id.clone_from(id);
@@ -634,7 +638,7 @@ async fn run_external(
     if let Some(cursor) = &work.cursor {
         if let Some(mut binding) = read_binding(cursor)? {
             binding.leaf_id = cursor.leaf_id();
-            update_binding(cursor, &binding)?;
+            write_binding(cursor, &binding)?;
         }
     }
     if cancelled {

@@ -134,17 +134,11 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .map(lofi_core::backend::saved_backend)
         .transpose()?
         .flatten();
-    let last_native = session
-        .last_run_model()
-        .is_some_and(|model| saved_backend.as_deref() != Some(&model.provider));
+    let last_provider = session.last_run_model().map(|model| model.provider);
     if let Some((mut backend, name, config)) = external_backend(
         opts.config_path.as_deref(),
         opts.backend.as_deref(),
-        if last_native {
-            Some("native")
-        } else {
-            saved_backend.as_deref()
-        },
+        last_provider.as_deref().or(saved_backend.as_deref()),
         opts.model.as_deref(),
         &opts.root,
         &env,
@@ -342,6 +336,13 @@ async fn external_backend(
         .as_deref()
         .and_then(|query| query.split_once('/'))
         .map(|(name, _)| name);
+    let saved = saved.map(|name| {
+        if config.backends.contains_key(name) {
+            name
+        } else {
+            "native"
+        }
+    });
     let name = requested
         .or(model_backend
             .filter(|name| config.backends.contains_key(*name))
