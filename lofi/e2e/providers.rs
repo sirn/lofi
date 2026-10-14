@@ -434,6 +434,71 @@ fn service_tier_is_forwarded_for_openai_protocols() {
 }
 
 #[test]
+fn provider_level_service_tier_applies_to_models_without_own_list() {
+    let server = MockServer::start(vec![
+        MockResponse::sse(chat_body("inherits provider tier")),
+        MockResponse::sse(chat_body("model tier wins")),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        &fixture.config,
+        format!(
+            r#"default_model = "mock/chat"
+
+[providers.mock]
+base_url = "{}"
+api_type = "openai-completions"
+no_auth = true
+service_tier = "priority"
+service_tiers = ["flex", "priority"]
+
+[providers.mock.models.chat]
+name = "A Chat"
+context_window = 100000
+
+[providers.mock.models.own]
+name = "B Own"
+context_window = 100000
+service_tier = "flex"
+service_tiers = ["flex"]
+"#,
+            server.url()
+        ),
+    )
+    .unwrap();
+
+    // chat declares no tiers and inherits the provider-level default.
+    let out = fixture.output(&["--model", "mock/chat", "--print", "p"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("inherits provider tier"));
+
+    // own declares its own list and keeps its model-level default.
+    let out = fixture.output(&["--model", "mock/own", "--print", "p"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("model tier wins"));
+
+    let requests = server.requests();
+    let chat_body = &requests[0].body;
+    let own_body = &requests[1].body;
+    assert!(
+        chat_body.contains("\"service_tier\":\"priority\""),
+        "mock/chat body: {chat_body}"
+    );
+    assert!(
+        own_body.contains("\"service_tier\":\"flex\""),
+        "mock/own body: {own_body}"
+    );
+}
+
+#[test]
 fn provider_reported_stream_errors_fail_without_silent_partial_answers() {
     let chat = json!({ "error": { "message": "chat stream rejected" } });
     let responses = json!({

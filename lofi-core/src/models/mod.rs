@@ -180,13 +180,18 @@ impl ModelRegistry {
             .available()
             .into_iter()
             .map(|m| {
-                let mc = self
-                    .providers
-                    .get(&m.provider)
-                    .and_then(|p| p.models.get(&m.id));
+                let p = self.providers.get(&m.provider);
+                let mc = p.and_then(|p| p.models.get(&m.id));
+                // A model without its own list inherits the provider-level
+                // list; a model-level list overrides the provider's.
+                let service_tiers = mc
+                    .map(|mc| mc.service_tiers.clone())
+                    .filter(|tiers| !tiers.is_empty())
+                    .or_else(|| p.map(|p| p.service_tiers.clone()))
+                    .unwrap_or_default();
                 lofi_types::ModelChoice {
                     thinking_levels: mc.map(|mc| mc.thinking_levels.clone()).unwrap_or_default(),
-                    service_tiers: mc.map(|mc| mc.service_tiers.clone()).unwrap_or_default(),
+                    service_tiers,
                     supports_image: m.supports_image,
                     provider: m.provider,
                     id: m.id,
@@ -629,6 +634,27 @@ mod tests {
         assert!(by_id["gpt-4o"].supports_image);
         assert!(!by_id["gpt-4o-mini"].supports_image);
         assert_eq!(by_id["gpt-4o"].provider, "openai");
+    }
+
+    #[test]
+    fn choices_inherit_provider_service_tiers() {
+        let mut m = models(&["gpt-4o", "gpt-4o-mini"]);
+        m.get_mut("gpt-4o").unwrap().service_tiers = vec![ServiceTier::Flex];
+        let mut p = pcfg(Api::OpenAiCompletions, m);
+        p.service_tiers = vec![ServiceTier::Flex, ServiceTier::Priority];
+        let mut providers = IndexMap::new();
+        providers.insert("openai".to_string(), p);
+        let reg = ModelRegistry::load(&config_with(providers)).unwrap();
+        let choices = reg.choices();
+        let by_id: std::collections::HashMap<&str, &lofi_types::ModelChoice> =
+            choices.iter().map(|c| (c.id.as_str(), c)).collect();
+        // Model without its own list inherits the provider-level list.
+        assert_eq!(
+            by_id["gpt-4o-mini"].service_tiers,
+            vec![ServiceTier::Flex, ServiceTier::Priority]
+        );
+        // Model-level list overrides the provider-level list.
+        assert_eq!(by_id["gpt-4o"].service_tiers, vec![ServiceTier::Flex]);
     }
 
     #[test]

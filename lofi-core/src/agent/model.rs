@@ -454,15 +454,29 @@ pub(crate) fn resolve_service_tier(
     agent: Option<ServiceTier>,
 ) -> Result<ServiceTier> {
     let was_explicit = explicit.is_some();
+    // A model without its own list inherits the provider-level list and
+    // default; a model-level list overrides both provider-level values.
+    let inherits_provider = mc.service_tiers.is_empty();
     let desired = explicit
         .or_else(|| mc.service_tier.clone())
-        .or_else(|| pcfg.service_tier.clone())
+        .or_else(|| {
+            if inherits_provider {
+                pcfg.service_tier.clone()
+            } else {
+                None
+            }
+        })
         .or(agent)
         .unwrap_or(ServiceTier::Auto);
     if desired == ServiceTier::Auto {
         return Ok(ServiceTier::Auto);
     }
-    if mc.service_tiers.is_empty() {
+    let tiers = if inherits_provider {
+        &pcfg.service_tiers
+    } else {
+        &mc.service_tiers
+    };
+    if tiers.is_empty() {
         // Like thinking levels, an undeclared list means the model declares
         // no service tiers, so an explicit non-auto tier is rejected rather
         // than silently forwarded to a provider that may not understand it.
@@ -474,8 +488,8 @@ pub(crate) fn resolve_service_tier(
         }
         return Ok(ServiceTier::Auto);
     }
-    if !mc.service_tiers.contains(&desired) {
-        let allowed: Vec<&str> = mc.service_tiers.iter().map(ServiceTier::as_str).collect();
+    if !tiers.contains(&desired) {
+        let allowed: Vec<&str> = tiers.iter().map(ServiceTier::as_str).collect();
         return Err(Error::Config(format!(
             "service tier `{}` not supported by this model; allowed: {}",
             desired.as_str(),

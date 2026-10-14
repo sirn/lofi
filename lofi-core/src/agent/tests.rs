@@ -3017,6 +3017,56 @@ fn select_model_auto_tier_always_allowed_even_without_declared_list() {
 }
 
 #[test]
+fn select_model_provider_tier_applies_to_model_without_own_list() {
+    let mut p = provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    );
+    p.service_tiers = vec![ServiceTier::Flex, ServiceTier::Priority];
+    p.service_tier = Some(ServiceTier::Priority);
+    let (cfg, reg) = build(one_provider(p));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Priority);
+}
+
+#[test]
+fn select_model_explicit_tier_validated_against_provider_list() {
+    let mut p = provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    );
+    p.service_tiers = vec![ServiceTier::Flex];
+    let (cfg, reg) = build(one_provider(p));
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o@flex")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Flex);
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o@priority")).unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_model_list_overrides_provider_tier() {
+    let mut p = provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Flex]))]),
+        None,
+    );
+    p.service_tiers = vec![ServiceTier::Priority];
+    p.service_tier = Some(ServiceTier::Priority);
+    let (cfg, reg) = build(one_provider(p));
+    // The model declares its own list, so the provider default does not
+    // apply and explicit tiers are validated against the model list.
+    let (m, _) = select_model(&reg, &cfg, Some("openai/gpt-4o")).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Auto);
+    let err = select_model(&reg, &cfg, Some("openai/gpt-4o@priority")).unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
 fn select_model_rejects_level_not_declared() {
     let (cfg, reg) = build(one_provider(provider(
         Api::OpenAiCompletions,
