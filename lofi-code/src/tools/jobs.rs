@@ -58,6 +58,13 @@ const DEFAULT_TTY_ROWS: u16 = 40;
 const MAX_TTY_DIM: u16 = 1000;
 /// Upper bound for one `jobType` payload.
 const MAX_TTY_WRITE_BYTES: usize = 64 * 1024;
+/// Terminal job records kept for inspection. Older terminal records are
+/// evicted (newest kept) so a long session's registry stays bounded;
+/// running jobs are never evicted.
+const MAX_TERMINAL_JOBS: usize = 64;
+/// Notices buffered while no subscriber is live. Overflow drops the oldest
+/// notices and queues one summary notice with the running drop total.
+const MAX_PENDING_NOTICES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -288,6 +295,59 @@ struct JobHandle {
     application_cursor: std::sync::atomic::AtomicBool,
 }
 
+/// Oldest-first buffer of notices produced while no UI subscriber is live.
+/// Bounded: overflow drops the oldest notices and records one summary
+/// notice carrying the running drop total, so the loss is visible to the
+/// host agent instead of silent.
+struct PendingNotices {
+    queue: std::collections::VecDeque<JobNotice>,
+    dropped_total: u64,
+    /// `dropped_total` at the time the newest summary was queued. A summary
+    /// is queued only when drops happened since the previous one.
+    summarized: u64,
+}
+
+impl PendingNotices {
+    fn new() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            dropped_total: 0,
+            summarized: 0,
+        }
+    }
+
+    fn push(&mut self, notice: JobNotice) {
+        // Reserve room for a possible summary plus the notice itself.
+        while self.queue.len() + 2 > MAX_PENDING_NOTICES {
+            self.queue.pop_front();
+            self.dropped_total += 1;
+        }
+        if self.dropped_total > self.summarized {
+            self.summarized = self.dropped_total;
+            self.queue.push_back(JobNotice {
+                id: notice.id,
+                terminal: false,
+                text: format!(
+                    "{} earlier job notices dropped (queue overflow); \
+                     check jobList for current state",
+                    self.dropped_total,
+                ),
+            });
+        }
+        self.queue.push_back(notice);
+    }
+
+    fn drain(&mut self) -> Vec<JobNotice> {
+        self.queue.drain(..).collect()
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.dropped_total = 0;
+        self.summarized = 0;
+    }
+}
+
 struct Inner {
     /// Seeded from the current time at registry construction so two
     /// registries sharing a tmp dir (as in tests, or a session restart
@@ -304,8 +364,9 @@ struct Inner {
     subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<JobNotice>>>,
     /// Buffered notices produced while no UI subscriber is live, or while a
     /// test drives the registry headless. `subscribe_notices` flushes this
-    /// buffer through the newly added subscriber.
-    pending: Mutex<Vec<JobNotice>>,
+    /// buffer through the newly added subscriber. Bounded; overflow is
+    /// summarized by [`PendingNotices`].
+    pending: Mutex<PendingNotices>,
 }
 
 /// Per-session registry of background jobs. Cheap to clone; every clone
@@ -336,7 +397,7 @@ impl JobRegistry {
                 generation: AtomicU64::new(0),
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
-                pending: std::sync::Mutex::new(Vec::new()),
+                pending: std::sync::Mutex::new(PendingNotices::new()),
             }),
         }
     }
@@ -348,7 +409,7 @@ impl JobRegistry {
         self.inner
             .pending
             .lock()
-            .map(|mut q| std::mem::take(&mut *q))
+            .map(|mut q| q.drain())
             .unwrap_or_default()
     }
 
@@ -372,7 +433,7 @@ impl JobRegistry {
             .inner
             .pending
             .lock()
-            .map(|mut q| std::mem::take(&mut *q))
+            .map(|mut q| q.drain())
             .unwrap_or_default();
         for notice in buffered {
             let _ = tx.send(notice);
@@ -484,12 +545,21 @@ impl JobRegistry {
             if self.kill(id) {
                 killed.push(id);
             }
-            let _ = self
+            if let Some(handle) = self
                 .inner
                 .jobs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id);
+                .remove(&id)
+            {
+                let log_path = handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .log_path
+                    .clone();
+                let _ = std::fs::remove_file(log_path);
+            }
         }
         killed.sort_unstable();
         killed
@@ -644,20 +714,26 @@ impl JobRegistry {
             .clear();
         drop(subscribers);
         for handle in jobs {
-            let pid = {
+            let (pid, log_path) = {
                 let mut job = handle
                     .data
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 job.notify.enabled = false;
-                if job.state.is_terminal() {
-                    continue;
-                }
-                job.state = State::Cancelled;
-                job.ended = Some(Instant::now());
-                job.signal = Some(nix::libc::SIGKILL);
-                job.pid
+                let running_pid = if job.state.is_terminal() {
+                    None
+                } else {
+                    job.state = State::Cancelled;
+                    job.ended = Some(Instant::now());
+                    job.signal = Some(nix::libc::SIGKILL);
+                    job.pid
+                };
+                (running_pid, job.log_path.clone())
             };
+            // The record is gone, so nothing can page its log. A killed
+            // job's driver may still drain final bytes into the unlinked
+            // file; that is harmless.
+            let _ = std::fs::remove_file(log_path);
             if let Some(pid) = pid {
                 kill_pgrp(pid);
             }
@@ -1758,6 +1834,46 @@ async fn run_job(
             },
         );
     }
+    if let Some(inner) = jobs.upgrade() {
+        evict_terminal_excess(&inner);
+    }
+}
+
+/// Keep at most [`MAX_TERMINAL_JOBS`] terminal records, evicting the oldest
+/// first. Running jobs are never evicted. An evicted record's log file is
+/// removed: the record no longer exists, so nothing can page the log.
+fn evict_terminal_excess(inner: &Inner) {
+    let mut jobs = inner
+        .jobs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut terminal: Vec<u64> = jobs
+        .iter()
+        .filter(|(_, h)| {
+            h.data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state
+                .is_terminal()
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if terminal.len() <= MAX_TERMINAL_JOBS {
+        return;
+    }
+    // Job ids mint from a monotonic counter, so ascending id is oldest first.
+    terminal.sort_unstable();
+    for id in &terminal[..terminal.len() - MAX_TERMINAL_JOBS] {
+        if let Some(handle) = jobs.remove(id) {
+            let log_path = handle
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .log_path
+                .clone();
+            let _ = std::fs::remove_file(log_path);
+        }
+    }
 }
 
 /// Publish a notice to every live subscriber, or buffer it for a future
@@ -2094,6 +2210,103 @@ mod tests {
         };
         push_notice(&weak, current_generation, current.clone());
         assert_eq!(current_receiver.try_recv().unwrap(), current);
+    }
+
+    #[test]
+    fn terminal_records_are_evicted_beyond_the_cap_and_logs_removed() {
+        let registry = JobRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let total = MAX_TERMINAL_JOBS as u64 + 3;
+        let mut log_paths = Vec::new();
+        {
+            let mut jobs = registry.inner.jobs.lock().unwrap();
+            for i in 1..=total {
+                let log = dir.path().join(format!("job-{i}.log"));
+                std::fs::write(&log, b"x").unwrap();
+                let log = log.to_string_lossy().into_owned();
+                log_paths.push(log.clone());
+                let handle = handle_with(NotifyOpts::terminal_only(), log);
+                {
+                    let mut job = handle.data.lock().unwrap();
+                    job.id = i;
+                    job.state = State::Completed;
+                }
+                jobs.insert(i, handle);
+            }
+        }
+        // A running job must survive eviction regardless of age.
+        let running_log = dir.path().join("running.log");
+        std::fs::write(&running_log, b"x").unwrap();
+        let running = handle_with(
+            NotifyOpts::terminal_only(),
+            running_log.to_string_lossy().into_owned(),
+        );
+        running.data.lock().unwrap().id = total + 1;
+        registry
+            .inner
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(total + 1, running);
+
+        evict_terminal_excess(&registry.inner);
+
+        let jobs = registry.inner.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), MAX_TERMINAL_JOBS + 1);
+        assert!(
+            jobs.contains_key(&(total + 1)),
+            "running job is never evicted"
+        );
+        for i in 1..=3_u64 {
+            assert!(!jobs.contains_key(&i), "oldest terminal job {i} evicted");
+            assert!(!std::path::Path::new(&log_paths[(i - 1) as usize]).exists());
+        }
+        assert!(jobs.contains_key(&total));
+        assert!(std::path::Path::new(&log_paths[(total - 1) as usize]).exists());
+    }
+
+    #[test]
+    fn pending_notices_are_bounded_and_summarize_overflow() {
+        let mut pending = PendingNotices::new();
+        let total = MAX_PENDING_NOTICES as u64 + 10;
+        for i in 0..total {
+            pending.push(JobNotice {
+                id: i,
+                terminal: false,
+                text: format!("notice-{i}"),
+            });
+        }
+
+        assert!(pending.queue.len() <= MAX_PENDING_NOTICES);
+        let drained = pending.drain();
+        let summaries: Vec<_> = drained
+            .iter()
+            .filter(|n| n.text.contains("dropped (queue overflow)"))
+            .collect();
+        assert!(!summaries.is_empty(), "overflow produced a summary notice");
+        // The newest notice survives the overflow.
+        assert!(drained
+            .iter()
+            .any(|n| n.text == format!("notice-{}", total - 1)));
+    }
+
+    #[test]
+    fn reset_removes_drained_job_logs() {
+        let registry = JobRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("reset-job.log");
+        std::fs::write(&log, b"x").unwrap();
+        let handle = handle_with(
+            NotifyOpts::terminal_only(),
+            log.to_string_lossy().into_owned(),
+        );
+        handle.data.lock().unwrap().state = State::Completed;
+        let id = handle.data.lock().unwrap().id;
+        registry.inner.jobs.lock().unwrap().insert(id, handle);
+
+        registry.reset();
+
+        assert!(!log.exists());
     }
 
     #[test]
