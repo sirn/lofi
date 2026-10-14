@@ -224,6 +224,22 @@ fn fake_claude_usage(
     );
 }
 
+fn fake_claude_stream(output: &mut impl Write, id: &str, text: &str) {
+    for chunk in ["con", "sidering"] {
+        send(
+            output,
+            &json!({"type":"stream_event","session_id":id,"event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":chunk}}}),
+        );
+    }
+    let split = text.len() / 2;
+    for chunk in [&text[..split], &text[split..]] {
+        send(
+            output,
+            &json!({"type":"stream_event","session_id":id,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":chunk}}}),
+        );
+    }
+}
+
 fn fake_claude_prompt(prompt: &Value, id: &str) -> String {
     assert_eq!(prompt["type"], "user");
     assert_eq!(prompt["session_id"], id);
@@ -315,14 +331,7 @@ fn fake_claude() {
         } else {
             "claude answer"
         };
-        send(
-            &mut output,
-            &json!({"type":"stream_event","session_id":id,"event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"considering"}}}),
-        );
-        send(
-            &mut output,
-            &json!({"type":"stream_event","session_id":id,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":text}}}),
-        );
+        fake_claude_stream(&mut output, &id, text);
         turn += 1;
         if report_usage {
             fake_claude_usage(&mut output, &id, model.as_deref(), text, turn);
@@ -684,8 +693,28 @@ fn claude_tui_keeps_context_and_resumes_by_id() {
     );
     tui.submit("/quit");
     tui.wait_exit();
-    let transcript = serde_json::to_string(&fixture.events()).unwrap();
-    assert!(transcript.contains("considering"));
+    let events = fixture.events();
+    let assistant_responses: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "message"
+                && event["role"] == "assistant"
+                && event["blocks"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "thinking"))
+        })
+        .collect();
+    assert_eq!(assistant_responses.len(), 3);
+    for response in assistant_responses {
+        assert_eq!(
+            response["blocks"],
+            json!([
+                {"type": "thinking", "text": "considering", "signature": null},
+                {"type": "text", "text": "claude answer"}
+            ])
+        );
+    }
+    let transcript = serde_json::to_string(&events).unwrap();
     assert!(transcript.contains("real exec"));
 }
 

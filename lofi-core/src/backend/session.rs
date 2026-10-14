@@ -692,6 +692,7 @@ fn tool_context(
 struct Journal {
     recorder: Option<SessionRecorder>,
     messages: Vec<Message>,
+    pending_blocks: Vec<ContentBlock>,
     history: Option<Arc<Mutex<Vec<Message>>>>,
     summary: TurnSummary,
 }
@@ -701,6 +702,7 @@ impl Journal {
         Self {
             recorder: cursor.map(|cursor| SessionRecorder::new(cursor, model)),
             messages: Vec::new(),
+            pending_blocks: Vec::new(),
             history: None,
             summary: TurnSummary {
                 elapsed_ms: 0,
@@ -713,13 +715,7 @@ impl Journal {
         }
     }
 
-    fn push(&mut self, role: Role, kind: PromptKind, block: ContentBlock) -> Result<()> {
-        let message = Message {
-            role,
-            kind,
-            origin: None,
-            blocks: vec![block],
-        };
+    fn append_message(&mut self, message: Message) -> Result<()> {
         if let Some(history) = &self.history {
             history
                 .lock()
@@ -727,10 +723,62 @@ impl Journal {
                 .push(message.clone());
         }
         self.messages.push(message);
+        Ok(())
+    }
+
+    fn flush_pending_blocks(&mut self) -> Result<()> {
+        if self.pending_blocks.is_empty() {
+            return Ok(());
+        }
+        let blocks = std::mem::take(&mut self.pending_blocks);
+        self.append_message(Message {
+            role: Role::Assistant,
+            kind: PromptKind::User,
+            origin: None,
+            blocks,
+        })
+    }
+
+    fn push(&mut self, role: Role, kind: PromptKind, block: ContentBlock) -> Result<()> {
+        self.flush_pending_blocks()?;
+        self.append_message(Message {
+            role,
+            kind,
+            origin: None,
+            blocks: vec![block],
+        })?;
         if let Some(recorder) = &mut self.recorder {
             recorder.checkpoint(&self.messages, &self.summary)?;
         }
         Ok(())
+    }
+
+    fn push_text_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(ContentBlock::Text { text }) = self.pending_blocks.last_mut() {
+            text.push_str(delta);
+        } else {
+            self.pending_blocks.push(ContentBlock::Text {
+                text: delta.to_owned(),
+            });
+        }
+    }
+
+    fn push_thinking_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(ContentBlock::Thinking { text, .. }) = self.pending_blocks.last_mut() {
+            text.push_str(delta);
+        } else {
+            self.pending_blocks.push(ContentBlock::Thinking {
+                text: delta.to_owned(),
+                signature: None,
+                redacted: false,
+            });
+        }
     }
 
     fn prompt(&mut self, text: &str, kind: PromptKind) -> Result<()> {
@@ -739,29 +787,25 @@ impl Journal {
 
     fn event(&mut self, event: &AgentEvent) -> Result<()> {
         match event {
-            AgentEvent::Text(text) => self.push(
-                Role::Assistant,
-                PromptKind::User,
-                ContentBlock::Text { text: text.clone() },
-            ),
-            AgentEvent::Thinking(text) => self.push(
-                Role::Assistant,
-                PromptKind::User,
-                ContentBlock::Thinking {
-                    text: text.clone(),
-                    signature: None,
-                    redacted: false,
-                },
-            ),
+            AgentEvent::Text(text) => {
+                self.push_text_delta(text);
+                Ok(())
+            }
+            AgentEvent::Thinking(text) => {
+                self.push_thinking_delta(text);
+                Ok(())
+            }
             AgentEvent::BackendUsage {
                 context,
                 usage,
                 cost,
             } => {
+                self.flush_pending_blocks()?;
                 if let Some(usage) = usage {
                     self.summary.usage = *usage;
                 }
-                if let Some(recorder) = &self.recorder {
+                if let Some(recorder) = &mut self.recorder {
+                    recorder.checkpoint(&self.messages, &self.summary)?;
                     recorder.cursor().record(
                         crate::session::recorder::SessionRecord::BackendUsage {
                             context: *context,
@@ -781,6 +825,7 @@ impl Journal {
     }
 
     fn finish(&mut self, outcome: &TurnOutcome, elapsed_ms: u64) -> Result<Option<(u64, u64)>> {
+        self.flush_pending_blocks()?;
         self.summary.elapsed_ms = elapsed_ms;
         self.recorder
             .as_mut()
