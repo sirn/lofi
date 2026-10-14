@@ -67,6 +67,11 @@ impl SessionFile {
     }
 
     #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        std::fs::metadata(&self.path).map_or(u64::MAX, |meta| meta.len())
+    }
+
+    #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
     }
@@ -1402,22 +1407,29 @@ fn one_line(s: &str) -> String {
         .map_or_else(|| line.to_string(), |(end, _)| format!("{}…", &line[..end]))
 }
 
+fn entry_text(ev: &EntryPreview) -> String {
+    let mut text = String::new();
+    for b in &ev.blocks {
+        if b.kind == "text" && !b.text.is_empty() {
+            text.push_str(&b.text);
+        }
+    }
+    text
+}
+
 fn entry_preview(ev: &EntryPreview) -> String {
     match ev.kind.as_str() {
         "message" | "" => {
-            let Some(text) = ev
-                .blocks
-                .iter()
-                .find_map(|b| (b.kind == "text" && !b.text.is_empty()).then_some(b.text.as_ref()))
-            else {
-                return String::new();
-            };
             let prefix = match ev.role.as_str() {
                 "user" => "user: ",
                 "assistant" => "agent: ",
-                _ => "",
+                _ => return String::new(),
             };
-            format!("{prefix}{}", one_line(text))
+            let text = entry_text(ev);
+            if text.is_empty() {
+                return String::new();
+            }
+            format!("{prefix}{}", one_line(&text))
         }
         "turn_failed" => format!("agent: {} (failed)", one_line(&ev.error)),
         "turn_cancelled" => "agent: (cancelled)".to_string(),
@@ -1428,6 +1440,39 @@ fn entry_preview(ev: &EntryPreview) -> String {
         "native_tool" => format!("exec: {} {}", ev.name, one_line(&ev.args)),
         _ => String::new(),
     }
+}
+
+fn entry_preview_slice(events: &[EntryPreview]) -> String {
+    if let [single] = events {
+        return entry_preview(single);
+    }
+    let mut text = String::new();
+    for ev in events {
+        for b in &ev.blocks {
+            if b.kind == "text" && !b.text.is_empty() {
+                text.push_str(&b.text);
+            }
+        }
+        if text.contains('\n') || text.chars().count() > 80 {
+            break;
+        }
+    }
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("agent: {}", one_line(&text))
+    }
+}
+
+fn finish_assistant_chunks(chunks: &[String]) -> Option<String> {
+    let mut combined = String::new();
+    for chunk in chunks.iter().rev() {
+        combined.push_str(chunk);
+        if combined.contains('\n') || combined.chars().count() > 80 {
+            break;
+        }
+    }
+    (!combined.is_empty()).then(|| format!("agent: {}", one_line(&combined)))
 }
 
 /// Scan the file backwards in bounded chunks and return the first complete
@@ -1444,37 +1489,59 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
     const MAX_TAIL: u64 = 1024 * 1024;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
+    let tail_floor = len.saturating_sub(MAX_TAIL);
     let mut end = len;
     let mut carry: Vec<u8> = Vec::new();
-    while end > 0 {
-        let start = end.saturating_sub(CHUNK).max(len.saturating_sub(MAX_TAIL));
+    let mut assistant_chunks: Vec<String> = Vec::new();
+    while end > tail_floor {
+        let start = end.saturating_sub(CHUNK).max(tail_floor);
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut chunk = vec![0u8; usize::try_from(end - start).ok()?];
         file.read_exact(&mut chunk).ok()?;
-        // Prepend the previous tail (bytes after the last newline we already
-        // saw in later chunks) so a line spanning chunk boundaries reassembles.
         chunk.extend_from_slice(&carry);
-        // Trailing bytes after the last newline form a partial line; save for
-        // next iteration. The final chunk (start == 0) has no predecessor, so
-        // a leading partial line there is the file's first line and is complete.
-        if let Some(nl) = chunk.iter().rposition(|byte| *byte == b'\n') {
-            carry = chunk.split_off(nl + 1);
-        } else {
-            carry = chunk;
-            if start == 0 {
-                // Entire file is one line with no newline; nothing to scan.
-                break;
+        let lines_slice = if start > tail_floor {
+            if let Some(first_nl) = chunk.iter().position(|byte| *byte == b'\n') {
+                let complete = chunk.split_off(first_nl + 1);
+                carry = chunk;
+                complete
+            } else {
+                carry = chunk;
+                end = start;
+                continue;
             }
-            end = start;
-            continue;
-        }
-        for line in chunk.rsplit(|byte| *byte == b'\n') {
+        } else {
+            carry.clear();
+            chunk
+        };
+        for line in lines_slice.rsplit(|byte| *byte == b'\n') {
             if line.is_empty() {
                 continue;
             }
             let Ok(event) = serde_json::from_slice::<EntryPreview>(line) else {
                 continue;
             };
+            if matches!(event.kind.as_str(), "message" | "") && event.role == "assistant" {
+                let text = entry_text(&event);
+                if !text.is_empty() {
+                    assistant_chunks.push(text);
+                }
+                continue;
+            }
+            if matches!(
+                event.kind.as_str(),
+                "cursor"
+                    | "backend_usage"
+                    | "tool_timing"
+                    | "thinking_timing"
+                    | "job_started"
+                    | "job_finished"
+            ) || (matches!(event.kind.as_str(), "message" | "") && event.role == "system")
+            {
+                continue;
+            }
+            if !assistant_chunks.is_empty() {
+                return finish_assistant_chunks(&assistant_chunks);
+            }
             let preview = entry_preview(&event);
             if !preview.is_empty() {
                 return Some(preview);
@@ -1482,13 +1549,7 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
         }
         end = start;
     }
-    // Nothing parsed from any full line; try the very first bytes we carried
-    // (covers a file whose first line is also its last).
-    let Ok(event) = serde_json::from_slice::<EntryPreview>(&carry) else {
-        return None;
-    };
-    let preview = entry_preview(&event);
-    (!preview.is_empty()).then_some(preview)
+    finish_assistant_chunks(&assistant_chunks)
 }
 
 /// Derive the resume-pick entry (message count + last preview) from the shared
@@ -1498,7 +1559,7 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
 /// worker-arena pages mapped at the high-water mark.
 fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<SessionEntry> {
     let (meta, message_count, last_message) =
-        index::scan_entry_summary::<EntryPreview>(path, entry_preview).ok()?;
+        index::scan_entry_summary::<EntryPreview>(path, entry_preview_slice).ok()?;
     Some(SessionEntry {
         meta,
         file: SessionFile {
@@ -2552,5 +2613,46 @@ mod tests {
             kinds,
             vec![lofi_types::PromptKind::User, lofi_types::PromptKind::Notice]
         );
+    }
+
+    #[test]
+    fn resume_preview_coalesces_streamed_assistant_chunks_and_skips_system_messages() {
+        let (_guard, store) = isolated_store();
+        let cwd = Path::new("/tmp/resume-preview");
+        let path = store.create(cwd, &"p/m".into()).unwrap();
+        let long_system = "S".repeat(6000);
+        let mut batch = [
+            ev(user("what is lofi?")),
+            ev(Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::Thinking {
+                    text: "considering".into(),
+                    signature: None,
+                    redacted: false,
+                }],
+                kind: PromptKind::default(),
+            }),
+            ev(assistant("## About")),
+            ev(assistant(" Lofi\n\nDetailed body.")),
+            ev(assistant(" trailing fragment.")),
+            ev(Message {
+                origin: None,
+                role: Role::System,
+                blocks: vec![ContentBlock::Text { text: long_system }],
+                kind: PromptKind::default(),
+            }),
+        ];
+        append_events(&path, &mut batch, None).unwrap();
+
+        let files = store.list_files_for_cwd(cwd).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].quick_preview().as_deref(),
+            Some("agent: ## About Lofi")
+        );
+        let entry = files[0].inspect().unwrap();
+        assert_eq!(entry.last_message, "agent: ## About Lofi");
+        assert_eq!(entry.message_count, 3);
     }
 }

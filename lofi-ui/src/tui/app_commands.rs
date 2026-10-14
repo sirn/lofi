@@ -35,11 +35,13 @@ fn run_resume_load(
             }
         }
     }
-    for (index, file) in files.iter().enumerate() {
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by_key(|&index| files[index].byte_len());
+    for index in order {
         if generation_clock.load(Ordering::Relaxed) != generation {
             return;
         }
-        let Some(entry) = file.inspect() else {
+        let Some(entry) = files[index].inspect() else {
             continue;
         };
         if tx

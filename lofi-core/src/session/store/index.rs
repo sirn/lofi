@@ -735,8 +735,8 @@ fn is_preview_kind(kind: IndexKind) -> bool {
     matches!(
         kind,
         IndexKind::UserPrompt
+            | IndexKind::UserShell
             | IndexKind::AssistantMessage
-            | IndexKind::SystemMessage
             | IndexKind::TurnFailed
             | IndexKind::TurnCancelled
             | IndexKind::Compaction
@@ -744,22 +744,98 @@ fn is_preview_kind(kind: IndexKind) -> bool {
     )
 }
 
+enum PreviewCandidate {
+    Single(u64),
+    AssistantRun(Vec<u64>),
+}
+
+struct SummaryAccumulator {
+    message_count: usize,
+    in_assistant_run: bool,
+    candidates: Vec<PreviewCandidate>,
+}
+
+impl SummaryAccumulator {
+    fn new() -> Self {
+        Self {
+            message_count: 0,
+            in_assistant_run: false,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, offset: u64, kind: IndexKind) {
+        match kind {
+            IndexKind::Cursor
+            | IndexKind::BackendUsage
+            | IndexKind::JobLifecycle
+            | IndexKind::Other => {}
+            IndexKind::SystemMessage => {
+                self.message_count = self.message_count.saturating_add(1);
+            }
+            IndexKind::AssistantMessage => {
+                if !self.in_assistant_run {
+                    self.message_count = self.message_count.saturating_add(1);
+                    self.in_assistant_run = true;
+                    self.candidates
+                        .push(PreviewCandidate::AssistantRun(vec![offset]));
+                } else if let Some(PreviewCandidate::AssistantRun(run)) = self.candidates.last_mut()
+                {
+                    run.push(offset);
+                }
+            }
+            IndexKind::ToolResult | IndexKind::TurnEnd => {
+                self.in_assistant_run = false;
+                if is_message_kind(kind) {
+                    self.message_count = self.message_count.saturating_add(1);
+                }
+            }
+            _ => {
+                self.in_assistant_run = false;
+                if is_message_kind(kind) {
+                    self.message_count = self.message_count.saturating_add(1);
+                }
+                if is_preview_kind(kind) {
+                    self.candidates.push(PreviewCandidate::Single(offset));
+                }
+            }
+        }
+    }
+}
+
 fn first_preview_at<T: serde::de::DeserializeOwned>(
     reader: &mut std::io::BufReader<std::fs::File>,
-    offsets: impl IntoIterator<Item = u64>,
-    mut preview_for: impl FnMut(&T) -> String,
+    candidates: Vec<PreviewCandidate>,
+    mut preview_for: impl FnMut(&[T]) -> String,
 ) -> Result<String> {
     use std::io::{Seek, SeekFrom};
 
     let mut budget = ProjectionBudget::event();
-    for offset in offsets {
-        reader.seek(SeekFrom::Start(offset))?;
-        let Some((_, _, value)) = read_projected_value::<T, _>(reader, &mut budget)? else {
-            continue;
-        };
-        let preview = preview_for(&value);
-        if !preview.is_empty() {
-            return Ok(preview);
+    let mut buf = Vec::new();
+    for candidate in candidates.into_iter().rev() {
+        buf.clear();
+        match candidate {
+            PreviewCandidate::Single(offset) => {
+                reader.seek(SeekFrom::Start(offset))?;
+                if let Some((_, _, value)) = read_projected_value::<T, _>(reader, &mut budget)? {
+                    buf.push(value);
+                }
+            }
+            PreviewCandidate::AssistantRun(offsets) => {
+                for offset in offsets {
+                    reader.seek(SeekFrom::Start(offset))?;
+                    if let Some((_, _, value)) = read_projected_value::<T, _>(reader, &mut budget)?
+                    {
+                        buf.push(value);
+                    }
+                }
+            }
+        }
+        if !buf.is_empty() {
+            let preview = preview_for(&buf);
+            if !preview.is_empty() {
+                return Ok(preview);
+            }
         }
     }
     Ok(String::new())
@@ -767,11 +843,11 @@ fn first_preview_at<T: serde::de::DeserializeOwned>(
 
 pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
     path: &Path,
-    preview_for: impl FnMut(&T) -> String,
+    preview_for: impl FnMut(&[T]) -> String,
 ) -> Result<(SessionMeta, usize, String)> {
     use std::io::{BufReader, Seek};
 
-    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let mut reader = BufReader::with_capacity(64 * 1024, std::fs::File::open(path)?);
     let Some((_start, _event_start, header)) = read_jsonl_value::<Header, _>(&mut reader)? else {
         return Err(Error::State(format!(
             "session file has no header: {}",
@@ -786,8 +862,7 @@ pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
         )));
     }
 
-    let mut message_count = 0usize;
-    let mut preview_offsets = Vec::new();
+    let mut summary = SummaryAccumulator::new();
     let mut previous: Option<IndexId> = None;
     let mut latest_cursor: Option<Option<IndexId>> = None;
     let mut linear = true;
@@ -823,12 +898,7 @@ pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
             linear = false;
             break;
         }
-        if is_message_kind(skel.kind) {
-            message_count = message_count.saturating_add(1);
-        }
-        if is_preview_kind(skel.kind) {
-            preview_offsets.push(line_start);
-        }
+        summary.push(line_start, skel.kind);
         previous = Some(skel.id);
     }
 
@@ -840,9 +910,8 @@ pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
             .as_ref()
             .is_none_or(|leaf| leaf.as_ref() == previous.as_ref())
         {
-            let last_message =
-                first_preview_at(&mut reader, preview_offsets.into_iter().rev(), preview_for)?;
-            return Ok((header.meta, message_count, last_message));
+            let last_message = first_preview_at(&mut reader, summary.candidates, preview_for)?;
+            return Ok((header.meta, summary.message_count, last_message));
         }
     }
 
@@ -861,17 +930,12 @@ pub(super) fn scan_entry_summary<T: serde::de::DeserializeOwned>(
                 .map(|e| e.id.to_event_id())
         });
     let lineage = super::lineage_indices(&index, leaf.as_deref())?;
-    let message_count = lineage
-        .iter()
-        .filter(|&&i| is_message_kind(index[i].kind))
-        .count();
-    let offsets = lineage
-        .into_iter()
-        .rev()
-        .filter(|&i| is_preview_kind(index[i].kind))
-        .map(|i| index[i].offset);
-    let last_message = first_preview_at(&mut reader, offsets, preview_for)?;
-    Ok((meta, message_count, last_message))
+    let mut branched = SummaryAccumulator::new();
+    for i in lineage {
+        branched.push(index[i].offset, index[i].kind);
+    }
+    let last_message = first_preview_at(&mut reader, branched.candidates, preview_for)?;
+    Ok((meta, branched.message_count, last_message))
 }
 
 pub(super) fn load_event_values<T: serde::de::DeserializeOwned>(
