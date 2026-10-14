@@ -25,7 +25,8 @@ pub use lofi_code::compact_hook::CodeCompactionHook;
 pub use lofi_code::memory::release_freed_memory;
 pub use lofi_code::policy::{default_mode as default_approval_mode, PolicyOverride};
 pub use lofi_code::tools::{
-    JobAttributes, JobColor, JobInfo, JobRegistry, JobScreen, JobScreenLine, JobSpan, JobStyle,
+    JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
+    JobStyle,
 };
 pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};

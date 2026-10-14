@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span, Text};
 use crate::tui::theme::{active_indicator, agent_indicator, user_indicator};
 use crate::tui::{
     App, Block, DetailKey, NativePreview, NativeTool, ResultAvailability, ThinkingBlock, ToolCall,
-    Turn, DETAIL_VIEW_ROWS,
+    Turn, DETAIL_VIEW_ROWS, SPINNER,
 };
 
 use super::component::{Component, Cx, Stack};
@@ -197,24 +197,33 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
         width: w,
         active_turn: running,
     };
+    let has_prior = !out.is_empty();
+    let jobs = app.running_jobs();
     out.extend(
-        render_transcript_tail(&tail_cx, !app.transcript.turns.is_empty())
+        render_transcript_tail(&tail_cx, has_prior, &jobs)
             .into_iter()
             .map(|rl| rl.line),
     );
     Text::from(out)
 }
 
-pub fn render_transcript_tail(cx: &Cx, has_prior: bool) -> Vec<RenderLine> {
+pub fn render_transcript_tail(
+    cx: &Cx,
+    has_prior: bool,
+    jobs: &[lofi_core::JobInfo],
+) -> Vec<RenderLine> {
     let mut out = Vec::new();
     let mut any = has_prior;
-    for job in cx.app.running_jobs() {
+    if cx.active_turn {
         if any {
             out.push(prim::rblank());
         }
-        out.extend(RunningJobLine { job: &job }.lines(cx));
+        out.extend(WorkingLine.lines(cx));
         any = true;
     }
+    // Queued prompts render above running jobs: a queued prompt moves up
+    // into the transcript when consumed, while a completed job's notice
+    // rises out of the running block below.
     for queued in &cx.app.prompt_queue {
         if any {
             out.push(prim::rblank());
@@ -226,6 +235,13 @@ pub fn render_transcript_tail(cx: &Cx, has_prior: bool) -> Vec<RenderLine> {
             }
             .lines(cx),
         );
+        any = true;
+    }
+    for job in jobs {
+        if any {
+            out.push(prim::rblank());
+        }
+        out.extend(RunningJobLine { job }.lines(cx));
         any = true;
     }
     out
@@ -408,6 +424,32 @@ impl Component for NoticeMessage<'_> {
             move |_| vec![Span::styled("▎ ", mark)],
             range,
         )
+    }
+}
+
+struct WorkingLine;
+
+impl Component for WorkingLine {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let frame = SPINNER[cx.app.spinner_frame() % SPINNER.len()];
+        vec![prim::render(
+            vec![
+                Span::raw("  "),
+                Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
+            ],
+            vec![
+                Span::styled(
+                    format!(
+                        "Working for {} with ",
+                        prim::fmt_duration(cx.app.run_elapsed())
+                    ),
+                    Style::new().fg(t.subtle),
+                ),
+                Span::styled(cx.app.run_label(), Style::new().fg(t.muted)),
+            ],
+            vec![],
+        )]
     }
 }
 
@@ -1742,6 +1784,7 @@ mod tests {
             duration_ms: 12_000,
             log_path: String::new(),
             tty: false,
+            notify: true,
         };
         let lines = (RunningJobLine { job: &job }).lines(&cx);
         assert_eq!(lines.len(), 1);
@@ -1754,6 +1797,98 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(rendered, "┆ job 42 running (12s): cargo test --workspace");
+    }
+
+    fn running_job(id: u64, cmd: &str) -> lofi_core::JobInfo {
+        lofi_core::JobInfo {
+            id,
+            cmd: cmd.to_string(),
+            state: "running".to_string(),
+            running: true,
+            pid: None,
+            exit_code: None,
+            duration_ms: 1_000,
+            log_path: String::new(),
+            tty: false,
+            notify: true,
+        }
+    }
+
+    fn tail_rows(a: &crate::tui::App, jobs: &[lofi_core::JobInfo]) -> Vec<String> {
+        let cx = super::Cx {
+            app: a,
+            theme: a.theme,
+            width: 80,
+            active_turn: false,
+        };
+        super::render_transcript_tail(&cx, false, jobs)
+            .iter()
+            .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn transcript_tail_renders_queued_prompts_above_running_jobs() {
+        let mut a = crate::tui::App::new(
+            "m".to_string(),
+            lofi_types::ThinkingLevel::Off,
+            lofi_types::ServiceTier::Auto,
+            200_000,
+            lofi_types::CompactionConfig::default(),
+            String::new(),
+        );
+        a.prompt_queue.push(crate::tui::QueuedPrompt {
+            text: "queued follow-up".to_string(),
+            kind: lofi_types::PromptKind::User,
+        });
+        a.prompt_queue.push(crate::tui::QueuedPrompt {
+            text: "job 7 completed: sleep 1".to_string(),
+            kind: lofi_types::PromptKind::Notice,
+        });
+        let rows = tail_rows(&a, &[running_job(9, "sleep 9")]);
+        let user_idx = rows
+            .iter()
+            .position(|r| r.contains("queued follow-up"))
+            .expect("queued user row");
+        let notice_idx = rows
+            .iter()
+            .position(|r| r.contains("job 7 completed"))
+            .expect("queued notice row");
+        let job_idx = rows
+            .iter()
+            .position(|r| r.contains("job 9 running"))
+            .expect("running job row");
+        assert!(
+            user_idx < notice_idx && notice_idx < job_idx,
+            "expected queued user ({user_idx}) < queued notice ({notice_idx}) < running job ({job_idx}): {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn job_completion_swaps_running_line_for_its_notice_without_height_change() {
+        let mut a = crate::tui::App::new(
+            "m".to_string(),
+            lofi_types::ThinkingLevel::Off,
+            lofi_types::ServiceTier::Auto,
+            200_000,
+            lofi_types::CompactionConfig::default(),
+            String::new(),
+        );
+        let before = tail_rows(&a, &[running_job(1, "sleep 1"), running_job(2, "sleep 30")]);
+        a.prompt_queue.push(crate::tui::QueuedPrompt {
+            text: "job 1 completed: sleep 1 (exit 0) — log: /tmp/lofi-job-1.log".to_string(),
+            kind: lofi_types::PromptKind::Notice,
+        });
+        let after = tail_rows(&a, &[running_job(2, "sleep 30")]);
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "before: {before:#?} after: {after:#?}"
+        );
+        assert!(before.iter().any(|r| r.contains("job 1 running")));
+        assert!(!after.iter().any(|r| r.contains("job 1 running")));
+        assert!(after.iter().any(|r| r.contains("job 1 completed")));
+        assert!(after.iter().any(|r| r.contains("job 2 running")));
     }
 
     #[test]

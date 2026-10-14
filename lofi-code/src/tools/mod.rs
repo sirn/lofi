@@ -29,7 +29,8 @@ use fs::{
     resolve_for_read, resolve_under, walk_files_capped, WalkCeilings, WalkLimit,
 };
 pub use jobs::{
-    JobAttributes, JobColor, JobInfo, JobRegistry, JobScreen, JobScreenLine, JobSpan, JobStyle,
+    JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
+    JobStyle,
 };
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,

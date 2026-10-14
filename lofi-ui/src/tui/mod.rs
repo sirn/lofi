@@ -1023,6 +1023,11 @@ pub(crate) struct App {
     /// replaces its receiver so notices already delivered for the old scope
     /// cannot enter the new session.
     jobs_receiver_stale: bool,
+    /// Ids of terminal jobs whose completion notice the run loop has queued
+    /// or spawned. The registry flips a job to terminal before its notice
+    /// reaches the select loop; the tail keeps rendering the running line
+    /// until the notice lands so line and notice swap in one frame.
+    notified_jobs: std::collections::HashSet<u64>,
     jobs_modal: Option<JobsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
@@ -1696,6 +1701,7 @@ async fn run_loop(
                                     app.policy_override = Some(new_agent.policy_override());
                                     app.auto_mode_configured = new_agent.has_auto_mode();
                                     app.jobs_receiver_stale = true;
+                                    app.notified_jobs.clear();
                                     agent = Some(new_agent);
                                     app.bump_render_epoch();
                                 }
@@ -1848,9 +1854,14 @@ async fn run_loop(
                     None => std::future::pending().await,
                 }
             } => {
-                if let Some(text) = notice {
+                if let Some(notice) = notice {
+                    // Settle the job line in the same arm that queues its
+                    // notice so both change in one redraw.
+                    if notice.terminal {
+                        app.notified_jobs.insert(notice.id);
+                    }
                     let queued = QueuedPrompt {
-                        text,
+                        text: notice.text,
                         kind: lofi_types::PromptKind::Notice,
                     };
                     if app.busy() {

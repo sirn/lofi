@@ -12,9 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::theme::active_indicator;
 use crate::tui::SLASH_COMMANDS;
-use crate::tui::{App, Mode, SPINNER};
+use crate::tui::{App, Mode};
 
 pub(crate) mod blocks;
 pub(crate) mod component;
@@ -93,14 +92,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     app.sync_input_scroll(area.width.saturating_sub(3) as usize, input_lines);
 
     let footer_h = input_h.saturating_add(3);
-    let running = u16::from(app.run_active());
     let mut vs = VStack::new();
     vs.fixed(1); // header
     vs.spacer(1);
     vs.fill(); // log viewport
     vs.spacer(1);
-    vs.fixed(running); // working indicator (absent when idle)
-    vs.spacer(running); // separate an active indicator from the footer
     vs.fixed(footer_h); // panel
     vs.fixed(u16::from(app.debug.is_some())); // full-width debug bar, no spacer
     let rects = vs.split(f, area);
@@ -112,13 +108,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
         render_log(f, r, app);
     }
     if let Some(r) = rects[4] {
-        render_working(f, r, app);
-    }
-    if let Some(r) = rects[6] {
         render_footer_block(f, r, app);
         render_toast(f, area, r.y, app);
     }
-    if let Some(r) = rects[7] {
+    if let Some(r) = rects[5] {
         render_debug_bar(f, r, app);
     }
     if app.slash_complete.is_some() {
@@ -268,13 +261,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
     app.render_profile.live_height_us = phase_started.elapsed().as_micros();
 
     let tail_lines = {
+        let jobs = app.running_jobs();
         let cx = component::Cx {
             app,
             theme,
             width: w,
             active_turn: running,
         };
-        blocks::render_transcript_tail(&cx, n_turns > 0)
+        blocks::render_transcript_tail(&cx, n_turns > 1 || last_h > 0, &jobs)
     };
     let tail_h = tail_lines.len();
     let turn_gaps = if n_turns == 0 {
@@ -708,24 +702,6 @@ fn draw_scrollbar(
 ) {
     let thumb = if active { t.user } else { t.muted };
     prim::render_scrollbar(f, gutter, off, visible, total, t.subtle, thumb);
-}
-
-fn render_working(f: &mut Frame, area: Rect, app: &App) {
-    let t = app.theme;
-    let frame = SPINNER[app.spinner_frame() % SPINNER.len()];
-    let line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
-        Span::styled(
-            format!(
-                "Working for {} with ",
-                prim::fmt_duration(app.run_elapsed())
-            ),
-            Style::new().fg(t.subtle),
-        ),
-        Span::styled(app.run_label(), Style::new().fg(t.muted)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {

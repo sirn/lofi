@@ -94,10 +94,7 @@ impl App {
     }
 
     pub(crate) fn running_jobs(&self) -> Vec<lofi_core::JobInfo> {
-        self.jobs_snapshot()
-            .into_iter()
-            .filter(|job| job.running)
-            .collect()
+        tail_jobs(self.jobs_snapshot(), &self.notified_jobs)
     }
 
     pub(crate) fn has_running_jobs(&self) -> bool {
@@ -207,5 +204,61 @@ impl App {
             label.push_str(st);
         }
         Line::from(vec![Span::styled(label, Style::new().fg(self.theme.muted))])
+    }
+}
+
+/// Jobs the transcript tail still shows as running. The registry flips a
+/// job to terminal before its completion notice reaches the run loop, so a
+/// terminal job with notices enabled stays listed until its notice has been
+/// queued — the running line and the notice swap in one frame instead of
+/// the tail collapsing and regrowing a tick apart. Jobs spawned with
+/// \`notify: false\` never produce a notice and drop out immediately.
+fn tail_jobs(
+    snapshot: Vec<lofi_core::JobInfo>,
+    notified: &std::collections::HashSet<u64>,
+) -> Vec<lofi_core::JobInfo> {
+    snapshot
+        .into_iter()
+        .filter(|job| job.running || (job.notify && !notified.contains(&job.id)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail_jobs;
+
+    fn job(id: u64, running: bool, notify: bool) -> lofi_core::JobInfo {
+        lofi_core::JobInfo {
+            id,
+            cmd: format!("cmd {id}"),
+            state: if running { "running" } else { "completed" }.to_string(),
+            running,
+            pid: None,
+            exit_code: None,
+            duration_ms: 1_000,
+            log_path: String::new(),
+            tty: false,
+            notify,
+        }
+    }
+
+    fn ids(jobs: &[lofi_core::JobInfo]) -> Vec<u64> {
+        jobs.iter().map(|j| j.id).collect()
+    }
+
+    #[test]
+    fn terminal_job_stays_listed_until_its_notice_lands() {
+        let mut notified = std::collections::HashSet::new();
+        let snapshot = || vec![job(1, false, true)];
+        assert_eq!(ids(&tail_jobs(snapshot(), &notified)), vec![1]);
+        notified.insert(1);
+        assert!(tail_jobs(snapshot(), &notified).is_empty());
+    }
+
+    #[test]
+    fn terminal_job_without_notify_drops_out_immediately() {
+        let notified = std::collections::HashSet::new();
+        let snapshot = vec![job(1, true, true), job(2, false, false)];
+        assert_eq!(ids(&tail_jobs(snapshot, &notified)), vec![1]);
     }
 }

@@ -1015,6 +1015,47 @@ fn retry_notice_is_transient_status_and_resets_on_success() {
 }
 
 #[test]
+fn queued_prompts_and_notices_render_below_working_indicator() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        kind: lofi_types::PromptKind::User,
+        prompt: "active prompt".to_string(),
+    });
+    a.run = Some(0);
+    a.run_start = Some(Instant::now());
+    a.prompt_queue.push(QueuedPrompt {
+        text: "queued user message".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    a.prompt_queue.push(QueuedPrompt {
+        text: "job 7 completed".to_string(),
+        kind: lofi_types::PromptKind::Notice,
+    });
+    let rendered = view::blocks::render_turns(&a, 80);
+    let rows: Vec<String> = rendered
+        .lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let working_idx = rows
+        .iter()
+        .position(|r| r.contains("Working for"))
+        .expect("working row");
+    let user_idx = rows
+        .iter()
+        .position(|r| r.contains("queued user message"))
+        .expect("queued user row");
+    let notice_idx = rows
+        .iter()
+        .position(|r| r.contains("job 7 completed"))
+        .expect("queued notice row");
+    assert!(
+        working_idx < user_idx && user_idx < notice_idx,
+        "expected Working ({working_idx}) < queued user ({user_idx}) < queued notice ({notice_idx}): {rows:#?}"
+    );
+}
+
+#[test]
 fn queued_prompts_render_in_transcript_with_muted_bars() {
     let mut a = app();
     a.prompt_queue.push(QueuedPrompt {

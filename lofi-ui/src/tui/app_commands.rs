@@ -449,6 +449,7 @@ impl App {
             jobs.reset();
             self.jobs_receiver_stale = true;
         }
+        self.notified_jobs.clear();
         self.jobs_modal = None;
         self.prompt_queue
             .retain(|queued| queued.kind == lofi_types::PromptKind::User);

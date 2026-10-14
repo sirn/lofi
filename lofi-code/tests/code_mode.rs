@@ -784,8 +784,16 @@ async fn job_completion_queues_a_notice() {
     wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
     let notices = jobs.drain_notices();
     assert_eq!(notices.len(), 1, "notices: {notices:?}");
-    assert!(notices[0].contains("failed"), "notice: {}", notices[0]);
-    assert!(notices[0].contains("exit 3"), "notice: {}", notices[0]);
+    assert!(
+        notices[0].text.contains("failed"),
+        "notice: {:?}",
+        notices[0]
+    );
+    assert!(
+        notices[0].text.contains("exit 3"),
+        "notice: {:?}",
+        notices[0]
+    );
 }
 
 #[tokio::test]
@@ -802,7 +810,11 @@ async fn job_periodic_tick_goes_to_ui_not_model() {
     // A tick lands in the single notice queue, to become a queued prompt.
     let notices = jobs.drain_notices();
     assert!(!notices.is_empty(), "no tick queued");
-    assert!(notices[0].contains("running"), "tick: {}", notices[0]);
+    assert!(
+        notices[0].text.contains("running"),
+        "tick: {:?}",
+        notices[0]
+    );
 }
 
 #[tokio::test]

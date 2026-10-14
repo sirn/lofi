@@ -186,6 +186,19 @@ pub struct JobInfo {
     pub duration_ms: u64,
     pub log_path: String,
     pub tty: bool,
+    /// Whether completion publishes a notice (`jobSpawn` `notify`). The UI
+    /// keeps a terminal job's running line until that notice arrives.
+    pub notify: bool,
+}
+
+/// A job lifecycle notice pushed to subscribers (and buffered for late
+/// ones). `terminal` marks the single completion notice; progress and idle
+/// ticks carry `false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobNotice {
+    pub id: u64,
+    pub terminal: bool,
+    pub text: String,
 }
 
 /// A terminal color captured independently of the UI renderer.
@@ -288,11 +301,11 @@ struct Inner {
     /// Live notice subscribers (one per UI host). Zero subscribers means
     /// headless; notices still land in `pending` so a late subscriber or a
     /// `drain_notices` call sees the same sequence.
-    subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<String>>>,
+    subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<JobNotice>>>,
     /// Buffered notices produced while no UI subscriber is live, or while a
     /// test drives the registry headless. `subscribe_notices` flushes this
     /// buffer through the newly added subscriber.
-    pending: Mutex<Vec<String>>,
+    pending: Mutex<Vec<JobNotice>>,
 }
 
 /// Per-session registry of background jobs. Cheap to clone; every clone
@@ -331,7 +344,7 @@ impl JobRegistry {
     /// Take all queued notices, leaving the queue empty. Used by tests and
     /// any host that has not subscribed to the live notice channel.
     #[must_use]
-    pub fn drain_notices(&self) -> Vec<String> {
+    pub fn drain_notices(&self) -> Vec<JobNotice> {
         self.inner
             .pending
             .lock()
@@ -343,7 +356,7 @@ impl JobRegistry {
     /// the subscription flush through the returned receiver first, so tests
     /// and the live UI see the same stream regardless of subscribe timing.
     #[must_use]
-    pub fn subscribe_notices(&self) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    pub fn subscribe_notices(&self) -> tokio::sync::mpsc::UnboundedReceiver<JobNotice> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         // Install the subscriber and drain the buffer under the same lock
         // order used by publish. Otherwise a completion can land after the
@@ -400,6 +413,7 @@ impl JobRegistry {
                         .as_millis() as u64,
                     log_path: j.log_path.clone(),
                     tty: j.tty,
+                    notify: j.notify.enabled,
                 }
             })
             .collect();
@@ -1582,12 +1596,12 @@ async fn run_job(
     master: Option<OwnedFd>,
     bash_env: crate::BashEnv,
 ) {
-    let (tty, cols, rows, log_path) = {
+    let (id, tty, cols, rows, log_path) = {
         let job = handle
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (job.tty, job.cols, job.rows, job.log_path.clone())
+        (job.id, job.tty, job.cols, job.rows, job.log_path.clone())
     };
     // The screen parser is driver-local. Writer tools only need the master fd.
     let mut parser = if tty {
@@ -1659,10 +1673,26 @@ async fn run_job(
             &mut idle_tracker,
             &bash_env,
         ) {
-            push_notice(&jobs, generation, text);
+            push_notice(
+                &jobs,
+                generation,
+                JobNotice {
+                    id,
+                    terminal: false,
+                    text,
+                },
+            );
         }
         if let Some(text) = progress_tick(&handle, &mut last_tick, &mut last_bytes) {
-            push_notice(&jobs, generation, text);
+            push_notice(
+                &jobs,
+                generation,
+                JobNotice {
+                    id,
+                    terminal: false,
+                    text,
+                },
+            );
         }
         tokio::time::sleep(JOB_POLL_INTERVAL).await;
     }
@@ -1718,13 +1748,21 @@ async fn run_job(
         hook(id);
     }
     if let Some(text) = notice {
-        push_notice(&jobs, generation, text);
+        push_notice(
+            &jobs,
+            generation,
+            JobNotice {
+                id,
+                terminal: true,
+                text,
+            },
+        );
     }
 }
 
 /// Publish a notice to every live subscriber, or buffer it for a future
 /// subscriber when the registry is headless (tests, pre-UI agent).
-fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, text: String) {
+fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, notice: JobNotice) {
     let Some(inner) = registry.upgrade() else {
         return;
     };
@@ -1743,13 +1781,13 @@ fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, text: String)
     }
     // send() on an unbounded channel fails iff the receiver is dropped; prune
     // dead subscribers on publish so we never hold stale senders.
-    subs.retain(|tx| tx.send(text.clone()).is_ok());
+    subs.retain(|tx| tx.send(notice.clone()).is_ok());
     if subs.is_empty() {
         inner
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(text);
+            .push(notice);
     }
 }
 
@@ -2024,12 +2062,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert(id, handle.clone());
-        registry
-            .inner
-            .pending
-            .lock()
-            .unwrap()
-            .push("buffered".into());
+        registry.inner.pending.lock().unwrap().push(JobNotice {
+            id,
+            terminal: false,
+            text: "buffered".into(),
+        });
 
         registry.reset();
 
@@ -2041,12 +2078,22 @@ mod tests {
         assert!(old_receiver.try_recv().is_err());
 
         let weak = Arc::downgrade(&registry.inner);
-        push_notice(&weak, old_generation, "stale".into());
+        let stale = JobNotice {
+            id,
+            terminal: true,
+            text: "stale".into(),
+        };
+        push_notice(&weak, old_generation, stale);
         let current_generation = registry.inner.generation.load(Ordering::SeqCst);
         let mut current_receiver = registry.subscribe_notices();
         assert!(current_receiver.try_recv().is_err());
-        push_notice(&weak, current_generation, "current".into());
-        assert_eq!(current_receiver.try_recv().unwrap(), "current");
+        let current = JobNotice {
+            id,
+            terminal: true,
+            text: "current".into(),
+        };
+        push_notice(&weak, current_generation, current.clone());
+        assert_eq!(current_receiver.try_recv().unwrap(), current);
     }
 
     #[test]
@@ -2384,9 +2431,9 @@ mod tests {
         // One idle window plus a little scheduling slack.
         tokio::time::sleep(Duration::from_millis(900)).await;
         let notices = tools.jobs.drain_notices();
-        let idle = notices.iter().find(|n| n.contains("idle"));
+        let idle = notices.iter().find(|n| n.text.contains("idle"));
         assert!(idle.is_some(), "notices: {notices:?}");
-        assert!(idle.unwrap().contains("Name?"), "notices: {notices:?}");
+        assert!(idle.unwrap().text.contains("Name?"), "notices: {notices:?}");
         tools.job_kill(json!({ "id": id })).await.unwrap();
     }
 }

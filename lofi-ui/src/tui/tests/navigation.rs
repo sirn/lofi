@@ -898,6 +898,7 @@ fn expanding_in_flight_exec_at_viewport_bottom_keeps_body_visible() {
     assert!(a.log_view_h > 0);
 
     a.enter_nav();
+    a.nav_move(-2);
     assert!(a.log_vis[a.nav_cursor - a.log_off]
         .rendered
         .contains("Exec"));
