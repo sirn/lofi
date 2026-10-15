@@ -7,6 +7,7 @@ mod modal;
 mod resume;
 mod settings;
 mod slash;
+mod subagents;
 mod tree;
 
 impl App {

@@ -342,6 +342,7 @@ pub(crate) async fn run_loop(
         // Clone the session's job registry for the `/job` modal and the
         // running-jobs badge. Cheap: shares the agent's map.
         app.jobs = Some(a.jobs());
+        app.subagents = a.subagents();
         // The `/policy` dialog writes the choice here; every exec in the
         // session reads it. Cloned (not moved) so model switches keep it.
         app.policy_override = Some(a.policy_override().clone());
@@ -595,6 +596,7 @@ pub(crate) async fn run_loop(
                                     app.no_models_hint = None;
                                     app.system_prompt = new_agent.system_prompt().into();
                                     app.jobs = Some(new_agent.jobs());
+                                    app.subagents = new_agent.subagents();
                                     app.policy_override = Some(new_agent.policy_override());
                                     app.auto_mode_configured = new_agent.has_auto_mode();
                                     app.jobs_receiver_stale = true;
@@ -823,6 +825,9 @@ pub(crate) async fn run_loop(
                         Some("quit: run aborted before its final transcript write".to_string());
                 }
             }
+            // Record subagent spend that settled after the last turn flush;
+            // the registry is dropped with the process after this.
+            app.record_subagent_spend();
             // Queued prompts were never sent; quit must not silently drop
             // typed input.
             persist_unsent_prompts(&mut app);

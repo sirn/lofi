@@ -307,6 +307,57 @@ bounded during recovery.
 **Returns:** `string` — the raw content (a tool result's output text, or a
 tool call's input JSON). Cheap and on-demand.
 
+## lofi.subagent({ prompt, id?, model?, thinking?, system?, timeout_ms?, output_limit? })
+
+Delegate a task to a foreground subagent: a fresh agent run in its own
+context window. Only the final result crosses back into this exec, so use
+it for work whose intermediate output you do not need (broad searches,
+log reads, mechanical edits).
+
+**Parameters:**
+- `prompt` (string, required) — the task for the subagent.
+- `id` (string, optional) — resume a previous subagent run, continuing its
+  context with this prompt. `model`, `thinking`, and `system` are rejected
+  on resume; `timeout_ms` and `output_limit` still apply.
+- `model` (string, optional) — model query (e.g. `anthropic/claude-haiku-4.5`)
+  overriding the session model. List choices with `lofi.models()`.
+- `thinking` (string, optional) — thinking level (`off`, `low`, `medium`,
+  `high`, `xhigh`).
+- `system` (string, optional) — system prompt override.
+- `timeout_ms` (number, optional) — wall-clock limit for the whole run.
+- `output_limit` (number, optional) — cap on the returned result bytes.
+
+**Returns:** `{ ok, id, status, result?, error?, session_id?, truncated?, full_bytes?, usage? }`.
+`status` is one of `completed`, `failed`, `cancelled`, `timed_out` —
+`running` when a resume targets a run that is still active, or
+`unavailable` when the sandbox has no subagent support. Keep the `id` to
+resume the run later; an `id` lives in memory only, so it never survives a
+restart, and `/new` or capacity eviction invalidates it. `session_id` is the
+id of the persisted transcript, present unless the session does not persist;
+the transcript stays on disk even after the `id` is evicted. When `result`
+was cut to fit `output_limit`, `truncated` is `true` and `full_bytes` holds
+the full length. `usage` reports the run's token totals and cost when the
+provider reported them. A timed-out run keeps only the history from before
+that run, so a resume never replays a dangling tool call. Argument problems —
+a missing `prompt`, an empty or unknown `id`, a bad override, a value with
+the wrong type — resolve with `ok: false` and `status: "failed"` instead of
+throwing.
+
+Subagents run with the session's shell policy and truncation config; they
+cannot spawn further subagents. They write transcripts unless the session
+does not persist (`--no-session`, print mode). Each session keeps at most
+64 subagent entries; past that, spawning evicts a finished entry, and it
+fails while 64 runs are still active.
+
+## lofi.models()
+
+List the models available for `lofi.subagent` overrides. Like every `lofi.*`
+call it returns a promise: `await lofi.models()`.
+
+**Returns:** `{ models: [{ model, name, thinking_levels, service_tiers }] }`,
+where `model` is the qualified query (`provider/id`). Without a host
+registry, returns `{ ok: false, status: "unavailable" }`.
+
 ## lofi.skills(search?)
 
 List available skills, optionally filtered.

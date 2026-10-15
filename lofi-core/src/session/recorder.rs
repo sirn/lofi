@@ -52,6 +52,11 @@ pub enum SessionRecord<'a> {
         usage: Option<Usage>,
         cost: Option<f64>,
     },
+    /// Spend of subagent runs that settled since the last record, as deltas.
+    SubagentUsage {
+        usage: Usage,
+        cost: f64,
+    },
     System {
         prompt: &'a str,
     },
@@ -156,6 +161,14 @@ impl store::SessionCursor {
                         usage,
                         cost,
                     },
+                }];
+                self.append_events(&mut events)
+            }
+            SessionRecord::SubagentUsage { usage, cost } => {
+                let mut events = [SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::SubagentUsage { usage, cost },
                 }];
                 self.append_events(&mut events)
             }

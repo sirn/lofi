@@ -166,7 +166,8 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
             backend.model_label()
         };
         let switcher =
-            tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env.clone())?;
+            tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env.clone())?
+                .with_subagent_persistence(!opts.no_session);
         let system_prompt = backend.system_prompt().to_string();
         return Box::pin(tui::run(
             Some(backend),
@@ -200,10 +201,12 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         match resolve_startup_agent(&opts, restored.as_deref()).await? {
             StartupAgent::Ready(built) => {
                 let (agent, model, thinking, config, registry) = *built;
+                let agent = agent.with_subagent_persistence(!opts.no_session);
                 let root = opts.root.clone();
                 let compaction = config.compaction.clone();
                 let ui_theme = config.ui.theme;
-                let switcher = tui::ModelSwitcher::new(registry, config, root, env);
+                let switcher = tui::ModelSwitcher::new(registry, config, root, env)
+                    .with_subagent_persistence(!opts.no_session);
                 (
                     Some(agent),
                     format!("{}/{}", model.provider, model.id),
@@ -228,6 +231,7 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
                     .await?;
                 let switcher =
                     tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env)?
+                        .with_subagent_persistence(!opts.no_session)
                         .with_tool_executor(executor);
                 (
                     None,
@@ -497,6 +501,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
     .await?
     {
         Some((backend, _, _)) => backend,
+        // Print mode writes no transcript of its own; subagents match it.
         None => build_agent(
             opts.config_path.as_deref(),
             opts.model.as_deref(),
@@ -505,6 +510,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
         )
         .await?
         .0
+        .with_subagent_persistence(false)
         .into(),
     };
 
@@ -553,6 +559,7 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::RoundCommitted { .. }
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
+                | AgentEvent::SubagentUsage { .. }
                 | AgentEvent::BackendUsage { .. }
                 | AgentEvent::BackendModel { .. }
                 | AgentEvent::RetryEnd { .. }

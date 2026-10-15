@@ -12,6 +12,9 @@ use super::{now_ms, short_id, Header, SessionMeta, SESSION_VERSION};
 #[derive(Debug, Clone)]
 pub struct SessionFile {
     pub(super) path: PathBuf,
+    // Read when the file was listed, so callers filter on it without a
+    // second header read per file.
+    meta: SessionMeta,
     last_active: std::time::SystemTime,
 }
 
@@ -33,6 +36,11 @@ impl SessionFile {
     }
 
     #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
     pub fn byte_len(&self) -> u64 {
         std::fs::metadata(&self.path).map_or(u64::MAX, |meta| meta.len())
     }
@@ -40,6 +48,12 @@ impl SessionFile {
     #[must_use]
     pub fn quick_preview(&self) -> Option<String> {
         quick_entry_preview(&self.path)
+    }
+
+    /// The session meta header, captured when the file was listed.
+    #[must_use]
+    pub fn meta(&self) -> &SessionMeta {
+        &self.meta
     }
 
     #[must_use]
@@ -78,6 +92,31 @@ impl SessionEntry {
     /// Propagates transcript indexing and validation failures.
     pub fn open_snapshot(&self) -> Result<(SessionCursor, SessionSnapshot)> {
         self.file.open_snapshot()
+    }
+}
+
+impl SessionStore {
+    /// Transcript headers of subagents spawned by the session `parent` in
+    /// `cwd`, newest first. `/subagent` lists these beside the live registry
+    /// so settled children survive eviction and restarts.
+    ///
+    /// # Errors
+    /// Propagates directory scan failures.
+    pub fn list_subagent_files_for_cwd(
+        &self,
+        cwd: &Path,
+        parent: &str,
+    ) -> Result<Vec<SessionFile>> {
+        let mut files: Vec<SessionFile> = self
+            .list_files_for_cwd(cwd)?
+            .into_iter()
+            .filter(|file| {
+                let meta = file.meta();
+                meta.subagent && meta.parent.as_deref() == Some(parent)
+            })
+            .collect();
+        files.sort_by_key(|file| std::cmp::Reverse(file.meta().created));
+        Ok(files)
     }
 }
 
@@ -147,13 +186,48 @@ impl SessionStore {
     /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
     /// header-serialization failure.
     pub fn create_cursor(&self, cwd: &Path, model: &RunModel) -> Result<SessionCursor> {
-        let path = self.create(cwd, model)?;
+        self.create_cursor_marked(cwd, model, false, None)
+    }
+
+    /// A subagent transcript: recorded for resumability, but excluded from
+    /// default session selection so it never becomes the `--continue` target.
+    /// # Errors
+    /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
+    /// header-serialization failure.
+    pub fn create_subagent_cursor(
+        &self,
+        cwd: &Path,
+        model: &RunModel,
+        parent: Option<&str>,
+    ) -> Result<SessionCursor> {
+        self.create_cursor_marked(cwd, model, true, parent)
+    }
+
+    fn create_cursor_marked(
+        &self,
+        cwd: &Path,
+        model: &RunModel,
+        subagent: bool,
+        parent: Option<&str>,
+    ) -> Result<SessionCursor> {
+        let path = self.create_marked(cwd, model, subagent, parent)?;
         let cursor = SessionCursor::new(path, None);
         *cursor.lock_compaction_index() = Some(Vec::new());
         Ok(cursor)
     }
 
+    #[cfg(test)]
     pub(super) fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
+        self.create_marked(cwd, model, false, None)
+    }
+
+    pub(super) fn create_marked(
+        &self,
+        cwd: &Path,
+        model: &RunModel,
+        subagent: bool,
+        parent: Option<&str>,
+    ) -> Result<PathBuf> {
         crate::state::ensure_private_dir(&self.root)?;
         let dir = self.dir_for_cwd(cwd);
         crate::state::ensure_private_dir(&dir)?;
@@ -166,6 +240,8 @@ impl SessionStore {
                 created: now_ms(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 model: model.clone(),
+                subagent,
+                parent: parent.map(str::to_string),
             },
         };
         let line =
@@ -180,6 +256,12 @@ impl SessionStore {
     pub fn list_for_cwd(&self, cwd: &Path) -> Result<Vec<SessionEntry>> {
         let mut entries = Vec::new();
         for file in self.list_files_for_cwd(cwd)? {
+            // Subagent transcripts exist for resumability; they are not user
+            // sessions and stay out of the picker. Filter on the listed
+            // header: inspect reads the whole file.
+            if file.meta().subagent {
+                continue;
+            }
             if let Some(entry) = file.inspect() {
                 entries.push(entry);
             }
@@ -220,7 +302,11 @@ impl SessionStore {
                 .metadata()
                 .and_then(|metadata| metadata.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            files.push(SessionFile { path, last_active });
+            files.push(SessionFile {
+                path,
+                meta,
+                last_active,
+            });
         }
         files.sort_by_key(|file| std::cmp::Reverse(file.last_active));
         Ok(files)
@@ -416,11 +502,12 @@ fn parse_entry(path: &Path, last_active: std::time::SystemTime) -> Option<Sessio
     let (meta, message_count, last_message) =
         super::index::scan_entry_summary::<EntryPreview>(path, entry_preview_slice).ok()?;
     Some(SessionEntry {
-        meta,
         file: SessionFile {
             path: path.to_path_buf(),
+            meta: meta.clone(),
             last_active,
         },
+        meta,
         message_count,
         last_active,
         last_message,

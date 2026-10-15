@@ -132,6 +132,13 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
+        // Stamp the live session id so spawned subagent transcripts link back
+        // to this session; /new and /resume switch cursors between turns.
+        if let Some(cursor) = session {
+            if let Some(stem) = cursor.path().file_stem().and_then(|s| s.to_str()) {
+                self.subagents.set_parent_session(stem);
+            }
+        }
         let mut starts_run = true;
         for notice in notices {
             let message = Message {

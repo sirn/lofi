@@ -44,6 +44,8 @@ fn ctx(root: &std::path::Path) -> ExecCtx {
         truncate: crate::tools::truncate::TruncatedCap::default(),
         jobs: crate::tools::JobRegistry::new(),
         on_job_acquired: None,
+        subagent: None,
+        models: None,
     }
 }
 
@@ -348,6 +350,8 @@ async fn exec_strings_exposed_as_lofi_strings() {
         truncate: crate::tools::truncate::TruncatedCap::default(),
         jobs: crate::tools::JobRegistry::new(),
         on_job_acquired: None,
+        subagent: None,
+        models: None,
     };
     let res = exec(
         "return lofi_strings.greeting;",
@@ -653,6 +657,156 @@ async fn exec_read_pages_whole_file_via_next_offset() {
     assert!(res.value["hops"].as_u64().unwrap() > 1, "{res:?}");
     // Pages split on line boundaries, so joining with "\n" restores the file.
     assert_eq!(res.value["joined"], json!(body.len()));
+}
+
+#[tokio::test]
+async fn exec_subagent_cancel_returns_promptly() {
+    // While the guest awaits the subagent hook, no QuickJS bytecode ticks,
+    // so the interrupt handler cannot observe the flag; the bound tool must
+    // race the hook against the cancel flag itself.
+    let dir = tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let opts = ExecOptions {
+        timeout: Duration::from_secs(30),
+        cancel: Some(cancel.clone()),
+        ..ExecOptions::default()
+    };
+    let mut c = ctx(dir.path());
+    c.subagent = Some(Arc::new(
+        |_| -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>> {
+            Box::pin(std::future::pending())
+        },
+    ));
+
+    tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.store(true, Ordering::Relaxed);
+        }
+    });
+
+    // The CPU budget cannot interrupt an awaited hook, so bound the exec
+    // itself: a broken cancel race must fail the test, not hang it.
+    #[allow(clippy::expect_used)]
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        exec("await lofi.subagent({ prompt: 'x' })", &c, &opts),
+    )
+    .await
+    .expect("exec did not return after cancellation")
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Sandbox(ref m) if m.contains("cancelled")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_subagent_without_hook_reports_unavailable() {
+    let dir = tempdir().unwrap();
+    let res = exec(
+        "return await lofi.subagent({ prompt: 'do a thing' });",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["ok"], json!(false), "{res:?}");
+    assert_eq!(res.value["status"], json!("unavailable"), "{res:?}");
+    assert!(
+        res.value["error"]
+            .as_str()
+            .unwrap()
+            .contains("not available"),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_subagent_requires_prompt() {
+    // The hook validates and resolves; the bind layer must not intercept the
+    // call or turn it into a thrown exception.
+    let dir = tempdir().unwrap();
+    let mut c = ctx(dir.path());
+    c.subagent = Some(Arc::new(|args| {
+        Box::pin(async move {
+            match args.get("prompt").and_then(Json::as_str) {
+                Some(p) if !p.trim().is_empty() => json!({ "ok": true, "status": "completed" }),
+                _ => json!({
+                    "ok": false,
+                    "status": "failed",
+                    "error": "prompt is required and must be non-empty",
+                }),
+            }
+        })
+    }));
+    let res = exec(
+        "return await lofi.subagent({});",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["ok"], json!(false), "{res:?}");
+    assert!(
+        res.value["error"].as_str().unwrap().contains("prompt"),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_subagent_passes_args_and_returns_result() {
+    let dir = tempdir().unwrap();
+    let mut c = ctx(dir.path());
+    c.subagent = Some(Arc::new(|args| {
+        Box::pin(async move {
+            json!({
+                "ok": true,
+                "id": "s1",
+                "status": "completed",
+                "result": format!("echo: {}", args["prompt"].as_str().unwrap()),
+            })
+        })
+    }));
+    let res = exec(
+        "const r = await lofi.subagent({ prompt: 'hello', timeout_ms: 1000 }); return r.result;",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!("echo: hello"));
+}
+
+#[tokio::test]
+async fn exec_models_lists_choices() {
+    let dir = tempdir().unwrap();
+    let mut c = ctx(dir.path());
+    c.models = Some(Arc::new(
+        || json!({ "models": [{ "model": "p/m", "name": "M", "thinking_levels": ["off"], "service_tiers": [] }] }),
+    ));
+    let res = exec(
+        "const m = await lofi.models(); return m.models[0].model;",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!("p/m"));
+}
+
+#[tokio::test]
+async fn exec_models_without_hook_reports_unavailable() {
+    let dir = tempdir().unwrap();
+    let res = exec(
+        "const m = await lofi.models(); return m.status;",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!("unavailable"));
 }
 
 #[tokio::test]

@@ -14,7 +14,9 @@ use lofi_error::{Error, Result};
 use crate::bind::bind_tools;
 use crate::compile::compile_ts;
 use crate::convert::{js_to_json_with_limit, SANDBOX_ERROR_KEY};
-use crate::ctx::{ExecCtx, ExecImage, ExecOptions, ExecResult, RecallFn, ResultFn};
+use crate::ctx::{
+    ExecCtx, ExecImage, ExecOptions, ExecResult, ModelsFn, RecallFn, ResultFn, SubagentFn,
+};
 use crate::tools::BuiltinTools;
 
 const GUEST_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
@@ -187,6 +189,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
     let recall = ctx.recall.clone();
     let result = ctx.result.clone();
     let skills_dir = ctx.skills_dir.clone();
+    let subagent = ctx.subagent.clone();
+    let models = ctx.models.clone();
     let logs = Arc::new(Mutex::new(String::new()));
 
     let outcome = async {
@@ -207,6 +211,8 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
                 recall,
                 result,
                 skills_dir,
+                subagent,
+                models,
                 &logs,
                 opts.max_value_bytes,
             )
@@ -318,11 +324,15 @@ fn install_globals<'js>(
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
+    subagent: Option<SubagentFn>,
+    models: Option<ModelsFn>,
     logs: &Arc<Mutex<String>>,
     max_output_bytes: usize,
 ) -> rquickjs::Result<Function<'js>> {
     let lofi = Object::new(ctx.clone())?;
-    bind_tools(ctx, &lofi, tools, recall, result, skills_dir)?;
+    bind_tools(
+        ctx, &lofi, tools, recall, result, skills_dir, subagent, models,
+    )?;
     lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
     let install_tracker: Function = ctx.eval(TRACK_FOREGROUND_TOOLS)?;
     let drain_tools = install_tracker.call((lofi.clone(),))?;

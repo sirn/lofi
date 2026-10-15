@@ -21,6 +21,20 @@ pub type RecallFn = Arc<
 
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
+/// Optional `lofi.subagent` implementation: an async callback from the
+/// `lofi.subagent` native tool into the engine that owns agent runs. The
+/// callback takes the raw argument object, and returns the structured
+/// result (`{ ok, id, status, ... }`). The sandbox never depends on
+/// `lofi-core`; the callback does.
+pub type SubagentFn = Arc<
+    dyn Fn(Json) -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>> + Send + Sync,
+>;
+
+/// Optional `lofi.models` implementation: lists the models available for
+/// `lofi.subagent` overrides. `None` where the host has no registry (nested
+/// subagent sandboxes, tests).
+pub type ModelsFn = Arc<dyn Fn() -> Json + Send + Sync>;
+
 // Must not block: called synchronously from the sandbox / job driver.
 pub type JobReleaseFn = Arc<dyn Fn(u64) + Send + Sync>;
 /// Acquire lifecycle ownership for a spawned job. The returned release hook
@@ -108,6 +122,13 @@ pub struct ExecCtx {
     /// only (pre-session resume, tests, `--no-session`). The callback
     /// returns the completion hook retained by that job.
     pub on_job_acquired: Option<crate::JobAcquireFn>,
+    /// Runs a subagent turn. `None` where subagents are unsupported
+    /// (nested subagent sandboxes, tests); `lofi.subagent` stays bound and
+    /// reports the context as unavailable.
+    pub subagent: Option<SubagentFn>,
+    /// Lists available models. `None` where the host has no registry;
+    /// `lofi.models` stays bound and reports the context as unavailable.
+    pub models: Option<ModelsFn>,
 }
 
 impl std::fmt::Debug for ExecCtx {
@@ -123,6 +144,8 @@ impl std::fmt::Debug for ExecCtx {
             .field("shell_policy", &"<resolved>")
             .field("confirm", &self.confirm.is_some())
             .field("auto_mode", &self.auto_mode.is_some())
+            .field("subagent", &self.subagent.is_some())
+            .field("models", &self.models.is_some())
             .field("skills_dir", &self.skills_dir)
             .finish_non_exhaustive()
     }

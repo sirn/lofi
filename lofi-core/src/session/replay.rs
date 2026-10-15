@@ -282,6 +282,12 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     cost: *cost,
                 });
             }
+            SessionEventKind::SubagentUsage { usage, cost } => {
+                emit(AgentEvent::SubagentUsage {
+                    cost: *cost,
+                    usage: *usage,
+                });
+            }
             SessionEventKind::RoundDiscarded { .. }
             | SessionEventKind::NativeTool(_)
             | SessionEventKind::ToolTiming { .. }
@@ -364,6 +370,8 @@ pub fn agent_message_for_event(kind: &SessionEventKind) -> Option<Message> {
         // from tool results and notices. Kept explicit against the wildcard
         // so the lifecycle rule is visible without scanning the `_` arm.
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => None,
+        // Accounting only; the model never sees subagent spend.
+        SessionEventKind::SubagentUsage { .. } => None,
         SessionEventKind::Message(m) => Some(m.clone()),
         SessionEventKind::UserShell {
             command,

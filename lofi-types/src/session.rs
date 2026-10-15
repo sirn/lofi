@@ -115,6 +115,12 @@ pub enum SessionEventKind {
     JobFinished {
         job_id: u64,
     },
+    /// Spend of subagent runs that settled since the last record, as deltas.
+    /// Accounting only: it never enters the model context.
+    SubagentUsage {
+        usage: Usage,
+        cost: f64,
+    },
     /// An event variant this build does not know about — typically a marker
     /// written by a newer (or older, pre-release) binary. The transcript
     /// stays loadable; consumers ignore these.

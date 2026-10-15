@@ -156,6 +156,13 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
+    /// Spend of subagent runs that settled since the last event, as deltas.
+    /// The UI folds these into the session totals only: child tokens never
+    /// occupy the parent context window, so the gauge must not see them.
+    SubagentUsage {
+        cost: f64,
+        usage: Usage,
+    },
     /// Response model identity and stable session display model. Terminal
     /// events carry the response identity for durable turn records and replay.
     BackendModel {

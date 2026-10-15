@@ -96,6 +96,9 @@ pub(crate) struct ModelSwitcher {
     choices: Vec<lofi_types::ModelChoice>,
     unresolved_config: Option<lofi_types::Config>,
     executor: Option<lofi_core::agent::ToolExecutor>,
+    // Inherited from the session: a non-persisting session also disables
+    // subagent transcripts, including after a model switch rebuilds the agent.
+    persist_sessions: bool,
 }
 
 impl ModelSwitcher {
@@ -114,7 +117,13 @@ impl ModelSwitcher {
             choices,
             unresolved_config: None,
             executor: None,
+            persist_sessions: true,
         }
+    }
+
+    pub(crate) fn with_subagent_persistence(mut self, persist_sessions: bool) -> Self {
+        self.persist_sessions = persist_sessions;
+        self
     }
 
     pub(crate) fn from_external(
@@ -182,6 +191,8 @@ impl ModelSwitcher {
         let (agent, model, level) = if let Some(config) = &self.unresolved_config {
             let provider = query.split_once('/').map_or("", |(name, _)| name);
             let mut config = config.clone();
+            // The external backend config resolves a single provider, so
+            // `lofi.models()` and `model` overrides stay limited to it.
             config.providers.retain(|name, _| name == provider);
             let guard = lofi_core::config_loader::apply_env_specs(&self.env);
             lofi_core::config_loader::resolve_config(&mut config).await?;
@@ -190,14 +201,15 @@ impl ModelSwitcher {
                 Ok(registry) => registry,
                 Err(_) => lofi_core::ModelRegistry::load(&config)?,
             };
-            lofi_core::rebuild_agent(
+            let (agent, model, level) = lofi_core::rebuild_agent(
                 existing.and_then(Backend::native),
                 &registry,
                 &config,
                 Some(query),
                 &self.root,
                 &self.env,
-            )?
+            )?;
+            (self.with_subagents(agent, registry, &config), model, level)
         } else {
             self.rebuild(existing.and_then(Backend::native), query)?
         };
@@ -216,13 +228,32 @@ impl ModelSwitcher {
         existing: Option<&Agent>,
         query: &str,
     ) -> Result<(Agent, lofi_types::Model, ThinkingLevel)> {
-        lofi_core::rebuild_agent(
+        let (agent, model, level) = lofi_core::rebuild_agent(
             existing,
             &self.registry,
             &self.config,
             Some(query),
             &self.root,
             &self.env,
+        )?;
+        Ok((
+            self.with_subagents(agent, self.registry.clone(), &self.config),
+            model,
+            level,
+        ))
+    }
+
+    /// Attach the subagent hooks. One place, so every construction path wires
+    /// the same persistence policy.
+    fn with_subagents(
+        &self,
+        agent: Agent,
+        registry: lofi_core::ModelRegistry,
+        config: &lofi_types::Config,
+    ) -> Agent {
+        agent.with_subagent_support(
+            lofi_core::SubagentSupport::new(registry, config.clone(), self.root.clone())
+                .with_persistence(self.persist_sessions),
         )
     }
 }
@@ -261,6 +292,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "exit lofi"),
     ("/resume", "pick a past session to resume"),
     ("/session", "show session info"),
+    ("/subagent", "list subagents, view a transcript"),
     ("/tree", "roll back to a past turn"),
     ("/model", "switch the active model"),
     ("/policy", "change bash approval mode for this session"),
@@ -358,6 +390,10 @@ pub(crate) struct App {
     /// startup. `None` when no agent is configured. Backs the `/job` modal
     /// and the persistent running-jobs badge.
     jobs: Option<lofi_core::JobRegistry>,
+    /// The session's subagent registry, cloned from the agent alongside
+    /// `jobs`. `/new` clears it so old subagent ids cannot resume into the
+    /// new session.
+    subagents: Option<lofi_core::SubagentRegistry>,
     /// Set when a session switch resets the shared registry. The run loop
     /// replaces its receiver so notices already delivered for the old scope
     /// cannot enter the new session.
@@ -368,6 +404,7 @@ pub(crate) struct App {
     /// until the notice lands so line and notice swap in one frame.
     notified_jobs: std::collections::HashSet<u64>,
     jobs_modal: Option<JobsModalState>,
+    subagents_modal: Option<SubagentsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,
     pending_model_switch: Option<String>,
     info: Option<InfoModal>,

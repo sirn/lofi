@@ -46,6 +46,11 @@ pub async fn build_agent(
 
     let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root, env)?;
     let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
+    let agent = agent.with_subagent_support(SubagentSupport::new(
+        registry.clone(),
+        config.clone(),
+        root.to_path_buf(),
+    ));
     let skills_dir = config_path.parent().map(|p| p.join("skills"));
     let agent = agent.with_skills_dir(skills_dir.clone());
     let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
@@ -340,8 +345,31 @@ pub fn select_model(
     config: &lofi_types::Config,
     model_query: Option<&str>,
 ) -> Result<(Model, ThinkingLevel)> {
+    select_model_impl(registry, config, model_query, None)
+}
+
+/// Like [`select_model`], but an explicit thinking level takes precedence
+/// over a level embedded in the query and over configured defaults.
+/// # Errors
+/// Propagates [`Error`] from query parsing, model resolution, and thinking
+/// level validation.
+pub fn select_model_with_level(
+    registry: &ModelRegistry,
+    config: &lofi_types::Config,
+    model_query: Option<&str>,
+    level: ThinkingLevel,
+) -> Result<(Model, ThinkingLevel)> {
+    select_model_impl(registry, config, model_query, Some(level))
+}
+
+fn select_model_impl(
+    registry: &ModelRegistry,
+    config: &lofi_types::Config,
+    model_query: Option<&str>,
+    level_override: Option<ThinkingLevel>,
+) -> Result<(Model, ThinkingLevel)> {
     let available = registry.available();
-    let (provider_name, model_id, explicit_level, explicit_tier) = if let Some(q) = model_query {
+    let (provider_name, model_id, parsed_level, explicit_tier) = if let Some(q) = model_query {
         let mq = parse_model_query(q)?;
         (mq.provider, mq.model, mq.level, mq.tier)
     } else if let Some(default) = config.default_model.as_deref() {
@@ -396,6 +424,7 @@ pub fn select_model(
             "no model `{model_id}` for provider `{provider_name}`"
         ))
     })?;
+    let explicit_level = level_override.or(parsed_level);
     let level = resolve_thinking_level(
         explicit_level,
         mc,

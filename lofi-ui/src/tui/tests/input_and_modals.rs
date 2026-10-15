@@ -733,3 +733,23 @@ fn slash_complete_single_item_tab_accepts() {
     assert_eq!(a.input, "/tree");
     assert!(a.slash_complete.is_none());
 }
+
+#[test]
+fn subagent_command_opens_empty_modal_without_a_session() {
+    let mut a = app();
+    assert!(a.slash_command("/subagent"));
+    // The test app has no session sink: the modal opens with live registry
+    // rows only, and there are none.
+    let modal = a.subagents_modal.as_ref().expect("subagents modal");
+    assert!(modal.rows.is_empty());
+}
+
+#[test]
+fn subagent_modal_esc_closes() {
+    let mut a = app();
+    assert!(a.slash_command("/subagent"));
+    assert!(a.subagents_modal.is_some());
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+    assert!(a.subagents_modal.is_none());
+}

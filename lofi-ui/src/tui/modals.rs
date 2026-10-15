@@ -210,6 +210,38 @@ impl ThemePickerState {
     ];
 }
 
+/// `/subagent` modal. Lists the subagents spawned by the live session:
+/// store rows (durable, survive restarts) merged with the registry's live
+/// overlay (in-flight runs). `Enter` opens a read-only transcript view.
+pub(crate) struct SubagentsModalState {
+    pub(crate) selected: usize,
+    /// Rows loaded at open and on `r`; store order (newest first), then live
+    /// rows not yet on disk.
+    pub(crate) rows: Vec<SubagentRow>,
+    /// Set while viewing one transcript; `Esc` returns to the list.
+    pub(crate) viewing: Option<SubagentTranscriptView>,
+}
+
+/// One `/subagent` list row. `file` is present for settled runs with a
+/// transcript on disk; live-only rows carry the registry's file name.
+pub(crate) struct SubagentRow {
+    pub(crate) id: String,
+    pub(crate) running: bool,
+    pub(crate) preview: String,
+    /// Transcript file name (`<millis>_<rand>.jsonl`), when one exists.
+    pub(crate) file: Option<String>,
+}
+
+/// Read-only drill-in of one subagent transcript, rendered as flat lines.
+pub(crate) struct SubagentTranscriptView {
+    pub(crate) id: String,
+    pub(crate) lines: Vec<String>,
+    pub(crate) scroll: usize,
+    /// Body height from the last render; the key handler clamps scroll
+    /// against it so there is no dead zone past the top.
+    pub(crate) view_h: usize,
+}
+
 /// State for the `/job` modal. The list is rebuilt from a fresh
 /// [`lofi_core::JobRegistry::snapshot`] each render, so only `selected` and
 /// the drill-in output view are kept here. Plain-job logs page bounded

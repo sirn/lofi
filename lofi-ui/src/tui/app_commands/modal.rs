@@ -82,6 +82,7 @@ impl App {
             || self.service_picker.is_some()
             || self.theme_picker.is_some()
             || self.jobs_modal.is_some()
+            || self.subagents_modal.is_some()
             || !self.pending_confirms.is_empty()
     }
 
@@ -94,7 +95,10 @@ impl App {
         if self.info.is_some() {
             return self.handle_info_key(k);
         }
-        if self.jobs_modal.is_some() || self.active_modal_slot().is_some() {
+        if self.jobs_modal.is_some()
+            || self.subagents_modal.is_some()
+            || self.active_modal_slot().is_some()
+        {
             return self.handle_modal_key(k);
         }
         self.handle_popover_key(k)
@@ -275,6 +279,9 @@ impl App {
     pub(in crate::tui) fn handle_modal_key(&mut self, k: &KeyEvent) -> bool {
         if self.jobs_modal.is_some() {
             return self.handle_jobs_key(k);
+        }
+        if self.subagents_modal.is_some() {
+            return self.handle_subagents_key(k);
         }
         let Some(slot) = self.active_modal_slot() else {
             return false;

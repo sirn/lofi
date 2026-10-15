@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::{InfoLine, JobViewContent, Theme};
+use crate::tui::{InfoLine, JobViewContent, SubagentRow, Theme};
 
 use ratatui::style::Color;
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
@@ -948,6 +948,130 @@ fn job_span_style(attrs: lofi_core::JobStyle) -> Style {
         style = style.add_modifier(Modifier::REVERSED);
     }
     style
+}
+
+/// `/subagent` modal. The list shows this session's subagents (live rows
+/// highlighted); `Enter` drills into a read-only transcript view.
+pub(super) fn render_subagents_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::widgets::ListState;
+    let t = app.theme;
+    let Some(modal) = app.subagents_modal.as_mut() else {
+        return;
+    };
+
+    // Drill-in transcript view.
+    if let Some(view) = &mut modal.viewing {
+        let title = format!(" subagent {} transcript ", view.id);
+        let help = " ↑/↓ scroll  g top  G bottom  esc back ";
+        let w = area.width.saturating_sub(4).clamp(40, 100);
+        let h = area.height.saturating_sub(4).clamp(8, 28);
+        let popup = centered_modal(area, w, h);
+        f.render_widget(Clear, popup);
+        let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+        let body_h = rows.content.height as usize;
+        view.view_h = body_h;
+        view.scroll = view.scroll.min(view.lines.len().saturating_sub(body_h));
+        let total = view.lines.len();
+        let end = total.saturating_sub(view.scroll);
+        let start = end.saturating_sub(body_h);
+        let visible: Vec<Line> = view
+            .lines
+            .iter()
+            .skip(start)
+            .take(body_h)
+            .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))))
+            .collect();
+        f.render_widget(Paragraph::new(visible), rows.content);
+        if total > body_h {
+            let scroll_area = modal_scroll_area(rows.content);
+            prim::render_scrollbar(
+                f,
+                scroll_area.gutter,
+                start,
+                body_h,
+                total,
+                t.subtle,
+                t.user,
+            );
+        }
+        return;
+    }
+
+    // Subagent list.
+    let title = " subagents ";
+    let help = " ↑/↓ navigate  enter transcript  r reload  esc close ";
+    let row_for = |row: &SubagentRow| {
+        let mut preview = String::new();
+        let mut chars = row.preview.chars();
+        for _ in 0..40 {
+            match chars.next() {
+                Some(c) => preview.push(c),
+                None => break,
+            }
+        }
+        if chars.next().is_some() {
+            preview.push('\u{2026}');
+        }
+        let state = if row.running { "running" } else { "done" };
+        format!("{:<8} {:<24} {}", state, row.id, preview)
+    };
+    let content_w = modal
+        .rows
+        .iter()
+        .map(|row| prim::width(&row_for(row)))
+        .max()
+        .unwrap_or(0);
+    let chrome_w = prim::width(title).max(prim::width(help));
+    let w = u16::try_from(content_w.max(chrome_w) + 4)
+        .unwrap_or(40)
+        .min(area.width);
+    let visible_rows = modal.rows.len().clamp(1, 18);
+    let desired_frame_h = u16::try_from(visible_rows + 4).unwrap_or(8);
+    let popup = centered_modal(area, w, desired_frame_h);
+    f.render_widget(Clear, popup);
+    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+
+    if modal.rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no subagents this session",
+                Style::new().fg(t.muted),
+            ))),
+            rows.content,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = modal
+        .rows
+        .iter()
+        .map(|row| {
+            let style = if row.running {
+                Style::new().fg(t.fg)
+            } else {
+                Style::new().fg(t.muted)
+            };
+            ListItem::new(Span::styled(row_for(row), style))
+        })
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(t.fg))
+        .highlight_style(focus_style(t));
+    let selected = modal.selected.min(modal.rows.len() - 1);
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(list, rows.content, &mut state);
+    if modal.rows.len() > rows.content.height as usize {
+        let scroll_area = modal_scroll_area(rows.content);
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            state.offset(),
+            rows.content.height as usize,
+            modal.rows.len(),
+            t.subtle,
+            t.user,
+        );
+    }
 }
 
 /// `/job` modal. PTY jobs show a parsed terminal screen. Plain jobs show a

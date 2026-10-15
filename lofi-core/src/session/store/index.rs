@@ -139,6 +139,7 @@ pub enum IndexKind {
     /// full event slice.
     JobLifecycle,
     BackendUsage,
+    SubagentUsage,
     Other,
 }
 
@@ -163,6 +164,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "cursor" => IndexKind::Cursor,
         "job_started" | "job_finished" => IndexKind::JobLifecycle,
         "backend_usage" => IndexKind::BackendUsage,
+        "subagent_usage" => IndexKind::SubagentUsage,
         _ => IndexKind::Other,
     }
 }
@@ -188,6 +190,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::Compaction { .. } => IndexKind::Compaction,
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
         SessionEventKind::BackendUsage { .. } => IndexKind::BackendUsage,
+        SessionEventKind::SubagentUsage { .. } => IndexKind::SubagentUsage,
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {
             IndexKind::JobLifecycle
         }

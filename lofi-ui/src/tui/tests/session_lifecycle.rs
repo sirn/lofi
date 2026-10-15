@@ -620,6 +620,41 @@ fn run_finished_keeps_blocks_for_hard_cap_continuation() {
 }
 
 #[test]
+fn subagent_usage_folds_totals_without_touching_the_gauge() {
+    let mut a = app();
+    a.apply_event(AgentEvent::Prompt {
+        prompt: "p".into(),
+        kind: lofi_types::PromptKind::User,
+    });
+    a.apply_event(AgentEvent::RoundUsage {
+        cost: 0.01,
+        usage: Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+    let gauge_before = a.status_usage;
+    a.apply_event(AgentEvent::SubagentUsage {
+        cost: 0.02,
+        usage: Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+    // Child spend counts toward the session totals but never toward the
+    // context gauge or the parent turn fold.
+    assert_eq!(a.total_in, 111);
+    assert_eq!(a.total_out, 57);
+    assert_eq!(a.cost, 0.02);
+    assert_eq!(a.turn_cost, 0.01);
+    assert_eq!(a.status_usage, gauge_before);
+}
+
+#[test]
 fn turn_end_updates_usage() {
     let mut a = app();
     push_turn(&mut a);
@@ -718,4 +753,134 @@ fn turn_end_folds_bundled_totals_on_resume_path() {
     assert_eq!(a.total_out, 20);
     assert_eq!(a.turn_cost, 0.0);
     assert!(!a.turn_has_round_usage);
+}
+
+// Serializes tests that touch the process-global LOFI_STATE_HOME: the
+// setter below and any test that builds an agent through `from_external`,
+// whose rebuild reads the variable.
+static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Restores LOFI_STATE_HOME on drop.
+struct StateEnv {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl Drop for StateEnv {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var("LOFI_STATE_HOME", v),
+            None => std::env::remove_var("LOFI_STATE_HOME"),
+        }
+    }
+}
+
+fn jsonl_count(dir: &std::path::Path) -> usize {
+    let mut n = 0;
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                n += jsonl_count(&path);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+// Regression: the external-backend startup path built the switcher without
+// `with_subagent_persistence`, so --no-session was lost when a later /model
+// switch rebuilt a native agent through it.
+// A static model on an unreachable offline provider: a subagent spawn fails
+// fast against it, and with persistence off it leaves no transcript.
+fn offline_switcher(root: &std::path::Path) -> crate::tui::ModelSwitcher {
+    let config: lofi_types::Config = serde_json::from_value(serde_json::json!({
+        "providers": {
+            "test": {
+                "api_type": "openai_completions",
+                "base_url": "http://127.0.0.1:1",
+                "no_auth": true,
+                "models": { "m": {} }
+            }
+        }
+    }))
+    .unwrap();
+    crate::tui::ModelSwitcher::from_external(config, root.to_path_buf(), Vec::new()).unwrap()
+}
+
+// The lock serializes against the process-global LOFI_STATE_HOME, not
+// shared runtime state, so holding it across awaits is the point.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn switcher_rebuild_propagates_subagent_persistence() {
+    let _guard = STATE_ENV_LOCK.lock().unwrap();
+
+    let state = tempfile::tempdir().unwrap();
+    let _restore = StateEnv {
+        prev: std::env::var_os("LOFI_STATE_HOME"),
+    };
+    std::env::set_var("LOFI_STATE_HOME", state.path());
+
+    let root = tempfile::tempdir().unwrap();
+    let build = || offline_switcher(root.path());
+
+    let (agent, ..) = build()
+        .with_subagent_persistence(false)
+        .rebuild(None, "test/m")
+        .unwrap();
+    let hook = agent.subagent_hook().unwrap();
+    let _ = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    assert_eq!(
+        jsonl_count(state.path()),
+        0,
+        "transcript written despite persistence off"
+    );
+
+    // Control: the switcher default persists, so the spawn path writes.
+    let (agent, ..) = build().rebuild(None, "test/m").unwrap();
+    let hook = agent.subagent_hook().unwrap();
+    let _ = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    assert!(
+        jsonl_count(state.path()) > 0,
+        "control spawn wrote no transcript"
+    );
+}
+
+// The lock guards the process-global LOFI_STATE_HOME, not shared runtime
+// state, so holding it across awaits is the point.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn new_session_clears_the_subagent_registry() {
+    // The rebuild below reads LOFI_STATE_HOME; hold the lock so it cannot
+    // race the env-mutating test above, and point it at a temporary
+    // directory so the rebuild's session tmp dirs stay out of the real one.
+    let _guard = STATE_ENV_LOCK.lock().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let _restore = StateEnv {
+        prev: std::env::var_os("LOFI_STATE_HOME"),
+    };
+    std::env::set_var("LOFI_STATE_HOME", state.path());
+    let root = tempfile::tempdir().unwrap();
+    let switcher = offline_switcher(root.path()).with_subagent_persistence(false);
+    let (agent, ..) = switcher.rebuild(None, "test/m").unwrap();
+    let registry = agent.subagents();
+    let hook = agent.subagent_hook().unwrap();
+    let out = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+
+    let mut a = app();
+    a.subagents = Some(registry);
+    a.start_new_session();
+
+    // Ids from the replaced session must not resume into the new one.
+    let out = hook(serde_json::json!({ "id": id, "prompt": "y" })).await;
+    assert_eq!(out["status"], serde_json::json!("failed"), "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown subagent id"),
+        "{out}"
+    );
 }

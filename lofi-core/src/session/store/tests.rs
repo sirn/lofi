@@ -1054,3 +1054,37 @@ fn resume_preview_coalesces_streamed_assistant_chunks_and_skips_system_messages(
     assert_eq!(entry.last_message, "agent: ## About Lofi");
     assert_eq!(entry.message_count, 3);
 }
+
+#[test]
+fn subagent_files_list_only_children_of_the_parent() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/subagent-listing");
+    // A user session and two subagent transcripts, one per parent.
+    store.create(cwd, &"p/m".into()).unwrap();
+    store
+        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-a"))
+        .unwrap();
+    store
+        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-b"))
+        .unwrap();
+
+    let children = store.list_subagent_files_for_cwd(cwd, "parent-a").unwrap();
+    assert_eq!(children.len(), 1);
+    assert!(children[0].meta().subagent);
+    assert_eq!(children[0].meta().parent.as_deref(), Some("parent-a"));
+
+    // User sessions and other parents' children stay out.
+    let none = store.list_subagent_files_for_cwd(cwd, "parent-c").unwrap();
+    assert!(none.is_empty());
+}
+
+#[test]
+fn subagent_cursor_without_parent_omits_the_link() {
+    let (_guard, store) = isolated_store();
+    let cwd = Path::new("/tmp/subagent-no-parent");
+    store
+        .create_subagent_cursor(cwd, &"p/m".into(), None)
+        .unwrap();
+    let files = store.list_subagent_files_for_cwd(cwd, "anything").unwrap();
+    assert!(files.is_empty());
+}

@@ -42,7 +42,9 @@ mod auto_mode;
 mod event;
 mod exec;
 mod model;
+mod subagent;
 mod tool_executor;
+pub use subagent::{SubagentRegistry, SubagentSupport};
 pub use tool_executor::{ToolCallContext, ToolExecutor};
 
 #[cfg(test)]
@@ -55,7 +57,7 @@ pub(crate) use exec::{cap_exec_result, cap_tool_result, CodePrefixDecoder};
 pub use exec::{
     exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
 };
-pub use model::{build_agent, rebuild_agent, select_model};
+pub use model::{build_agent, rebuild_agent, select_model, select_model_with_level};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 
@@ -200,6 +202,11 @@ pub struct Agent {
     /// on the single-threaded host runtime would freeze the UI; the worker
     /// keeps the sandbox off it for the agent's lifetime.
     exec_worker: std::sync::Arc<std::sync::OnceLock<lofi_code::ExecWorker>>,
+    /// Registry and config the subagent hook needs to resolve model
+    /// overrides. `None` disables `lofi.subagent` (nested subagent agents).
+    subagent_support: Option<SubagentSupport>,
+    /// Spawned subagents of this session, resumable by id.
+    subagents: SubagentRegistry,
 }
 
 impl Agent {
@@ -247,6 +254,8 @@ impl Agent {
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
+            subagent_support: None,
+            subagents: SubagentRegistry::default(),
         }
     }
 
@@ -281,6 +290,8 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             exec_worker: self.exec_worker.clone(),
+            subagent_support: self.subagent_support.clone(),
+            subagents: self.subagents.clone(),
         }
     }
 
@@ -305,6 +316,8 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             exec_worker: self.exec_worker.clone(),
+            subagent_support: self.subagent_support.clone(),
+            subagents: self.subagents.clone(),
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
@@ -332,6 +345,8 @@ impl Agent {
             skills_dir,
             jobs: self.jobs.clone(),
             exec_worker: self.exec_worker.clone(),
+            subagent_support: self.subagent_support.clone(),
+            subagents: self.subagents.clone(),
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
@@ -367,6 +382,11 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             exec_worker: self.exec_worker.clone(),
+            subagent: self.subagent_hook(),
+            models: self
+                .subagent_support
+                .as_ref()
+                .map(SubagentSupport::models_fn),
         }
     }
 
@@ -443,6 +463,13 @@ impl Agent {
     #[must_use]
     pub fn jobs(&self) -> lofi_code::tools::JobRegistry {
         self.jobs.clone()
+    }
+
+    /// The session's subagent registry (shared by every clone). The UI keeps
+    /// a handle so a new session can drop the entries of the old one.
+    #[must_use]
+    pub fn subagents(&self) -> SubagentRegistry {
+        self.subagents.clone()
     }
 
     /// The raw model identity stamped onto [`AgentEvent::TurnEnd`] (and the

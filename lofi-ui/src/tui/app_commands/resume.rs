@@ -217,6 +217,12 @@ impl App {
         let Some(entry) = entry else {
             return;
         };
+        // Record into the still-open session before the new cursor exists.
+        // After open_snapshot the leaf would move on, and a late record
+        // through the old cursor would fork off the visible path. The
+        // registry clear waits for the success path: on every failure path
+        // the old session stays open and keeps its subagents.
+        self.record_subagent_spend();
         match entry.file.open_snapshot() {
             Ok((cursor, snapshot)) => {
                 match lofi_core::backend::saved_backend(&cursor) {
@@ -251,6 +257,7 @@ impl App {
                     return;
                 }
                 self.reset_session_jobs();
+                self.clear_subagents();
                 if self.transcript.turns.len() > 1 {
                     let n = self.transcript.turns.len();
                     for turn in &mut self.transcript.turns[..n - 1] {

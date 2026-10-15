@@ -186,6 +186,8 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
         auto_continue: lofi_types::AutoContinuePolicy::default(),
+        subagent_support: None,
+        subagents: SubagentRegistry::default(),
     }
 }
 
@@ -274,3 +276,4 @@ mod persistence;
 mod recovery;
 mod retry;
 mod round;
+mod subagent;

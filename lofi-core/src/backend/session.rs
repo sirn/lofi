@@ -45,6 +45,10 @@ impl Backend {
         root: PathBuf,
         executor: ToolExecutor,
     ) -> Self {
+        // External sessions do not expose lofi.subagent: their registry
+        // would be invisible to the UI (Backend::subagents returns None), so
+        // /new could not clear it.
+        let executor = executor.without_subagent();
         Self::External(Box::new(ExternalBackend {
             model: config.model().map(str::to_owned),
             name,
@@ -81,6 +85,16 @@ impl Backend {
         match self {
             Self::Native(agent) => agent.jobs(),
             Self::External(external) => external.executor.jobs(),
+        }
+    }
+
+    /// The subagent registry of a native agent. External backends do not
+    /// expose `lofi.subagent` and return `None`.
+    #[must_use]
+    pub fn subagents(&self) -> Option<crate::SubagentRegistry> {
+        match self {
+            Self::Native(agent) => Some(agent.subagents()),
+            Self::External(_) => None,
         }
     }
 

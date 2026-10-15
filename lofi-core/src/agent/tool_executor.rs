@@ -19,6 +19,11 @@ pub struct ToolExecutor {
     pub(super) skills_dir: Option<PathBuf>,
     pub(super) jobs: lofi_code::tools::JobRegistry,
     pub(super) exec_worker: Arc<std::sync::OnceLock<lofi_code::ExecWorker>>,
+    /// `lofi.subagent` hook, `None` where subagents are unsupported (nested
+    /// subagent sandboxes).
+    pub(super) subagent: Option<lofi_code::SubagentFn>,
+    /// `lofi.models` hook, `None` where the host has no model registry.
+    pub(super) models: Option<lofi_code::ModelsFn>,
 }
 
 /// Hooks for one tool call. All callbacks belong to the owning session.
@@ -61,6 +66,8 @@ impl ToolExecutor {
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
             exec_worker: Arc::new(std::sync::OnceLock::new()),
+            subagent: None,
+            models: None,
         })
     }
 
@@ -106,6 +113,18 @@ impl ToolExecutor {
     #[must_use]
     pub fn has_auto_mode(&self) -> bool {
         self.auto_mode.is_some()
+    }
+
+    /// Drop the subagent hook. Used when the executor moves to a backend
+    /// whose registry the UI cannot reach for cleanup. The models listing
+    /// goes with it: `lofi.models` exists so a guest can pick a model for
+    /// `lofi.subagent`, and leaving it behind would advertise overrides the
+    /// session cannot use.
+    #[must_use]
+    pub fn without_subagent(mut self) -> Self {
+        self.subagent = None;
+        self.models = None;
+        self
     }
 
     #[must_use]
@@ -393,6 +412,8 @@ impl ToolExecutor {
                 truncate: self.truncate,
                 jobs: self.jobs.clone(),
                 on_job_acquired: on_job_acquired.clone(),
+                subagent: self.subagent.clone(),
+                models: self.models.clone(),
             };
             let outcome = self
                 .sandbox_worker()

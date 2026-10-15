@@ -156,6 +156,12 @@ impl BuiltinTools {
         self
     }
 
+    /// The run's cooperative cancellation flag, for bound tools that await
+    /// host work outside this module (`lofi.subagent`).
+    pub(crate) fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.cancel.clone()
+    }
+
     /// Shares the owning session's job registry. Without this each exec
     /// would get a fresh registry and `jobStatus` on the next call could
     /// not see a job spawned by the previous one.

@@ -26,6 +26,7 @@ impl SummaryAccumulator {
             IndexKind::Cursor
             | IndexKind::BackendUsage
             | IndexKind::JobLifecycle
+            | IndexKind::SubagentUsage
             | IndexKind::Other => {}
             IndexKind::SystemMessage => {
                 self.message_count = self.message_count.saturating_add(1);

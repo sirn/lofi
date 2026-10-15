@@ -337,6 +337,36 @@ fn select_model_model_list_overrides_provider_tier() {
 }
 
 #[test]
+fn select_model_level_override_wins_over_query_suffix() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[(
+            "gpt-4o",
+            mc_levels(&[ThinkingLevel::Low, ThinkingLevel::High]),
+        )]),
+        None,
+    )));
+    let (_m, level) =
+        select_model_with_level(&reg, &cfg, Some("openai/gpt-4o:low"), ThinkingLevel::High)
+            .unwrap();
+    assert_eq!(level, ThinkingLevel::High);
+}
+
+#[test]
+fn select_model_level_override_must_be_declared() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_levels(&[ThinkingLevel::Low]))]),
+        None,
+    )));
+    let err = select_model_with_level(&reg, &cfg, Some("openai/gpt-4o"), ThinkingLevel::High)
+        .unwrap_err();
+    assert!(matches!(err, Error::Config(_)), "{err:?}");
+}
+
+#[test]
 fn select_model_rejects_level_not_declared() {
     let (cfg, reg) = build(one_provider(provider(
         Api::OpenAiCompletions,

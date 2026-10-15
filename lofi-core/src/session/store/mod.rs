@@ -38,6 +38,14 @@ pub struct SessionMeta {
     pub created: u64,
     pub cwd: String,
     pub model: RunModel,
+    /// Subagent transcripts are excluded from default session selection
+    /// (`--continue`); they exist for resumability, not as user sessions.
+    #[serde(default)]
+    pub subagent: bool,
+    /// The session id of the spawning session; links a subagent transcript
+    /// to its parent so `/subagent` lists the children of this session.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

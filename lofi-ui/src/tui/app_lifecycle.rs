@@ -130,9 +130,11 @@ impl App {
             // Cloned session job registry. Set by the caller from the running
             // agent; `None` until the agent attaches.
             jobs: None,
+            subagents: None,
             jobs_receiver_stale: false,
             notified_jobs: std::collections::HashSet::new(),
             jobs_modal: None,
+            subagents_modal: None,
         }
     }
 
@@ -269,6 +271,15 @@ impl App {
                 if let Some(cost) = cost {
                     self.cost = cost;
                 }
+                return;
+            }
+            AgentEvent::SubagentUsage { cost, usage } => {
+                // Subagent spend folds into the session totals only: child
+                // tokens never occupy the parent context window, so the
+                // gauge (`status_usage`) and the turn fold stay untouched.
+                self.cost += cost;
+                self.total_in += usage.input_tokens;
+                self.total_out += usage.output_tokens;
                 return;
             }
             AgentEvent::RoundUsage { cost, usage } => {

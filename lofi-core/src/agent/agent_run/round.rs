@@ -9,6 +9,31 @@ use super::progress::checkpoint_progress;
 use super::*;
 
 impl Agent {
+    /// Record and report spend of subagent runs that settled since the last
+    /// flush. The deltas count toward the session totals only: child tokens
+    /// never occupy the parent context window, so they must not reach the
+    /// context gauge.
+    async fn flush_subagent_usage(
+        &self,
+        recorder: Option<&SessionRecorder>,
+        tx: Option<&Sender<AgentEvent>>,
+    ) {
+        let Some((cost, usage)) = self.subagents.take_unreported() else {
+            return;
+        };
+        if let Some(recorder) = recorder {
+            if let Err(e) = recorder
+                .cursor()
+                .record(crate::session::recorder::SessionRecord::SubagentUsage { usage, cost })
+            {
+                tracing::warn!(error = %e, "subagent usage record failed");
+            }
+        }
+        if let Some(tx) = tx {
+            let _ = tx.send(AgentEvent::SubagentUsage { cost, usage }).await;
+        }
+    }
+
     pub(super) async fn settle_turn(
         &self,
         messages: &mut [Message],
@@ -23,6 +48,9 @@ impl Agent {
             Ok(outcome) => (outcome, None),
             Err(error) => (TurnOutcome::Failed(error.to_string()), Some(error)),
         };
+        // Last chance to record spend of subagents that settled after the
+        // final tool round; after this point the turn is over.
+        self.flush_subagent_usage(recorder.as_ref(), Some(tx)).await;
         // Disk first: a crash after the UI terminal event must not lose a
         // settled turn that was still only in memory.
         let mut committed = None;
@@ -159,7 +187,7 @@ impl Agent {
             prev_input_tokens,
             suppress_omit_notice,
             on_job_acquired,
-            recorder,
+            mut recorder,
             record_from,
             mut loop_detector,
         } = opts;
@@ -552,6 +580,9 @@ impl Agent {
         };
 
         if tool_uses.is_empty() {
+            // A detached subagent may have settled during this round; fold its
+            // spend in before the turn ends without a tool round.
+            self.flush_subagent_usage(recorder.as_deref(), tx).await;
             let assistant = &messages[assistant_index];
             let announced_tool_intent = assistant_announces_tool_intent(assistant);
             return Ok(RoundOutcome {
@@ -565,24 +596,25 @@ impl Agent {
             });
         }
 
-        let native_cursor =
-            if let (Some(recorder), Some(stats), Some(tx)) = (recorder, stats.as_deref(), tx) {
-                if let Some((byte_start, byte_end)) =
-                    checkpoint_progress(Some(recorder), &messages[record_from..], stats, tx).await
-                {
-                    let _ = tx
-                        .send(AgentEvent::RoundCommitted {
-                            byte_start,
-                            byte_end,
-                        })
-                        .await;
-                    Some(recorder.cursor())
-                } else {
-                    None
-                }
+        let native_cursor = if let (Some(recorder), Some(stats), Some(tx)) =
+            (recorder.as_deref_mut(), stats.as_deref(), tx)
+        {
+            if let Some((byte_start, byte_end)) =
+                checkpoint_progress(Some(recorder), &messages[record_from..], stats, tx).await
+            {
+                let _ = tx
+                    .send(AgentEvent::RoundCommitted {
+                        byte_start,
+                        byte_end,
+                    })
+                    .await;
+                Some(recorder.cursor())
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
         let run_refs: Vec<(&str, &str, &serde_json::Value)> = tool_uses
             .iter()
             .filter(|(id, _, _)| !cut_tool_ids.contains(id))
@@ -604,6 +636,7 @@ impl Agent {
         {
             Ok(results) => results,
             Err(error) => {
+                self.flush_subagent_usage(recorder.as_deref(), tx).await;
                 // Abandoning the turn here (cancel, closed channel, tool
                 // error) leaves the pushed assistant message's `ToolUse`
                 // blocks without matching results. Close the orphans so a
@@ -614,6 +647,7 @@ impl Agent {
                 return Err(error.into());
             }
         };
+        self.flush_subagent_usage(recorder.as_deref(), tx).await;
 
         let mut executed_iter = executed.into_iter();
         let mut results = Vec::with_capacity(tool_uses.len());

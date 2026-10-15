@@ -79,6 +79,10 @@ impl App {
                 self.open_jobs_modal();
                 true
             }
+            "/subagent" | "/subagents" => {
+                self.open_subagents_modal();
+                true
+            }
             _ if cmd.starts_with('/') => {
                 self.notify(
                     NotifyKind::Error,
@@ -230,6 +234,7 @@ impl App {
             "/job",
             "list background jobs, view output, stop",
         ));
+        lines.push(info_kv(t, "/subagent", "list subagents, view a transcript"));
         lines.push(info_kv(t, "/quit", "exit"));
         lines.push(InfoLine::Text(Line::from("")));
         lines.push(info_note(
@@ -297,6 +302,8 @@ impl App {
             return;
         }
         self.reset_session_jobs();
+        self.record_subagent_spend();
+        self.clear_subagents();
         if let Err(error) = self.lifecycle.clear_history() {
             self.notify(NotifyKind::Error, format!("clear agent history: {error}"));
         }

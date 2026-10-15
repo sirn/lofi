@@ -66,10 +66,13 @@ impl SessionSink {
         id: &str,
     ) -> Result<(Self, SessionCursor, store::SessionSnapshot)> {
         let store = SessionStore::open()?;
+        // Subagent transcripts are not user sessions: they never match a
+        // resume id, so they cannot make a prefix ambiguous or stop the
+        // lookup with a rejection.
         let matches: Vec<_> = store
             .list_files_for_cwd(cwd)?
             .into_iter()
-            .filter(|file| file.id().starts_with(id))
+            .filter(|file| !file.meta().subagent && file.id().starts_with(id))
             .collect();
         if matches.len() > 1 {
             return Err(lofi_error::Error::State(format!(
@@ -101,6 +104,12 @@ impl SessionSink {
         // every `--continue`. A file that fails to open behaves as absent,
         // the way unloadable files were ineligible before.
         for file in store.list_files_for_cwd(cwd)? {
+            // Filter on the listed header first: open_snapshot indexes the
+            // whole transcript, and a workspace with many subagent
+            // transcripts would pay that cost for each of them.
+            if file.meta().subagent {
+                continue;
+            }
             if let Ok((cursor, snapshot)) = file.open_snapshot() {
                 return Ok(Some((
                     Self::resumed(cwd, cursor.clone())?,
@@ -173,6 +182,19 @@ impl SessionSink {
         })
     }
 
+    /// Record subagent spend that no turn claimed, flushed at session switch
+    /// or quit. No-op when no session is open.
+    ///
+    /// # Errors
+    /// Propagates transcript I/O failures.
+    pub fn record_subagent_usage(&self, usage: lofi_types::Usage, cost: f64) -> Result<()> {
+        let Some(cursor) = &self.cursor else {
+            return Ok(());
+        };
+        cursor.record(super::recorder::SessionRecord::SubagentUsage { usage, cost })?;
+        Ok(())
+    }
+
     /// Move the active session head to the given entry, returning the snapshot
     /// of the newly selected lineage.
     ///
@@ -205,7 +227,14 @@ impl SessionSink {
     /// # Errors
     /// Propagates directory read failures.
     pub fn workspace_sessions(&self) -> Result<Vec<store::SessionFile>> {
-        self.store.list_files_for_cwd(&self.cwd)
+        // Subagent transcripts are not user sessions: they stay out of the
+        // picker, and interactive resume rejects them.
+        Ok(self
+            .store
+            .list_files_for_cwd(&self.cwd)?
+            .into_iter()
+            .filter(|file| !file.meta().subagent)
+            .collect())
     }
 
     /// List the session entries (files with message counts and previews) for
@@ -217,11 +246,84 @@ impl SessionSink {
         self.store.list_for_cwd(&self.cwd)
     }
 
+    /// Subagent transcripts spawned by the session `parent`, newest first.
+    /// Read-only; never mutates.
+    ///
+    /// # Errors
+    /// Propagates directory read failures.
+    pub fn subagent_sessions(&self, parent: &str) -> Result<Vec<store::SessionFile>> {
+        self.store.list_subagent_files_for_cwd(&self.cwd, parent)
+    }
+
     /// Run a read-heavy transcript walk on the store's shared IO worker.
     /// Picker scans and tree hydration funnel here so their transient
     /// allocations reuse one arena instead of spawning a fresh thread per
     /// action.
     pub fn submit_io(&self, job: Box<dyn FnOnce(&mut super::io::WorkerState) + Send + 'static>) {
         super::io::submit(self.store.root().to_path_buf(), job);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use lofi_types::RunModel;
+    use tempfile::tempdir;
+
+    // Point LOFI_STATE_HOME at a temp dir; restores the previous value on drop.
+    struct StateEnv {
+        prev: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl StateEnv {
+        fn new() -> Self {
+            let dir = tempdir().unwrap();
+            let prev = std::env::var_os("LOFI_STATE_HOME");
+            std::env::set_var("LOFI_STATE_HOME", dir.path());
+            Self { prev, _dir: dir }
+        }
+    }
+
+    impl Drop for StateEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("LOFI_STATE_HOME", v),
+                None => std::env::remove_var("LOFI_STATE_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn picker_and_continue_exclude_subagent_transcripts() {
+        let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
+        let _state = StateEnv::new();
+        let cwd = std::path::Path::new("/tmp/project");
+        let model: RunModel = "p/m".into();
+
+        let store = store::SessionStore::open().unwrap();
+        let normal = store.create_cursor(cwd, &model).unwrap();
+        let sub = store
+            .create_subagent_cursor(cwd, &model, Some("parent-x"))
+            .unwrap();
+        assert_ne!(normal.id(), sub.id());
+
+        let sink = SessionSink::with_store(store::SessionStore::open().unwrap(), cwd, None);
+        let files = sink.workspace_sessions().unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].id(), normal.id());
+        let entries = sink.workspace_entries().unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(!entries[0].meta.subagent);
+
+        let (_, _, snapshot) = SessionSink::resume_last(cwd).unwrap().unwrap();
+        assert!(!snapshot.meta.subagent, "--continue landed on a subagent");
+
+        // Subagent transcripts never match a resume id: their flag keeps
+        // them out of the picker, so a resumed child would become invisible.
+        let err = SessionSink::resume_by_id(cwd, &sub.id()).unwrap_err();
+        assert!(err.to_string().contains("no session matching id"), "{err}");
     }
 }

@@ -8,7 +8,7 @@ use serde_json::{json, Value as Json};
 use lofi_error::Error;
 
 use crate::convert::{js_to_json, json_to_js};
-use crate::ctx::{RecallFn, ResultFn, ToolEvent};
+use crate::ctx::{ModelsFn, RecallFn, ResultFn, SubagentFn, ToolEvent};
 use crate::tools::BuiltinTools;
 
 #[allow(clippy::too_many_arguments)]
@@ -19,6 +19,8 @@ pub(super) fn bind_tools<'js>(
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
+    subagent: Option<SubagentFn>,
+    models: Option<ModelsFn>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_job_tools(ctx, lofi, tools)?;
@@ -26,6 +28,104 @@ pub(super) fn bind_tools<'js>(
     bind_result_tool(ctx, lofi, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
     bind_docs_tools(ctx, lofi)?;
+    bind_subagent_tool(ctx, lofi, tools, subagent)?;
+    bind_models_tool(ctx, lofi, models)?;
+    Ok(())
+}
+
+/// `lofi.models` lists the models available for `lofi.subagent` overrides.
+/// The tool stays bound without a hook so a nested sandbox gets a clear
+/// error instead of an undefined function.
+fn bind_models_tool<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    models: Option<ModelsFn>,
+) -> rquickjs::Result<()> {
+    lofi.set(
+        "models",
+        Function::new(ctx.clone(), move || -> rquickjs::Result<JsonV> {
+            match &models {
+                Some(list) => Ok(JsonV(list())),
+                None => Ok(JsonV(json!({
+                    "ok": false,
+                    "status": "unavailable",
+                    "error": "lofi.models is not available in this context",
+                }))),
+            }
+        }),
+    )?;
+    Ok(())
+}
+
+/// `lofi.subagent` delegates a prompt to a child agent run owned by the
+/// host engine. The tool stays bound without a hook so a nested sandbox
+/// gets a clear error instead of an undefined function.
+fn bind_subagent_tool<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+    subagent: Option<SubagentFn>,
+) -> rquickjs::Result<()> {
+    let t = tools.clone();
+    lofi.set(
+        "subagent",
+        Function::new(
+            ctx.clone(),
+            Async(move |args: Opt<Value>| {
+                let t = t.clone();
+                let subagent = subagent.clone();
+                let args = args.0.map_or(Json::Null, |v| js_to_json(&v));
+                async move {
+                    let id = t.next_tool_id();
+                    let label = args.get("prompt").and_then(Json::as_str).unwrap_or("");
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "subagent".into(),
+                        args: cap_first_line(label, 120),
+                    });
+                    let res: std::result::Result<Json, Error> = match &subagent {
+                        Some(hook) => {
+                            // Race the hook against user cancellation: while
+                            // the guest awaits the subagent, no QuickJS
+                            // bytecode ticks, so the interrupt handler can't
+                            // observe `cancel`. Dropping the hook future
+                            // triggers the subagent's CancelOnDrop, which
+                            // cancels the child run.
+                            match t.cancel_flag() {
+                                Some(flag) => {
+                                    let cancel_wait = crate::tools::wait_for_cancel(&flag);
+                                    tokio::pin!(cancel_wait);
+                                    tokio::select! {
+                                        biased;
+                                        out = hook(args) => Ok(out),
+                                        () = &mut cancel_wait => Err(Error::Tool(
+                                            "cancelled".to_string(),
+                                        )),
+                                    }
+                                }
+                                None => Ok(hook(args).await),
+                            }
+                        }
+                        // Resolve rather than throw, like the hook's own
+                        // argument errors: guest code checks the `ok` field
+                        // instead of mixing try/catch with status checks.
+                        None => Ok(json!({
+                            "ok": false,
+                            "status": "unavailable",
+                            "error": "subagent is not available in this context",
+                        })),
+                    };
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
     Ok(())
 }
 

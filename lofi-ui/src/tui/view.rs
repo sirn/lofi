@@ -22,8 +22,8 @@ mod modals;
 mod prim;
 use modals::{
     render_confirm_modal, render_info_modal, render_jobs_modal, render_model_picker, render_picker,
-    render_policy_picker, render_service_picker, render_slash_complete, render_theme_picker,
-    render_thinking_picker, render_tree_picker,
+    render_policy_picker, render_service_picker, render_slash_complete, render_subagents_modal,
+    render_theme_picker, render_thinking_picker, render_tree_picker,
 };
 
 #[allow(unused_imports)] // used by tests and render harnesses
@@ -140,6 +140,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App) {
     }
     if app.jobs_modal.is_some() {
         render_jobs_modal(f, area, app);
+    }
+    if app.subagents_modal.is_some() {
+        render_subagents_modal(f, area, app);
     }
     if app.info.is_some() {
         render_info_modal(f, area, app);
