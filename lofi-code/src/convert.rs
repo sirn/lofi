@@ -2,8 +2,19 @@
 //! and a `serde_json::Value`; conversion caps depth, nodes, and copied bytes
 //! so a self-referential or pathologically large value cannot exhaust memory.
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use rquickjs::{Array, Ctx, Function, IntoJs, Object, Value};
+use serde_json::{json, Value as Json};
+
+/// Sentinel object key used by the IIFE wrapper to surface an uncaught guest
+/// exception as a resolved (not rejected) promise.
+pub(crate) const SANDBOX_ERROR_KEY: &str = "__lofi_sandbox_error__";
+
+const JS_TO_JSON_MAX_DEPTH: usize = 64;
+const JS_TO_JSON_MAX_NODES: usize = 10_000;
+/// Maximum cumulative bytes of converted strings and object keys, so a single
+/// huge guest string cannot exhaust host memory despite staying within the
+/// node budget.
+pub(crate) const JS_TO_JSON_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 struct Conversion<'js> {
     nodes: usize,
@@ -91,7 +102,7 @@ impl<'js> Conversion<'js> {
 }
 
 /// Convert a guest value to JSON, surfacing depth, node, or byte overflow as
-/// the sandbox-error sentinel so the caller raises [`Error::Sandbox`].
+/// the sandbox-error sentinel so the caller raises [`lofi_error::Error::Sandbox`].
 pub(super) fn js_to_json(v: &Value<'_>) -> Json {
     js_to_json_with_mode(v, JS_TO_JSON_MAX_BYTES, false).0
 }

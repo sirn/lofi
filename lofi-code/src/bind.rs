@@ -1,6 +1,15 @@
-use super::convert::js_to_json;
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use rquickjs::prelude::*;
+use rquickjs::{Ctx, Exception, Function, Object, Value};
+use serde_json::{json, Value as Json};
+
+use lofi_error::Error;
+
+use crate::convert::{js_to_json, json_to_js};
+use crate::ctx::{RecallFn, ResultFn, ToolEvent};
+use crate::tools::BuiltinTools;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bind_tools<'js>(
@@ -458,7 +467,92 @@ fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<
     Ok(())
 }
 
-/// Translate a builtin tool [`Result`] into the owned value that crosses
+struct JsonV(Json);
+
+impl<'js> IntoJs<'js> for JsonV {
+    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        json_to_js(ctx, &self.0)
+    }
+}
+
+enum ToolOutput {
+    Value(Json),
+    Error(String),
+}
+
+impl<'js> IntoJs<'js> for ToolOutput {
+    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        match self {
+            Self::Value(value) => json_to_js(ctx, &value),
+            Self::Error(message) => Err(Exception::throw_message(ctx, &message)),
+        }
+    }
+}
+
+fn parse_read_opts(opts: Opt<Value>) -> (Option<u64>, Option<u64>) {
+    let Some(v) = opts.0 else {
+        return (None, None);
+    };
+    let json = js_to_json(&v);
+    let Some(obj) = json.as_object() else {
+        return (None, None);
+    };
+    let offset = obj.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = obj.get("limit").and_then(serde_json::Value::as_u64);
+    (offset, limit)
+}
+
+fn cap_first_line(s: &str, cap: usize) -> String {
+    let line = s.split('\n').next().unwrap_or("");
+    let mut chars = line.chars();
+    let mut out = String::new();
+    for _ in 0..cap {
+        match chars.next() {
+            Some(c) => out.push(c),
+            None => break,
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn native_args_label(name: &str, v: &serde_json::Value) -> String {
+    let pick = |key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(std::string::ToString::to_string)
+    };
+    let raw = match name {
+        "write" | "edit" | "patch" => pick("path"),
+        "bash" => pick("cmd"),
+        _ => None,
+    };
+    let s = raw.unwrap_or_else(|| match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
+    cap_first_line(&s, 120)
+}
+
+fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
+    match res {
+        Ok(v) => {
+            let is_error = v
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .is_some_and(|ok| !ok);
+            match v {
+                Json::String(s) => (s.clone(), is_error),
+                other => (other.to_string(), is_error),
+            }
+        }
+        Err(e) => (e.to_string(), true),
+    }
+}
+
+/// Translate a builtin tool [`lofi_error::Result`] into the owned value that crosses
 /// the native-future boundary. Conversion to a JS value/error happens only
 /// when rquickjs settles the promise.
 fn tool_result(res: std::result::Result<Json, Error>) -> ToolOutput {

@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 
+use super::round::RoundOutcome;
 use super::*;
 
 const THINKING_LOOP_MIN_BYTES: usize = 100;
