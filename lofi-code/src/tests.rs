@@ -542,6 +542,28 @@ async fn exec_memory_limit_aborts_unbounded_allocation() {
 }
 
 #[tokio::test]
+async fn exec_memory_limit_aborts_unbounded_read_loop() {
+    // Regression: a helper that accumulates `lofi.read` content across awaits
+    // (e.g. paging on a missing `nextOffset`) must hit the memory limit and
+    // throw rather than growing host RSS without bound.
+    let dir = tempdir().unwrap();
+    let body = ("x".repeat(80) + "\n").repeat(4000);
+    std::fs::write(dir.path().join("big.txt"), body).unwrap();
+    let opts = ExecOptions {
+        timeout: Duration::from_secs(5),
+        ..ExecOptions::default()
+    };
+    let err = exec(
+        "let s = ''; while (true) { s += (await lofi.read('big.txt')).content; } return s.length;",
+        &ctx(dir.path()),
+        &opts,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::Sandbox(_)), "{err:?}");
+}
+
+#[tokio::test]
 async fn exec_deep_recursion_hits_stack_limit() {
     let dir = tempdir().unwrap();
     let opts = ExecOptions {
@@ -604,4 +626,28 @@ async fn exec_docs_search() {
     "#;
     let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
     assert_eq!(res.value, json!("lofi.write"));
+}
+
+#[tokio::test]
+async fn exec_tool_call_budget_aborts_await_loop() {
+    // Await-heavy loops barely tick the interrupt handler, so the CPU budget
+    // cannot bound them. Every awaited host call funnels through the tool
+    // wrapper, whose per-exec call budget must abort the loop instead.
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let opts = ExecOptions {
+        timeout: Duration::from_secs(30),
+        ..ExecOptions::default()
+    };
+    let err = exec(
+        "while (true) { await lofi.read('a.txt'); } return 1;",
+        &ctx(dir.path()),
+        &opts,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Sandbox(ref m) if m.contains("tool call budget")),
+        "{err:?}"
+    );
 }

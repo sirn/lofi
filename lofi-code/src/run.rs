@@ -43,10 +43,25 @@ const TRACK_FOREGROUND_TOOLS: &str = r#"
         const errorText = error =>
             String(error && error.message ? error.message : error);
 
+        // Await-heavy loops (while-true around an await) barely tick the
+        // QuickJS interrupt handler, so the CPU budget cannot bound them.
+        // Every await on a host tool funnels through this wrapper, so cap
+        // the number of tool calls per exec instead. 4096 is far above any
+        // legitimate script (paging, batch edits) and trips in about a
+        // second for a tight loop.
+        const MAX_CALLS = 4096;
+        let calls = 0;
+
         for (const name of Object.keys(lofi)) {
             const tool = lofi[name];
             if (typeof tool !== "function") continue;
             lofi[name] = (...args) => {
+                calls += 1;
+                if (calls > MAX_CALLS) {
+                    throw new Error(
+                        "tool call budget exceeded (" + MAX_CALLS + " calls per exec)"
+                    );
+                }
                 const promise = Promise.resolve().then(() => tool(...args));
                 const tracked = promise.then(
                     value => {
@@ -124,7 +139,10 @@ async fn install_cpu_guard(
 ///   handler calls at [`SUSPEND_THRESHOLD`]. When the accumulated time exceeds
 ///   `opts.timeout` the handler returns
 ///   *abort*, breaking out of synchronous tight loops (`while (true) {}`)
-///   that the cooperative `tokio` runtime cannot preempt.
+///   that the cooperative `tokio` runtime cannot preempt. Ticks are rare
+///   during awaited host work, so await-heavy loops accumulate budget
+///   slowly; the tool-call cap in [`TRACK_FOREGROUND_TOOLS`] bounds those
+///   instead.
 /// - **Cancellation** — if `opts.cancel` is provided, setting it to `true`
 ///   causes the same interrupt path and surfaces a distinct "cancelled"
 ///   error. This is how the UI's Ctrl+C breaks a sync loop that `handle

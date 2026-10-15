@@ -18,6 +18,11 @@ Read a file as UTF-8 with optional line range, or attach an image.
 line count. `truncated` is true when more lines remain below either cap. Page
 large files with a higher `offset`.
 
+There is no cursor field (no `nextOffset`). To page, track the next offset
+yourself: `offset = start_line + lines_in_content`, and stop when
+`truncated` is false. Do not loop while a cursor field is undefined; that
+re-reads from the start forever.
+
 **Returns (image):** for a path with an image extension (`.png`, `.jpg`,
 `.jpeg`, `.gif`, `.webp`, `.bmp`), returns `{ ok, type: "image", media_type,
 data_b64 }` instead. The host decodes `data_b64` and attaches the image to the
