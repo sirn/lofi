@@ -629,6 +629,33 @@ async fn exec_docs_search() {
 }
 
 #[tokio::test]
+async fn exec_read_pages_whole_file_via_next_offset() {
+    // The documented paging loop must reassemble a multi-page file exactly.
+    let dir = tempdir().unwrap();
+    let body = ("x".repeat(80) + "\n").repeat(4000);
+    std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+    let src = r#"
+        let offset = 1;
+        const pages = [];
+        let hops = 0;
+        while (true) {
+            const page = await lofi.read('big.txt', { offset });
+            pages.push(page.content);
+            hops++;
+            if (page.next_offset === null) break;
+            offset = page.next_offset;
+        }
+        return { joined: pages.join("\n").length, hops };
+    "#;
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert!(res.value["hops"].as_u64().unwrap() > 1, "{res:?}");
+    // Pages split on line boundaries, so joining with "\n" restores the file.
+    assert_eq!(res.value["joined"], json!(body.len()));
+}
+
+#[tokio::test]
 async fn exec_tool_call_budget_aborts_await_loop() {
     // Await-heavy loops barely tick the interrupt handler, so the CPU budget
     // cannot bound them. Every awaited host call funnels through the tool

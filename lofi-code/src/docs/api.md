@@ -12,16 +12,25 @@ Read a file as UTF-8 with optional line range, or attach an image.
 - `path` (string, required) — a workspace-relative file path, or an absolute path under a registered read root. Tilde (`~`) is not expanded.
 - `opts` (object, optional) — `{ offset?, limit? }`. `offset` is a 1-indexed line to start from (default 1); `limit` selects at most that many source lines. Omit `limit` to read from `offset` to the end before visible-output truncation.
 
-**Returns (text):** `{ ok, content, start_line, total_lines, truncated }`.
+**Returns (text):** `{ ok, content, start_line, total_lines, truncated, next_offset }`.
 `content` is head-truncated to the configured `[truncate] max_lines` and `max_bytes` values (defaults: 2000 lines and 50 KiB).
 `start_line` is the 1-indexed first line returned. `total_lines` is the file's
-line count. `truncated` is true when more lines remain below either cap. Page
-large files with a higher `offset`.
+line count. `truncated` is true when more lines remain below either cap.
 
-There is no cursor field (no `nextOffset`). To page, track the next offset
-yourself: `offset = start_line + lines_in_content`, and stop when
-`truncated` is false. Do not loop while a cursor field is undefined; that
-re-reads from the start forever.
+`next_offset` is the paging cursor: pass it as `offset` to read the next
+page. It is null when the file is fully read. The cursor always advances; a
+single line larger than `max_bytes` cannot be returned and is skipped. Page
+a whole file with:
+
+```
+let offset = 1;
+while (true) {
+    const page = await lofi.read(path, { offset });
+    // ... use page.content ...
+    if (page.next_offset === null) break;
+    offset = page.next_offset;
+}
+```
 
 **Returns (image):** for a path with an image extension (`.png`, `.jpg`,
 `.jpeg`, `.gif`, `.webp`, `.bmp`), returns `{ ok, type: "image", media_type,

@@ -386,6 +386,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_next_offset_pages_to_eof() {
+        let (_dir, tools) = tools();
+        let content = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(tools.root().join("big.txt"), content).unwrap();
+
+        let v = tools.read("big.txt", Some(1), Some(3)).await.unwrap();
+        assert_eq!(v["next_offset"], json!(4));
+        assert_eq!(v["truncated"], json!(true));
+
+        let v = tools.read("big.txt", Some(4), Some(3)).await.unwrap();
+        assert_eq!(v["content"], json!("line3\nline4\nline5"));
+        assert_eq!(v["next_offset"], json!(7));
+
+        let v = tools.read("big.txt", Some(10), None).await.unwrap();
+        assert_eq!(v["truncated"], json!(false));
+        assert_eq!(v["next_offset"], json!(null));
+    }
+
+    #[tokio::test]
+    async fn read_next_offset_skips_overlong_line() {
+        // A single line larger than max_bytes returns no content; the cursor
+        // must still advance so paging loops do not stall on it.
+        let (_dir, tools) = tools();
+        let long = "x".repeat(truncate::DEFAULT_MAX_BYTES + 1);
+        std::fs::write(tools.root().join("long.txt"), format!("{long}\nshort")).unwrap();
+        let v = tools.read("long.txt", Some(1), None).await.unwrap();
+        assert_eq!(v["content"], json!(""));
+        assert_eq!(v["truncated"], json!(true));
+        assert_eq!(v["next_offset"], json!(2));
+        let v = tools.read("long.txt", Some(2), None).await.unwrap();
+        assert_eq!(v["content"], json!("short"));
+        assert_eq!(v["next_offset"], json!(null));
+    }
+
+    #[tokio::test]
     async fn read_offset_beyond_end_errors() {
         let (_dir, tools) = tools();
         std::fs::write(tools.root().join("a.txt"), "one\ntwo").unwrap();

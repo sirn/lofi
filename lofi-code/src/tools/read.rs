@@ -97,12 +97,22 @@ impl BuiltinTools {
         let cap = self.truncate;
         let t = truncate_head_with(&selected, cap.max_lines, cap.max_bytes);
         let limit_remaining = limit.is_some() && start + t.output_lines < all_lines.len();
+        let truncated = t.truncated || limit_remaining;
+        // The cursor must always advance: a single line larger than max_bytes
+        // returns no content, so skip it rather than handing back the same
+        // offset and stalling a paging loop.
+        let next_offset = if truncated {
+            json!(start_line + t.output_lines.max(1))
+        } else {
+            Value::Null
+        };
         Ok(json!({
             "ok": true,
             "content": t.content,
             "start_line": start_line,
             "total_lines": total_file_lines,
-            "truncated": t.truncated || limit_remaining,
+            "truncated": truncated,
+            "next_offset": next_offset,
         }))
     }
 }
