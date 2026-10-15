@@ -17,14 +17,18 @@ mod support;
 use support::*;
 
 mod compaction_resume;
+mod detail;
 mod input_and_modals;
 mod jobs_and_theme;
+mod markdown;
 mod navigation;
 mod pickers;
 mod reliability;
 mod rendering;
+mod replay;
 mod resize;
 mod session_lifecycle;
 mod session_tree;
 mod status_and_replay;
 mod streaming;
+mod yank;
