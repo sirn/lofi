@@ -101,8 +101,11 @@ impl BuiltinTools {
         // The cursor must always advance: a single line larger than max_bytes
         // returns no content, so skip it rather than handing back the same
         // offset and stalling a paging loop.
-        let next_offset = if truncated {
-            json!(start_line + t.output_lines.max(1))
+        let candidate = start_line + t.output_lines.max(1);
+        // A mid-line cut on the final line yields a cursor past EOF; there is
+        // no whole line left to page to, so report no cursor.
+        let next_offset = if truncated && candidate <= all_lines.len() {
+            json!(candidate)
         } else {
             Value::Null
         };

@@ -660,6 +660,24 @@ async fn exec_read_pages_whole_file_via_next_offset() {
 }
 
 #[tokio::test]
+async fn exec_read_overlong_final_line_returns_null_cursor() {
+    // A truncated last line without trailing newline consumes every line; the
+    // cursor must not point past EOF, or the paging loop errors out of range.
+    let dir = tempdir().unwrap();
+    let body = "x".repeat(60 * 1024);
+    std::fs::write(dir.path().join("long.txt"), &body).unwrap();
+    let src = r"
+        const page = await lofi.read('long.txt');
+        return { truncated: page.truncated, next: page.next_offset };
+    ";
+    let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value["truncated"], json!(true), "{res:?}");
+    assert_eq!(res.value["next"], json!(null), "{res:?}");
+}
+
+#[tokio::test]
 async fn exec_subagent_cancel_returns_promptly() {
     // While the guest awaits the subagent hook, no QuickJS bytecode ticks,
     // so the interrupt handler cannot observe the flag; the bound tool must
