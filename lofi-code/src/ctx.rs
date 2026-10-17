@@ -22,12 +22,38 @@ pub type RecallFn = Arc<
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// Optional `lofi.subagent` implementation: an async callback from the
-/// `lofi.subagent` native tool into the engine that owns agent runs. The
-/// callback takes the raw argument object, and returns the structured
-/// result (`{ ok, id, status, ... }`). The sandbox never depends on
-/// `lofi-core`; the callback does.
+/// Which `lofi.subagent*` function the guest invoked. One typed hook
+/// serves the whole family so the crate boundary keeps a single plumbing
+/// path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentOp {
+    /// `lofi.subagent`: foreground run; dropping the future cancels it.
+    Run,
+    /// `lofi.subagentSpawn`: background run; the future returns at once.
+    Spawn,
+    /// `lofi.subagentStatus`.
+    Status,
+    /// `lofi.subagentList`.
+    List,
+    /// `lofi.subagentWait`: dropping the future aborts the wait, never the
+    /// run.
+    Wait,
+    /// `lofi.subagentRead`.
+    Read,
+    /// `lofi.subagentKill`.
+    Kill,
+    /// `lofi.subagentNotify`.
+    Notify,
+}
+
+/// `lofi.subagent*` native tool into the engine that owns agent runs. The
+/// callback takes the operation and the raw argument object, and returns
+/// the structured result (`{ ok, id, status, ... }`). The sandbox never
+/// depends on `lofi-core`; the callback does.
 pub type SubagentFn = Arc<
-    dyn Fn(Json) -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>> + Send + Sync,
+    dyn Fn(SubagentOp, Json) -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// Optional `lofi.models` implementation: lists the models available for
@@ -118,6 +144,10 @@ pub struct ExecCtx {
     /// Session-scoped background job registry shared with the owning
     /// agent.
     pub jobs: crate::tools::JobRegistry,
+    /// Owning subagent run id when this exec belongs to one. Jobs spawned
+    /// here are tagged with it so the subagent can be cancelled with its
+    /// process tree.
+    pub job_owner: Option<String>,
     /// Fired at successful `jobSpawn`. `None` keeps lifecycle in-memory
     /// only (pre-session resume, tests, `--no-session`). The callback
     /// returns the completion hook retained by that job.

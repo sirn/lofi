@@ -43,6 +43,7 @@ fn ctx(root: &std::path::Path) -> ExecCtx {
         skills_dir: None,
         truncate: crate::tools::truncate::TruncatedCap::default(),
         jobs: crate::tools::JobRegistry::new(),
+        job_owner: None,
         on_job_acquired: None,
         subagent: None,
         models: None,
@@ -349,6 +350,7 @@ async fn exec_strings_exposed_as_lofi_strings() {
         skills_dir: None,
         truncate: crate::tools::truncate::TruncatedCap::default(),
         jobs: crate::tools::JobRegistry::new(),
+        job_owner: None,
         on_job_acquired: None,
         subagent: None,
         models: None,
@@ -691,7 +693,7 @@ async fn exec_subagent_cancel_returns_promptly() {
     };
     let mut c = ctx(dir.path());
     c.subagent = Some(Arc::new(
-        |_| -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>> {
+        |_, _| -> std::pin::Pin<Box<dyn std::future::Future<Output = Json> + Send>> {
             Box::pin(std::future::pending())
         },
     ));
@@ -747,7 +749,7 @@ async fn exec_subagent_requires_prompt() {
     // call or turn it into a thrown exception.
     let dir = tempdir().unwrap();
     let mut c = ctx(dir.path());
-    c.subagent = Some(Arc::new(|args| {
+    c.subagent = Some(Arc::new(|_op, args| {
         Box::pin(async move {
             match args.get("prompt").and_then(Json::as_str) {
                 Some(p) if !p.trim().is_empty() => json!({ "ok": true, "status": "completed" }),
@@ -777,7 +779,7 @@ async fn exec_subagent_requires_prompt() {
 async fn exec_subagent_passes_args_and_returns_result() {
     let dir = tempdir().unwrap();
     let mut c = ctx(dir.path());
-    c.subagent = Some(Arc::new(|args| {
+    c.subagent = Some(Arc::new(|_op, args| {
         Box::pin(async move {
             json!({
                 "ok": true,

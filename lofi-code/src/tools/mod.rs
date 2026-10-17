@@ -78,6 +78,9 @@ pub struct BuiltinTools {
     /// agent so jobs survive across the per-exec tool bundles. Explicit host
     /// shutdown kills survivors; dropping the last clone is the fallback.
     jobs: JobRegistry,
+    /// Owning subagent run id when this tool bundle serves one. Spawned
+    /// jobs are tagged with it for kill-by-owner and the per-owner cap.
+    job_owner: Option<String>,
     on_job_acquired: Option<crate::JobAcquireFn>,
     /// Visible-output caps for tool results (file reads and bash output).
     truncate: truncate::TruncatedCap,
@@ -141,6 +144,7 @@ impl BuiltinTools {
             read_roots,
             cancel: None,
             jobs: JobRegistry::new(),
+            job_owner: None,
             on_job_acquired: None,
             truncate: truncate::TruncatedCap::default(),
         }
@@ -168,6 +172,14 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_jobs(mut self, jobs: JobRegistry) -> Self {
         self.jobs = jobs;
+        self
+    }
+
+    /// Tags spawned jobs with the owning subagent run id so a subagent
+    /// cancellation kills exactly its own process tree.
+    #[must_use]
+    pub fn with_job_owner(mut self, owner: Option<String>) -> Self {
+        self.job_owner = owner;
         self
     }
 

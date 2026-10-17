@@ -18,6 +18,7 @@ pub struct ToolExecutor {
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
     pub(super) skills_dir: Option<PathBuf>,
     pub(super) jobs: lofi_code::tools::JobRegistry,
+    pub(super) job_owner: Option<String>,
     pub(super) exec_worker: Arc<std::sync::OnceLock<lofi_code::ExecWorker>>,
     /// `lofi.subagent` hook, `None` where subagents are unsupported (nested
     /// subagent sandboxes).
@@ -65,6 +66,7 @@ impl ToolExecutor {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
+            job_owner: None,
             exec_worker: Arc::new(std::sync::OnceLock::new()),
             subagent: None,
             models: None,
@@ -411,6 +413,7 @@ impl ToolExecutor {
                 skills_dir: self.skills_dir.clone(),
                 truncate: self.truncate,
                 jobs: self.jobs.clone(),
+                job_owner: self.job_owner.clone(),
                 on_job_acquired: on_job_acquired.clone(),
                 subagent: self.subagent.clone(),
                 models: self.models.clone(),

@@ -357,6 +357,12 @@ pub(crate) async fn run_loop(
         .jobs
         .as_ref()
         .map(lofi_core::JobRegistry::subscribe_notices);
+    // The subagent registry instance outlives /new, /resume, and model
+    // rebuilds (its Arcs are shared), so one subscription covers the app.
+    let mut subagent_notice_rx = app
+        .subagents
+        .as_ref()
+        .map(lofi_core::SubagentRegistry::subscribe_notices);
 
     let (picker_load_tx, mut picker_load_rx) = tokio::sync::mpsc::unbounded_channel();
     app.picker_load_tx = Some(picker_load_tx);
@@ -780,6 +786,36 @@ pub(crate) async fn run_loop(
                     dirty = true;
                 }
             }
+            notice = async {
+                match subagent_notice_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // Lagging skips ahead; Closed means the registry is
+                // gone, which outlives the app only in tests.
+                if let Ok(notice) = notice {
+                    let queued = QueuedPrompt {
+                        text: notice.text,
+                        kind: lofi_types::PromptKind::Notice,
+                    };
+                    if app.busy() {
+                        app.prompt_queue.push(queued);
+                        if let Some(r) = &current_run {
+                            r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if agent.is_some() {
+                        spawn_prompt(
+                            &mut app,
+                            agent.as_ref(),
+                            &mut current_run,
+                            queued.text,
+                            queued.kind,
+                        );
+                    }
+                    dirty = true;
+                }
+            }
             picker_load = picker_load_rx.recv() => {
                 if let Some(load) = picker_load {
                     app.apply_picker_load(load);
@@ -836,6 +872,11 @@ pub(crate) async fn run_loop(
     }
     if let Some(jobs) = &app.jobs {
         jobs.shutdown();
+    }
+    if let Some(subagents) = &app.subagents {
+        // Cancel and abort any surviving background runs; their residue
+        // spend is dropped with the process.
+        let _ = subagents.clear();
     }
     if let Some(msg) = last_err {
         return Err(Error::Io(std::io::Error::other(msg)));

@@ -1,4 +1,5 @@
 use super::*;
+use lofi_core::SubagentOp;
 
 fn last_text(app: &App) -> Option<&str> {
     app.transcript
@@ -830,7 +831,11 @@ async fn switcher_rebuild_propagates_subagent_persistence() {
         .rebuild(None, "test/m")
         .unwrap();
     let hook = agent.subagent_hook().unwrap();
-    let _ = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    let _ = hook(
+        SubagentOp::Run,
+        serde_json::json!({ "prompt": "x", "timeout_ms": 100 }),
+    )
+    .await;
     assert_eq!(
         jsonl_count(state.path()),
         0,
@@ -840,7 +845,11 @@ async fn switcher_rebuild_propagates_subagent_persistence() {
     // Control: the switcher default persists, so the spawn path writes.
     let (agent, ..) = build().rebuild(None, "test/m").unwrap();
     let hook = agent.subagent_hook().unwrap();
-    let _ = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    let _ = hook(
+        SubagentOp::Run,
+        serde_json::json!({ "prompt": "x", "timeout_ms": 100 }),
+    )
+    .await;
     assert!(
         jsonl_count(state.path()) > 0,
         "control spawn wrote no transcript"
@@ -866,7 +875,11 @@ async fn new_session_clears_the_subagent_registry() {
     let (agent, ..) = switcher.rebuild(None, "test/m").unwrap();
     let registry = agent.subagents();
     let hook = agent.subagent_hook().unwrap();
-    let out = hook(serde_json::json!({ "prompt": "x", "timeout_ms": 100 })).await;
+    let out = hook(
+        SubagentOp::Run,
+        serde_json::json!({ "prompt": "x", "timeout_ms": 100 }),
+    )
+    .await;
     let id = out["id"].as_str().unwrap().to_string();
 
     let mut a = app();
@@ -874,7 +887,11 @@ async fn new_session_clears_the_subagent_registry() {
     a.start_new_session();
 
     // Ids from the replaced session must not resume into the new one.
-    let out = hook(serde_json::json!({ "id": id, "prompt": "y" })).await;
+    let out = hook(
+        SubagentOp::Run,
+        serde_json::json!({ "id": id, "prompt": "y" }),
+    )
+    .await;
     assert_eq!(out["status"], serde_json::json!("failed"), "{out}");
     assert!(
         out["error"]

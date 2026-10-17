@@ -57,6 +57,22 @@ struct PendingAfterRoundProvider {
     first: std::sync::Mutex<Option<Vec<StreamingEvent>>>,
 }
 
+/// A provider whose stream never yields: the run stays live until it is
+/// cancelled or timed out.
+struct NeverProvider;
+
+#[async_trait]
+impl Provider for NeverProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
 #[async_trait]
 impl Provider for PendingAfterRoundProvider {
     async fn stream(
@@ -183,6 +199,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
+        job_owner: None,
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
         auto_continue: lofi_types::AutoContinuePolicy::default(),

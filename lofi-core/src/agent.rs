@@ -44,7 +44,8 @@ mod exec;
 mod model;
 mod subagent;
 mod tool_executor;
-pub use subagent::{SubagentRegistry, SubagentSupport};
+pub use lofi_code::SubagentOp;
+pub use subagent::{SubagentNotice, SubagentRegistry, SubagentSupport};
 pub use tool_executor::{ToolCallContext, ToolExecutor};
 
 #[cfg(test)]
@@ -198,6 +199,9 @@ pub struct Agent {
     /// spawned in one round is visible to the next. The host shuts down
     /// survivors when the session ends.
     jobs: lofi_code::tools::JobRegistry,
+    /// Owning subagent run id; set on child agents so their spawned jobs
+    /// are tagged for kill-by-owner and the per-owner cap.
+    job_owner: Option<String>,
     /// Session-shared sandbox thread, born with the first exec. Guest work
     /// on the single-threaded host runtime would freeze the UI; the worker
     /// keeps the sandbox off it for the agent's lifetime.
@@ -253,6 +257,7 @@ impl Agent {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
+            job_owner: None,
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
             subagent_support: None,
             subagents: SubagentRegistry::default(),
@@ -289,6 +294,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
@@ -315,6 +321,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
@@ -344,6 +351,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir,
             jobs: self.jobs.clone(),
+            job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
@@ -381,6 +389,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent: self.subagent_hook(),
             models: self

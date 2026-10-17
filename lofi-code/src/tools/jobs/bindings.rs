@@ -13,6 +13,10 @@ use tokio::process::Command;
 use lofi_error::{Error, Result};
 
 use super::driver::run_job;
+
+/// Maximum concurrently running jobs one subagent may hold. Bounds a
+/// runaway child without capping the session's own jobs.
+const MAX_JOBS_PER_OWNER: usize = 16;
 use super::pty::{key_press_bytes, open_pty, write_to_master, JobScreen, JobScreenLine};
 use super::{
     kill_pgrp, Job, JobHandle, NotifyOpts, State, DEFAULT_NOTIFY_INTERVAL_MS, DEFAULT_TTY_COLS,
@@ -82,6 +86,17 @@ impl BuiltinTools {
 
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
+        }
+
+        // Bound one subagent's process tree; the session itself is
+        // uncapped here (its jobs end with the turn or the session).
+        if let Some(owner) = &self.job_owner {
+            if self.jobs.running_count_for(owner) >= MAX_JOBS_PER_OWNER {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("subagent job cap reached ({MAX_JOBS_PER_OWNER} running)"),
+                }));
+            }
         }
 
         let generation = self.jobs.inner.generation.load(Ordering::SeqCst);
@@ -174,6 +189,7 @@ impl BuiltinTools {
                 log_path: log_path.clone(),
                 timeout_ms,
                 notify,
+                owner: self.job_owner.clone(),
                 tty,
                 cols,
                 rows,

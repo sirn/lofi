@@ -19,6 +19,7 @@ fn handle_with(notify: NotifyOpts, log_path: String) -> Arc<JobHandle> {
             log_path,
             timeout_ms: None,
             notify,
+            owner: None,
             tty: false,
             cols: DEFAULT_TTY_COLS,
             rows: DEFAULT_TTY_ROWS,

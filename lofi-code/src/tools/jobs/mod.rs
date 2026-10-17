@@ -117,6 +117,9 @@ struct Job {
     /// When output last changed. Always tracked while running; the basis for
     /// idle notices.
     last_output_at: Option<Instant>,
+    /// Owning subagent run id; `None` for jobs spawned by the session's own
+    /// execs. Lets a subagent cancellation kill exactly its process tree.
+    owner: Option<String>,
 }
 
 /// Progress-notification settings for a job.
@@ -492,6 +495,57 @@ impl JobRegistry {
         }
         killed.sort_unstable();
         killed
+    }
+
+    /// Number of running jobs owned by one subagent run.
+    #[must_use]
+    pub fn running_count_for(&self, owner: &str) -> usize {
+        self.inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|h| {
+                let job = h
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                job.owner.as_deref() == Some(owner) && !job.state.is_terminal()
+            })
+            .count()
+    }
+
+    /// Kill every running job owned by one subagent run, silently: notices
+    /// are disabled first so the parent session is not spammed with one
+    /// "cancelled" notice per owned job. Returns the killed ids.
+    pub fn kill_owned(&self, owner: &str) -> Vec<u64> {
+        let ids: Vec<u64> = self
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, h)| {
+                let job = h
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                job.owner.as_deref() == Some(owner) && !job.state.is_terminal()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            if let Some(handle) = self.get(*id) {
+                handle
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .notify
+                    .enabled = false;
+            }
+            self.kill(*id);
+        }
+        ids
     }
 
     /// Kill a job's whole process group and mark it cancelled. Synchronous

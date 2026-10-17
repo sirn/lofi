@@ -8,7 +8,7 @@ use serde_json::{json, Value as Json};
 use lofi_error::Error;
 
 use crate::convert::{js_to_json, json_to_js};
-use crate::ctx::{ModelsFn, RecallFn, ResultFn, SubagentFn, ToolEvent};
+use crate::ctx::{ModelsFn, RecallFn, ResultFn, SubagentFn, SubagentOp, ToolEvent};
 use crate::tools::BuiltinTools;
 
 #[allow(clippy::too_many_arguments)]
@@ -19,7 +19,7 @@ pub(super) fn bind_tools<'js>(
     recall: Option<RecallFn>,
     result: Option<ResultFn>,
     skills_dir: Option<PathBuf>,
-    subagent: Option<SubagentFn>,
+    subagent: Option<&SubagentFn>,
     models: Option<ModelsFn>,
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
@@ -57,75 +57,97 @@ fn bind_models_tool<'js>(
     Ok(())
 }
 
-/// `lofi.subagent` delegates a prompt to a child agent run owned by the
-/// host engine. The tool stays bound without a hook so a nested sandbox
-/// gets a clear error instead of an undefined function.
+/// `lofi.subagent*` delegates work to child agent runs owned by the host
+/// engine. The tools stay bound without a hook so a nested sandbox gets a
+/// clear error instead of an undefined function. Only `subagent` (Run) arms
+/// the hook's drop-cancellation; dropping a `subagentWait` future aborts
+/// the wait but never the run.
 fn bind_subagent_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
     tools: &Arc<BuiltinTools>,
-    subagent: Option<SubagentFn>,
+    subagent: Option<&SubagentFn>,
 ) -> rquickjs::Result<()> {
-    let t = tools.clone();
-    lofi.set(
-        "subagent",
-        Function::new(
-            ctx.clone(),
-            Async(move |args: Opt<Value>| {
-                let t = t.clone();
-                let subagent = subagent.clone();
-                let args = args.0.map_or(Json::Null, |v| js_to_json(&v));
-                async move {
-                    let id = t.next_tool_id();
-                    let label = args.get("prompt").and_then(Json::as_str).unwrap_or("");
-                    t.emit(ToolEvent::Start {
-                        id,
-                        name: "subagent".into(),
-                        args: cap_first_line(label, 120),
-                    });
-                    let res: std::result::Result<Json, Error> = match &subagent {
-                        Some(hook) => {
-                            // Race the hook against user cancellation: while
-                            // the guest awaits the subagent, no QuickJS
-                            // bytecode ticks, so the interrupt handler can't
-                            // observe `cancel`. Dropping the hook future
-                            // triggers the subagent's CancelOnDrop, which
-                            // cancels the child run.
-                            match t.cancel_flag() {
-                                Some(flag) => {
-                                    let cancel_wait = crate::tools::wait_for_cancel(&flag);
-                                    tokio::pin!(cancel_wait);
-                                    tokio::select! {
-                                        biased;
-                                        out = hook(args) => Ok(out),
-                                        () = &mut cancel_wait => Err(Error::Tool(
-                                            "cancelled".to_string(),
-                                        )),
+    for (name, op, cancellable) in [
+        ("subagent", SubagentOp::Run, true),
+        ("subagentSpawn", SubagentOp::Spawn, false),
+        ("subagentStatus", SubagentOp::Status, false),
+        ("subagentList", SubagentOp::List, false),
+        ("subagentWait", SubagentOp::Wait, true),
+        ("subagentRead", SubagentOp::Read, false),
+        ("subagentKill", SubagentOp::Kill, false),
+        ("subagentNotify", SubagentOp::Notify, false),
+    ] {
+        let t = tools.clone();
+        // Clone the Arc out of the reference: the closures are 'js-lived
+        // and cannot capture the caller's reference.
+        let subagent = subagent.cloned();
+        lofi.set(
+            name,
+            Function::new(
+                ctx.clone(),
+                Async(move |args: Opt<Value>| {
+                    let t = t.clone();
+                    let subagent = subagent.clone();
+                    let args = args.0.map_or(Json::Null, |v| js_to_json(&v));
+                    async move {
+                        let id = t.next_tool_id();
+                        let label = args
+                            .get("prompt")
+                            .or_else(|| args.get("id"))
+                            .and_then(Json::as_str)
+                            .unwrap_or("");
+                        t.emit(ToolEvent::Start {
+                            id,
+                            name: name.into(),
+                            args: cap_first_line(label, 120),
+                        });
+                        let res: std::result::Result<Json, Error> = match &subagent {
+                            Some(hook) => {
+                                // Race the hook against user cancellation:
+                                // while the guest awaits the subagent, no
+                                // QuickJS bytecode ticks, so the interrupt
+                                // handler can't observe `cancel`. Dropping
+                                // the Run hook future triggers the
+                                // subagent's CancelOnDrop; the Wait hook
+                                // holds no such guard.
+                                match (cancellable, t.cancel_flag()) {
+                                    (true, Some(flag)) => {
+                                        let cancel_wait = crate::tools::wait_for_cancel(&flag);
+                                        tokio::pin!(cancel_wait);
+                                        tokio::select! {
+                                            biased;
+                                            out = hook(op, args) => Ok(out),
+                                            () = &mut cancel_wait => Err(Error::Tool(
+                                                "cancelled".to_string(),
+                                            )),
+                                        }
                                     }
+                                    _ => Ok(hook(op, args).await),
                                 }
-                                None => Ok(hook(args).await),
                             }
-                        }
-                        // Resolve rather than throw, like the hook's own
-                        // argument errors: guest code checks the `ok` field
-                        // instead of mixing try/catch with status checks.
-                        None => Ok(json!({
-                            "ok": false,
-                            "status": "unavailable",
-                            "error": "subagent is not available in this context",
-                        })),
-                    };
-                    let (result, is_error) = tool_preview(&res);
-                    t.emit(ToolEvent::End {
-                        id,
-                        result,
-                        is_error,
-                    });
-                    tool_result(res)
-                }
-            }),
-        )?,
-    )?;
+                            // Resolve rather than throw, like the hook's own
+                            // argument errors: guest code checks the `ok`
+                            // field instead of mixing try/catch with status
+                            // checks.
+                            None => Ok(json!({
+                                "ok": false,
+                                "status": "unavailable",
+                                "error": "subagent is not available in this context",
+                            })),
+                        };
+                        let (result, is_error) = tool_preview(&res);
+                        t.emit(ToolEvent::End {
+                            id,
+                            result,
+                            is_error,
+                        });
+                        tool_result(res)
+                    }
+                }),
+            )?,
+        )?;
+    }
     Ok(())
 }
 

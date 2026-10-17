@@ -307,7 +307,7 @@ bounded during recovery.
 **Returns:** `string` — the raw content (a tool result's output text, or a
 tool call's input JSON). Cheap and on-demand.
 
-## lofi.subagent({ prompt, id?, model?, thinking?, system?, timeout_ms?, output_limit? })
+## lofi.subagent({ prompt, id?, model?, thinking?, system?, timeout_ms?, output_limit?, token_budget? })
 
 Delegate a task to a foreground subagent: a fresh agent run in its own
 context window. Only the final result crosses back into this exec, so use
@@ -318,7 +318,7 @@ log reads, mechanical edits).
 - `prompt` (string, required) — the task for the subagent.
 - `id` (string, optional) — resume a previous subagent run, continuing its
   context with this prompt. `model`, `thinking`, and `system` are rejected
-  on resume; `timeout_ms` and `output_limit` still apply.
+  on resume; `timeout_ms`, `output_limit`, and `token_budget` still apply.
 - `model` (string, optional) — model query (e.g. `anthropic/claude-haiku-4.5`)
   overriding the session model. List choices with `lofi.models()`.
 - `thinking` (string, optional) — thinking level (`off`, `low`, `medium`,
@@ -326,6 +326,8 @@ log reads, mechanical edits).
 - `system` (string, optional) — system prompt override.
 - `timeout_ms` (number, optional) — wall-clock limit for the whole run.
 - `output_limit` (number, optional) — cap on the returned result bytes.
+- `token_budget` (number, optional) — total token budget (input + output).
+  The run is cancelled and fails once its spend crosses the budget.
 
 **Returns:** `{ ok, id, status, result?, error?, session_id?, truncated?, full_bytes?, usage? }`.
 `status` is one of `completed`, `failed`, `cancelled`, `timed_out` —
@@ -348,6 +350,104 @@ cannot spawn further subagents. They write transcripts unless the session
 does not persist (`--no-session`, print mode). Each session keeps at most
 64 subagent entries; past that, spawning evicts a finished entry, and it
 fails while 64 runs are still active.
+
+## lofi.subagentSpawn({ prompt, model?, thinking?, system?, timeout_ms?, token_budget? })
+
+Start a background subagent and return immediately. The run survives the
+end of this exec; unlike `lofi.subagent`, cancelling the exec does not
+cancel the run. Take the result later with `lofi.subagentWait`.
+
+**Parameters:** same as `lofi.subagent`, except `id` (resume) and
+`output_limit` are not accepted; resume stays a foreground operation.
+
+**Returns:** `{ ok, id, status, session_id? }`. `status` is `running` on
+success, `failed` with an `error` on rejection (concurrency cap, bad
+override, unknown argument problem). Keep the `id`: it is the handle for
+`subagentStatus`, `subagentWait`, `subagentRead`, `subagentKill`, and
+`subagentNotify`.
+
+## lofi.subagentStatus({ id })
+
+Report one subagent run's state.
+
+**Parameters:**
+- `id` (string, required) — the run id from `subagentSpawn` or `subagent`.
+
+**Returns:** `{ ok, id, status, session_id?, usage?, error? }`. `status` is
+`running`, `completed`, `failed`, `cancelled`, or `timed_out`; `error` is
+set for `failed`. Unknown ids resolve with `ok: false`.
+
+## lofi.subagentList({ state?, limit?, cursor? })
+
+List this session's subagent runs, oldest first.
+
+**Parameters:**
+- `state` (string, optional) — `running` or `terminal`; omit for all.
+- `limit` (number, optional) — page size, default 20, maximum 100.
+- `cursor` (string, optional) — opaque page cursor from a previous call.
+
+**Returns:** `{ ok, entries: [{ id, status, session_id? }], cursor? }`.
+`cursor` is present while more entries remain.
+
+## lofi.subagentWait({ id, timeout_ms? })
+
+Wait for a background subagent to reach a terminal state. A wait timeout
+never cancels the run: the run keeps going and can be awaited again.
+
+**Parameters:**
+- `id` (string, required) — the run id.
+- `timeout_ms` (number, optional) — wait limit, default 60_000. Keep it
+  below the exec's own timeout.
+
+**Returns:** the same shape as `lofi.subagent` once the run is terminal;
+`{ ok, id, status: "running" }` when the wait timed out.
+
+## lofi.subagentRead({ id, cursor?, limit?, types? })
+
+Read a run's events incrementally. Events are sequence-numbered; the cursor
+is the next sequence number.
+
+**Parameters:**
+- `id` (string, required) — the run id.
+- `cursor` (number, optional) — sequence number to start from, default 0.
+- `limit` (number, optional) — page size, default 50, maximum 200.
+- `types` (array of string, optional) — event types to include; the cursor
+  still advances over filtered-out events.
+
+**Returns:** `{ ok, id, events: [{ seq, type, ... }], cursor, dropped,
+done }`. Event `type` is one of `prompt`, `text`, `tool_start`, `tool_end`,
+`usage`, `state`. `dropped` counts events that fell out of the retained
+buffer before `cursor` (the buffer is bounded); `done` is true when the run
+is terminal and all retained events are read. The final `state` event
+carries the terminal status. The buffer lives until the run's entry is
+evicted; afterwards use the transcript (`session_id`) instead.
+
+## lofi.subagentKill({ id, reason? })
+
+Cancel a running subagent and the jobs it spawned. Idempotent: killing a
+terminal run returns its current status.
+
+**Parameters:**
+- `id` (string, required) — the run id.
+- `reason` (string, optional) — recorded in the run's terminal `state`
+  event.
+
+**Returns:** `{ ok, id, status }`.
+
+## lofi.subagentNotify({ id, interval_ms?, enabled? })
+
+Configure host notices for a run. A terminal notice (status and short
+summary) is on by default; this toggles it or adds periodic progress
+notices.
+
+**Parameters:**
+- `id` (string, required) — the run id.
+- `interval_ms` (number, optional) — periodic notice interval, minimum
+  5_000.
+- `enabled` (boolean, optional) — set `false` to silence all notices for
+  this run.
+
+**Returns:** `{ ok, id }`.
 
 ## lofi.models()
 

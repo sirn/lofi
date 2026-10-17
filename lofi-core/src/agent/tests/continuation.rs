@@ -871,6 +871,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         auto_continue: lofi_types::AutoContinuePolicy::default(),
         subagent_support: None,
         subagents: SubagentRegistry::default(),
+        job_owner: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -944,6 +945,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         auto_continue: lofi_types::AutoContinuePolicy::default(),
         subagent_support: None,
         subagents: SubagentRegistry::default(),
+        job_owner: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.
