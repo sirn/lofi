@@ -132,10 +132,14 @@ impl Agent {
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));
-        // Background subagents run on the host runtime; the sandbox worker
-        // runtime would stop them unsettled when the worker idles out.
+        // Background subagents and job drivers need a runtime that
+        // outlives this turn's worker runtime. Both registries capture one
+        // at construction; these calls repair registries built outside
+        // any runtime and are no-ops otherwise (first-wins).
         self.subagents
             .set_host_handle(tokio::runtime::Handle::current());
+        self.jobs
+            .set_driver_runtime(tokio::runtime::Handle::current());
         // Stamp the live session id so spawned subagent transcripts link back
         // to this session; /new and /resume switch cursors between turns.
         if let Some(cursor) = session {

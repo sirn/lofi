@@ -725,6 +725,41 @@ async fn settled_run_spend_folds_into_session_totals() {
 }
 
 #[tokio::test]
+async fn background_run_survives_a_per_turn_runtime() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("bg done")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    // The TUI's turn loop runs on its own worker runtime that dies when
+    // the turn ends; recording it as the host runtime must not win over
+    // the construction-time capture.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let turn = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                turn.block_on(async {
+                    agent
+                        .subagents()
+                        .set_host_handle(tokio::runtime::Handle::current());
+                });
+            })
+            .join()
+            .unwrap();
+    });
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "a" })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+    let done = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 30_000 })).await;
+    assert_eq!(done["status"], json!("completed"), "{done}");
+    assert_eq!(done["result"], json!("bg done"), "{done}");
+}
+
+#[tokio::test]
 async fn cache_only_spend_is_still_reported() {
     let _env = env_lock();
     let _state = StateEnv::new();

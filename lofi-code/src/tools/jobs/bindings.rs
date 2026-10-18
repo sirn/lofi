@@ -98,6 +98,15 @@ impl BuiltinTools {
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
         }
+        // A kill can land while the prompt was open; stop before the child
+        // exists, not after. Checked once more under the jobs lock below.
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return Err(Error::Tool("jobSpawn: run cancelled".into()));
+        }
 
         // Bound one subagent's process tree; the session itself is
         // uncapped here (its jobs end with the turn or the session).
@@ -276,7 +285,14 @@ impl BuiltinTools {
             driver_master,
             self.bash_env.clone(),
         );
-        if let Some(runtime) = &self.jobs.inner.driver_runtime {
+        let runtime = self
+            .jobs
+            .inner
+            .driver_runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(runtime) = runtime {
             runtime.spawn(driver);
         } else {
             tokio::spawn(driver);

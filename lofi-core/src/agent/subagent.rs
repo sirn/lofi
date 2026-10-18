@@ -174,7 +174,7 @@ pub struct SubagentNotice {
 }
 
 /// Per-session store of spawned subagents, shared across model switches.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SubagentRegistry {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
     next_used: Arc<AtomicU64>,
@@ -190,12 +190,33 @@ pub struct SubagentRegistry {
     generation: Arc<AtomicU64>,
     /// Creation order for `subagentList` cursors.
     next_born: Arc<AtomicU64>,
-    /// Runtime that owns background runs. Captured at the start of the
-    /// parent's turn on the host; spawning on the sandbox worker runtime
-    /// would stop the run unsettled when the worker idles out.
+    /// Runtime that owns background runs. Captured at construction: the
+    /// agent is built on the app's long-lived runtime, while a turn may
+    /// run on a per-turn worker runtime that dies when the turn ends.
+    /// `set_host_handle` remains as the fallback for registries built
+    /// outside any runtime.
     host_handle: Arc<std::sync::OnceLock<tokio::runtime::Handle>>,
     /// Terminal and progress notices for the host UI.
     notices: Arc<NoticeHub>,
+}
+
+impl Default for SubagentRegistry {
+    fn default() -> Self {
+        let host_handle = Arc::new(std::sync::OnceLock::new());
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _ = host_handle.set(handle);
+        }
+        Self {
+            entries: Arc::default(),
+            next_used: Arc::default(),
+            unreported: Arc::default(),
+            parent_session: Arc::default(),
+            generation: Arc::default(),
+            next_born: Arc::default(),
+            host_handle,
+            notices: Arc::new(NoticeHub::default()),
+        }
+    }
 }
 
 /// Bounded broadcast of subagent notices. Lagging subscribers skip ahead;
@@ -226,8 +247,10 @@ impl SubagentRegistry {
         });
     }
 
-    /// Record the runtime that owns background runs. Called at the start of
-    /// the parent's turn, which always runs on the host runtime.
+    /// Record the runtime that owns background runs when construction
+    /// could not (built outside a runtime). First-wins: a turn may run on
+    /// a per-turn worker runtime, so a later call must not replace the
+    /// construction-time handle.
     pub(crate) fn set_host_handle(&self, handle: tokio::runtime::Handle) {
         let _ = self.host_handle.set(handle);
     }

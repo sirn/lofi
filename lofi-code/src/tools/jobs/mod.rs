@@ -296,14 +296,16 @@ struct Inner {
     /// later pass would remove it. Cleared when the subagent's next run
     /// starts. Never hold this lock while taking `jobs`.
     cancelled_owners: Mutex<std::collections::HashSet<String>>,
-    /// Runtime for job drivers, captured where the registry is built. A
-    /// driver spawned on the per-exec worker runtime dies silently when
+    /// Runtime for job drivers, captured where the registry is built and
+    /// repaired by `set_driver_runtime` when construction saw no runtime.
+    /// A driver spawned on the per-exec worker runtime dies silently when
     /// that worker is torn down (subagent settle, idle restart), leaving
     /// the child process running without timeout enforcement, exit
-    /// watching, or release hooks. `None` only when the registry was
-    /// built outside any runtime; the spawn then uses the caller's
-    /// runtime, matching the old behavior.
-    driver_runtime: Option<tokio::runtime::Handle>,
+    /// watching, or release hooks. `None` only when no runtime has been
+    /// seen yet; the spawn then uses the caller's runtime, matching the
+    /// old behavior. Leaf lock: never take another registry lock while
+    /// holding it.
+    driver_runtime: Mutex<Option<tokio::runtime::Handle>>,
     /// Live notice subscribers (one per UI host). Zero subscribers means
     /// headless; notices still land in `pending` so a late subscriber or a
     /// `drain_notices` call sees the same sequence.
@@ -343,7 +345,7 @@ impl JobRegistry {
                 generation: AtomicU64::new(0),
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 cancelled_owners: std::sync::Mutex::new(std::collections::HashSet::new()),
-                driver_runtime: tokio::runtime::Handle::try_current().ok(),
+                driver_runtime: Mutex::new(tokio::runtime::Handle::try_current().ok()),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(PendingNotices::new()),
             }),
@@ -511,6 +513,19 @@ impl JobRegistry {
         }
         killed.sort_unstable();
         killed
+    }
+
+    /// Adopt a runtime for drivers when none is known yet. Called at the
+    /// start of every turn so a registry built outside a runtime (where
+    /// the constructor could not capture one) still gets one. Fill-only:
+    /// a turn may run on a per-turn worker runtime that dies when the
+    /// turn ends, so it must not replace the construction-time handle.
+    pub fn set_driver_runtime(&self, handle: tokio::runtime::Handle) {
+        self.inner
+            .driver_runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(handle);
     }
 
     /// Lift the acquisition bar `kill_owned` put on `owner`: the
