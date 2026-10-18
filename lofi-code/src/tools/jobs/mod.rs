@@ -698,33 +698,7 @@ impl JobRegistry {
     /// during graceful shutdown; [`Drop`] is the final fallback when the
     /// owning session releases its last registry clone.
     pub fn shutdown(&self) {
-        let jobs: Vec<Arc<JobHandle>> = self
-            .inner
-            .jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .cloned()
-            .collect();
-        for handle in jobs {
-            let pid = {
-                let mut job = handle
-                    .data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if job.state.is_terminal() {
-                    continue;
-                }
-                job.state = State::Cancelled;
-                job.ended = Some(Instant::now());
-                job.signal = Some(nix::libc::SIGKILL);
-                job.pid
-            };
-            if let Some(pid) = pid {
-                kill_pgrp(pid);
-            }
-            handle.cancel.store(true, Ordering::Relaxed);
-        }
+        shutdown_inner(&self.inner);
     }
 
     /// End the current session's job scope. Running process groups are
@@ -783,13 +757,41 @@ impl JobRegistry {
     }
 }
 
-impl Drop for JobRegistry {
-    fn drop(&mut self) {
-        // Only the last clone tears down; intermediate clones (per-exec tool
-        // bundles) must not kill jobs still owned by the session.
-        if Arc::strong_count(&self.inner) == 1 {
-            self.shutdown();
+fn shutdown_inner(inner: &Inner) {
+    let jobs: Vec<Arc<JobHandle>> = inner
+        .jobs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect();
+    for handle in jobs {
+        let pid = {
+            let mut job = handle
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if job.state.is_terminal() {
+                continue;
+            }
+            job.state = State::Cancelled;
+            job.ended = Some(Instant::now());
+            job.signal = Some(nix::libc::SIGKILL);
+            job.pid
+        };
+        if let Some(pid) = pid {
+            kill_pgrp(pid);
         }
+        handle.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Fires when the last strong reference goes away, including the
+        // temporary upgrades a driver holds: a strong-count check on the
+        // registry would skip teardown in that case and leak the jobs.
+        shutdown_inner(self);
     }
 }
 
