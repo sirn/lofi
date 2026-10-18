@@ -39,6 +39,9 @@ const MAX_RUNNING: usize = 8;
 const EVENT_CAP: usize = 512;
 /// Cap on any string carried by a public event.
 const EVENT_TEXT_CAP: usize = 8 * 1024;
+/// Cap on the outcome line quoted in a terminal notice: the notice becomes
+/// a parent prompt, so it stays short.
+const NOTICE_DETAIL_CAP: usize = 200;
 /// Default `subagentWait` limit: below the two-minute guest exec timeout so
 /// a default wait reports `running` instead of dying with the exec.
 const DEFAULT_WAIT_MS: u64 = 60_000;
@@ -101,9 +104,15 @@ struct Entry {
     abort: Option<AbortHandle>,
     // Bounded public event log paged by `subagentRead`.
     events: EventLog,
-    // Terminal notice switch; on by default, cleared by
+    // Terminal notice switch; on by default for background runs, cleared by
     // `subagentNotify({enabled: false})` and by `clear()`.
     notify_terminal: bool,
+    // Generation of the periodic-notice loop: each `subagentNotify` with an
+    // interval bumps it so a stale loop exits instead of doubling up.
+    notify_tick: u64,
+    // Handle of the active periodic-notice loop; reconfiguration aborts it
+    // instead of leaving it asleep until its old interval expires.
+    notify_task: Option<AbortHandle>,
 }
 
 /// Bounded per-run event buffer for `subagentRead`. Sequence numbers are
@@ -135,6 +144,9 @@ impl EventLog {
         let mut next = cursor.max(first);
         for event in &self.events {
             let seq = event["seq"].as_u64().unwrap_or(0);
+            if seq < cursor {
+                continue;
+            }
             // The cursor advances over filtered-out events: a filtered page
             // must not stall the reader.
             next = seq + 1;
@@ -414,14 +426,18 @@ impl Drop for CancelOnDrop {
 
 /// Finalizes an entry when its task ends unwatched: a panic, or an abort
 /// from `subagentKill`'s backstop or `clear()`. Normal completion disarms
-/// it; a kill settles first, so the guard no-ops. All work is synchronous:
-/// Drop cannot await.
+/// it; on the kill path the guard is what settles the entry and reports
+/// its spend. All work is synchronous: Drop cannot await.
 struct SettleOnDrop {
     registry: SubagentRegistry,
     id: String,
     cursor: Option<SessionCursor>,
     pre_run_leaf: Option<String>,
     cancel: Arc<AtomicBool>,
+    // Spend collected by the event drain. An aborted run never reaches the
+    // report at the end of `run_turn_with_timeout`, so the guard folds in
+    // what the drain saw instead of losing it.
+    totals: Arc<std::sync::Mutex<ChildUsage>>,
     generation: u64,
     armed: bool,
 }
@@ -437,21 +453,49 @@ impl Drop for SettleOnDrop {
         if !self.armed {
             return;
         }
-        let mut entries = lock(&self.registry.entries);
-        let Some(entry) = entries.get_mut(&self.id) else {
-            return;
-        };
-        if entry.status.is_terminal() {
-            return;
+        {
+            let entries = lock(&self.registry.entries);
+            let Some(entry) = entries.get(&self.id) else {
+                return;
+            };
+            if entry.status.is_terminal() {
+                return;
+            }
         }
         let status = if self.cancel.load(Ordering::SeqCst) {
             Status::Cancelled
         } else {
             Status::Failed
         };
-        entry.status = status;
-        entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
-        entry.outcome = Some(json!({
+        // Rollback and spend reporting happen while the entry is still
+        // running — a resume is rejected in that state, so no new run can
+        // claim the transcript head this rollback is about to rewind. Both
+        // do blocking store I/O, so they stay outside the entries lock.
+        if let Some(cursor) = self.cursor.as_ref() {
+            if let Err(e) = cursor.restore_branch(self.pre_run_leaf.clone()) {
+                tracing::debug!(error = %e, "subagent transcript rollback failed");
+            }
+        }
+        // The ended run never reached the report at the end of
+        // run_turn_with_timeout; fold in what the drain saw. The generation
+        // check happens under the lock, as in the normal reporting path, so
+        // a concurrent clear() cannot split them.
+        {
+            let mut unreported = lock(&self.registry.unreported);
+            if self.registry.generation() == self.generation {
+                lock(&self.totals).report(&mut unreported);
+            }
+        }
+        // Usage the drain collected before the abort. Buffered events may
+        // still flush after this read — the drain task cannot be awaited
+        // from Drop — so the figure can be short by one round.
+        let usage = lock(&self.totals).json();
+        let mut entries = lock(&self.registry.entries);
+        // clear() may have removed the entry during the unlocked section.
+        let Some(entry) = entries.get_mut(&self.id) else {
+            return;
+        };
+        let mut outcome = json!({
             "ok": false,
             "id": self.id,
             "status": status.as_str(),
@@ -460,20 +504,21 @@ impl Drop for SettleOnDrop {
             } else {
                 "subagent task ended unexpectedly"
             },
-        }));
+        });
+        if let Some(usage) = usage {
+            outcome["usage"] = usage;
+        }
+        entry.status = status;
+        entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+        entry.outcome = Some(outcome);
         entry
             .events
             .push("state", json!({ "status": status.as_str() }));
-        let _ = entry.state_tx.send(status);
+        // send, not send_replace, would drop the value when no waiter is
+        // subscribed: a wait started after the settle would hang.
+        entry.state_tx.send_replace(status);
         let notify = entry.notify_terminal;
         drop(entries);
-        // The ended task may have written partial records; move the
-        // transcript head back so a resume matches the stored history.
-        if let Some(cursor) = self.cursor.as_ref() {
-            if let Err(e) = cursor.restore_branch(self.pre_run_leaf.clone()) {
-                tracing::debug!(error = %e, "subagent transcript rollback failed");
-            }
-        }
         if notify && self.registry.generation() == self.generation {
             self.registry.publish_notice(
                 &self.id,
@@ -618,7 +663,9 @@ async fn run(
     registry: SubagentRegistry,
     args: Value,
 ) -> Value {
-    let started = match start(&template, &support, &registry, &args) {
+    // Foreground runs return their outcome to the caller directly: a
+    // terminal notice on top would queue a duplicate as a parent prompt.
+    let started = match start(&template, &support, &registry, &args, false) {
         Ok(started) => started,
         Err(rejection) => return rejection_json(rejection, &args),
     };
@@ -652,7 +699,7 @@ fn spawn(
             });
         }
     }
-    let started = match start(template, support, registry, args) {
+    let started = match start(template, support, registry, args, true) {
         Ok(started) => started,
         Err(rejection) => return rejection_json(rejection, args),
     };
@@ -809,10 +856,22 @@ fn read_op(registry: &SubagentRegistry, args: &Value) -> Value {
     };
     let types: Option<Vec<String>> = match args.get("types") {
         None | Some(Value::Null) => None,
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| item.as_str().map(str::to_string))
-            .collect(),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(item) => out.push(item.to_string()),
+                    None => {
+                        return json!({
+                            "ok": false,
+                            "status": "failed",
+                            "error": "types must be an array of strings",
+                        })
+                    }
+                }
+            }
+            Some(out)
+        }
         Some(_) => {
             return json!({
                 "ok": false,
@@ -912,27 +971,35 @@ fn notify_op(registry: &SubagentRegistry, args: &Value) -> Value {
     if let Some(enabled) = enabled {
         entry.notify_terminal = enabled;
     }
+    // Any reconfiguration retires the previous loop at once instead of
+    // leaving it asleep until its old interval expires.
+    entry.notify_tick += 1;
+    if let Some(task) = entry.notify_task.take() {
+        task.abort();
+    }
     if let Some(interval) = interval {
+        let tick = entry.notify_tick;
         if entry.status == Status::Running && entry.notify_terminal {
-            // One tick task per run; it exits when the run settles or the
-            // entry is cleared.
             let registry = registry.clone();
-            let id = id.clone();
-            registry.host_handle().spawn(async move {
+            let loop_id = id.clone();
+            let task = registry.host_handle().spawn(async move {
                 loop {
                     tokio::time::sleep(interval).await;
-                    let running = {
+                    let active = {
                         let entries = lock(&registry.entries);
-                        entries
-                            .get(&id)
-                            .is_some_and(|entry| entry.status == Status::Running)
+                        entries.get(&loop_id).is_some_and(|entry| {
+                            entry.status == Status::Running
+                                && entry.notify_terminal
+                                && entry.notify_tick == tick
+                        })
                     };
-                    if !running {
+                    if !active {
                         break;
                     }
-                    registry.publish_notice(&id, format!("subagent {id} still running"));
+                    registry.publish_notice(&loop_id, format!("subagent {loop_id} still running"));
                 }
             });
+            entry.notify_task = Some(task.abort_handle());
         }
     }
     json!({ "ok": true, "id": id })
@@ -969,6 +1036,7 @@ fn start(
     support: &SubagentSupport,
     registry: &SubagentRegistry,
     args: &Value,
+    notify: bool,
 ) -> std::result::Result<Started, RunRejection> {
     let prompt = str_arg(args, "prompt")?
         .filter(|p| !p.trim().is_empty())
@@ -985,7 +1053,8 @@ fn start(
     if args.get("id").is_some_and(|v| !v.is_null()) && id.is_none() {
         return Err(Error::Tool("id must be a non-empty string".into()).into());
     }
-    let (agent, messages, cursor, cancel, id) = prepare(template, support, registry, id, args)?;
+    let (agent, messages, cursor, cancel, id) =
+        prepare(template, support, registry, id, args, notify)?;
     // The transcript id lets the caller locate the persisted session later;
     // the registry id alone is meaningless after a restart or an eviction.
     let session_id = cursor.as_ref().map(SessionCursor::id);
@@ -1001,9 +1070,9 @@ fn start(
     {
         let mut entries = lock(&registry.entries);
         if let Some(entry) = entries.get_mut(&id) {
-            let mut text = prompt.clone();
-            text.truncate(EVENT_TEXT_CAP);
-            entry.events.push("prompt", json!({ "text": text }));
+            entry
+                .events
+                .push("prompt", json!({ "text": cap_event_text(&prompt) }));
         }
     }
     let handle = {
@@ -1062,12 +1131,14 @@ async fn run_task(
     generation: u64,
     session_id: Option<String>,
 ) {
+    let totals = Arc::new(std::sync::Mutex::new(ChildUsage::default()));
     let guard = SettleOnDrop {
         registry: registry.clone(),
         id: id.clone(),
         cursor: cursor.clone(),
         pre_run_leaf: pre_run_leaf.clone(),
         cancel: cancel.clone(),
+        totals: totals.clone(),
         generation,
         armed: true,
     };
@@ -1084,20 +1155,25 @@ async fn run_task(
         prompt,
         output_limit,
         token_budget,
+        totals,
         generation,
     )
     .await;
     let status = outcome.status;
     let out = outcome_json(&id, session_id.as_deref(), outcome);
+    let notice_text = terminal_notice(&id, status, &out);
+    // Terminal write in one critical section: a resume observes either
+    // the running entry or the fully settled one, never half of either.
     let notify = {
         let mut entries = lock(&registry.entries);
         match entries.get_mut(&id) {
             Some(entry) => {
+                entry.status = status;
                 entry.outcome = Some(out);
                 entry
                     .events
                     .push("state", json!({ "status": status.as_str() }));
-                let _ = entry.state_tx.send(status);
+                entry.state_tx.send_replace(status);
                 entry.notify_terminal
             }
             // clear() removed the entry: nothing to record, nothing to say.
@@ -1105,14 +1181,27 @@ async fn run_task(
         }
     };
     if notify && registry.generation() == generation {
-        registry.publish_notice(&id, terminal_notice(&id, status));
+        registry.publish_notice(&id, notice_text);
     }
     guard.disarm();
 }
 
 /// One-line terminal notice: status plus the first line of the outcome.
-fn terminal_notice(id: &str, status: Status) -> String {
-    format!("subagent {id} {}", status.as_str())
+fn terminal_notice(id: &str, status: Status, outcome: &Value) -> String {
+    let detail = outcome["result"]
+        .as_str()
+        .or_else(|| outcome["error"].as_str())
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+        // A detail that only repeats the status adds nothing.
+        .filter(|line| *line != status.as_str());
+    match detail {
+        Some(line) => format!(
+            "subagent {id} {}: {}",
+            status.as_str(),
+            cap_at_boundary(line, NOTICE_DETAIL_CAP)
+        ),
+        None => format!("subagent {id} {}", status.as_str()),
+    }
 }
 
 /// The JSON body stored at settle and returned to the foreground caller,
@@ -1184,7 +1273,7 @@ fn spawn_event_drain(
                     let spent = {
                         let mut totals = lock(&totals);
                         totals.add(*cost, usage);
-                        totals.input + totals.output
+                        totals.total()
                     };
                     // Cancel as soon as the budget is crossed; the settle path
                     // reports the breach as the failure reason.
@@ -1233,10 +1322,22 @@ fn spawn_event_drain(
     (stop_tx, drain)
 }
 
-fn cap_event_text(text: &str) -> String {
+/// Truncate at `cap` bytes, backing up to a UTF-8 boundary:
+/// `String::truncate` panics off one.
+fn cap_at_boundary(text: &str, cap: usize) -> String {
     let mut text = text.to_string();
-    text.truncate(EVENT_TEXT_CAP);
+    if text.len() > cap {
+        let mut end = cap;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
     text
+}
+
+fn cap_event_text(text: &str) -> String {
+    cap_at_boundary(text, EVENT_TEXT_CAP)
 }
 
 /// Run one turn to completion and finalize the registry entry: status,
@@ -1256,6 +1357,9 @@ async fn run_turn_with_timeout(
     prompt: String,
     output_limit: usize,
     token_budget: Option<u64>,
+    // Created by the caller so the settle guard can report an aborted run's
+    // partial spend; the event drain fills it as RoundUsage events arrive.
+    totals: Arc<std::sync::Mutex<ChildUsage>>,
     // Captured at admission: a /new or /resume bumps it, and a detached
     // settle must not fold spend into the new session.
     generation: u64,
@@ -1264,7 +1368,6 @@ async fn run_turn_with_timeout(
     // The child events have no consumer: the parent transcript records the
     // tool call, not the child stream. Collect the usage so the spend is
     // still visible in the tool result; drain the rest.
-    let totals = Arc::new(std::sync::Mutex::new(ChildUsage::default()));
     // run_turn reports a context-pressure stop as Ok: the flag separates it
     // from a real completion, which ends on the final assistant message.
     let pressure = Arc::new(AtomicBool::new(false));
@@ -1297,7 +1400,7 @@ async fn run_turn_with_timeout(
     // here even when the provider finished the round before noticing.
     let budget_over = {
         let totals = lock(&totals);
-        let spent = totals.input + totals.output;
+        let spent = totals.total();
         token_budget
             .filter(|&budget| spent > budget)
             .map(|budget| (spent, budget))
@@ -1330,8 +1433,11 @@ async fn run_turn_with_timeout(
     } else {
         (status, error)
     };
+    // The terminal status is NOT set here: `run_task` writes status,
+    // outcome, event, and the watch state in one critical section. Setting
+    // it early would let a resume claim the entry in between and this
+    // run's stale outcome would then land on the new run's waiters.
     let entry_present = if let Some(entry) = lock(&registry.entries).get_mut(&id) {
-        entry.status = status;
         // Restamp at settle: the stamp orders eviction, and a long run that
         // finishes last must not become the oldest victim.
         entry.used = registry.stamp();
@@ -1367,7 +1473,6 @@ async fn run_turn_with_timeout(
 /// budget)` when the run crossed its token budget; the drain flushed before
 /// this call, so the breach is visible even when the provider finished the
 /// round before noticing the cancel flag.
-#[allow(clippy::too_many_arguments)]
 fn classify_outcome(
     outcome: std::result::Result<Result<()>, tokio::time::error::Elapsed>,
     budget_over: Option<(u64, u64)>,
@@ -1442,6 +1547,11 @@ impl ChildUsage {
         self.seen = true;
     }
 
+    /// Total tokens across every category the provider reports.
+    fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+
     fn json(&self) -> Option<Value> {
         self.seen.then(|| {
             json!({
@@ -1474,6 +1584,7 @@ fn prepare(
     registry: &SubagentRegistry,
     id: Option<String>,
     args: &Value,
+    notify: bool,
 ) -> std::result::Result<
     (
         Agent,
@@ -1485,7 +1596,7 @@ fn prepare(
     RunRejection,
 > {
     if let Some(id) = id {
-        return prepare_resume(registry, id, args);
+        return prepare_resume(registry, id, args, notify);
     }
 
     let mut agent = template.clone();
@@ -1507,7 +1618,6 @@ fn prepare(
     // state behind; the placeholder is filled in with the transcript below.
     let id = {
         let mut entries = lock(&registry.entries);
-        evict_for_spawn(&mut entries)?;
         let running = entries
             .values()
             .filter(|entry| !entry.status.is_terminal())
@@ -1518,6 +1628,7 @@ fn prepare(
             ))
             .into());
         }
+        evict_for_spawn(&mut entries)?;
         let id = loop {
             let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
             if !entries.contains_key(&id) {
@@ -1540,11 +1651,13 @@ fn prepare(
                 used: registry.stamp(),
                 // Born 0 would collide with the absent page cursor.
                 born: registry.next_born.fetch_add(1, Ordering::SeqCst) + 1,
+                notify_tick: 0,
+                notify_task: None,
                 outcome: None,
                 state_tx,
                 abort: None,
                 events: EventLog::default(),
-                notify_terminal: true,
+                notify_terminal: notify,
             },
         );
         id
@@ -1617,6 +1730,7 @@ fn prepare_resume(
     registry: &SubagentRegistry,
     id: String,
     args: &Value,
+    notify: bool,
 ) -> std::result::Result<
     (
         Agent,
@@ -1628,12 +1742,27 @@ fn prepare_resume(
     RunRejection,
 > {
     let mut entries = lock(&registry.entries);
+    match entries.get(&id) {
+        None => return Err(Error::Tool(format!("unknown subagent id: {id}")).into()),
+        Some(entry) if !entry.status.is_terminal() => {
+            return Err(RunRejection::Busy(entry.status.as_str().to_string()))
+        }
+        Some(_) => {}
+    }
+    // A resume re-enters the running set, so it is subject to the same cap.
+    let running = entries
+        .values()
+        .filter(|entry| !entry.status.is_terminal())
+        .count();
+    if running >= MAX_RUNNING {
+        return Err(Error::Tool(format!(
+            "concurrency cap reached ({MAX_RUNNING} running subagents)"
+        ))
+        .into());
+    }
     let entry = entries
         .get_mut(&id)
         .ok_or_else(|| Error::Tool(format!("unknown subagent id: {id}")))?;
-    if !entry.status.is_terminal() {
-        return Err(RunRejection::Busy(entry.status.as_str().to_string()));
-    }
     if str_arg(args, "model")?.is_some()
         || str_arg(args, "thinking")?.is_some()
         || str_arg(args, "system")?.is_some()
@@ -1655,7 +1784,15 @@ fn prepare_resume(
     // new run stores its own. Waiters see the state move back to running.
     entry.outcome = None;
     entry.abort = None;
-    let _ = entry.state_tx.send(Status::Running);
+    // The resume path is always foreground: silence the terminal notice and
+    // retire the previous run's periodic loop, which would otherwise wake
+    // up on the running status.
+    entry.notify_terminal = notify;
+    entry.notify_tick += 1;
+    if let Some(task) = entry.notify_task.take() {
+        task.abort();
+    }
+    entry.state_tx.send_replace(Status::Running);
     Ok((
         entry.agent.clone(),
         entry.messages.clone(),

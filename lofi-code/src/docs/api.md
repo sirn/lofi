@@ -326,8 +326,9 @@ log reads, mechanical edits).
 - `system` (string, optional) — system prompt override.
 - `timeout_ms` (number, optional) — wall-clock limit for the whole run.
 - `output_limit` (number, optional) — cap on the returned result bytes.
-- `token_budget` (number, optional) — total token budget (input + output).
-  The run is cancelled and fails once its spend crosses the budget.
+- `token_budget` (number, optional) — total token budget, counting every
+  token category the provider reports (input, output, cache). The run is
+  cancelled and fails once its spend crosses the budget.
 
 **Returns:** `{ ok, id, status, result?, error?, session_id?, truncated?, full_bytes?, usage? }`.
 `status` is one of `completed`, `failed`, `cancelled`, `timed_out` —
@@ -436,9 +437,10 @@ terminal run returns its current status.
 
 ## lofi.subagentNotify({ id, interval_ms?, enabled? })
 
-Configure host notices for a run. A terminal notice (status and short
-summary) is on by default; this toggles it or adds periodic progress
-notices.
+Configure host notices for a run. Runs started with `subagentSpawn`
+publish a terminal notice (status and short summary) by default;
+foreground `subagent` runs return their outcome directly and publish
+nothing. This toggles the notice or adds periodic progress notices.
 
 **Parameters:**
 - `id` (string, required) — the run id.

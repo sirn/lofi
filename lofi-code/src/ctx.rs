@@ -21,7 +21,6 @@ pub type RecallFn = Arc<
 
 pub type ResultFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// Optional `lofi.subagent` implementation: an async callback from the
 /// Which `lofi.subagent*` function the guest invoked. One typed hook
 /// serves the whole family so the crate boundary keeps a single plumbing
 /// path.

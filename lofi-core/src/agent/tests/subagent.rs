@@ -906,6 +906,226 @@ async fn token_budget_zero_is_rejected() {
 }
 
 #[tokio::test]
+async fn read_pages_do_not_repeat_events() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("paged")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "page me" })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+    let done = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 30_000 })).await;
+    assert_eq!(done["status"], json!("completed"), "{done}");
+
+    let page1 = hook(SubagentOp::Read, json!({ "id": id, "limit": 2 })).await;
+    let events1 = page1["events"].as_array().unwrap();
+    assert_eq!(events1.len(), 2, "{page1}");
+    let cursor = page1["cursor"].as_u64().unwrap();
+    let page2 = hook(SubagentOp::Read, json!({ "id": id, "cursor": cursor })).await;
+    let events2 = page2["events"].as_array().unwrap();
+    assert!(!events2.is_empty(), "{page2}");
+    let first = events2[0]["seq"].as_u64().unwrap();
+    assert!(first >= cursor, "page 2 repeats page 1: {page2}");
+    assert_eq!(page2["done"], json!(true), "{page2}");
+}
+
+#[tokio::test]
+async fn wait_after_settle_returns_the_stored_outcome() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("late waiter")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    let registry = agent.subagents();
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "quick" })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+    // Poll status until terminal: no waiter is subscribed when the run
+    // settles, so the watch channel must retain the terminal state.
+    for _ in 0..1000 {
+        let status = hook(SubagentOp::Status, json!({ "id": id })).await;
+        if status["status"] != json!("running") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(registry.ids().contains(&id));
+    let done = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 30_000 })).await;
+    assert_eq!(done["status"], json!("completed"), "{done}");
+    assert_eq!(done["result"], json!("late waiter"), "{done}");
+}
+
+#[tokio::test]
+async fn resume_is_rejected_at_the_concurrency_cap() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![text_round("settled")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    // One settled run to resume later.
+    let out = hook(SubagentOp::Run, json!({ "prompt": "first" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    let resume_id = out["id"].as_str().unwrap().to_string();
+
+    // Fill the running set with eight pending runs.
+    agent.provider = Arc::new(NeverProvider);
+    let registry = agent.subagents();
+    let mut running = Vec::new();
+    for _ in 0..8 {
+        let out = hook(SubagentOp::Spawn, json!({ "prompt": "hang" })).await;
+        assert_eq!(out["ok"], json!(true), "{out}");
+        running.push(out["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(registry.ids().len(), 9);
+
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "id": resume_id, "prompt": "again" }),
+    )
+    .await;
+    assert_eq!(out["status"], json!("failed"), "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains("concurrency cap"),
+        "{out}"
+    );
+
+    for id in running {
+        hook(SubagentOp::Kill, json!({ "id": id })).await;
+    }
+}
+
+#[tokio::test]
+async fn foreground_run_publishes_no_terminal_notice() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("quiet")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    let mut notices = agent.subagents().subscribe_notices();
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Run, json!({ "prompt": "quiet" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    assert!(
+        notices.try_recv().is_err(),
+        "foreground run published a notice"
+    );
+}
+
+struct CacheUsageProvider;
+
+#[async_trait]
+impl Provider for CacheUsageProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        Ok(Box::pin(stream::iter([
+            Ok(StreamingEvent::TextDelta("done".to_string())),
+            Ok(StreamingEvent::Done {
+                usage: Usage {
+                    cache_read_tokens: 100,
+                    ..Usage::default()
+                },
+                stop_reason: None,
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn token_budget_counts_cache_tokens() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = Arc::new(CacheUsageProvider);
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(
+        SubagentOp::Run,
+        json!({ "prompt": "cache", "token_budget": 10 }),
+    )
+    .await;
+    assert_eq!(out["status"], json!("failed"), "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .contains("token budget exceeded"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn resume_of_a_background_run_publishes_no_notice() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("first"), text_round("second")], dir.path())
+        .with_subagent_support(support(dir.path()));
+    let mut notices = agent.subagents().subscribe_notices();
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "a" })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+    let done = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 30_000 })).await;
+    assert_eq!(done["status"], json!("completed"), "{done}");
+    // The background run published its terminal notice; drain it.
+    while notices.try_recv().is_ok() {}
+
+    // Resume is always a foreground op: its outcome goes to the caller, so
+    // no second notice may be queued as a parent prompt.
+    let out = hook(SubagentOp::Run, json!({ "id": id, "prompt": "b" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    assert_eq!(out["result"], json!("second"), "{out}");
+    assert!(
+        notices.try_recv().is_err(),
+        "foreground resume published a notice"
+    );
+}
+
+#[tokio::test]
+async fn multibyte_prompt_at_the_event_cap_does_not_panic() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent =
+        agent_with(vec![text_round("ok")], dir.path()).with_subagent_support(support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    // Byte 8192 lands inside the two-byte character.
+    let mut prompt = "x".repeat(8191);
+    prompt.push('\u{00e9}');
+    prompt.push_str(&"y".repeat(64));
+    let out = hook(SubagentOp::Run, json!({ "prompt": prompt })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+}
+
+#[tokio::test]
+async fn read_rejects_non_string_types_items() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let agent =
+        agent_with(vec![text_round("ok")], dir.path()).with_subagent_support(support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Run, json!({ "prompt": "a" })).await;
+    let id = out["id"].as_str().unwrap().to_string();
+    let out = hook(SubagentOp::Read, json!({ "id": id, "types": ["text", 3] })).await;
+    assert_eq!(out["ok"], json!(false), "{out}");
+    assert!(out["error"].as_str().unwrap().contains("types"), "{out}");
+}
+
+#[tokio::test]
 async fn spawn_rejects_resume_and_output_limit_args() {
     let _env = env_lock();
     let _state = StateEnv::new();

@@ -13,10 +13,6 @@ use tokio::process::Command;
 use lofi_error::{Error, Result};
 
 use super::driver::run_job;
-
-/// Maximum concurrently running jobs one subagent may hold. Bounds a
-/// runaway child without capping the session's own jobs.
-const MAX_JOBS_PER_OWNER: usize = 16;
 use super::pty::{key_press_bytes, open_pty, write_to_master, JobScreen, JobScreenLine};
 use super::{
     kill_pgrp, Job, JobHandle, NotifyOpts, State, DEFAULT_NOTIFY_INTERVAL_MS, DEFAULT_TTY_COLS,
@@ -24,6 +20,10 @@ use super::{
     MIN_IDLE_MS, MIN_NOTIFY_INTERVAL_MS,
 };
 use crate::tools::BuiltinTools;
+
+/// Maximum concurrently running jobs one subagent may hold. Bounds a
+/// runaway child without capping the session's own jobs.
+const MAX_JOBS_PER_OWNER: usize = 16;
 
 fn parse_id(args: &Value) -> Result<u64> {
     args.get("id")
