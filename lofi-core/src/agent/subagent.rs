@@ -1639,7 +1639,10 @@ fn prepare(
         evict_for_spawn(&mut entries)?;
         let id = loop {
             let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-            if !entries.contains_key(&id) {
+            // A killed owner's job bar outlives its entry (its old worker
+            // may still finish in-flight work): do not hand the id to a
+            // new run, which would then be unable to spawn jobs.
+            if !entries.contains_key(&id) && !agent.jobs().owner_cancelled(&id) {
                 break id;
             }
         };

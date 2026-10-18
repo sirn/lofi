@@ -706,6 +706,17 @@ async fn driver_survives_the_calling_runtime() {
 }
 
 #[tokio::test]
+async fn cancelled_run_cannot_spawn_jobs() {
+    // The kill landed while the spawn was queued behind a policy prompt.
+    let (_dir, tools) = tools_with_cancel(Arc::new(AtomicBool::new(true)));
+    let err = tools
+        .job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+}
+
+#[tokio::test]
 async fn killed_owner_cannot_spawn_until_uncancelled() {
     let registry = JobRegistry::new();
     let (_dir, tools) = tools_with_cancel(Arc::new(AtomicBool::new(false)));

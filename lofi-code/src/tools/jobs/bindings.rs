@@ -84,6 +84,17 @@ impl BuiltinTools {
             idle_ms = Some(DEFAULT_TTY_IDLE_MS);
         }
 
+        // A kill that landed while a policy prompt or an earlier await
+        // held this call must stop it here, not after the child exists.
+        // The same flag is checked again under the jobs lock below.
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return Err(Error::Tool("jobSpawn: run cancelled".into()));
+        }
+
         if let Some(blocked) = self.check_policy(&cmd).await {
             return Ok(blocked);
         }
@@ -218,7 +229,16 @@ impl BuiltinTools {
                 .job_owner
                 .as_deref()
                 .is_some_and(|owner| self.jobs.owner_cancelled(owner));
-            if barred || self.jobs.inner.generation.load(Ordering::SeqCst) != generation {
+            // A kill can land between the entry check and here (e.g. while
+            // a policy prompt was open): reject before the job registers.
+            let cancelled = self
+                .cancel
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed));
+            if barred
+                || cancelled
+                || self.jobs.inner.generation.load(Ordering::SeqCst) != generation
+            {
                 drop(jobs);
                 if let Some(pid) = pid {
                     kill_pgrp(pid);
@@ -229,6 +249,8 @@ impl BuiltinTools {
                         "job: owning subagent {} was killed",
                         self.job_owner.as_deref().unwrap_or_default()
                     )
+                } else if cancelled {
+                    "jobSpawn: run cancelled".into()
                 } else {
                     "session changed while spawning job".into()
                 }));
