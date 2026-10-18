@@ -255,6 +255,14 @@ impl SubagentRegistry {
         let _ = self.host_handle.set(handle);
     }
 
+    /// Whether both registries share one store (clones of one instance).
+    /// A model switch that rebuilds the agent may keep the registry; the
+    /// TUI must not cancel its live runs or re-subscribe then.
+    #[must_use]
+    pub fn same_instance(&self, other: &SubagentRegistry) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
+    }
+
     /// The runtime to spawn background runs on. Falls back to the current
     /// runtime (tests, print mode before the first turn); never panics
     /// because every caller runs under some runtime.

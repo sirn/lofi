@@ -357,8 +357,8 @@ pub(crate) async fn run_loop(
         .jobs
         .as_ref()
         .map(lofi_core::JobRegistry::subscribe_notices);
-    // The subagent registry instance outlives /new, /resume, and model
-    // rebuilds (its Arcs are shared), so one subscription covers the app.
+    // The startup registry instance backs this receiver; a backend switch
+    // that swaps the instance re-subscribes at the switch site.
     let mut subagent_notice_rx = app
         .subagents
         .as_ref()
@@ -602,7 +602,29 @@ pub(crate) async fn run_loop(
                                     app.no_models_hint = None;
                                     app.system_prompt = new_agent.system_prompt().into();
                                     app.jobs = Some(new_agent.jobs());
-                                    app.subagents = new_agent.subagents();
+                                    let new_subagents = new_agent.subagents();
+                                    // A switch that swaps the registry
+                                    // instance orphans the old one's runs:
+                                    // settle their spend and cancel them,
+                                    // then listen to the new instance. A
+                                    // switch that keeps it must not cancel
+                                    // its live runs.
+                                    let subagents_changed = match (&app.subagents, &new_subagents)
+                                    {
+                                        (Some(old), Some(new)) => !old.same_instance(new),
+                                        (old, new) => old.is_some() != new.is_some(),
+                                    };
+                                    if subagents_changed {
+                                        app.record_subagent_spend();
+                                        app.clear_subagents();
+                                    }
+                                    app.subagents = new_subagents;
+                                    if subagents_changed {
+                                        subagent_notice_rx = app
+                                            .subagents
+                                            .as_ref()
+                                            .map(lofi_core::SubagentRegistry::subscribe_notices);
+                                    }
                                     app.policy_override = Some(new_agent.policy_override());
                                     app.auto_mode_configured = new_agent.has_auto_mode();
                                     app.jobs_receiver_stale = true;
