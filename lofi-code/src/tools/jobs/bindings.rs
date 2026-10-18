@@ -214,13 +214,24 @@ impl BuiltinTools {
                 .jobs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.jobs.inner.generation.load(Ordering::SeqCst) != generation {
+            let barred = self
+                .job_owner
+                .as_deref()
+                .is_some_and(|owner| self.jobs.owner_cancelled(owner));
+            if barred || self.jobs.inner.generation.load(Ordering::SeqCst) != generation {
                 drop(jobs);
                 if let Some(pid) = pid {
                     kill_pgrp(pid);
                 }
                 let _ = child.wait().await;
-                return Err(Error::Tool("session changed while spawning job".into()));
+                return Err(Error::Tool(if barred {
+                    format!(
+                        "job: owning subagent {} was killed",
+                        self.job_owner.as_deref().unwrap_or_default()
+                    )
+                } else {
+                    "session changed while spawning job".into()
+                }));
             }
             let on_release = self.on_job_acquired.as_ref().and_then(|hook| hook(id));
             *handle
@@ -231,8 +242,10 @@ impl BuiltinTools {
         }
 
         // Start the driver only after the acquisition marker is published, so
-        // even an immediately exiting child cannot finish first.
-        tokio::spawn(run_job(
+        // even an immediately exiting child cannot finish first. It must
+        // outlive this exec worker, so prefer the runtime the registry was
+        // built on over this call's.
+        let driver = run_job(
             Arc::downgrade(&self.jobs.inner),
             handle,
             child,
@@ -240,7 +253,12 @@ impl BuiltinTools {
             generation,
             driver_master,
             self.bash_env.clone(),
-        ));
+        );
+        if let Some(runtime) = &self.jobs.inner.driver_runtime {
+            runtime.spawn(driver);
+        } else {
+            tokio::spawn(driver);
+        }
 
         Ok(json!({
             "ok": true,

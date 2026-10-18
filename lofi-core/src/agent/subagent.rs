@@ -318,7 +318,11 @@ impl SubagentRegistry {
     #[must_use]
     pub fn take_unreported(&self) -> Option<(f64, lofi_types::Usage)> {
         let mut u = lock(&self.unreported);
-        (u.0 > 0.0 || u.1.input_tokens > 0 || u.1.output_tokens > 0)
+        (u.0 > 0.0
+            || u.1.input_tokens > 0
+            || u.1.output_tokens > 0
+            || u.1.cache_read_tokens > 0
+            || u.1.cache_write_tokens > 0)
             .then(|| std::mem::take(&mut *u))
     }
 
@@ -509,6 +513,10 @@ impl Drop for SettleOnDrop {
             outcome["usage"] = usage;
         }
         entry.status = status;
+        // Restamp like the normal settle does: an aborted run that keeps
+        // its start stamp becomes the oldest eviction victim, and a caller
+        // reading the kill result right after could lose it.
+        entry.used = self.registry.stamp();
         entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
         entry.outcome = Some(outcome);
         entry
@@ -1776,6 +1784,9 @@ fn prepare_resume(
     // id is rejected instead of racing this run.
     entry.status = Status::Running;
     entry.used = registry.stamp();
+    // A previous kill barred this owner from acquiring jobs; the new run
+    // needs them again.
+    entry.agent.jobs().uncancel_owner(&id);
     // Fresh cancel flag per run: the previous run's flag may still be
     // observed by its lingering sandbox work, and resetting it would
     // uncancel that work.

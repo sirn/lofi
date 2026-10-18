@@ -725,6 +725,32 @@ async fn settled_run_spend_folds_into_session_totals() {
 }
 
 #[tokio::test]
+async fn cache_only_spend_is_still_reported() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    // A cache hit with no billable tokens and no cost still counts: the
+    // predicate must not wait for another run to carry it.
+    let child = vec![
+        StreamingEvent::TextDelta("sub result".to_string()),
+        StreamingEvent::Done {
+            usage: Usage {
+                cache_read_tokens: 500,
+                ..Usage::default()
+            },
+            stop_reason: None,
+        },
+    ];
+    let agent = agent_with(vec![child], dir.path()).with_subagent_support(support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Run, json!({ "prompt": "do it" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    let (_, usage) = agent.subagents().take_unreported().unwrap();
+    assert_eq!(usage.cache_read_tokens, 500);
+}
+
+#[tokio::test]
 async fn parent_turn_records_and_reports_subagent_spend() {
     let _env = env_lock();
     let _state = StateEnv::new();

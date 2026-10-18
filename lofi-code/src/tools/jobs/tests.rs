@@ -669,3 +669,62 @@ async fn tty_job_queues_one_idle_notice() {
     assert!(idle.unwrap().text.contains("Name?"), "notices: {notices:?}");
     tools.job_kill(json!({ "id": id })).await.unwrap();
 }
+
+#[tokio::test]
+async fn driver_survives_the_calling_runtime() {
+    // The registry is built on this test's runtime; the spawn below runs on
+    // a throwaway one, like an exec worker that is torn down at settle.
+    let (_dir, tools) = tools_with_cancel(Arc::new(AtomicBool::new(false)));
+    let id = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let worker = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let out = worker
+                    .block_on(tools.job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 })))
+                    .unwrap();
+                out["id"].as_str().unwrap().to_string()
+            })
+            .join()
+            .unwrap()
+    });
+
+    // The driver lives on the registry's runtime, so the short-lived job
+    // still reaches a terminal state after the spawning runtime is gone.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = tools.job_status(json!({ "id": id })).await.unwrap();
+        if status["state"] != json!("running") {
+            assert_eq!(status["state"], json!("completed"), "{status}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "job stuck: {status}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn killed_owner_cannot_spawn_until_uncancelled() {
+    let registry = JobRegistry::new();
+    let (_dir, tools) = tools_with_cancel(Arc::new(AtomicBool::new(false)));
+    let tools = tools
+        .with_jobs(registry.clone())
+        .with_job_owner(Some("sub-1".to_string()));
+
+    registry.kill_owned("sub-1");
+    let err = tools
+        .job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("killed"), "{err}");
+
+    // The subagent's next run lifts the bar.
+    registry.uncancel_owner("sub-1");
+    let out = tools
+        .job_spawn(json!({ "cmd": "true", "timeoutMs": 60_000 }))
+        .await
+        .unwrap();
+    assert_eq!(out["ok"], json!(true), "{out}");
+}

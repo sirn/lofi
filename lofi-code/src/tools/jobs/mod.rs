@@ -290,6 +290,20 @@ struct Inner {
     /// Drivers publish only into the generation they were spawned in.
     generation: AtomicU64,
     jobs: Mutex<HashMap<u64, Arc<JobHandle>>>,
+    /// Subagent owners killed by `kill_owned` that may not acquire new
+    /// jobs. Without this a job spawn approved interactively just before
+    /// the kill slips past it: the job did not exist at kill time, and no
+    /// later pass would remove it. Cleared when the subagent's next run
+    /// starts. Never hold this lock while taking `jobs`.
+    cancelled_owners: Mutex<std::collections::HashSet<String>>,
+    /// Runtime for job drivers, captured where the registry is built. A
+    /// driver spawned on the per-exec worker runtime dies silently when
+    /// that worker is torn down (subagent settle, idle restart), leaving
+    /// the child process running without timeout enforcement, exit
+    /// watching, or release hooks. `None` only when the registry was
+    /// built outside any runtime; the spawn then uses the caller's
+    /// runtime, matching the old behavior.
+    driver_runtime: Option<tokio::runtime::Handle>,
     /// Live notice subscribers (one per UI host). Zero subscribers means
     /// headless; notices still land in `pending` so a late subscriber or a
     /// `drain_notices` call sees the same sequence.
@@ -328,6 +342,8 @@ impl JobRegistry {
                 next_id: AtomicU64::new(nanos),
                 generation: AtomicU64::new(0),
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+                cancelled_owners: std::sync::Mutex::new(std::collections::HashSet::new()),
+                driver_runtime: tokio::runtime::Handle::try_current().ok(),
                 subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(PendingNotices::new()),
             }),
@@ -497,6 +513,26 @@ impl JobRegistry {
         killed
     }
 
+    /// Lift the acquisition bar `kill_owned` put on `owner`: the
+    /// subagent's next run has started, so its jobs are wanted again.
+    pub fn uncancel_owner(&self, owner: &str) {
+        self.inner
+            .cancelled_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(owner);
+    }
+
+    /// Whether `kill_owned` barred `owner` from acquiring new jobs.
+    #[must_use]
+    pub fn owner_cancelled(&self, owner: &str) -> bool {
+        self.inner
+            .cancelled_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(owner)
+    }
+
     /// Number of running jobs owned by one subagent run.
     #[must_use]
     pub fn running_count_for(&self, owner: &str) -> usize {
@@ -519,6 +555,13 @@ impl JobRegistry {
     /// are disabled first so the parent session is not spammed with one
     /// "cancelled" notice per owned job. Returns the killed ids.
     pub fn kill_owned(&self, owner: &str) -> Vec<u64> {
+        // Bar new acquisitions first: a spawn approved interactively just
+        // before this kill must not register afterwards and escape it.
+        self.inner
+            .cancelled_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(owner.to_string());
         let ids: Vec<u64> = self
             .inner
             .jobs
