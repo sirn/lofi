@@ -756,6 +756,20 @@ pub(crate) async fn run_loop(
                 {
                     dirty = true;
                 }
+                // The only path that starts a mailbox turn: every other
+                // mailbox notice is stored and waits for this one.
+                if app.mailbox_wake.is_some() && agent.is_some() {
+                    if let Some(text) = app.ready_mailbox_turn() {
+                        spawn_prompt(
+                            &mut app,
+                            agent.as_ref(),
+                            &mut current_run,
+                            text,
+                            lofi_types::PromptKind::Notice,
+                        );
+                        dirty = true;
+                    }
+                }
                 if let Some(t) = app.yank_notify {
                     if t.elapsed() >= YANK_NOTIFY {
                         app.yank_notify = None;
@@ -843,26 +857,48 @@ pub(crate) async fn run_loop(
             } => {
                 // Lagging skips ahead; Closed means the registry is
                 // gone, which outlives the app only in tests.
-                if let Ok(notice) = notice {
-                    let queued = QueuedPrompt {
-                        text: notice.text,
-                        kind: lofi_types::PromptKind::Notice,
-                    };
-                    if app.busy() {
-                        app.prompt_queue.push(queued);
-                        if let Some(r) = &current_run {
-                            r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                match notice {
+                    // A mailbox wake never preempts and never joins the prompt
+                    // queue: that turn may be the one that reads the mail, and
+                    // a message from a child must not cut the parent's own
+                    // work short. The at-rest path starts it instead.
+                    Ok(notice) if notice.kind == lofi_core::SubagentNoticeKind::Mailbox => {
+                        if app.has_unclaimed_mailbox_wake() {
+                            app.mailbox_wake = Some(notice.text);
+                            dirty = true;
                         }
-                    } else if agent.is_some() {
-                        spawn_prompt(
-                            &mut app,
-                            agent.as_ref(),
-                            &mut current_run,
-                            queued.text,
-                            queued.kind,
-                        );
                     }
-                    dirty = true;
+                    Ok(notice) => {
+                        let queued = QueuedPrompt {
+                            text: notice.text,
+                            kind: lofi_types::PromptKind::Notice,
+                        };
+                        if app.busy() {
+                            app.prompt_queue.push(queued);
+                            if let Some(r) = &current_run {
+                                r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        } else if agent.is_some() {
+                            spawn_prompt(
+                                &mut app,
+                                agent.as_ref(),
+                                &mut current_run,
+                                queued.text,
+                                queued.kind,
+                            );
+                        }
+                        dirty = true;
+                    }
+                    // A run notice lost to lag is recoverable through
+                    // subagentStatus. An untaken mailbox wake is not: the
+                    // inbox stays nonempty, so no later send raises another.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(text) = app.lost_mailbox_wake() {
+                            app.mailbox_wake = Some(text);
+                            dirty = true;
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
             picker_load = picker_load_rx.recv() => {

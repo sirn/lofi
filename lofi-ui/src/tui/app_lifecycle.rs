@@ -57,6 +57,7 @@ impl App {
             total_in: 0,
             total_out: 0,
             prompt_queue: Vec::new(),
+            mailbox_wake: None,
             startup_notices: Vec::new(),
             run: None,
             run_start: None,
@@ -455,6 +456,41 @@ impl App {
 
     pub(super) fn busy(&self) -> bool {
         self.run_active() || self.lifecycle_busy
+    }
+
+    /// The mailbox turn, when the host is at rest and the inbox still holds
+    /// mail. A queued prompt goes first, and a wake never cuts a run short.
+    pub(super) fn ready_mailbox_turn(&mut self) -> Option<String> {
+        if self.busy() || !self.prompt_queue.is_empty() {
+            return None;
+        }
+        self.take_mailbox_wake()
+    }
+
+    /// Take the stored wake, and only when it is still unclaimed and the
+    /// inbox still holds mail: the turn that just ended may have read it.
+    fn take_mailbox_wake(&mut self) -> Option<String> {
+        let text = self.mailbox_wake.take()?;
+        let registry = self.subagents.as_ref()?;
+        registry.claim_mailbox_wake().then_some(text)
+    }
+
+    /// Whether a mailbox notice should be stored at all. A notice that was
+    /// buffered across a session switch names a sender the new inbox does
+    /// not hold.
+    pub(super) fn has_unclaimed_mailbox_wake(&self) -> bool {
+        self.subagents
+            .as_ref()
+            .is_some_and(lofi_core::SubagentRegistry::mailbox_wake_unclaimed)
+    }
+
+    /// The wake a broadcast lag may have dropped. Only an untaken wake is
+    /// rebuilt: one the host already spent may name mail a cancelled turn
+    /// left unread.
+    pub(super) fn lost_mailbox_wake(&self) -> Option<String> {
+        self.subagents
+            .as_ref()
+            .and_then(lofi_core::SubagentRegistry::lost_mailbox_wake)
     }
 
     pub(super) fn spinner_frame(&self) -> usize {

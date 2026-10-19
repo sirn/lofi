@@ -453,10 +453,91 @@ nothing. This toggles the notice or adds periodic progress notices.
 - `id` (string, required) — the run id.
 - `interval_ms` (number, optional) — periodic notice interval, minimum
   5_000.
-- `enabled` (boolean, optional) — set `false` to silence all notices for
-  this run.
+- `enabled` (boolean, optional) — set `false` to silence the terminal
+  and progress notices for this run. A message the run sends to `parent`
+  still wakes the session when the parent inbox was empty, because asking
+  for an answer is the point of the message.
 
 **Returns:** `{ ok, id }`.
+
+## lofi.subagentMailboxSend({ to, body, reply_to?, key? })
+
+Send one message to the parent or to a run. A subagent may address only
+`parent`; the session addresses a live run id. The sender is taken from
+the caller's capability, never from the arguments, so a subagent cannot
+address a sibling.
+
+**Parameters:**
+- `to` (string, required) — `parent` from a subagent, or a live run id
+  from the session.
+- `body` (string, required) — the message, at most 8 KiB.
+- `reply_to` (number, optional) — the `seq` of the message being answered.
+- `key` (string, optional) — idempotency key. A retry with the same key
+  returns the original `seq` with `duplicate: true`. The same key with
+  different content is a conflict.
+
+**Returns:** `{ ok, seq, to }`, or `{ ok: false, status, error }` with
+`status` one of `failed`, `forbidden`, `sender_ended`,
+`unknown_recipient`, `recipient_ended`, `full`, `conflict`,
+`too_large`, `persist_failed`. `sender_ended` means the caller's own run
+has ended, so it may no longer write. A repeat of `key` returns the first
+`seq` with `duplicate: true`, even when the recipient has ended since.
+
+A message to `parent` wakes the session: it stores one notice prompt
+naming the oldest sender, and the session reads the mail with
+`lofi.subagentMailboxReceive`. The wake fires when the parent inbox goes
+from empty to non-empty, so ten messages from three children cost one
+wake. Only a `receive` that empties the parent inbox arms the next wake:
+`lofi.subagentMailboxList`, a partial `receive`, and a turn the user
+cancels all leave the inbox nonempty, and then no new message wakes the
+session until the inbox is drained. The notice carries no body. A wake
+never interrupts a running turn: the session finishes its work first, then
+starts the turn unless the inbox is already empty. A session that stays in
+`lofi.subagentMailboxReceive` needs no wake, because the wait takes the
+message directly. Mail that a restart replays into the parent inbox wakes
+once, after the session's next turn, unless that turn reads the inbox.
+
+The wake reaches a host that subscribes to notices, which the TUI does.
+Print mode does not subscribe, so it reads the inbox when it next runs.
+
+## lofi.subagentMailboxReceive({ limit?, wait_ms? })
+
+Take pending messages from the caller's inbox, oldest first. Messages are
+numbered by one counter for the whole mailbox, so the parent sees a single
+order across all children.
+
+**Parameters:**
+- `limit` (number, optional) — maximum messages, default 20, maximum 100.
+- `wait_ms` (number, optional) — wait for the first message. Default 0
+  returns at once; the maximum is 60_000. A wait never reads past the
+  exec timeout and never blocks the sending side.
+
+**Returns:** `{ ok, messages }` where each message is
+`{ seq, from, to, reply_to, body }`; `{ ok, messages: [], empty: true }`
+when nothing is pending, with `timed_out: true` when the wait expired;
+`{ ok, messages: [], closed: true }` when the caller's run has ended or
+the session that owned it has been replaced.
+
+A message that arrives for a run which then ends is never delivered to
+that run. It stays visible to the parent, and a later resume of the same
+id delivers it to the new run. The read is recorded when the caller takes
+the messages: a crash before the hand-off delivers them again on the
+resume, while a run that ends after it does not get them back.
+
+## lofi.subagentMailboxList({ agent_id? })
+
+List pending messages. A subagent sees only its own inbox. The session
+sees its own inbox and, with `agent_id`, one run's inbox; without
+`agent_id` it also gets a per-address count.
+
+**Parameters:**
+- `agent_id` (string, optional) — run id to inspect. A subagent may pass
+  only its own id.
+
+**Returns:** `{ ok, agent_id, messages }`, or for the session without
+`agent_id`, `{ ok, messages, inboxes: [{ agent_id, pending }] }`. A
+message a run never read carries `undelivered: <reason>`, where the
+reason is the run's final status.
 
 ## lofi.models()
 

@@ -200,6 +200,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
         job_owner: None,
+        mailbox: None,
         truncate: lofi_code::TruncatedCap::default(),
         image: lofi_types::ImageConfig::default(),
         auto_continue: lofi_types::AutoContinuePolicy::default(),

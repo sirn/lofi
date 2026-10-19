@@ -1506,6 +1506,74 @@ async fn rehydrate_without_settle_marker_is_cancelled() {
 }
 
 #[tokio::test]
+async fn a_restored_run_keeps_its_mailbox_and_no_run_management() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid004")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    // The restored entry is a child, not a second manager: its hook answers
+    // mailbox ops and reports run management as unavailable.
+    let restored = agent.subagents().agent_of("runid004").unwrap();
+    let hook = restored.subagent_hook().unwrap();
+    let managed = hook(SubagentOp::List, json!({})).await;
+    assert_eq!(managed["status"], json!("unavailable"), "{managed}");
+    let mailbox = hook(SubagentOp::MailboxList, json!({})).await;
+    assert_eq!(mailbox["agent_id"], json!("runid004"), "{mailbox}");
+    // A restored run is terminal until a resume claims it: the address takes
+    // no new messages.
+    let parent = agent.subagent_hook().unwrap();
+    let sent = parent(
+        SubagentOp::MailboxSend,
+        json!({ "to": "runid004", "body": "late" }),
+    )
+    .await;
+    assert_eq!(sent["status"], json!("recipient_ended"), "{sent}");
+}
+
+#[tokio::test]
+async fn a_failed_resume_closes_the_inbox_again() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid005")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+    let path = cursor.path().to_path_buf();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    // The claim reopens the address; the load then fails, so the claim must
+    // close it again instead of leaving a run that no one will start.
+    std::fs::remove_file(&path).unwrap();
+    let resumed = hook(
+        SubagentOp::Run,
+        json!({ "id": "runid005", "prompt": "continue" }),
+    )
+    .await;
+    assert_eq!(resumed["ok"], json!(false), "{resumed}");
+
+    let sent = hook(
+        SubagentOp::MailboxSend,
+        json!({ "to": "runid005", "body": "late" }),
+    )
+    .await;
+    assert_eq!(sent["status"], json!("recipient_ended"), "{sent}");
+}
+
+#[tokio::test]
 async fn rehydrate_legacy_transcript_falls_back_to_file_stem() {
     let _env = env_lock();
     let _state = StateEnv::new();
@@ -1699,4 +1767,237 @@ async fn running_lists_background_runs_only() {
     hook(SubagentOp::Kill, json!({ "id": background_id })).await;
     hook(SubagentOp::Kill, json!({ "id": foreground_id })).await;
     foreground.abort();
+}
+
+// The child sends to the parent inside its own run; the parent then reads its
+// inbox in the same exec, so the round trip crosses both sandboxes.
+// Answers by prompt content, never by a call counter: the round order then
+// cannot make the test flaky. Prompt "a" pends so a spawn stays live, prompt
+// "b" reads the mailbox, and a tool result is answered with text.
+struct MailboxResumeProvider {
+    read_round: Vec<StreamingEvent>,
+    text_round: Vec<StreamingEvent>,
+}
+
+#[async_trait]
+impl Provider for MailboxResumeProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        messages: &[Message],
+        _tools: &[ToolSchema],
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
+        let last = messages.last();
+        let round = match last {
+            Some(m) if m.role == Role::Tool => self.text_round.clone(),
+            Some(m) if m.role == Role::User && first_text(m) == "a" => std::future::pending().await,
+            _ => self.read_round.clone(),
+        };
+        Ok(Box::pin(stream::iter(round.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_run_takes_back_what_the_killed_run_never_read() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(MailboxResumeProvider {
+        read_round: exec_round(
+            "const got = await lofi.subagentMailboxReceive({}); return got.messages.length;",
+        ),
+        text_round: text_round("resumed done"),
+    });
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider.clone();
+    let hook = agent.subagent_hook().unwrap();
+
+    let started = hook(SubagentOp::Spawn, json!({ "prompt": "a" })).await;
+    let id = started["id"].as_str().unwrap().to_string();
+    // The spawned run is live, so its inbox is open and the send is accepted.
+    let sent = hook(
+        SubagentOp::MailboxSend,
+        json!({ "to": id, "body": "instruction" }),
+    )
+    .await;
+    assert_eq!(sent["ok"], json!(true), "{sent}");
+    hook(SubagentOp::Kill, json!({ "id": id })).await;
+
+    // The kill is observed by the run; wait for it to settle.
+    let ended = hook(SubagentOp::Wait, json!({ "id": id, "timeout_ms": 10_000 })).await;
+    let status = ended["status"].as_str().unwrap().to_string();
+    assert_ne!(status, "running", "{ended}");
+
+    // The ended run never read it, so the parent sees it as undelivered.
+    let listed = hook(SubagentOp::MailboxList, json!({ "agent_id": id })).await;
+    assert_eq!(
+        listed["messages"][0]["undelivered"],
+        json!(status),
+        "{listed}"
+    );
+
+    // The resume claim reopens the inbox, and the new run reads the message.
+    let resumed = hook(SubagentOp::Run, json!({ "id": id, "prompt": "b" })).await;
+    assert_eq!(resumed["status"], json!("completed"), "{resumed}");
+
+    let after = hook(SubagentOp::MailboxList, json!({ "agent_id": id })).await;
+    assert!(
+        after["messages"].as_array().unwrap().is_empty(),
+        "the resumed run read the message: {after}"
+    );
+}
+
+#[tokio::test]
+async fn a_message_to_the_parent_inbox_wakes_the_host() {
+    let registry = SubagentRegistry::default();
+    let mut notices = registry.subscribe_notices();
+    registry.mailbox.open("child-a");
+    let sent = registry.mailbox.send(
+        "child-a",
+        false,
+        &json!({ "to": "parent", "body": "secret" }),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    let notice = notices.try_recv().unwrap();
+    assert_eq!(notice.kind, SubagentNoticeKind::Mailbox);
+    assert_eq!(notice.id, "child-a");
+    assert!(
+        notice.text.contains("lofi.subagentMailboxReceive"),
+        "{}",
+        notice.text
+    );
+    // The body stays in the inbox: the notice becomes a prompt, and a child's
+    // words must reach the parent as tool output, never as an instruction.
+    assert!(!notice.text.contains("secret"), "{}", notice.text);
+    assert!(registry.mailbox.parent_inbox_pending());
+    // One wake per non-empty inbox, however many messages arrive.
+    registry.mailbox.send(
+        "child-a",
+        false,
+        &json!({ "to": "parent", "body": "again" }),
+    );
+    assert!(notices.try_recv().is_err());
+    // Draining the inbox arms the next wake.
+    let read = registry.mailbox.receive("parent", &json!({})).await;
+    assert_eq!(read["messages"].as_array().map(Vec::len), Some(2), "{read}");
+    assert!(!registry.mailbox.parent_inbox_pending());
+    registry.mailbox.send(
+        "child-a",
+        false,
+        &json!({ "to": "parent", "body": "third" }),
+    );
+    assert_eq!(
+        notices.try_recv().unwrap().kind,
+        SubagentNoticeKind::Mailbox
+    );
+    // A notice lost to lag is rebuilt from the inbox while the wake is
+    // untaken, and never after the host claims it: the turn that took the
+    // wake may have been cancelled with the mail unread.
+    assert!(registry.lost_mailbox_wake().is_some());
+    assert!(registry.claim_mailbox_wake());
+    assert!(registry.lost_mailbox_wake().is_none());
+    // A session switch drops the inbox the stored wake points at, and the
+    // wake with it, even while it is unclaimed.
+    let read = registry.mailbox.receive("parent", &json!({})).await;
+    assert_eq!(read["messages"].as_array().map(Vec::len), Some(1), "{read}");
+    assert_eq!(
+        registry.mailbox.send(
+            "child-a",
+            false,
+            &json!({ "to": "parent", "body": "fourth" }),
+        )["ok"],
+        true
+    );
+    assert!(registry.mailbox_wake_unclaimed());
+    let _ = registry.clear();
+    assert!(!registry.mailbox_wake_unclaimed());
+    assert!(registry.lost_mailbox_wake().is_none());
+}
+
+#[tokio::test]
+async fn a_child_reaches_the_parent_mailbox_from_its_own_sandbox() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let parent_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "p1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputComplete {
+            id: "p1".into(),
+            input: json!({ "code": "const run = await lofi.subagent({ prompt: 'x' }); const got = await lofi.subagentMailboxReceive({ wait_ms: 500 }); return { status: run.status, messages: got.messages };" }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd { id: "p1".into() },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+    let child_round = vec![
+        StreamingEvent::ToolUseStart {
+            id: "c1".into(),
+            name: "exec".into(),
+        },
+        StreamingEvent::ToolUseInputComplete {
+            id: "c1".into(),
+            input: json!({ "code": "const r = await lofi.subagentMailboxSend({ to: 'parent', body: 'from child' }); return r.ok;" }).to_string(),
+        },
+        StreamingEvent::ToolUseEnd { id: "c1".into() },
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::ToolUse),
+        },
+    ];
+
+    let child_final = vec![
+        StreamingEvent::TextDelta("child done".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    let parent_final = vec![
+        StreamingEvent::TextDelta("done".into()),
+        StreamingEvent::Done {
+            usage: Usage::default(),
+            stop_reason: Some(lofi_types::StopReason::EndTurn),
+        },
+    ];
+    // Rounds are drawn in consumption order: the parent's tool round, the
+    // child's tool round and closing text, then the parent's closing text.
+    let agent = agent_with(
+        vec![parent_round, child_round, child_final, parent_final],
+        dir.path(),
+    )
+    .with_subagent_support(support(dir.path()));
+    let mut notices = agent.subagents().subscribe_notices();
+    let mut messages = vec![user_msg("go")];
+    // The first round asks for the exec; the second ends the turn.
+    assert!(!agent.run_once(&mut messages).await.unwrap());
+    assert!(agent.run_once(&mut messages).await.unwrap());
+
+    // The send from the child's own sandbox wakes the host through the
+    // scope it shares with the registry.
+    let notice = notices.try_recv().unwrap();
+    assert_eq!(notice.kind, SubagentNoticeKind::Mailbox);
+    assert!(
+        notice.text.contains("lofi.subagentMailboxReceive"),
+        "{}",
+        notice.text
+    );
+
+    let result = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .flat_map(|message| message.blocks.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } if content.contains("from child") => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the parent read the child's message: {messages:#?}"));
+    // The reply carries the child's id and its completed status.
+    assert!(result.contains("\"status\":\"completed\""), "{result}");
 }

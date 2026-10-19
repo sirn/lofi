@@ -17,8 +17,8 @@ pub mod state;
 
 pub use agent::{
     build_agent, exec_input_code_and_label, exec_result_display, rebuild_agent, select_model,
-    Agent, AgentEvent, ConfirmRequest, RunControls, SubagentNotice, SubagentOp, SubagentRegistry,
-    SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
+    Agent, AgentEvent, ConfirmRequest, RunControls, SubagentNotice, SubagentNoticeKind, SubagentOp,
+    SubagentRegistry, SubagentRunning, SubagentSupport, TurnInput, TurnRequest,
 };
 pub use compact::{compact, compacted_history, CompactOptions, Compaction, HANDOFF_PREAMBLE};
 pub use lifecycle::{AgentLifecycle, HardCompactOutcome, LineageJobReconciliation};

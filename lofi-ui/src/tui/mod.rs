@@ -328,6 +328,9 @@ pub(crate) struct App {
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
+    /// Text of a mailbox wake whose turn did not start yet. A wake must not
+    /// cut a running turn, so it waits for the app to reach rest.
+    mailbox_wake: Option<String>,
     /// Stale-job notices computed at session startup, folded into the
     /// history of the first agent run after resume. Consumed on first use.
     startup_notices: Vec<String>,

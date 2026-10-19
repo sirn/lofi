@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
+use super::mailbox::{Mailbox, MailboxScope, PARENT_ADDRESS};
 use super::{lock, select_model, Agent, AgentEvent, RunControls, TurnRequest};
 use crate::models::ModelRegistry;
 use crate::session::store::{SessionCursor, SessionFile, SessionStore};
@@ -231,6 +232,18 @@ impl EventLog {
 pub struct SubagentNotice {
     pub id: String,
     pub text: String,
+    pub kind: SubagentNoticeKind,
+}
+
+/// Why a notice fired. The host reacts in kind: a settled run gets a turn
+/// that reports it, while a mailbox wake must not end a turn that is
+/// already running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentNoticeKind {
+    /// A run reached a terminal state, or is still running.
+    Run,
+    /// A message landed in the parent inbox.
+    Mailbox,
 }
 
 /// Per-session store of spawned subagents, shared across model switches.
@@ -261,6 +274,9 @@ pub struct SubagentRegistry {
     /// Parent session id whose transcripts were already rehydrated into
     /// entries. Restart restore runs once per parent; `clear()` resets it.
     rehydrated_for: Arc<Mutex<Option<String>>>,
+    /// Parent/child messaging. Shared by every child exec, which reaches it
+    /// through a scoped capability rather than this registry.
+    pub(crate) mailbox: Mailbox,
 }
 
 impl Default for SubagentRegistry {
@@ -269,6 +285,13 @@ impl Default for SubagentRegistry {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let _ = host_handle.set(handle);
         }
+        let notices = Arc::new(NoticeHub::default());
+        // A child holds only a mailbox scope, so it cannot publish a notice
+        // itself: the mailbox wakes the host through this hub.
+        let mailbox = Mailbox::default().with_sink({
+            let notices = notices.clone();
+            Arc::new(move |sender: &str| notices.publish_mailbox(sender))
+        });
         Self {
             entries: Arc::default(),
             next_used: Arc::default(),
@@ -277,8 +300,9 @@ impl Default for SubagentRegistry {
             generation: Arc::default(),
             next_born: Arc::default(),
             host_handle,
-            notices: Arc::new(NoticeHub::default()),
+            notices,
             rehydrated_for: Arc::default(),
+            mailbox,
         }
     }
 }
@@ -296,6 +320,26 @@ impl Default for NoticeHub {
     }
 }
 
+/// Pointer text for a mailbox wake. One wake covers every sender, so the
+/// text names the oldest one without claiming it is the only one. It carries
+/// no body: it becomes a prompt, and a child's words must reach the parent as
+/// tool output the parent asked for, never as an instruction.
+fn mailbox_notice_text(sender: &str) -> String {
+    format!(
+        "subagent {sender} sent a message; drain the parent inbox with lofi.subagentMailboxReceive"
+    )
+}
+
+impl NoticeHub {
+    fn publish_mailbox(&self, sender: &str) {
+        let _ = self.tx.send(SubagentNotice {
+            id: sender.to_string(),
+            text: mailbox_notice_text(sender),
+            kind: SubagentNoticeKind::Mailbox,
+        });
+    }
+}
+
 impl SubagentRegistry {
     /// Notice stream for the host UI. Re-subscribe after a session rebuild;
     /// a lagging receiver skips to the newest notices.
@@ -304,10 +348,38 @@ impl SubagentRegistry {
         self.notices.tx.subscribe()
     }
 
+    /// Whether a wake for the parent inbox is still untaken. A notice that
+    /// arrives after the wake was spent must not wake the host again.
+    #[must_use]
+    pub fn mailbox_wake_unclaimed(&self) -> bool {
+        self.mailbox.parent_wake_unclaimed()
+    }
+
+    /// Take the parent wake for a turn the host is about to start. False for
+    /// a spent wake, and for mail a running turn drained itself.
+    #[must_use]
+    pub fn claim_mailbox_wake(&self) -> bool {
+        self.mailbox.claim_parent_wake()
+    }
+
+    /// The wake a broadcast lag may have dropped: one the host never took,
+    /// for mail that is still queued. A taken wake is not rebuilt, because
+    /// the turn it started may have been cancelled with the mail unread.
+    #[must_use]
+    pub fn lost_mailbox_wake(&self) -> Option<String> {
+        if !self.mailbox.parent_wake_unclaimed() {
+            return None;
+        }
+        self.mailbox
+            .parent_inbox_front()
+            .map(|sender| mailbox_notice_text(&sender))
+    }
+
     fn publish_notice(&self, id: &str, text: String) {
         let _ = self.notices.tx.send(SubagentNotice {
             id: id.to_string(),
             text,
+            kind: SubagentNoticeKind::Run,
         });
     }
 
@@ -379,8 +451,13 @@ impl SubagentRegistry {
             return;
         }
         let generation = self.generation();
-        let files = SessionStore::open()
-            .and_then(|store| store.list_subagent_files_for_cwd(&support.cwd, &parent));
+        let files = SessionStore::open().and_then(|store| {
+            // Attach before restoring entries: a resumed session must replay
+            // its own journal before the first spawn, or sends taken before
+            // that point reuse sequence numbers the journal already holds.
+            attach_mailbox_journal(self, &store);
+            store.list_subagent_files_for_cwd(&support.cwd, &parent)
+        });
         let files = match files {
             Ok(files) => files,
             Err(e) => {
@@ -407,7 +484,15 @@ impl SubagentRegistry {
             }
             // A spawn or a duplicate file with the same id wins over the
             // restored entry.
-            entries.entry(id).or_insert(entry);
+            let std::collections::hash_map::Entry::Vacant(slot) = entries.entry(id) else {
+                continue;
+            };
+            // Every restored run is terminal: its address rejects sends, and a
+            // message left pending by the replay stays visible as undelivered.
+            // The resume claim reopens it. The close stays here, so it never
+            // touches an address a live entry already owns.
+            self.mailbox.close(slot.key(), entry.status.as_str());
+            slot.insert(entry);
         }
         drop(entries);
         *lock(&self.rehydrated_for) = Some(parent);
@@ -449,6 +534,7 @@ impl SubagentRegistry {
             }
             entries.clear();
         }
+        self.mailbox.close_children("session cleared");
         let mut unreported = lock(&self.unreported);
         let usage = std::mem::take(&mut *unreported);
         *lock(&self.rehydrated_for) = None;
@@ -534,6 +620,11 @@ impl SubagentRegistry {
     #[cfg(test)]
     pub(crate) fn ids(&self) -> Vec<String> {
         lock(&self.entries).keys().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_of(&self, id: &str) -> Option<Agent> {
+        lock(&self.entries).get(id).map(|e| e.agent.clone())
     }
 
     #[cfg(test)]
@@ -730,6 +821,10 @@ impl Drop for SettleOnDrop {
         // send, not send_replace, would drop the value when no waiter is
         // subscribed: a wait started after the settle would hang.
         entry.state_tx.send_replace(status);
+        // The close belongs to this critical section: a waiter that sees the
+        // terminal status may claim a resume at once, and a close issued
+        // after the lock was released would shut the fresh run's address.
+        self.registry.mailbox.close(&self.id, status.as_str());
         let notify = entry.notify_terminal;
         drop(entries);
         if notify && self.registry.generation() == self.generation {
@@ -746,7 +841,12 @@ impl Agent {
     /// agent has no subagent support (nested subagent agents).
     #[must_use]
     pub fn subagent_hook(&self) -> Option<SubagentFn> {
-        let support = self.subagent_support.clone()?;
+        let Some(support) = self.subagent_support.clone() else {
+            // A child cannot manage runs, but it keeps the mailbox: the hook
+            // answers the three mailbox ops and reports every other op as
+            // unavailable.
+            return self.mailbox.clone().map(mailbox_hook);
+        };
         let mut template = self.clone();
         template.subagent_support = None;
         // Fresh registry per child: entries store child agents, so sharing
@@ -779,6 +879,36 @@ impl Agent {
         }
         self
     }
+}
+
+/// Point the mailbox at this store's journal for the parent session, so a
+/// resumed session replays only its own conversation.
+fn attach_mailbox_journal(registry: &SubagentRegistry, store: &SessionStore) {
+    let name = registry
+        .parent_session()
+        .unwrap_or_else(|| PARENT_ADDRESS.to_string());
+    registry
+        .mailbox
+        .attach_journal(&store.root().join(format!("mailbox-{name}.jsonl")));
+}
+
+/// Hook for a child agent: mailbox only, scoped to the child's own address.
+fn mailbox_hook(scope: MailboxScope) -> SubagentFn {
+    Arc::new(move |op: SubagentOp, args: Value| {
+        let scope = scope.clone();
+        Box::pin(async move {
+            match op {
+                SubagentOp::MailboxSend => scope.mailbox.send(&scope.me, false, &args),
+                SubagentOp::MailboxReceive => scope.mailbox.receive(&scope.me, &args).await,
+                SubagentOp::MailboxList => scope.mailbox.list(&scope.me, false, &args),
+                _ => json!({
+                    "ok": false,
+                    "status": "unavailable",
+                    "error": "subagent is not available in this context",
+                }),
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
+    })
 }
 
 /// Absent, null and empty string all mean "not given"; any other non-string
@@ -822,6 +952,11 @@ async fn dispatch(
         SubagentOp::Read => read_op(&registry, &args),
         SubagentOp::Kill => kill_op(&registry, &args),
         SubagentOp::Notify => notify_op(&registry, &args),
+        // The parent addresses runs by id; a child reaches the same store
+        // through the scoped hook built below.
+        SubagentOp::MailboxSend => registry.mailbox.send(PARENT_ADDRESS, true, &args),
+        SubagentOp::MailboxReceive => registry.mailbox.receive(PARENT_ADDRESS, &args).await,
+        SubagentOp::MailboxList => registry.mailbox.list(PARENT_ADDRESS, true, &args),
     }
 }
 
@@ -1407,6 +1542,11 @@ async fn run_task(
     // the running entry or the fully settled one, never half of either.
     let notify = {
         let mut entries = lock(&registry.entries);
+        // Close inside this critical section: a send racing the settle sees
+        // either a live recipient or a rejected one, a child blocked in
+        // receive wakes with the closed result, and a resume claimed the
+        // moment the terminal status is visible finds the inbox already shut.
+        registry.mailbox.close(&id, status.as_str());
         match entries.get_mut(&id) {
             Some(entry) => {
                 entry.status = status;
@@ -2008,6 +2148,11 @@ fn prepare(
         // Tag the child's jobs with the run id so a kill or a session
         // switch cancels exactly its process tree.
         agent.job_owner = Some(id.clone());
+        agent.mailbox = Some(MailboxScope {
+            mailbox: registry.mailbox.clone(),
+            me: id.clone(),
+        });
+        registry.mailbox.open(&id);
         let (state_tx, _) = watch::channel(Status::Running);
         entries.insert(
             id.clone(),
@@ -2042,6 +2187,7 @@ fn prepare(
     };
     let cursor = if support.persist_sessions {
         let created = SessionStore::open().and_then(|store| {
+            attach_mailbox_journal(registry, &store);
             let cursor = store.create_subagent_cursor(
                 &support.cwd,
                 &agent.run_model(),
@@ -2146,8 +2292,16 @@ fn restore_entry(
         }
     };
     agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+    // The template is the session agent: a restored child must not inherit
+    // its run-management hook, or the resume would manage runs through a
+    // private registry instead of messaging its parent.
+    agent.subagent_support = None;
     agent.subagents = SubagentRegistry::default();
     agent.job_owner = Some(id.clone());
+    agent.mailbox = Some(MailboxScope {
+        mailbox: registry.mailbox.clone(),
+        me: id.clone(),
+    });
     let (state_tx, _) = watch::channel(status);
     let entry = Entry {
         status,
@@ -2283,6 +2437,9 @@ fn prepare_resume(
             task.abort();
         }
         entry.state_tx.send_replace(Status::Running);
+        // The previous run closed this inbox at settle; a resume continues the
+        // same conversation and must receive what that run never read.
+        registry.mailbox.open(&id);
         let transcript_backed = entry.cursor.is_some() || entry.transcript_path.is_some();
         // The run owns the history while it runs: a transcript-backed entry
         // gets it back at settle or reloads it from the transcript after an
@@ -2344,6 +2501,9 @@ fn unclaim(registry: &SubagentRegistry, id: &str, error: &Error) {
         "error": format!("subagent transcript could not be loaded: {error}"),
     }));
     entry.state_tx.send_replace(Status::Failed);
+    // The claim reopened the address before the load; a failed claim must
+    // close it again, or a send would be accepted for a run that never starts.
+    registry.mailbox.close(id, Status::Failed.as_str());
 }
 
 /// Replay a transcript into the resume history: a bounded projection of the
@@ -2532,4 +2692,39 @@ fn last_text(messages: &[Message], limit: usize) -> Option<(String, Option<usize
         text.truncate(end);
     }
     Some((text, full))
+}
+
+#[cfg(test)]
+mod mailbox_capability {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_child_hook_answers_mailbox_ops_but_not_management() {
+        let mailbox = Mailbox::default();
+        mailbox.open("child");
+        let hook = mailbox_hook(MailboxScope {
+            mailbox: mailbox.clone(),
+            me: "child".to_string(),
+        });
+
+        let run = hook(SubagentOp::Run, json!({ "prompt": "x" })).await;
+        assert_eq!(run["status"], "unavailable", "{run}");
+
+        let sent = hook(
+            SubagentOp::MailboxSend,
+            json!({ "to": PARENT_ADDRESS, "body": "hi" }),
+        )
+        .await;
+        assert_eq!(sent["ok"], true, "{sent}");
+
+        let sibling = hook(
+            SubagentOp::MailboxSend,
+            json!({ "to": "other", "body": "hi" }),
+        )
+        .await;
+        assert_eq!(sibling["status"], "forbidden", "{sibling}");
+
+        let received = mailbox.receive(PARENT_ADDRESS, &json!({})).await;
+        assert_eq!(received["messages"][0]["body"], "hi", "{received}");
+    }
 }

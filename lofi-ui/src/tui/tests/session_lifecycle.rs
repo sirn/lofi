@@ -856,6 +856,59 @@ async fn switcher_rebuild_propagates_subagent_persistence() {
     );
 }
 
+#[test]
+fn a_stored_mailbox_wake_is_dropped_when_no_wake_is_unclaimed() {
+    let mut a = app();
+    // No registry, so no inbox: nothing would read the mail this wake names.
+    a.mailbox_wake = Some("pointer".to_string());
+    assert!(a.ready_mailbox_turn().is_none());
+    assert!(a.mailbox_wake.is_none(), "a dropped wake must not linger");
+
+    a.mailbox_wake = Some("pointer".to_string());
+    a.subagents = Some(lofi_core::SubagentRegistry::default());
+    assert!(a.ready_mailbox_turn().is_none());
+    assert!(a.mailbox_wake.is_none());
+}
+
+#[test]
+fn a_busy_turn_keeps_the_mailbox_wake_for_later() {
+    let mut a = app();
+    a.mailbox_wake = Some("pointer".to_string());
+    a.run = Some(0);
+    assert!(a.ready_mailbox_turn().is_none());
+    assert!(
+        a.mailbox_wake.is_some(),
+        "a running turn must not spend the wake"
+    );
+
+    // A queued prompt goes first.
+    a.run = None;
+    a.prompt_queue.push(crate::tui::QueuedPrompt {
+        text: "typed".to_string(),
+        kind: lofi_types::PromptKind::User,
+    });
+    assert!(a.ready_mailbox_turn().is_none());
+    assert!(a.mailbox_wake.is_some());
+}
+
+#[test]
+fn a_registry_without_mail_has_no_unclaimed_mailbox_wake() {
+    let mut a = app();
+    a.subagents = Some(lofi_core::SubagentRegistry::default());
+    assert!(!a.has_unclaimed_mailbox_wake());
+}
+
+#[test]
+fn a_session_switch_drops_a_stored_mailbox_wake() {
+    let mut a = app();
+    a.mailbox_wake = Some("pointer".to_string());
+    a.clear_subagents();
+    assert!(
+        a.mailbox_wake.is_none(),
+        "a wake must not survive into the next session"
+    );
+}
+
 // The lock guards the process-global LOFI_STATE_HOME, not shared runtime
 // state, so holding it across awaits is the point.
 #[allow(clippy::await_holding_lock)]

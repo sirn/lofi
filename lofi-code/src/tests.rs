@@ -800,6 +800,59 @@ async fn exec_subagent_passes_args_and_returns_result() {
 }
 
 #[tokio::test]
+async fn exec_mailbox_without_hook_names_the_mailbox() {
+    let dir = tempdir().unwrap();
+    let res = exec(
+        "return await lofi.subagentMailboxSend({ to: 'parent', body: 'hi' });",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["ok"], json!(false), "{res:?}");
+    assert_eq!(res.value["status"], json!("unavailable"), "{res:?}");
+    assert!(
+        res.value["error"]
+            .as_str()
+            .unwrap()
+            .contains("subagent mailbox is not available"),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_mailbox_ops_reach_the_hook() {
+    let dir = tempdir().unwrap();
+    let mut c = ctx(dir.path());
+    c.subagent = Some(Arc::new(|op, args| {
+        Box::pin(async move {
+            let name = match op {
+                SubagentOp::MailboxSend => "send",
+                SubagentOp::MailboxReceive => "receive",
+                SubagentOp::MailboxList => "list",
+                _ => "other",
+            };
+            json!({ "ok": true, "op": name, "to": args.get("to") })
+        })
+    }));
+    let res = exec(
+        "const sent = await lofi.subagentMailboxSend({ to: 'parent', body: 'hi' });\
+         const got = await lofi.subagentMailboxReceive({ limit: 5 });\
+         const listed = await lofi.subagentMailboxList({});\
+         return [sent.op, got.op, listed.op, sent.to];",
+        &c,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res.value,
+        json!(["send", "receive", "list", "parent"]),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
 async fn exec_models_lists_choices() {
     let dir = tempdir().unwrap();
     let mut c = ctx(dir.path());

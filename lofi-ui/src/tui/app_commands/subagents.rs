@@ -28,6 +28,9 @@ impl App {
     /// `record_subagent_spend` and this clear is old-session residue: log
     /// and drop it rather than book it into the new session.
     pub(in crate::tui) fn clear_subagents(&mut self) {
+        // The registry reset drops the inbox a stored wake points at. Clear
+        // the text here too, so no turn starts on the old session's sender.
+        self.mailbox_wake = None;
         let Some(subagents) = &self.subagents else {
             return;
         };

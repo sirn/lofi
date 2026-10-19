@@ -41,11 +41,14 @@ pub use agent_run::{RunControls, TurnInput, TurnRequest};
 mod auto_mode;
 mod event;
 mod exec;
+mod mailbox;
 mod model;
 mod subagent;
 mod tool_executor;
 pub use lofi_code::SubagentOp;
-pub use subagent::{SubagentNotice, SubagentRegistry, SubagentRunning, SubagentSupport};
+pub use subagent::{
+    SubagentNotice, SubagentNoticeKind, SubagentRegistry, SubagentRunning, SubagentSupport,
+};
 pub use tool_executor::{ToolCallContext, ToolExecutor};
 
 #[cfg(test)]
@@ -202,6 +205,10 @@ pub struct Agent {
     /// Owning subagent run id; set on child agents so their spawned jobs
     /// are tagged for kill-by-owner and the per-owner cap.
     job_owner: Option<String>,
+    /// Mailbox capability of a child agent: its own inbox plus the right to
+    /// write to the parent. `None` on a session agent, which addresses runs
+    /// through the registry instead.
+    mailbox: Option<mailbox::MailboxScope>,
     /// Session-shared sandbox thread, born with the first exec. Guest work
     /// on the single-threaded host runtime would freeze the UI; the worker
     /// keeps the sandbox off it for the agent's lifetime.
@@ -258,6 +265,7 @@ impl Agent {
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
             job_owner: None,
+            mailbox: None,
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
             subagent_support: None,
             subagents: SubagentRegistry::default(),
@@ -295,6 +303,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             job_owner: self.job_owner.clone(),
+            mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
@@ -322,6 +331,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
             job_owner: self.job_owner.clone(),
+            mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
@@ -352,6 +362,7 @@ impl Agent {
             skills_dir,
             jobs: self.jobs.clone(),
             job_owner: self.job_owner.clone(),
+            mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),

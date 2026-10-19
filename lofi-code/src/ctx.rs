@@ -43,6 +43,13 @@ pub enum SubagentOp {
     Kill,
     /// `lofi.subagentNotify`.
     Notify,
+    /// `lofi.subagentMailboxSend`.
+    MailboxSend,
+    /// `lofi.subagentMailboxReceive`: dropping the future aborts the wait,
+    /// never the queued messages.
+    MailboxReceive,
+    /// `lofi.subagentMailboxList`.
+    MailboxList,
 }
 
 /// `lofi.subagent*` native tool into the engine that owns agent runs. The

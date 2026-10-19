@@ -77,6 +77,9 @@ fn bind_subagent_tool<'js>(
         ("subagentRead", SubagentOp::Read, false),
         ("subagentKill", SubagentOp::Kill, false),
         ("subagentNotify", SubagentOp::Notify, false),
+        ("subagentMailboxSend", SubagentOp::MailboxSend, false),
+        ("subagentMailboxReceive", SubagentOp::MailboxReceive, true),
+        ("subagentMailboxList", SubagentOp::MailboxList, false),
     ] {
         let t = tools.clone();
         // Clone the Arc out of the reference: the closures are 'js-lived
@@ -94,6 +97,7 @@ fn bind_subagent_tool<'js>(
                         let id = t.next_tool_id();
                         let label = args
                             .get("prompt")
+                            .or_else(|| args.get("to"))
                             .or_else(|| args.get("id"))
                             .and_then(Json::as_str)
                             .unwrap_or("");
@@ -133,7 +137,14 @@ fn bind_subagent_tool<'js>(
                             None => Ok(json!({
                                 "ok": false,
                                 "status": "unavailable",
-                                "error": "subagent is not available in this context",
+                                "error": match op {
+                                    SubagentOp::MailboxSend
+                                    | SubagentOp::MailboxReceive
+                                    | SubagentOp::MailboxList => {
+                                        "subagent mailbox is not available in this context"
+                                    }
+                                    _ => "subagent is not available in this context",
+                                },
                             })),
                         };
                         let (result, is_error) = tool_preview(&res);
