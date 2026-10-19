@@ -1062,10 +1062,10 @@ fn subagent_files_list_only_children_of_the_parent() {
     // A user session and two subagent transcripts, one per parent.
     store.create(cwd, &"p/m".into()).unwrap();
     store
-        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-a"))
+        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-a"), "run-a")
         .unwrap();
     store
-        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-b"))
+        .create_subagent_cursor(cwd, &"p/m".into(), Some("parent-b"), "run-b")
         .unwrap();
 
     let children = store.list_subagent_files_for_cwd(cwd, "parent-a").unwrap();
@@ -1083,7 +1083,7 @@ fn subagent_cursor_without_parent_omits_the_link() {
     let (_guard, store) = isolated_store();
     let cwd = Path::new("/tmp/subagent-no-parent");
     store
-        .create_subagent_cursor(cwd, &"p/m".into(), None)
+        .create_subagent_cursor(cwd, &"p/m".into(), None, "run-c")
         .unwrap();
     let files = store.list_subagent_files_for_cwd(cwd, "anything").unwrap();
     assert!(files.is_empty());

@@ -146,6 +146,12 @@ impl Agent {
             if let Some(stem) = cursor.path().file_stem().and_then(|s| s.to_str()) {
                 self.subagents.set_parent_session(stem);
             }
+            // A restarted process rebuilds the registry from this session's
+            // subagent transcripts so children stay resumable: once per
+            // parent session id, before any tool of the turn runs.
+            if let Some(support) = self.subagent_support.as_ref() {
+                self.subagents.rehydrate(self, support);
+            }
         }
         let mut starts_run = true;
         for notice in notices {

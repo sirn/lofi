@@ -295,6 +295,7 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
             | SessionEventKind::JobStarted { .. }
             | SessionEventKind::JobFinished { .. }
             | SessionEventKind::Cursor { .. }
+            | SessionEventKind::RunSettled { .. }
             | SessionEventKind::Unknown => {}
             SessionEventKind::Compaction {
                 summarized,

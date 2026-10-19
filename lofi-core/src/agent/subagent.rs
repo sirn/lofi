@@ -6,27 +6,38 @@
 //! entry with its stored history instead of starting fresh.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lofi_code::{SubagentFn, SubagentOp};
 use lofi_error::{Error, Result};
-use lofi_types::{Config, ContentBlock, Message, PromptKind, Role, ThinkingLevel};
+use lofi_types::{
+    Config, ContentBlock, Message, PromptKind, Role, SessionEvent, SessionEventKind, ThinkingLevel,
+};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
 use super::{lock, select_model, Agent, AgentEvent, RunControls, TurnRequest};
 use crate::models::ModelRegistry;
-use crate::session::store::{SessionCursor, SessionStore};
+use crate::session::store::{SessionCursor, SessionFile, SessionStore};
 
 /// Maximum time a subagent turn may run when `timeout_ms` is not set.
 const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 /// Cap on the `result` text returned to the parent when `output_limit` is
-/// not set.
+/// not set. Also the retention cap: the registry entry and the transcript
+/// settle marker keep at most this much of the result and error text, so
+/// one idle entry never holds more than a few KB.
 const DEFAULT_OUTPUT_LIMIT: usize = 32 * 1024;
+/// Hard bound on the serialized settle-marker line. `record_settled` cuts
+/// the result until the line fits, so the rehydration tail window always
+/// contains the whole marker.
+const SETTLED_MARKER_LIMIT: usize = 128 * 1024;
+/// Tail bytes scanned for the settle marker at rehydration: twice the
+/// marker limit, so the marker line always starts inside the window.
+const SETTLED_TAIL_WINDOW: u64 = 2 * SETTLED_MARKER_LIMIT as u64;
 /// Maximum retained subagent entries per session. Spawning past the cap
 /// evicts a finished entry to make room; if every entry is still active the
 /// spawn fails instead of growing the registry without bound.
@@ -75,16 +86,35 @@ impl Status {
     fn is_terminal(self) -> bool {
         !matches!(self, Self::Running)
     }
+
+    /// Restore from a persisted settle marker. An unknown status (written by
+    /// a newer build) degrades to failed rather than blocking the resume.
+    fn from_marker(status: &str) -> Self {
+        match status {
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            "timed_out" => Self::TimedOut,
+            _ => Self::Failed,
+        }
+    }
 }
 
 struct Entry {
     status: Status,
     agent: Agent,
     messages: Vec<Message>,
+    /// False only for entries rehydrated from a transcript after a restart:
+    /// their history replays from the cursor on the first resume, so a
+    /// session start does not pay for histories nobody resumes.
+    history_loaded: bool,
     cancel: Arc<AtomicBool>,
     // Retained so the entry outlives a timed-out or abandoned run; reused on
     // the next resume.
     cursor: Option<SessionCursor>,
+    /// Transcript of a rehydrated entry whose cursor is not open yet; the
+    /// first resume opens it and fills `cursor`. Opening at rehydrate would
+    /// index every transcript at session start for entries nobody resumes.
+    transcript_path: Option<PathBuf>,
     // Transcript file name of this child; lets `/subagent` offer a drill-in
     // replay while the run is still live and the entry has not settled.
     session: Option<String>,
@@ -113,6 +143,9 @@ struct Entry {
     // Handle of the active periodic-notice loop; reconfiguration aborts it
     // instead of leaving it asleep until its old interval expires.
     notify_task: Option<AbortHandle>,
+    // Set when rehydration could not restore the transcript's model: the
+    // entry keeps the session model instead. Surfaced by status and list.
+    note: Option<String>,
 }
 
 /// Bounded per-run event buffer for `subagentRead`. Sequence numbers are
@@ -198,6 +231,9 @@ pub struct SubagentRegistry {
     host_handle: Arc<std::sync::OnceLock<tokio::runtime::Handle>>,
     /// Terminal and progress notices for the host UI.
     notices: Arc<NoticeHub>,
+    /// Parent session id whose transcripts were already rehydrated into
+    /// entries. Restart restore runs once per parent; `clear()` resets it.
+    rehydrated_for: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for SubagentRegistry {
@@ -215,6 +251,7 @@ impl Default for SubagentRegistry {
             next_born: Arc::default(),
             host_handle,
             notices: Arc::new(NoticeHub::default()),
+            rehydrated_for: Arc::default(),
         }
     }
 }
@@ -296,6 +333,58 @@ impl SubagentRegistry {
             .get(id)
             .and_then(|entry| entry.outcome.clone())
     }
+
+    /// Restore entries from this session's subagent transcripts so runs
+    /// stay resumable across a process restart. Runs once per parent
+    /// session id (the turn loop calls it at turn start); `clear()` resets
+    /// the marker so a later /resume of the same parent re-runs it.
+    ///
+    /// Memory: reads only the header (via the listing) and a bounded tail
+    /// window per file. Histories replay lazily on resume.
+    pub fn rehydrate(&self, template: &Agent, support: &SubagentSupport) {
+        if !support.persist_sessions {
+            return;
+        }
+        let Some(parent) = self.parent_session() else {
+            return;
+        };
+        if lock(&self.rehydrated_for).as_deref() == Some(parent.as_str()) {
+            return;
+        }
+        let generation = self.generation();
+        let files = SessionStore::open()
+            .and_then(|store| store.list_subagent_files_for_cwd(&support.cwd, &parent));
+        let files = match files {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::debug!(error = %e, "subagent rehydration skipped");
+                return;
+            }
+        };
+        let mut restored = Vec::new();
+        // The listing is newest first: select within the cap, then build
+        // oldest first so born order stays chronological.
+        for file in files.into_iter().take(MAX_ENTRIES).rev() {
+            let pair = restore_entry(template, support, self, &file);
+            restored.push(pair);
+        }
+        let mut entries = lock(&self.entries);
+        // A clear() during the scan switched sessions; these entries belong
+        // to the old parent.
+        if self.generation() != generation {
+            return;
+        }
+        for (id, entry) in restored {
+            if entries.len() >= MAX_ENTRIES {
+                break;
+            }
+            // A spawn or a duplicate file with the same id wins over the
+            // restored entry.
+            entries.entry(id).or_insert(entry);
+        }
+        drop(entries);
+        *lock(&self.rehydrated_for) = Some(parent);
+    }
 }
 
 impl SubagentRegistry {
@@ -335,6 +424,7 @@ impl SubagentRegistry {
         }
         let mut unreported = lock(&self.unreported);
         let usage = std::mem::take(&mut *unreported);
+        *lock(&self.rehydrated_for) = None;
         self.generation.fetch_add(1, Ordering::SeqCst);
         usage
     }
@@ -511,6 +601,17 @@ impl Drop for SettleOnDrop {
                 tracing::debug!(error = %e, "subagent transcript rollback failed");
             }
         }
+        record_settled(
+            self.cursor.as_ref(),
+            status,
+            None,
+            Some(if status == Status::Cancelled {
+                "cancelled"
+            } else {
+                "subagent task ended unexpectedly"
+            }),
+            &lock(&self.totals),
+        );
         // The ended run never reached the report at the end of
         // run_turn_with_timeout; fold in what the drain saw. The generation
         // check happens under the lock, as in the normal reporting path, so
@@ -550,6 +651,12 @@ impl Drop for SettleOnDrop {
         entry.used = self.registry.stamp();
         entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
         entry.outcome = Some(outcome);
+        if entry.cursor.is_some() {
+            // The claim moved the history into the run, which died with it;
+            // the rolled-back transcript still holds it.
+            entry.messages = Vec::new();
+            entry.history_loaded = false;
+        }
         entry
             .events
             .push("state", json!({ "status": status.as_str() }));
@@ -761,8 +868,11 @@ fn status_op(registry: &SubagentRegistry, args: &Value) -> Value {
         return unknown_id(&id);
     };
     let mut out = json!({ "ok": true, "id": id, "status": entry.status.as_str() });
-    if let Some(session_id) = entry.cursor.as_ref().map(SessionCursor::id) {
+    if let Some(session_id) = entry_session_id(entry) {
         out["session_id"] = json!(session_id);
+    }
+    if let Some(note) = &entry.note {
+        out["note"] = json!(note);
     }
     if let Some(outcome) = &entry.outcome {
         if let Some(usage) = outcome.get("usage") {
@@ -826,8 +936,11 @@ fn list_op(registry: &SubagentRegistry, args: &Value) -> Value {
         .into_iter()
         .map(|(id, entry)| {
             let mut row = json!({ "id": id, "status": entry.status.as_str() });
-            if let Some(session_id) = entry.cursor.as_ref().map(SessionCursor::id) {
+            if let Some(session_id) = entry_session_id(entry) {
                 row["session_id"] = json!(session_id);
+            }
+            if let Some(note) = &entry.note {
+                row["note"] = json!(note);
             }
             row
         })
@@ -1184,7 +1297,7 @@ async fn run_task(
     let outcome = run_turn_with_timeout(
         agent,
         messages,
-        cursor,
+        cursor.clone(),
         cancel,
         registry.clone(),
         id.clone(),
@@ -1194,12 +1307,34 @@ async fn run_task(
         prompt,
         output_limit,
         token_budget,
-        totals,
+        totals.clone(),
         generation,
     )
     .await;
     let status = outcome.status;
-    let out = outcome_json(&id, session_id.as_deref(), outcome);
+    // Retention cap: the kept body bounds result and error so an idle entry
+    // holds KBs regardless of the caller's output_limit. The full answer
+    // stays in the transcript.
+    let mut retained = outcome;
+    if let Some(result) = retained.result.as_mut() {
+        if result.len() > DEFAULT_OUTPUT_LIMIT {
+            retained.full_bytes = Some(retained.full_bytes.unwrap_or(result.len()));
+            *result = cap_at_boundary(result, DEFAULT_OUTPUT_LIMIT);
+        }
+    }
+    if let Some(error) = retained.error.as_mut() {
+        *error = cap_at_boundary(error, DEFAULT_OUTPUT_LIMIT);
+    }
+    let out = outcome_json(&id, session_id.as_deref(), retained);
+    // Durable terminal record: after a restart the rehydration tail scan
+    // restores exactly this status and outcome.
+    let persisted = record_settled(
+        cursor.as_ref(),
+        status,
+        out["result"].as_str(),
+        out["error"].as_str(),
+        &lock(&totals),
+    );
     let notice_text = terminal_notice(&id, status, &out);
     // Terminal write in one critical section: a resume observes either
     // the running entry or the fully settled one, never half of either.
@@ -1213,6 +1348,13 @@ async fn run_task(
                     .events
                     .push("state", json!({ "status": status.as_str() }));
                 entry.state_tx.send_replace(status);
+                if persisted && entry.cursor.is_some() {
+                    // The transcript holds the full history; an idle entry
+                    // retains only the outcome. The next resume replays
+                    // from the transcript.
+                    entry.messages = Vec::new();
+                    entry.history_loaded = false;
+                }
                 entry.notify_terminal
             }
             // clear() removed the entry: nothing to record, nothing to say.
@@ -1286,6 +1428,125 @@ struct RunOutcome {
     full_bytes: Option<usize>,
     // Token and cost totals of the run, when the provider reported any.
     usage: Option<Value>,
+}
+
+/// Append the run's terminal record as the leaf of the transcript so a
+/// rehydrate after a restart restores this exact status and outcome instead
+/// of inferring them from the transcript tail. Runs after any rollback, so
+/// the marker is the physical last line of the file: the rehydration tail
+/// scan relies on that. The serialized line is bounded by
+/// [`SETTLED_MARKER_LIMIT`] so the tail window always contains it whole.
+/// Returns whether the marker was persisted; an idle entry keeps its history
+/// in memory when the transcript cannot reproduce it.
+fn record_settled(
+    cursor: Option<&SessionCursor>,
+    status: Status,
+    result: Option<&str>,
+    error: Option<&str>,
+    totals: &ChildUsage,
+) -> bool {
+    let Some(cursor) = cursor else { return false };
+    let (usage, cost) = if totals.seen {
+        (
+            Some(lofi_types::Usage {
+                input_tokens: totals.input,
+                output_tokens: totals.output,
+                cache_read_tokens: totals.cache_read,
+                cache_write_tokens: totals.cache_write,
+            }),
+            Some(totals.cost),
+        )
+    } else {
+        (None, None)
+    };
+    // Callers already cap both texts at DEFAULT_OUTPUT_LIMIT; the measure
+    // loop is the hard guarantee that escaping and multi-byte UTF-8 cannot
+    // push the serialized line past the tail window.
+    let mut result = result.map(|text| cap_at_boundary(text, DEFAULT_OUTPUT_LIMIT));
+    let error = error.map(|text| cap_at_boundary(text, DEFAULT_OUTPUT_LIMIT));
+    let build = |result: &Option<String>| SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: SessionEventKind::RunSettled {
+            status: status.as_str().to_string(),
+            result: result.clone(),
+            error: error.clone(),
+            usage,
+            cost,
+        },
+    };
+    let mut event = build(&result);
+    while let Some(text) = result.as_ref() {
+        let Ok(line) = serde_json::to_string(&event) else {
+            break;
+        };
+        if line.len() <= SETTLED_MARKER_LIMIT || text.is_empty() {
+            break;
+        }
+        result = Some(cap_at_boundary(text, text.len() / 2));
+        event = build(&result);
+    }
+    let mut events = vec![event];
+    if let Err(e) = cursor.append_events(&mut events) {
+        tracing::debug!(error = %e, "subagent settle marker not recorded");
+        return false;
+    }
+    true
+}
+
+/// A subagent run's terminal record as persisted by the `RunSettled` marker.
+struct SettledRun {
+    status: Status,
+    result: Option<String>,
+    error: Option<String>,
+    usage: Option<Value>,
+}
+
+/// Restore the terminal record from the transcript tail. The marker is the
+/// physical last line of a settled run; anything else at the tail — turn
+/// events of a newer run, a torn final line without a newline — means the
+/// process exited before the last run settled.
+fn read_settled_marker(path: &Path) -> Option<SettledRun> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(SETTLED_TAIL_WINDOW)))
+        .ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    // A final line without its newline is a torn write, not a marker.
+    if !buf.ends_with(b"\n") {
+        return None;
+    }
+    let text = String::from_utf8(buf).ok()?;
+    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    let event = crate::session::store::parse_event(line).ok()?;
+    if let SessionEventKind::RunSettled {
+        status,
+        result,
+        error,
+        usage,
+        cost,
+    } = event.kind
+    {
+        let usage = usage.map(|usage| {
+            json!({
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_write_tokens": usage.cache_write_tokens,
+                "cost": cost.unwrap_or(0.0),
+            })
+        });
+        Some(SettledRun {
+            status: Status::from_marker(&status),
+            result,
+            error,
+            usage,
+        })
+    } else {
+        None
+    }
 }
 
 /// Drain the child event stream into usage totals, the pressure flag, and
@@ -1687,9 +1948,11 @@ fn prepare(
                 status: Status::Running,
                 agent: agent.clone(),
                 messages: Vec::new(),
+                history_loaded: true,
                 cancel: cancel.clone(),
                 session: None,
                 cursor: None,
+                transcript_path: None,
                 used: registry.stamp(),
                 // Born 0 would collide with the absent page cursor.
                 born: registry.next_born.fetch_add(1, Ordering::SeqCst) + 1,
@@ -1700,6 +1963,7 @@ fn prepare(
                 abort: None,
                 events: EventLog::default(),
                 notify_terminal: notify,
+                note: None,
             },
         );
         id
@@ -1710,6 +1974,7 @@ fn prepare(
                 &support.cwd,
                 &agent.run_model(),
                 registry.parent_session().as_deref(),
+                &id,
             )?;
             let system = agent.system_prompt();
             if !system.is_empty() {
@@ -1741,6 +2006,102 @@ fn prepare(
         }
     }
     Ok((agent, Vec::new(), cursor, cancel, id))
+}
+
+/// Transcript id of an entry, whether the cursor is open (live or resumed
+/// in this process) or not (rehydrated, first resume pending).
+fn entry_session_id(entry: &Entry) -> Option<String> {
+    entry.cursor.as_ref().map(SessionCursor::id).or_else(|| {
+        entry
+            .session
+            .as_deref()
+            .map(|name| name.strip_suffix(".jsonl").unwrap_or(name).to_string())
+    })
+}
+
+/// Build one registry entry from a transcript: identity, model, and the
+/// persisted outcome only. The history replays on the first resume; the
+/// system prompt comes from the replayed lineage (a header-level read could
+/// pick a record from an abandoned branch).
+fn restore_entry(
+    template: &Agent,
+    support: &SubagentSupport,
+    registry: &SubagentRegistry,
+    file: &SessionFile,
+) -> (String, Entry) {
+    let meta = file.meta();
+    // Transcripts written before rehydration existed carry no run_id; the
+    // file stem stands in so they stay resumable.
+    let id = meta.run_id.clone().unwrap_or_else(|| file.id());
+    let session_id = file.id();
+    let (status, outcome) = match read_settled_marker(file.path()) {
+        Some(settled) => (
+            settled.status,
+            RunOutcome {
+                status: settled.status,
+                result: settled.result,
+                error: settled.error,
+                full_bytes: None,
+                usage: settled.usage,
+            },
+        ),
+        None => (
+            Status::Cancelled,
+            RunOutcome {
+                status: Status::Cancelled,
+                result: None,
+                error: Some("lofi exited before the run settled".to_string()),
+                full_bytes: None,
+                usage: None,
+            },
+        ),
+    };
+    let outcome = outcome_json(&id, Some(&session_id), outcome);
+    // Restore the model the transcript ran with. When it is gone (provider
+    // or model removed from the config), keep the session model and say so
+    // on the entry instead of failing the restore.
+    let base = template.clone();
+    let mut note = None;
+    let overrides = json!({ "model": meta.model.query() });
+    let mut agent = match apply_model_overrides(base.clone(), support, &overrides) {
+        Ok(overridden) => overridden,
+        Err(e) => {
+            note = Some(format!(
+                "transcript model {} is unavailable ({e}); resume uses the session model",
+                meta.model.label(),
+            ));
+            base
+        }
+    };
+    agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+    agent.subagents = SubagentRegistry::default();
+    agent.job_owner = Some(id.clone());
+    let (state_tx, _) = watch::channel(status);
+    let entry = Entry {
+        status,
+        agent,
+        messages: Vec::new(),
+        history_loaded: false,
+        cancel: Arc::new(AtomicBool::new(false)),
+        session: file
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        cursor: None,
+        transcript_path: Some(file.path().to_path_buf()),
+        used: registry.stamp(),
+        // Born 0 would collide with the absent page cursor.
+        born: registry.next_born.fetch_add(1, Ordering::SeqCst) + 1,
+        outcome: Some(outcome),
+        state_tx,
+        abort: None,
+        events: EventLog::default(),
+        notify_terminal: false,
+        notify_tick: 0,
+        notify_task: None,
+        note,
+    };
+    (id, entry)
 }
 
 /// Make room for one more entry by evicting the terminal entry with the
@@ -1783,68 +2144,207 @@ fn prepare_resume(
     ),
     RunRejection,
 > {
-    let mut entries = lock(&registry.entries);
-    match entries.get(&id) {
-        None => return Err(Error::Tool(format!("unknown subagent id: {id}")).into()),
-        Some(entry) if !entry.status.is_terminal() => {
-            return Err(RunRejection::Busy(entry.status.as_str().to_string()))
+    let (agent, history, cursor, transcript_path, cancel, loaded) = {
+        let mut entries = lock(&registry.entries);
+        match entries.get(&id) {
+            None => return Err(Error::Tool(format!("unknown subagent id: {id}")).into()),
+            Some(entry) if !entry.status.is_terminal() => {
+                return Err(RunRejection::Busy(entry.status.as_str().to_string()))
+            }
+            Some(_) => {}
         }
-        Some(_) => {}
-    }
-    // A resume re-enters the running set, so it is subject to the same cap.
-    let running = entries
-        .values()
-        .filter(|entry| !entry.status.is_terminal())
-        .count();
-    if running >= MAX_RUNNING {
-        return Err(Error::Tool(format!(
-            "concurrency cap reached ({MAX_RUNNING} running subagents)"
-        ))
-        .into());
-    }
-    let entry = entries
-        .get_mut(&id)
-        .ok_or_else(|| Error::Tool(format!("unknown subagent id: {id}")))?;
-    if str_arg(args, "model")?.is_some()
-        || str_arg(args, "thinking")?.is_some()
-        || str_arg(args, "system")?.is_some()
-    {
-        return Err(Error::Tool(
-            "model, thinking and system only apply when spawning a subagent".into(),
+        // A resume re-enters the running set, so it is subject to the same cap.
+        let running = entries
+            .values()
+            .filter(|entry| !entry.status.is_terminal())
+            .count();
+        if running >= MAX_RUNNING {
+            return Err(Error::Tool(format!(
+                "concurrency cap reached ({MAX_RUNNING} running subagents)"
+            ))
+            .into());
+        }
+        let entry = entries
+            .get_mut(&id)
+            .ok_or_else(|| Error::Tool(format!("unknown subagent id: {id}")))?;
+        if str_arg(args, "model")?.is_some()
+            || str_arg(args, "thinking")?.is_some()
+            || str_arg(args, "system")?.is_some()
+        {
+            return Err(Error::Tool(
+                "model, thinking and system only apply when spawning a subagent".into(),
+            )
+            .into());
+        }
+        // Claim the entry under the lock so a concurrent resume of the same
+        // id is rejected instead of racing this run.
+        entry.status = Status::Running;
+        entry.used = registry.stamp();
+        // A previous kill barred this owner from acquiring jobs; the new run
+        // needs them again.
+        entry.agent.jobs().uncancel_owner(&id);
+        // Fresh cancel flag per run: the previous run's flag may still be
+        // observed by its lingering sandbox work, and resetting it would
+        // uncancel that work.
+        entry.cancel = Arc::new(AtomicBool::new(false));
+        // The previous run's outcome and abort handle belong to that run; the
+        // new run stores its own. Waiters see the state move back to running.
+        entry.outcome = None;
+        entry.abort = None;
+        // The resume path is always foreground: silence the terminal notice and
+        // retire the previous run's periodic loop, which would otherwise wake
+        // up on the running status.
+        entry.notify_terminal = notify;
+        entry.notify_tick += 1;
+        if let Some(task) = entry.notify_task.take() {
+            task.abort();
+        }
+        entry.state_tx.send_replace(Status::Running);
+        let transcript_backed = entry.cursor.is_some() || entry.transcript_path.is_some();
+        // The run owns the history while it runs: a transcript-backed entry
+        // gets it back at settle or reloads it from the transcript after an
+        // abort, so nothing retains two copies. An entry without a
+        // transcript keeps its only copy in the registry.
+        let history = match (entry.history_loaded, transcript_backed) {
+            (true, true) => std::mem::take(&mut entry.messages),
+            (true, false) => entry.messages.clone(),
+            (false, _) => Vec::new(),
+        };
+        (
+            entry.agent.clone(),
+            history,
+            entry.cursor.clone(),
+            entry.transcript_path.clone(),
+            entry.cancel.clone(),
+            entry.history_loaded,
         )
-        .into());
+    };
+    if loaded {
+        return Ok((agent, history, cursor, cancel, id));
     }
-    // Claim the entry under the lock so a concurrent resume of the same
-    // id is rejected instead of racing this run.
-    entry.status = Status::Running;
-    entry.used = registry.stamp();
-    // A previous kill barred this owner from acquiring jobs; the new run
-    // needs them again.
-    entry.agent.jobs().uncancel_owner(&id);
-    // Fresh cancel flag per run: the previous run's flag may still be
-    // observed by its lingering sandbox work, and resetting it would
-    // uncancel that work.
-    entry.cancel = Arc::new(AtomicBool::new(false));
-    // The previous run's outcome and abort handle belong to that run; the
-    // new run stores its own. Waiters see the state move back to running.
-    entry.outcome = None;
-    entry.abort = None;
-    // The resume path is always foreground: silence the terminal notice and
-    // retire the previous run's periodic loop, which would otherwise wake
-    // up on the running status.
-    entry.notify_terminal = notify;
-    entry.notify_tick += 1;
-    if let Some(task) = entry.notify_task.take() {
-        task.abort();
+    // First resume after a rehydrate or an unload: replay the transcript.
+    // The store I/O stays outside the entries lock; a concurrent kill sets
+    // the claimed cancel flag, which the run observes on its first round.
+    match load_entry_history(cursor, transcript_path) {
+        Ok((history, cursor, system)) => {
+            let agent = match system {
+                Some(prompt) if prompt != agent.system_prompt() => agent.with_system_prompt(prompt),
+                _ => agent,
+            };
+            let mut entries = lock(&registry.entries);
+            let Some(entry) = entries.get_mut(&id) else {
+                return Err(Error::Tool(format!("unknown subagent id: {id}")).into());
+            };
+            entry.cursor = Some(cursor.clone());
+            entry.history_loaded = true;
+            Ok((agent, history, Some(cursor), entry.cancel.clone(), id))
+        }
+        Err(e) => {
+            unclaim(registry, &id, &e);
+            Err(Error::Tool(format!("subagent transcript could not be loaded: {e}")).into())
+        }
     }
-    entry.state_tx.send_replace(Status::Running);
-    Ok((
-        entry.agent.clone(),
-        entry.messages.clone(),
-        entry.cursor.clone(),
-        entry.cancel.clone(),
-        id,
-    ))
+}
+
+/// A resume whose transcript failed to load must not wedge the entry in the
+/// running state: publish the failure and hand the entry back to waiters.
+fn unclaim(registry: &SubagentRegistry, id: &str, error: &Error) {
+    let mut entries = lock(&registry.entries);
+    let Some(entry) = entries.get_mut(id) else {
+        return;
+    };
+    entry.status = Status::Failed;
+    entry.outcome = Some(json!({
+        "ok": false,
+        "id": id,
+        "status": Status::Failed.as_str(),
+        "error": format!("subagent transcript could not be loaded: {error}"),
+    }));
+    entry.state_tx.send_replace(Status::Failed);
+}
+
+/// Replay a transcript into the resume history: a bounded projection of the
+/// selected lineage (events stream one at a time; the full event vector is
+/// never materialized), the latest system prompt split out for the agent,
+/// and a trailing incomplete tool exchange dropped.
+fn load_entry_history(
+    cursor: Option<SessionCursor>,
+    transcript_path: Option<PathBuf>,
+) -> Result<(Vec<Message>, SessionCursor, Option<String>)> {
+    let (cursor, snapshot) = if let Some(cursor) = cursor {
+        let snapshot = cursor.snapshot()?;
+        (cursor, snapshot)
+    } else {
+        let path = transcript_path
+            .ok_or_else(|| Error::State("subagent entry has no transcript".to_string()))?;
+        SessionCursor::open_snapshot(path)?
+    };
+    // Same leaf-first recipe as the parent session's restore: from
+    // history_start so a compaction boundary is never crossed.
+    let offsets: Vec<u64> = snapshot.index[snapshot.history_start.min(snapshot.index.len())..]
+        .iter()
+        .rev()
+        .map(|entry| entry.offset)
+        .collect();
+    let mut projection = crate::session::replay::AgentHistoryProjection::default();
+    cursor.visit_events(&offsets, |event| {
+        projection.push(&event);
+        Ok(())
+    })?;
+    let mut messages = projection.finish();
+    drop(snapshot);
+    lofi_code::memory::release_freed_memory();
+    // The projection puts the latest system prompt first; the agent carries
+    // it instead, matching entries that never reloaded.
+    let system = if messages
+        .first()
+        .is_some_and(|message| message.role == Role::System)
+    {
+        let system = messages.remove(0);
+        let text = system
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(text)
+    } else {
+        None
+    };
+    trim_dangling_tool_calls(&mut messages);
+    Ok((messages, cursor, system))
+}
+
+/// A process can exit between an assistant tool call and its result;
+/// providers reject a history whose tail calls tools without results. Drop
+/// the unfinished turn tail: the partial exchange stays in the transcript
+/// for display, but the model never sees half a call.
+fn trim_dangling_tool_calls(messages: &mut Vec<Message>) {
+    while let Some(assistant) = messages
+        .iter()
+        .rposition(|message| message.role == Role::Assistant)
+    {
+        let dangling = {
+            let answered: std::collections::HashSet<&str> = messages[assistant + 1..]
+                .iter()
+                .flat_map(|message| message.blocks.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            messages[assistant].blocks.iter().any(|block| {
+                matches!(block, ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()))
+            })
+        };
+        if !dangling {
+            break;
+        }
+        messages.truncate(assistant);
+    }
 }
 
 /// Apply the model and thinking overrides of a spawn call to the agent.

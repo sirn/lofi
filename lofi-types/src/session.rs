@@ -121,6 +121,22 @@ pub enum SessionEventKind {
         usage: Usage,
         cost: f64,
     },
+    /// Terminal record of a subagent run, appended once at settle (after any
+    /// timeout rollback) so it is the leaf of the active branch. A restart
+    /// rehydrates the registry entry from it; a transcript whose leaf is not
+    /// `RunSettled` belongs to a run the process never settled. Invisible to
+    /// the model and the transcript renderer.
+    RunSettled {
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+    },
     /// An event variant this build does not know about — typically a marker
     /// written by a newer (or older, pre-release) binary. The transcript
     /// stays loadable; consumers ignore these.

@@ -334,17 +334,24 @@ log reads, mechanical edits).
 `status` is one of `completed`, `failed`, `cancelled`, `timed_out` —
 `running` when a resume targets a run that is still active, or
 `unavailable` when the sandbox has no subagent support. Keep the `id` to
-resume the run later; an `id` lives in memory only, so it never survives a
-restart, and `/new` or capacity eviction invalidates it. `session_id` is the
-id of the persisted transcript, present unless the session does not persist;
-the transcript stays on disk even after the `id` is evicted. When `result`
-was cut to fit `output_limit`, `truncated` is `true` and `full_bytes` holds
-the full length. `usage` reports the run's token totals and cost when the
-provider reported them. A timed-out run keeps only the history from before
-that run, so a resume never replays a dangling tool call. Argument problems —
-a missing `prompt`, an empty or unknown `id`, a bad override, a value with
-the wrong type — resolve with `ok: false` and `status: "failed"` instead of
-throwing.
+resume the run later; `/new` or capacity eviction invalidates it. Entries
+survive a process restart when the session persists: at the start of the
+next turn the registry rehydrates from this session's transcripts, and a
+resume with the same `id` replays the stored history. A run whose
+transcript has no settle marker — the process exited mid-run — comes back
+as `cancelled` with the error "lofi exited before the run settled".
+`session_id` is the id of the persisted transcript, present unless the
+session does not persist; the transcript stays on disk even after the `id`
+is evicted. When `result` was cut to fit `output_limit`, `truncated` is
+`true` and `full_bytes` holds the full length. The retained result and
+error are capped at 32768 bytes regardless of `output_limit`, so a status
+or wait after the fact may report a shorter, marked-truncated text than
+the original return. `usage` reports the run's token totals and cost when
+the provider reported them. A timed-out run keeps only the history from
+before that run, so a resume never replays a dangling tool call. Argument
+problems — a missing `prompt`, an empty or unknown `id`, a bad override, a
+value with the wrong type — resolve with `ok: false` and `status: "failed"`
+instead of throwing.
 
 Subagents run with the session's shell policy and truncation config; they
 cannot spawn further subagents. They write transcripts unless the session

@@ -140,6 +140,9 @@ pub enum IndexKind {
     JobLifecycle,
     BackendUsage,
     SubagentUsage,
+    /// Terminal record of a subagent run; rehydration finds it as the leaf
+    /// of the selected lineage. Never model- or display-visible.
+    RunSettled,
     Other,
 }
 
@@ -165,6 +168,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "job_started" | "job_finished" => IndexKind::JobLifecycle,
         "backend_usage" => IndexKind::BackendUsage,
         "subagent_usage" => IndexKind::SubagentUsage,
+        "run_settled" => IndexKind::RunSettled,
         _ => IndexKind::Other,
     }
 }
@@ -191,6 +195,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
         SessionEventKind::BackendUsage { .. } => IndexKind::BackendUsage,
         SessionEventKind::SubagentUsage { .. } => IndexKind::SubagentUsage,
+        SessionEventKind::RunSettled { .. } => IndexKind::RunSettled,
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {
             IndexKind::JobLifecycle
         }

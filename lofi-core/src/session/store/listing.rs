@@ -186,11 +186,13 @@ impl SessionStore {
     /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
     /// header-serialization failure.
     pub fn create_cursor(&self, cwd: &Path, model: &RunModel) -> Result<SessionCursor> {
-        self.create_cursor_marked(cwd, model, false, None)
+        self.create_cursor_marked(cwd, model, false, None, None)
     }
 
     /// A subagent transcript: recorded for resumability, but excluded from
     /// default session selection so it never becomes the `--continue` target.
+    /// `run_id` is the registry id of the run; rehydration restores the entry
+    /// under it so resume calls from the parent history survive a restart.
     /// # Errors
     /// Returns [`Error::Io`] on filesystem failure or [`Error::State`] on a
     /// header-serialization failure.
@@ -199,8 +201,9 @@ impl SessionStore {
         cwd: &Path,
         model: &RunModel,
         parent: Option<&str>,
+        run_id: &str,
     ) -> Result<SessionCursor> {
-        self.create_cursor_marked(cwd, model, true, parent)
+        self.create_cursor_marked(cwd, model, true, parent, Some(run_id))
     }
 
     fn create_cursor_marked(
@@ -209,8 +212,9 @@ impl SessionStore {
         model: &RunModel,
         subagent: bool,
         parent: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<SessionCursor> {
-        let path = self.create_marked(cwd, model, subagent, parent)?;
+        let path = self.create_marked(cwd, model, subagent, parent, run_id)?;
         let cursor = SessionCursor::new(path, None);
         *cursor.lock_compaction_index() = Some(Vec::new());
         Ok(cursor)
@@ -218,7 +222,7 @@ impl SessionStore {
 
     #[cfg(test)]
     pub(super) fn create(&self, cwd: &Path, model: &RunModel) -> Result<PathBuf> {
-        self.create_marked(cwd, model, false, None)
+        self.create_marked(cwd, model, false, None, None)
     }
 
     pub(super) fn create_marked(
@@ -227,6 +231,7 @@ impl SessionStore {
         model: &RunModel,
         subagent: bool,
         parent: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<PathBuf> {
         crate::state::ensure_private_dir(&self.root)?;
         let dir = self.dir_for_cwd(cwd);
@@ -242,6 +247,7 @@ impl SessionStore {
                 model: model.clone(),
                 subagent,
                 parent: parent.map(str::to_string),
+                run_id: run_id.map(str::to_string),
             },
         };
         let line =

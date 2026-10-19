@@ -46,6 +46,12 @@ pub struct SessionMeta {
     /// to its parent so `/subagent` lists the children of this session.
     #[serde(default)]
     pub parent: Option<String>,
+    /// Registry id of the subagent run that owns this transcript. Restart
+    /// rehydration restores the entry under the same id so resume calls from
+    /// the parent's history keep working. Absent in transcripts written
+    /// before rehydration existed; those fall back to the file stem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

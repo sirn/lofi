@@ -306,7 +306,7 @@ mod tests {
         let store = store::SessionStore::open().unwrap();
         let normal = store.create_cursor(cwd, &model).unwrap();
         let sub = store
-            .create_subagent_cursor(cwd, &model, Some("parent-x"))
+            .create_subagent_cursor(cwd, &model, Some("parent-x"), "run-x")
             .unwrap();
         assert_ne!(normal.id(), sub.id());
 

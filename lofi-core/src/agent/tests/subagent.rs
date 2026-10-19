@@ -361,9 +361,13 @@ async fn timeout_rolls_back_the_unfinished_turn() {
         kinds,
         vec![
             crate::session::store::IndexKind::SystemMessage,
+            // The timed-out run's settle marker, at the rollback point.
+            crate::session::store::IndexKind::RunSettled,
             crate::session::store::IndexKind::UserPrompt,
             crate::session::store::IndexKind::AssistantMessage,
             crate::session::store::IndexKind::TurnEnd,
+            // The resumed run's settle marker ends the lineage.
+            crate::session::store::IndexKind::RunSettled,
         ],
         "{kinds:?}"
     );
@@ -1396,4 +1400,227 @@ async fn spawned_entry_resumes_through_the_foreground_op() {
     assert_eq!(resumed["status"], json!("completed"), "{resumed}");
     assert_eq!(resumed["result"], json!("second"), "{resumed}");
     assert_eq!(provider.requests().len(), 2);
+}
+
+// Restart rehydration: entries are restored from transcripts so a run can be
+// resumed after the process that spawned it exited. Each test builds a fresh
+// registry over the same state dir to stand in for the restart.
+
+fn user_event(text: &str) -> lofi_types::SessionEvent {
+    lofi_types::SessionEvent {
+        id: String::new(),
+        parent_id: None,
+        kind: lofi_types::SessionEventKind::Message(Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            kind: PromptKind::default(),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn rehydrated_run_resumes_with_replayed_history() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let provider = Arc::new(MockProvider::recording(vec![
+        text_round("first"),
+        text_round("second"),
+    ]));
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider.clone();
+    agent.subagents().set_parent_session("parent-x");
+    let hook = agent.subagent_hook().unwrap();
+
+    let out = hook(SubagentOp::Run, json!({ "prompt": "a" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    let id = out["id"].as_str().unwrap().to_string();
+    let session_id = out["session_id"].as_str().unwrap().to_string();
+
+    // The restart: a fresh agent and registry over the same state dir.
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider.clone();
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let list = hook(SubagentOp::List, json!({})).await;
+    let entries = list["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{list}");
+    assert_eq!(entries[0]["id"], json!(id), "{list}");
+    assert_eq!(entries[0]["status"], json!("completed"), "{list}");
+    assert_eq!(entries[0]["session_id"], json!(session_id), "{list}");
+
+    let status = hook(SubagentOp::Status, json!({ "id": id })).await;
+    assert_eq!(status["status"], json!("completed"), "{status}");
+
+    let out = hook(SubagentOp::Run, json!({ "id": id, "prompt": "b" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    assert_eq!(out["result"], json!("second"), "{out}");
+
+    // The resume replayed the transcript: the provider saw the original
+    // exchange before the new prompt.
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let roles: Vec<_> = requests[1]
+        .iter()
+        .map(|m| (m.role, first_text(m)))
+        .collect();
+    let a = roles
+        .iter()
+        .position(|(r, t)| *r == Role::User && t == "a")
+        .unwrap();
+    assert_eq!(roles[a + 1], (Role::Assistant, "first".to_string()));
+    assert_eq!(roles[a + 2], (Role::User, "b".to_string()));
+}
+
+#[tokio::test]
+async fn rehydrate_without_settle_marker_is_cancelled() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    // A transcript whose run never settled: prompt recorded, no marker.
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid001")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let status = hook(SubagentOp::Status, json!({ "id": "runid001" })).await;
+    assert_eq!(status["status"], json!("cancelled"), "{status}");
+    assert!(
+        status["error"]
+            .as_str()
+            .unwrap()
+            .contains("exited before the run settled"),
+        "{status}"
+    );
+}
+
+#[tokio::test]
+async fn rehydrate_legacy_transcript_falls_back_to_file_stem() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid002")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+    // Transcripts from before rehydration carry no run_id: strip it from
+    // the header to reproduce one.
+    let path = cursor.path().to_path_buf();
+    let stem = cursor.id();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header.as_object_mut().unwrap().remove("run_id");
+    lines[0] = serde_json::to_string(&header).unwrap();
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let list = hook(SubagentOp::List, json!({})).await;
+    let entries = list["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{list}");
+    assert_eq!(entries[0]["id"], json!(stem), "{list}");
+}
+
+#[tokio::test]
+async fn rehydrate_runs_once_per_parent_and_after_clear() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid003")
+        .unwrap();
+    cursor.append_events(&mut [user_event("a")]).unwrap();
+
+    let agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    let registry = agent.subagents();
+    registry.set_parent_session("parent-x");
+    registry.rehydrate(&agent, &support(dir.path()));
+    registry.rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+    let list = hook(SubagentOp::List, json!({})).await;
+    assert_eq!(list["entries"].as_array().unwrap().len(), 1, "{list}");
+
+    // A session switch drops the entries; rehydrate for the same parent
+    // restores them.
+    let _ = registry.clear();
+    let list = hook(SubagentOp::List, json!({})).await;
+    assert_eq!(list["entries"].as_array().unwrap().len(), 0, "{list}");
+    registry.rehydrate(&agent, &support(dir.path()));
+    let list = hook(SubagentOp::List, json!({})).await;
+    assert_eq!(list["entries"].as_array().unwrap().len(), 1, "{list}");
+}
+
+#[tokio::test]
+async fn resume_after_rehydrate_trims_dangling_tool_calls() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let store = crate::session::store::SessionStore::open().unwrap();
+    let cursor = store
+        .create_subagent_cursor(dir.path(), &"p/m".into(), Some("parent-x"), "runid004")
+        .unwrap();
+    // The process died between the assistant's tool call and its result.
+    let mut events = vec![
+        user_event("a"),
+        lofi_types::SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind: lofi_types::SessionEventKind::Message(Message {
+                origin: None,
+                role: Role::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "exec".to_string(),
+                    input: json!({}),
+                }],
+                kind: PromptKind::default(),
+            }),
+        },
+    ];
+    cursor.append_events(&mut events).unwrap();
+
+    let provider = Arc::new(MockProvider::recording(vec![text_round("done")]));
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    agent.provider = provider.clone();
+    agent.subagents().set_parent_session("parent-x");
+    agent.subagents().rehydrate(&agent, &support(dir.path()));
+    let hook = agent.subagent_hook().unwrap();
+
+    let status = hook(SubagentOp::Status, json!({ "id": "runid004" })).await;
+    assert_eq!(status["status"], json!("cancelled"), "{status}");
+
+    let out = hook(SubagentOp::Run, json!({ "id": "runid004", "prompt": "b" })).await;
+    assert_eq!(out["status"], json!("completed"), "{out}");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    let has_tool_use = requests[0].iter().any(|m| {
+        m.blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    });
+    assert!(!has_tool_use, "{:?}", requests[0]);
+    let texts: Vec<_> = requests[0]
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(first_text)
+        .collect();
+    assert!(texts.contains(&"a".to_string()), "{texts:?}");
+    assert!(texts.contains(&"b".to_string()), "{texts:?}");
 }
