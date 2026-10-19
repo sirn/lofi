@@ -62,14 +62,18 @@ fn running_job(id: u64, cmd: &str) -> lofi_core::JobInfo {
     }
 }
 
-fn tail_rows(a: &crate::tui::App, jobs: &[lofi_core::JobInfo]) -> Vec<String> {
+fn tail_rows(
+    a: &crate::tui::App,
+    jobs: &[lofi_core::JobInfo],
+    subagents: &[lofi_core::SubagentRunning],
+) -> Vec<String> {
     let cx = super::Cx {
         app: a,
         theme: a.theme,
         width: 80,
         active_turn: false,
     };
-    super::render_transcript_tail(&cx, false, jobs)
+    super::render_transcript_tail(&cx, false, jobs, subagents)
         .iter()
         .map(|rl| rl.line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect()
@@ -93,7 +97,7 @@ fn transcript_tail_renders_queued_prompts_above_running_jobs() {
         text: "job 7 completed: sleep 1".to_string(),
         kind: lofi_types::PromptKind::Notice,
     });
-    let rows = tail_rows(&a, &[running_job(9, "sleep 9")]);
+    let rows = tail_rows(&a, &[running_job(9, "sleep 9")], &[]);
     let user_idx = rows
         .iter()
         .position(|r| r.contains("queued follow-up"))
@@ -122,12 +126,16 @@ fn job_completion_swaps_running_line_for_its_notice_without_height_change() {
         lofi_types::CompactionConfig::default(),
         String::new(),
     );
-    let before = tail_rows(&a, &[running_job(1, "sleep 1"), running_job(2, "sleep 30")]);
+    let before = tail_rows(
+        &a,
+        &[running_job(1, "sleep 1"), running_job(2, "sleep 30")],
+        &[],
+    );
     a.prompt_queue.push(crate::tui::QueuedPrompt {
         text: "job 1 completed: sleep 1 (exit 0) — log: /tmp/lofi-job-1.log".to_string(),
         kind: lofi_types::PromptKind::Notice,
     });
-    let after = tail_rows(&a, &[running_job(2, "sleep 30")]);
+    let after = tail_rows(&a, &[running_job(2, "sleep 30")], &[]);
     assert_eq!(
         before.len(),
         after.len(),
@@ -137,6 +145,36 @@ fn job_completion_swaps_running_line_for_its_notice_without_height_change() {
     assert!(!after.iter().any(|r| r.contains("job 1 running")));
     assert!(after.iter().any(|r| r.contains("job 1 completed")));
     assert!(after.iter().any(|r| r.contains("job 2 running")));
+}
+
+#[test]
+fn transcript_tail_renders_running_subagents_above_running_jobs() {
+    let a = crate::tui::App::new(
+        "m".to_string(),
+        lofi_types::ThinkingLevel::Off,
+        lofi_types::ServiceTier::Auto,
+        200_000,
+        lofi_types::CompactionConfig::default(),
+        String::new(),
+    );
+    let runs = [lofi_core::SubagentRunning {
+        id: "ab12cd34".to_string(),
+        elapsed_ms: 65_000,
+        task: "survey the repo".to_string(),
+    }];
+    let rows = tail_rows(&a, &[running_job(9, "sleep 9")], &runs);
+    let subagent_idx = rows
+        .iter()
+        .position(|r| r.contains("subagent ab12cd34 running (65s): survey the repo"))
+        .expect("running subagent row");
+    let job_idx = rows
+        .iter()
+        .position(|r| r.contains("job 9 running"))
+        .expect("running job row");
+    assert!(
+        subagent_idx < job_idx,
+        "expected subagent ({subagent_idx}) above job ({job_idx}): {rows:#?}"
+    );
 }
 
 #[test]

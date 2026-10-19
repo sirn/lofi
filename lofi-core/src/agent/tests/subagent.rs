@@ -1624,3 +1624,79 @@ async fn resume_after_rehydrate_trims_dangling_tool_calls() {
     assert!(texts.contains(&"a".to_string()), "{texts:?}");
     assert!(texts.contains(&"b".to_string()), "{texts:?}");
 }
+
+#[tokio::test]
+async fn running_reports_in_flight_runs_with_a_bounded_task_preview() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    // The hook clones the agent as its template, so the blocking provider
+    // must be in place first; otherwise the run can finish before the
+    // assertions see it.
+    agent.provider = Arc::new(NeverProvider);
+    let hook = agent.subagent_hook().unwrap();
+    let registry = agent.subagents();
+
+    let prompt = format!("{}\nsecond line", "x".repeat(100));
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": prompt })).await;
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let id = out["id"].as_str().unwrap().to_string();
+
+    assert!(registry.is_running(&id));
+    let running = registry.running();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].id, id);
+    // The first line only, cut to 80 chars plus an ellipsis.
+    assert_eq!(running[0].task.chars().count(), 81);
+    assert!(running[0].task.ends_with('\u{2026}'));
+
+    hook(SubagentOp::Kill, json!({ "id": id })).await;
+}
+
+#[tokio::test]
+async fn running_lists_background_runs_only() {
+    let _env = env_lock();
+    let _state = StateEnv::new();
+    let dir = tempdir().unwrap();
+    let mut agent = agent_with(vec![], dir.path()).with_subagent_support(support(dir.path()));
+    // The hook clones the agent as its template, so the blocking provider
+    // must be in place first.
+    agent.provider = Arc::new(NeverProvider);
+    let hook = agent.subagent_hook().unwrap();
+    let registry = agent.subagents();
+
+    // A foreground run in flight is not listed: the parent's exec block
+    // already shows it.
+    let foreground = tokio::spawn({
+        let hook = hook.clone();
+        async move { hook(SubagentOp::Run, json!({ "prompt": "fg" })).await }
+    });
+    let mut foreground_id = None;
+    for _ in 0..200 {
+        if let Some((id, _, true)) = registry.live().into_iter().next() {
+            foreground_id = Some(id);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let Some(foreground_id) = foreground_id else {
+        panic!("foreground run never started");
+    };
+    assert!(registry.is_running(&foreground_id));
+    assert!(registry.running().is_empty());
+    assert!(!registry.has_running_background());
+
+    // A background run is listed.
+    let out = hook(SubagentOp::Spawn, json!({ "prompt": "bg" })).await;
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let background_id = out["id"].as_str().unwrap().to_string();
+    let running = registry.running();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].id, background_id);
+    assert!(registry.has_running_background());
+
+    hook(SubagentOp::Kill, json!({ "id": background_id })).await;
+    hook(SubagentOp::Kill, json!({ "id": foreground_id })).await;
+    foreground.abort();
+}

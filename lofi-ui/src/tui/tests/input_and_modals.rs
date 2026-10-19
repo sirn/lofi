@@ -753,3 +753,762 @@ fn subagent_modal_esc_closes() {
     handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
     assert!(a.subagents_modal.is_none());
 }
+
+#[test]
+fn subagent_transcript_view_builds_main_transcript_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let mut events = blank_events([
+        msg(user("inspect the repo")),
+        msg(Message {
+            origin: None,
+            role: Role::Assistant,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "looking".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                },
+            ],
+            kind: PromptKind::default(),
+        }),
+        msg(Message {
+            origin: None,
+            role: Role::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "file body".to_string(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+            kind: PromptKind::default(),
+        }),
+        SessionEventKind::TurnEnd {
+            model: "openai/gpt-4o".into(),
+            elapsed_ms: 1000,
+            cost: 0.0,
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ]);
+    sub.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    assert!(a.slash_command("/subagent"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    let modal = a.subagents_modal.as_ref().expect("subagents modal");
+    let view = modal.viewing.as_ref().expect("transcript view");
+    assert!(view.load_error.is_none());
+    assert_eq!(view.turns.len(), 1);
+    assert_eq!(view.turns[0].prompt, "inspect the repo");
+    assert!(
+        view.turns[0]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Tool(tool) if tool.done)),
+        "expected a settled tool block, got {:?}",
+        view.turns[0].blocks
+    );
+}
+
+#[test]
+fn subagent_transcript_view_esc_returns_to_list() {
+    let mut a = app();
+    assert!(a.slash_command("/subagent"));
+    a.subagents_modal.as_mut().unwrap().viewing = Some(SubagentTranscriptView {
+        id: "run-1".to_string(),
+        file: None,
+        path: None,
+        turns: Vec::new(),
+        load_error: Some("transcript not found".to_string()),
+        live: false,
+        reloaded: false,
+        heights: Vec::new(),
+        signatures: Vec::new(),
+        prior_heights: Vec::new(),
+        parsed_len: None,
+        width: 0,
+        total: 0,
+        scroll: 0,
+        last_reload: std::time::Instant::now(),
+        view_h: 10,
+    });
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Esc), &mut a, None, &mut run);
+    let modal = a.subagents_modal.as_ref().expect("subagents modal");
+    assert!(modal.viewing.is_none());
+}
+
+#[test]
+fn subagent_transcript_view_keeps_turns_across_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let turn_end = || SessionEventKind::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 1000,
+        cost: 0.0,
+        usage: Usage::default(),
+        stop_reason: None,
+    };
+    let mut first = blank_events([
+        msg(user("first prompt")),
+        msg(assistant("first answer")),
+        turn_end(),
+    ]);
+    test_append_events(sub.path(), &mut first, None).unwrap();
+    test_append_compaction(
+        sub.path(),
+        &[assistant("kept tail")],
+        None,
+        "summary",
+        &[first[0].id.clone(), first[2].id.clone()],
+        store::CompactionCounts {
+            summarized: 3,
+            represented: 3,
+            kept: 1,
+        },
+    )
+    .unwrap();
+    let mut second = blank_events([
+        msg(user("second prompt")),
+        msg(assistant("second answer")),
+        turn_end(),
+    ]);
+    test_append_events(sub.path(), &mut second, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    assert!(a.slash_command("/subagent"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    let modal = a.subagents_modal.as_ref().expect("subagents modal");
+    let view = modal.viewing.as_ref().expect("transcript view");
+    let prompts: Vec<&str> = view.turns.iter().map(|turn| turn.prompt.as_str()).collect();
+    // The compaction marker's parent is a hidden checkpoint copy; a replay
+    // that walked parent links would stop there and drop the first turn.
+    assert_eq!(prompts, ["first prompt", "second prompt"]);
+}
+
+fn subagent_screen(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buf = term.backend().buffer();
+    let area = buf.area;
+    (area.top()..area.bottom())
+        .map(|y| {
+            (area.left()..area.right())
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Open the drill-in for the only subagent row and scroll up ten rows.
+/// The first render measures the transcript; only then can the key handler
+/// clamp the scroll against the real total.
+fn open_scrolled_subagent_view(
+    a: &mut App,
+    term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+) {
+    assert!(a.slash_command("/subagent"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), a, None, &mut run);
+    term.draw(|frame| crate::tui::view::render(frame, a))
+        .unwrap();
+    for _ in 0..10 {
+        handle_event(&plain_key(KeyCode::Up), a, None, &mut run);
+    }
+    term.draw(|frame| crate::tui::view::render(frame, a))
+        .unwrap();
+}
+
+#[test]
+fn subagent_transcript_view_renders_bottom_anchored_and_scrolls_to_top() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let body = (0..40)
+        .map(|i| format!("line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut events = blank_events([
+        msg(user("inspect the repo")),
+        msg(assistant(&body)),
+        SessionEventKind::TurnEnd {
+            model: "openai/gpt-4o".into(),
+            elapsed_ms: 1000,
+            cost: 0.0,
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ]);
+    sub.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    assert!(a.slash_command("/subagent"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let bottom = subagent_screen(&term);
+    assert!(bottom.contains("line 39"), "bottom frame:\n{bottom}");
+    assert!(!bottom.contains("line 00"), "bottom frame:\n{bottom}");
+
+    handle_event(&plain_key(KeyCode::Char('g')), &mut a, None, &mut run);
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let top = subagent_screen(&term);
+    assert!(top.contains("inspect the repo"), "top frame:\n{top}");
+}
+
+#[test]
+fn refresh_subagent_view_skips_reload_when_the_run_is_not_live() {
+    let mut a = app();
+    assert!(a.slash_command("/subagent"));
+    a.subagents_modal.as_mut().unwrap().viewing = Some(SubagentTranscriptView {
+        id: "run-1".to_string(),
+        file: None,
+        path: None,
+        turns: vec![Turn {
+            kind: lofi_types::PromptKind::User,
+            prompt: "p".to_string(),
+            blocks: Vec::new(),
+        }],
+        load_error: None,
+        heights: vec![Some(3)],
+        signatures: Vec::new(),
+        prior_heights: Vec::new(),
+        parsed_len: None,
+        width: 80,
+        total: 3,
+        scroll: 0,
+        // Long past the throttle interval: only liveness gates the reload.
+        last_reload: std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_mins(1))
+            .unwrap(),
+        live: false,
+        reloaded: false,
+        view_h: 10,
+    });
+    a.refresh_subagent_view();
+    // The test app has no registry, so the run is not live: no reload.
+    let view = a
+        .subagents_modal
+        .as_ref()
+        .and_then(|modal| modal.viewing.as_ref())
+        .unwrap();
+    assert_eq!(view.turns.len(), 1);
+    assert_eq!(view.heights, vec![Some(3)]);
+}
+
+#[test]
+fn subagent_transcript_view_watermark_stops_at_a_torn_trailing_line() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let mut events = blank_events([msg(user("complete answer"))]);
+    sub.append_events(&mut events).unwrap();
+    let complete_len = std::fs::metadata(sub.path()).unwrap().len();
+    // A live writer can leave a partial line at the end of the file.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(sub.path())
+        .unwrap();
+    file.write_all(b"{\"partial\":").unwrap();
+    drop(file);
+    assert!(std::fs::metadata(sub.path()).unwrap().len() > complete_len);
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    assert!(a.slash_command("/subagent"));
+    let mut run = None;
+    handle_event(&plain_key(KeyCode::Enter), &mut a, None, &mut run);
+
+    let view = a
+        .subagents_modal
+        .as_ref()
+        .and_then(|modal| modal.viewing.as_ref())
+        .unwrap();
+    // The watermark covers only the parsed bytes, so the torn tail still
+    // counts as unseen and earns a later reload.
+    assert_eq!(view.parsed_len, Some(complete_len));
+
+    let modal = a.subagents_modal.as_mut().unwrap();
+    let view = modal.viewing.as_mut().unwrap();
+    view.live = true;
+    view.last_reload = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_mins(1))
+        .unwrap();
+    a.refresh_subagent_view();
+    let view = a
+        .subagents_modal
+        .as_ref()
+        .and_then(|modal| modal.viewing.as_ref())
+        .unwrap();
+    // The file is longer than the watermark, so the settle reload ran.
+    assert!(view.reloaded);
+    assert_eq!(view.parsed_len, Some(complete_len));
+}
+
+#[test]
+fn refresh_subagent_view_skips_the_final_reload_when_the_file_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let mut events = blank_events([msg(user("settled answer"))]);
+    sub.append_events(&mut events).unwrap();
+    let parsed_len = std::fs::metadata(sub.path()).unwrap().len();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    a.subagents_modal = Some(SubagentsModalState {
+        selected: 0,
+        rows: Vec::new(),
+        viewing: Some(SubagentTranscriptView {
+            id: "run-1".to_string(),
+            file: Some(
+                sub.path()
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap(),
+            ),
+            path: Some(sub.path().to_path_buf()),
+            turns: Vec::new(),
+            load_error: None,
+            heights: Vec::new(),
+            signatures: Vec::new(),
+            prior_heights: Vec::new(),
+            parsed_len: Some(parsed_len),
+            width: 0,
+            total: 0,
+            scroll: 0,
+            last_reload: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_mins(1))
+                .unwrap(),
+            live: true,
+            reloaded: false,
+            view_h: 10,
+        }),
+    });
+    a.refresh_subagent_view();
+
+    let view = a
+        .subagents_modal
+        .as_ref()
+        .and_then(|modal| modal.viewing.as_ref())
+        .unwrap();
+    // The settle would reload once, but the file length matches the parsed
+    // watermark: only the liveness bookkeeping moves.
+    assert!(!view.live);
+    assert!(view.turns.is_empty());
+    assert!(!view.reloaded);
+}
+
+#[test]
+fn refresh_subagent_view_reloads_once_when_a_live_run_settles() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let file_name = sub
+        .path()
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let mut events = blank_events([msg(user("late answer"))]);
+    test_append_events(sub.path(), &mut events, None).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    a.subagents_modal = Some(SubagentsModalState {
+        selected: 0,
+        rows: Vec::new(),
+        viewing: Some(SubagentTranscriptView {
+            id: "run-1".to_string(),
+            file: Some(file_name),
+            path: None,
+            turns: Vec::new(),
+            load_error: None,
+            heights: Vec::new(),
+            signatures: Vec::new(),
+            prior_heights: Vec::new(),
+            parsed_len: None,
+            width: 0,
+            total: 0,
+            scroll: 0,
+            last_reload: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_mins(1))
+                .unwrap(),
+            // The view was live at the last load, and the test app has no
+            // registry: the settle path reloads one final time.
+            live: true,
+            reloaded: false,
+            view_h: 10,
+        }),
+    });
+    a.refresh_subagent_view();
+
+    let view = a
+        .subagents_modal
+        .as_ref()
+        .and_then(|modal| modal.viewing.as_ref())
+        .unwrap();
+    assert!(!view.live);
+    assert_eq!(view.turns.len(), 1);
+    assert_eq!(view.turns[0].prompt, "late answer");
+}
+
+#[test]
+fn subagent_transcript_reload_keeps_a_scrolled_up_view_on_the_same_content() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let body = (0..40)
+        .map(|i| format!("line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let turn_end = || SessionEventKind::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 1000,
+        cost: 0.0,
+        usage: Usage::default(),
+        stop_reason: None,
+    };
+    let mut events = blank_events([
+        msg(user("inspect the repo")),
+        msg(assistant(&body)),
+        turn_end(),
+    ]);
+    sub.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    open_scrolled_subagent_view(&mut a, &mut term);
+    let before = subagent_screen(&term);
+    assert!(before.contains("line 20"), "scrolled frame:\n{before}");
+    assert!(!before.contains("line 39"), "scrolled frame:\n{before}");
+
+    // The live run appends a turn while the user reads the scrolled-up
+    // position.
+    let mut second = blank_events([
+        msg(user("and now")),
+        msg(assistant("more output\nthat keeps\ngrowing")),
+        turn_end(),
+    ]);
+    test_append_events(sub.path(), &mut second, None).unwrap();
+    {
+        let modal = a.subagents_modal.as_mut().unwrap();
+        let view = modal.viewing.as_mut().unwrap();
+        // No registry in the test app: the settle path does the reload.
+        view.live = true;
+        view.last_reload = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_mins(1))
+            .unwrap();
+    }
+    a.refresh_subagent_view();
+    assert!(
+        a.subagents_modal
+            .as_ref()
+            .and_then(|modal| modal.viewing.as_ref())
+            .unwrap()
+            .reloaded
+    );
+
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let after = subagent_screen(&term);
+    // The scrollbar thumb may move (the total grew); the visible content
+    // window must not.
+    for marker in ["line 16", "line 20", "line 31"] {
+        assert!(
+            after.contains(marker),
+            "after frame lost {marker}:\n{after}"
+        );
+    }
+    for marker in ["line 15", "line 32", "and now"] {
+        assert!(
+            !after.contains(marker),
+            "after frame gained {marker}:\n{after}"
+        );
+    }
+}
+
+#[test]
+fn subagent_transcript_reload_compensates_a_shrink_below_the_window_top() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let turn_end = || SessionEventKind::TurnEnd {
+        model: "openai/gpt-4o".into(),
+        elapsed_ms: 1000,
+        cost: 0.0,
+        usage: Usage::default(),
+        stop_reason: None,
+    };
+    let body = |lines: &[usize]| {
+        lines
+            .iter()
+            .map(|i| format!("line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let full: Vec<usize> = (0..40).collect();
+    let mut events = blank_events([
+        msg(user("inspect the repo")),
+        msg(assistant(&body(&full))),
+        turn_end(),
+    ]);
+    sub.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    open_scrolled_subagent_view(&mut a, &mut term);
+    let before = subagent_screen(&term);
+    for marker in ["line 16", "line 20", "line 31"] {
+        assert!(
+            before.contains(marker),
+            "scrolled frame lost {marker}:\n{before}"
+        );
+    }
+    for marker in ["line 15", "line 32"] {
+        assert!(
+            !before.contains(marker),
+            "scrolled frame gained {marker}:\n{before}"
+        );
+    }
+
+    // The display budget keeps a prefix and a tail of each string, so it
+    // cut a middle span of the turn below the window top. Files are
+    // append-only in production; the rewrite models the re-truncated view
+    // the display reader would return. The meta header must survive.
+    let original = std::fs::read(sub.path()).unwrap();
+    let header_end = original.iter().position(|&b| b == b'\n').unwrap() + 1;
+    std::fs::remove_file(sub.path()).unwrap();
+    std::fs::write(sub.path(), &original[..header_end]).unwrap();
+    let cursor = store::SessionCursor::new(sub.path().to_path_buf(), None);
+    // The reader keeps a prefix and a tail of about the same length.
+    let cut: Vec<usize> = (0..18).chain(23..40).collect();
+    let mut shorter = blank_events([
+        msg(user("inspect the repo")),
+        msg(assistant(&body(&cut))),
+        turn_end(),
+    ]);
+    cursor.append_events(&mut shorter).unwrap();
+    {
+        let modal = a.subagents_modal.as_mut().unwrap();
+        let view = modal.viewing.as_mut().unwrap();
+        // No registry in the test app: the settle path does the reload.
+        view.live = true;
+        view.last_reload = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_mins(1))
+            .unwrap();
+    }
+    a.refresh_subagent_view();
+    assert!(
+        a.subagents_modal
+            .as_ref()
+            .and_then(|modal| modal.viewing.as_ref())
+            .unwrap()
+            .reloaded
+    );
+
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let after = subagent_screen(&term);
+    // The rows above the cut must not move; the kept tail slides up into
+    // view below it.
+    for marker in ["line 16", "line 17", "line 23", "line 28", "line 34"] {
+        assert!(
+            after.contains(marker),
+            "after frame lost {marker}:\n{after}"
+        );
+    }
+    for marker in ["line 11", "line 22", "line 39"] {
+        assert!(
+            !after.contains(marker),
+            "after frame gained {marker}:\n{after}"
+        );
+    }
+}
+
+#[test]
+fn subagent_transcript_reload_compensates_when_the_straddling_turn_grows() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/workspace");
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let parent = store.create_cursor(cwd, &"openai/gpt-4o".into()).unwrap();
+    let stem = parent
+        .path()
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap();
+    let sub = store
+        .create_subagent_cursor(cwd, &"openai/gpt-4o".into(), Some(&stem), "run-1")
+        .unwrap();
+    let body = (0..40)
+        .map(|i| format!("line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // No TurnEnd: this turn is still in progress and keeps growing.
+    let mut events = blank_events([msg(user("inspect the repo")), msg(assistant(&body))]);
+    sub.append_events(&mut events).unwrap();
+
+    let mut a = app();
+    attach_session_sink(&mut a, store, cwd, parent);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    open_scrolled_subagent_view(&mut a, &mut term);
+    let before = subagent_screen(&term);
+    for marker in ["line 14", "line 20", "line 29"] {
+        assert!(
+            before.contains(marker),
+            "scrolled frame lost {marker}:\n{before}"
+        );
+    }
+    for marker in ["line 13", "line 30", "line 39"] {
+        assert!(
+            !before.contains(marker),
+            "scrolled frame gained {marker}:\n{before}"
+        );
+    }
+
+    // The in-progress turn grows at its bottom, below the window top.
+    let growth = (40..46)
+        .map(|i| format!("line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut more = blank_events([msg(assistant(&growth))]);
+    test_append_events(sub.path(), &mut more, None).unwrap();
+    {
+        let modal = a.subagents_modal.as_mut().unwrap();
+        let view = modal.viewing.as_mut().unwrap();
+        // No registry in the test app: the settle path does the reload.
+        view.live = true;
+        view.last_reload = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_mins(1))
+            .unwrap();
+    }
+    a.refresh_subagent_view();
+    assert!(
+        a.subagents_modal
+            .as_ref()
+            .and_then(|modal| modal.viewing.as_ref())
+            .unwrap()
+            .reloaded
+    );
+
+    term.draw(|frame| crate::tui::view::render(frame, &mut a))
+        .unwrap();
+    let after = subagent_screen(&term);
+    // The turn straddles the window top, so its growth would slide the
+    // visible content without compensation.
+    for marker in ["line 14", "line 20", "line 29"] {
+        assert!(
+            after.contains(marker),
+            "after frame lost {marker}:\n{after}"
+        );
+    }
+    for marker in ["line 13", "line 30", "line 40"] {
+        assert!(
+            !after.contains(marker),
+            "after frame gained {marker}:\n{after}"
+        );
+    }
+}

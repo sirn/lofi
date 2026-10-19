@@ -386,9 +386,20 @@ pub(crate) async fn run_loop(
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut dirty = true;
     let mut resize = Box::<ResizeState>::default();
+    // What the last drawn frame showed: a running background subagent's
+    // line must leave the screen even when the settled run published no
+    // terminal notice. The state is sampled at draw time, not at tick
+    // time, so a run drawn between ticks and settled before the next one
+    // is still caught.
+    let mut subagents_shown = false;
     loop {
         if dirty && resize.deadline.is_none() {
+            // Bracket the draw: a run that starts or settles while the
+            // frame builds must still count as shown, or its status line
+            // could stay on screen forever.
+            let running_before = app.has_running_subagents();
             guard.draw(&mut app, resize.events, resize.started, resize.last)?;
+            subagents_shown = running_before || app.has_running_subagents();
             if resize.deadline.is_none() {
                 resize.started = None;
                 resize.last = None;
@@ -724,6 +735,22 @@ pub(crate) async fn run_loop(
                 }
                 if app
                     .jobs_modal
+                    .as_ref()
+                    .is_some_and(|modal| modal.viewing.is_some())
+                {
+                    dirty = true;
+                }
+                // A running background subagent ticks the status line and
+                // the drill-in refresh even while the parent is idle. The
+                // transition away from what the last frame showed also
+                // redraws: without a terminal notice, nothing else would
+                // take the line off the screen.
+                let subagents_running = app.has_running_subagents();
+                if subagents_running || subagents_shown != subagents_running {
+                    dirty = true;
+                }
+                if app
+                    .subagents_modal
                     .as_ref()
                     .is_some_and(|modal| modal.viewing.is_some())
                 {

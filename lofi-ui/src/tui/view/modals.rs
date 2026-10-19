@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::tui::{InfoLine, JobViewContent, SubagentRow, Theme};
+use crate::tui::{InfoLine, JobViewContent, SubagentRow, SubagentsModalState, Theme};
 
 use ratatui::style::Color;
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Padding};
@@ -953,47 +953,29 @@ fn job_span_style(attrs: lofi_core::JobStyle) -> Style {
 /// `/subagent` modal. The list shows this session's subagents (live rows
 /// highlighted); `Enter` drills into a read-only transcript view.
 pub(super) fn render_subagents_modal(f: &mut Frame, area: Rect, app: &mut App) {
-    use ratatui::widgets::ListState;
-    let t = app.theme;
-    let Some(modal) = app.subagents_modal.as_mut() else {
+    // Keep an open drill-in current while its run is live.
+    app.refresh_subagent_view();
+    // Take the modal out: the transcript drill-in renders turn components,
+    // whose render context borrows `&App`.
+    let Some(mut modal) = app.subagents_modal.take() else {
         return;
     };
+    render_subagents_modal_inner(f, area, app, &mut modal);
+    app.subagents_modal = Some(modal);
+}
+
+fn render_subagents_modal_inner(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    modal: &mut SubagentsModalState,
+) {
+    use ratatui::widgets::ListState;
+    let t = app.theme;
 
     // Drill-in transcript view.
-    if let Some(view) = &mut modal.viewing {
-        let title = format!(" subagent {} transcript ", view.id);
-        let help = " ↑/↓ scroll  g top  G bottom  esc back ";
-        let w = area.width.saturating_sub(4).clamp(40, 100);
-        let h = area.height.saturating_sub(4).clamp(8, 28);
-        let popup = centered_modal(area, w, h);
-        f.render_widget(Clear, popup);
-        let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
-        let body_h = rows.content.height as usize;
-        view.view_h = body_h;
-        view.scroll = view.scroll.min(view.lines.len().saturating_sub(body_h));
-        let total = view.lines.len();
-        let end = total.saturating_sub(view.scroll);
-        let start = end.saturating_sub(body_h);
-        let visible: Vec<Line> = view
-            .lines
-            .iter()
-            .skip(start)
-            .take(body_h)
-            .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))))
-            .collect();
-        f.render_widget(Paragraph::new(visible), rows.content);
-        if total > body_h {
-            let scroll_area = modal_scroll_area(rows.content);
-            prim::render_scrollbar(
-                f,
-                scroll_area.gutter,
-                start,
-                body_h,
-                total,
-                t.subtle,
-                t.user,
-            );
-        }
+    if modal.viewing.is_some() {
+        render_subagent_transcript(f, area, app, modal);
         return;
     }
 
@@ -1068,6 +1050,157 @@ pub(super) fn render_subagents_modal(f: &mut Frame, area: Rect, app: &mut App) {
             state.offset(),
             rows.content.height as usize,
             modal.rows.len(),
+            t.subtle,
+            t.user,
+        );
+    }
+}
+
+/// Subagent transcript drill-in: the same turn components as the main
+/// transcript, rendered per frame so only the visible window is
+/// materialized. Scroll is bottom-anchored like the main transcript.
+fn render_subagent_transcript(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    modal: &mut SubagentsModalState,
+) {
+    let t = app.theme;
+    let Some(view) = &mut modal.viewing else {
+        return;
+    };
+    let title = format!(" subagent {} transcript ", view.id);
+    let help = " ↑/↓ scroll  g top  G bottom  esc back ";
+    let w = area.width.saturating_sub(4).clamp(40, 100);
+    let h = area.height.saturating_sub(4).clamp(8, 28);
+    let popup = centered_modal(area, w, h);
+    f.render_widget(Clear, popup);
+    let rows = render_modal_frame(f, popup, t, modal_title(t, title), modal_help(t, help));
+    let body_h = rows.content.height as usize;
+    view.view_h = body_h;
+
+    if let Some(error) = &view.load_error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                error.clone(),
+                Style::new().fg(t.error),
+            ))),
+            rows.content,
+        );
+        return;
+    }
+
+    // A width change re-measures every turn; a reload re-measures only
+    // the turns whose signature changed, which the refresh kept unmeasured.
+    let width = rows.content.width as usize;
+    if width == 0 || body_h == 0 {
+        return;
+    }
+    let cx = component::Cx {
+        app,
+        theme: t,
+        width,
+        active_turn: false,
+    };
+    if view.width != width {
+        // A reflow invalidates every measurement, and the reload
+        // compensation has no prior layout to compare against.
+        view.heights = vec![None; view.turns.len()];
+        view.prior_heights.clear();
+        view.width = width;
+    }
+    // Only the turns the refresh invalidated need a measure pass.
+    let changed: Vec<bool> = view.heights.iter().map(Option::is_none).collect();
+    for (i, height) in view.heights.iter_mut().enumerate() {
+        if height.is_none() {
+            *height = Some(blocks::render_turn_height(&cx, &view.turns[i]));
+        }
+    }
+    let heights: Vec<usize> = view.heights.iter().flatten().copied().collect();
+    let total = heights.iter().sum::<usize>() + heights.len().saturating_sub(1);
+    if view.reloaded && view.scroll > 0 && !view.prior_heights.is_empty() {
+        // Scroll is a distance from the bottom. A change strictly below
+        // the window top shifts the visible content unless scroll follows
+        // it; a change at or above the window top needs no compensation. A
+        // bottom-anchored view (scroll == 0) stays pinned instead. The
+        // rule is turn-granular: a changed turn straddling the top counts
+        // its whole delta even when the divergence sits above the top.
+        let end_old = view.total.saturating_sub(view.scroll);
+        let start_old = end_old.saturating_sub(body_h);
+        let mut drift: isize = 0;
+        let mut pos = 0usize;
+        for (i, &old_h) in view.prior_heights.iter().enumerate() {
+            if i > 0 {
+                pos += 1;
+            }
+            if i < heights.len() && changed[i] {
+                // Anchor every change at the turn's bottom. A live turn
+                // grows there, and the display budget keeps the prefix of
+                // each string, so a re-truncation cuts a middle span.
+                // Compensating keeps the rows above the divergence fixed;
+                // a window top inside the kept tail sits below the cut, so
+                // the anchor then moves the read rows by the delta. At
+                // turn granularity the exact divergence is unknowable, so
+                // a mixed growth and shrink nets to one direction.
+                if pos + old_h > start_old {
+                    // Heights are screen rows; the signed casts never wrap.
+                    drift += heights[i].cast_signed() - old_h.cast_signed();
+                }
+            }
+            pos += old_h;
+        }
+        // Turns past the prior layout were appended at the bottom, always
+        // below the window top.
+        for (i, &new_h) in heights.iter().enumerate().skip(view.prior_heights.len()) {
+            drift += new_h.cast_signed() + isize::from(i > 0);
+        }
+        if drift > 0 {
+            view.scroll = view.scroll.saturating_add(drift.unsigned_abs());
+        } else {
+            view.scroll = view.scroll.saturating_sub(drift.unsigned_abs());
+        }
+    }
+    view.reloaded = false;
+    view.prior_heights.clear();
+    view.total = total;
+    view.scroll = view.scroll.min(view.total.saturating_sub(body_h));
+
+    let end = view.total.saturating_sub(view.scroll);
+    let start = end.saturating_sub(body_h);
+    let mut lines: Vec<Line> = Vec::with_capacity(body_h);
+    let mut pos = 0usize;
+    for (i, turn) in view.turns.iter().enumerate() {
+        // The blank separator between turns matches the main transcript.
+        if i > 0 {
+            if (start..end).contains(&pos) {
+                lines.push(Line::default());
+            }
+            pos += 1;
+        }
+        let height = heights[i];
+        if height > 0 && pos + height > start && pos < end {
+            let from = start.saturating_sub(pos);
+            let to = end.min(pos + height) - pos;
+            lines.extend(
+                blocks::render_turn_window(&cx, turn, from..to)
+                    .into_iter()
+                    .map(|rl| rl.line),
+            );
+        }
+        pos += height;
+        if pos >= end {
+            break;
+        }
+    }
+    f.render_widget(Paragraph::new(lines), rows.content);
+    if view.total > body_h {
+        let scroll_area = modal_scroll_area(rows.content);
+        prim::render_scrollbar(
+            f,
+            scroll_area.gutter,
+            start,
+            body_h,
+            view.total,
             t.subtle,
             t.user,
         );

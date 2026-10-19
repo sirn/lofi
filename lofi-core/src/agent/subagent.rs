@@ -146,6 +146,33 @@ struct Entry {
     // Set when rehydration could not restore the transcript's model: the
     // entry keeps the session model instead. Surfaced by status and list.
     note: Option<String>,
+    // Reset at every claim (spawn and resume): the parent's status line
+    // shows a running run's elapsed time and task.
+    started: std::time::Instant,
+    task: String,
+    // Set at spawn, cleared at resume: the parent's status line shows only
+    // background runs; a foreground run already blocks the parent's exec
+    // block, so listing it there would duplicate it.
+    background: bool,
+}
+
+/// One running subagent, surfaced on the parent's status line.
+pub struct SubagentRunning {
+    pub id: String,
+    pub elapsed_ms: u64,
+    pub task: String,
+}
+
+/// One-line task summary for status surfaces: the first line, bounded so a
+/// pasted file body cannot flood a status line.
+fn task_preview(prompt: &str) -> String {
+    const MAX: usize = 80;
+    let first = prompt.lines().next().unwrap_or("").trim();
+    let mut out: String = first.chars().take(MAX).collect();
+    if first.chars().count() > MAX {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// Bounded per-run event buffer for `subagentRead`. Sequence numbers are
@@ -462,6 +489,46 @@ impl SubagentRegistry {
                 )
             })
             .collect()
+    }
+
+    /// Currently running background runs, for the parent's status line.
+    /// Foreground runs are excluded: the parent's exec block already shows
+    /// them. Sorted by start time so the status line does not reshuffle
+    /// between frames.
+    #[must_use]
+    pub fn running(&self) -> Vec<SubagentRunning> {
+        let mut running: Vec<_> = lock(&self.entries)
+            .iter()
+            .filter(|(_, e)| matches!(e.status, Status::Running) && e.background)
+            .map(|(id, e)| (e.started, id.clone(), e.task.clone()))
+            .collect();
+        running.sort_by_key(|(started, _, _)| *started);
+        running
+            .into_iter()
+            .map(|(started, id, task)| SubagentRunning {
+                id,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                task,
+            })
+            .collect()
+    }
+
+    /// Whether a background run is still active. The tick loop polls this
+    /// on every tick, so it must not copy the task strings the way
+    /// [`Self::running`] does.
+    #[must_use]
+    pub fn has_running_background(&self) -> bool {
+        lock(&self.entries)
+            .values()
+            .any(|e| matches!(e.status, Status::Running) && e.background)
+    }
+
+    /// Whether `id` names a run that is still active.
+    #[must_use]
+    pub fn is_running(&self, id: &str) -> bool {
+        lock(&self.entries)
+            .get(id)
+            .is_some_and(|e| matches!(e.status, Status::Running))
     }
 
     #[cfg(test)]
@@ -1964,6 +2031,11 @@ fn prepare(
                 events: EventLog::default(),
                 notify_terminal: notify,
                 note: None,
+                started: std::time::Instant::now(),
+                task: task_preview(str_arg(args, "prompt")?.unwrap_or("")),
+                // The notify argument marks the spawn path: only
+                // `subagentSpawn` starts a run with notices on.
+                background: notify,
             },
         );
         id
@@ -2100,6 +2172,11 @@ fn restore_entry(
         notify_tick: 0,
         notify_task: None,
         note,
+        started: std::time::Instant::now(),
+        task: String::new(),
+        // A rehydrated entry is settled; a resume re-claims it as
+        // foreground and flips this flag itself.
+        background: false,
     };
     (id, entry)
 }
@@ -2176,10 +2253,15 @@ fn prepare_resume(
             )
             .into());
         }
+        // Parse before the claim: a failure must not strand the entry in
+        // the running state.
+        let task = task_preview(str_arg(args, "prompt")?.unwrap_or(""));
         // Claim the entry under the lock so a concurrent resume of the same
         // id is rejected instead of racing this run.
         entry.status = Status::Running;
         entry.used = registry.stamp();
+        entry.started = std::time::Instant::now();
+        entry.task = task;
         // A previous kill barred this owner from acquiring jobs; the new run
         // needs them again.
         entry.agent.jobs().uncancel_owner(&id);
@@ -2195,6 +2277,7 @@ fn prepare_resume(
         // retire the previous run's periodic loop, which would otherwise wake
         // up on the running status.
         entry.notify_terminal = notify;
+        entry.background = notify;
         entry.notify_tick += 1;
         if let Some(task) = entry.notify_task.take() {
             task.abort();

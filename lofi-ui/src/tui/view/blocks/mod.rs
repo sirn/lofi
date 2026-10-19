@@ -21,8 +21,8 @@ pub(crate) use native::compact_native_previews;
 use exec::ExecBlock;
 use message::{AssistantText, NoticeMessage, Thinking, UserMessage};
 use status::{
-    CompactionLine, ErrorLine, QueuedPromptLine, RunningJobLine, ToolLine, TurnCancelled, TurnEnd,
-    TurnFailed, UserShellLine, WorkingLine,
+    CompactionLine, ErrorLine, QueuedPromptLine, RunningJobLine, RunningSubagentLine, ToolLine,
+    TurnCancelled, TurnEnd, TurnFailed, UserShellLine, WorkingLine,
 };
 
 pub(super) struct RenderWindow {
@@ -92,8 +92,9 @@ pub fn render_turns(app: &App, width: u16) -> Text<'static> {
     };
     let has_prior = !out.is_empty();
     let jobs = app.running_jobs();
+    let subagents = app.running_subagents();
     out.extend(
-        render_transcript_tail(&tail_cx, has_prior, &jobs)
+        render_transcript_tail(&tail_cx, has_prior, &jobs, &subagents)
             .into_iter()
             .map(|rl| rl.line),
     );
@@ -104,6 +105,7 @@ pub fn render_transcript_tail(
     cx: &Cx,
     has_prior: bool,
     jobs: &[lofi_core::JobInfo],
+    subagents: &[lofi_core::SubagentRunning],
 ) -> Vec<RenderLine> {
     let mut out = Vec::new();
     let mut any = has_prior;
@@ -128,6 +130,13 @@ pub fn render_transcript_tail(
             }
             .lines(cx),
         );
+        any = true;
+    }
+    for run in subagents {
+        if any {
+            out.push(prim::rblank());
+        }
+        out.extend(RunningSubagentLine { run }.lines(cx));
         any = true;
     }
     for job in jobs {

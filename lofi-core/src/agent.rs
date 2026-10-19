@@ -45,7 +45,7 @@ mod model;
 mod subagent;
 mod tool_executor;
 pub use lofi_code::SubagentOp;
-pub use subagent::{SubagentNotice, SubagentRegistry, SubagentSupport};
+pub use subagent::{SubagentNotice, SubagentRegistry, SubagentRunning, SubagentSupport};
 pub use tool_executor::{ToolCallContext, ToolExecutor};
 
 #[cfg(test)]

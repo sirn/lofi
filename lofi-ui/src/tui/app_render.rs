@@ -122,10 +122,23 @@ impl App {
         tail_jobs(self.jobs_snapshot(), &self.notified_jobs)
     }
 
+    pub(crate) fn running_subagents(&self) -> Vec<lofi_core::SubagentRunning> {
+        self.subagents
+            .as_ref()
+            .map(lofi_core::SubagentRegistry::running)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn has_running_jobs(&self) -> bool {
         self.jobs
             .as_ref()
             .is_some_and(|jobs| jobs.running_count() > 0)
+    }
+
+    pub(crate) fn has_running_subagents(&self) -> bool {
+        self.subagents
+            .as_ref()
+            .is_some_and(lofi_core::SubagentRegistry::has_running_background)
     }
 
     pub(crate) fn yank_badge(&self) -> Option<&'static str> {

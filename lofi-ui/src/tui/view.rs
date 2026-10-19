@@ -265,13 +265,14 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
 
     let tail_lines = {
         let jobs = app.running_jobs();
+        let subagents = app.running_subagents();
         let cx = component::Cx {
             app,
             theme,
             width: w,
             active_turn: running,
         };
-        blocks::render_transcript_tail(&cx, n_turns > 1 || last_h > 0, &jobs)
+        blocks::render_transcript_tail(&cx, n_turns > 1 || last_h > 0, &jobs, &subagents)
     };
     let tail_h = tail_lines.len();
     let turn_gaps = if n_turns == 0 {

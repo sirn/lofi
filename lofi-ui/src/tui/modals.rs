@@ -232,11 +232,44 @@ pub(crate) struct SubagentRow {
     pub(crate) file: Option<String>,
 }
 
-/// Read-only drill-in of one subagent transcript, rendered as flat lines.
+/// Read-only drill-in of one subagent transcript. Turns are built with the
+/// same replay the main transcript uses and rendered per frame, so the view
+/// matches the main transcript while retained styled lines stay bounded by
+/// the viewport. Tool expansion is not wired up here.
 pub(crate) struct SubagentTranscriptView {
     pub(crate) id: String,
-    pub(crate) lines: Vec<String>,
+    /// Transcript file name, kept so a live run's view can reload.
+    pub(crate) file: Option<String>,
+    /// Resolved transcript path, cached so a live reload does not list the
+    /// sessions directory on every tick.
+    pub(crate) path: Option<std::path::PathBuf>,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) load_error: Option<String>,
+    /// Per-turn rendered heights; `None` marks a turn that changed since
+    /// the last render and still needs a measure pass.
+    pub(crate) heights: Vec<Option<usize>>,
+    /// Change detection per turn. A reload serializes the fresh turns once
+    /// and compares against these; the old turns are never re-serialized.
+    pub(crate) signatures: Vec<u64>,
+    /// Complete heights from the last render before a reload; the renderer
+    /// compares them against the new layout to keep a scrolled-up view on
+    /// the same content. Empty when no complete measurement exists.
+    pub(crate) prior_heights: Vec<usize>,
+    /// Parsed byte watermark at the last load; a file length equal to it
+    /// skips the reload. A same-length rewrite would slip through, but the
+    /// transcript is append-only in practice.
+    pub(crate) parsed_len: Option<u64>,
+    pub(crate) width: usize,
+    pub(crate) total: usize,
     pub(crate) scroll: usize,
+    /// Last reload of a live run; throttles the live refresh.
+    pub(crate) last_reload: std::time::Instant,
+    /// The run was live at the last load: when it settles, one final
+    /// reload picks up the closing events.
+    pub(crate) live: bool,
+    /// Set by the refresh after a successful reload; the renderer then
+    /// compensates the bottom-relative scroll for the appended height.
+    pub(crate) reloaded: bool,
     /// Body height from the last render; the key handler clamps scroll
     /// against it so there is no dead zone past the top.
     pub(crate) view_h: usize,

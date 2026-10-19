@@ -62,6 +62,33 @@ impl Component for RunningJobLine<'_> {
     }
 }
 
+pub(super) struct RunningSubagentLine<'a> {
+    pub(super) run: &'a lofi_core::SubagentRunning,
+}
+
+impl Component for RunningSubagentLine<'_> {
+    fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
+        let t = cx.theme;
+        let dur = prim::fmt_duration(Duration::from_millis(self.run.elapsed_ms));
+        let task = self.run.task.trim();
+        let text = if task.is_empty() {
+            format!("subagent {} running ({dur})", self.run.id)
+        } else {
+            format!("subagent {} running ({dur}): {task}", self.run.id)
+        };
+        let mark = Style::new().fg(t.info);
+        let body_style = Style::new().fg(t.muted);
+        render_markdown_body(
+            &text,
+            t,
+            cx.width,
+            cx.width.saturating_sub(2),
+            body_style,
+            move |_| vec![Span::styled("┆ ", mark)],
+        )
+    }
+}
+
 pub(super) struct QueuedPromptLine<'a> {
     pub(super) text: &'a str,
     pub(super) kind: lofi_types::PromptKind,
