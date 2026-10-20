@@ -635,3 +635,27 @@ fn auto_models_defaults() {
     assert!(!am.enabled);
     assert!(am.models_url.is_none());
 }
+
+#[test]
+fn run_model_query_emits_the_tier() {
+    let m = RunModel {
+        provider: "openai".into(),
+        id: "gpt-5.6-sol".into(),
+        thinking: ThinkingLevel::High,
+        service_tier: ServiceTier::Auto,
+    };
+    // `auto` is emitted so restoring a run cannot re-resolve it to a
+    // configured default.
+    assert_eq!(m.query(), "openai/gpt-5.6-sol:high@auto");
+    let parsed: RunModel = m.query().as_str().into();
+    assert_eq!(parsed.thinking, ThinkingLevel::High);
+    assert_eq!(parsed.service_tier, ServiceTier::Auto);
+
+    let custom = RunModel {
+        service_tier: ServiceTier::Custom("vip".into()),
+        ..m
+    };
+    assert_eq!(custom.query(), "openai/gpt-5.6-sol:high@vip");
+    let parsed: RunModel = custom.query().as_str().into();
+    assert_eq!(parsed.service_tier, ServiceTier::Custom("vip".into()));
+}

@@ -345,7 +345,7 @@ pub fn select_model(
     config: &lofi_types::Config,
     model_query: Option<&str>,
 ) -> Result<(Model, ThinkingLevel)> {
-    select_model_impl(registry, config, model_query, None)
+    select_model_impl(registry, config, model_query, None, None)
 }
 
 /// Like [`select_model`], but an explicit thinking level takes precedence
@@ -359,7 +359,29 @@ pub fn select_model_with_level(
     model_query: Option<&str>,
     level: ThinkingLevel,
 ) -> Result<(Model, ThinkingLevel)> {
-    select_model_impl(registry, config, model_query, Some(level))
+    select_model_impl(registry, config, model_query, Some(level), None)
+}
+
+/// Like [`select_model_with_level`], but a subagent also keeps the session's
+/// non-`auto` service tier when the query carries no `@tier` and the target
+/// model declares it.
+/// # Errors
+/// Propagates [`Error`] from query parsing, model resolution, and level
+/// validation.
+pub(crate) fn select_model_for_subagent(
+    registry: &ModelRegistry,
+    config: &lofi_types::Config,
+    model_query: &str,
+    level: Option<ThinkingLevel>,
+    parent_tier: &ServiceTier,
+) -> Result<(Model, ThinkingLevel)> {
+    select_model_impl(
+        registry,
+        config,
+        Some(model_query),
+        level,
+        Some(parent_tier),
+    )
 }
 
 fn select_model_impl(
@@ -367,6 +389,7 @@ fn select_model_impl(
     config: &lofi_types::Config,
     model_query: Option<&str>,
     level_override: Option<ThinkingLevel>,
+    parent_tier: Option<&ServiceTier>,
 ) -> Result<(Model, ThinkingLevel)> {
     let available = registry.available();
     let (provider_name, model_id, parsed_level, explicit_tier) = if let Some(q) = model_query {
@@ -431,7 +454,20 @@ fn select_model_impl(
         pcfg,
         config.agent.thinking_level.clone(),
     )?;
-    let tier = resolve_service_tier(explicit_tier, mc, pcfg, config.agent.service_tier.clone())?;
+    // A subagent keeps the session's tier: the user chose it for the
+    // session, so a model override must not silently drop it back to a
+    // configured default. Only a non-`auto` tier the target model declares
+    // is inherited, so an explicit `@tier` still wins and an undeclared tier
+    // leaves the usual order in place.
+    let inherited = parent_tier.filter(|tier| {
+        explicit_tier.is_none()
+            && **tier != ServiceTier::Auto
+            && declared_tiers(mc, pcfg).contains(*tier)
+    });
+    let tier = match inherited {
+        Some(tier) => tier.clone(),
+        None => resolve_service_tier(explicit_tier, mc, pcfg, config.agent.service_tier.clone())?,
+    };
     let mut model = model;
     model.service_tier = tier.clone();
     Ok((model, level))
@@ -476,6 +512,19 @@ pub(crate) fn resolve_thinking_level(
     Ok(desired)
 }
 
+/// The tiers a model may run with: its own list, or the provider list when
+/// it declares none.
+fn declared_tiers<'a>(
+    mc: &'a lofi_types::ModelConfig,
+    pcfg: &'a lofi_types::ProviderConfig,
+) -> &'a [ServiceTier] {
+    if mc.service_tiers.is_empty() {
+        &pcfg.service_tiers
+    } else {
+        &mc.service_tiers
+    }
+}
+
 pub(crate) fn resolve_service_tier(
     explicit: Option<ServiceTier>,
     mc: &lofi_types::ModelConfig,
@@ -500,11 +549,7 @@ pub(crate) fn resolve_service_tier(
     if desired == ServiceTier::Auto {
         return Ok(ServiceTier::Auto);
     }
-    let tiers = if inherits_provider {
-        &pcfg.service_tiers
-    } else {
-        &mc.service_tiers
-    };
+    let tiers = declared_tiers(mc, pcfg);
     if tiers.is_empty() {
         // Like thinking levels, an undeclared list means the model declares
         // no service tiers, so an explicit non-auto tier is rejected rather

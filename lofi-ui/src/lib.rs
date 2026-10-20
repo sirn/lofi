@@ -185,11 +185,12 @@ pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
         .await;
     }
 
-    // Restore the model+thinking the user last ran with unless --model was
-    // given: the resumed session's final turn marker carries it (raw, on the
-    // active path), so a fresh/ephemeral session with no turns falls through
-    // to the config default. `resolve_startup_agent` falls back to that
-    // default when the restored model is no longer resolvable.
+    // Restore the model, thinking level, and service tier the user last ran
+    // with unless --model was given: the resumed session's final turn marker
+    // carries them (raw, on the active path), so a fresh/ephemeral session
+    // with no turns falls through to the config default.
+    // `resolve_startup_agent` falls back to that default when the restored
+    // model is no longer resolvable.
     let restored = opts
         .model
         .is_none()

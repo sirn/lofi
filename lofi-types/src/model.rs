@@ -74,20 +74,17 @@ pub struct RunModel {
 
 impl RunModel {
     /// A model query that round-trips through `parse_model_query`: unlike
-    /// `label` it always emits the thinking level so a restored `off` level
-    /// is not silently replaced by the model's default.
+    /// `label` it always emits the thinking level and the service tier, so a
+    /// restored `off` level or `auto` tier is not silently replaced by a
+    /// configured default.
     #[must_use]
     pub fn query(&self) -> String {
         format!(
-            "{}/{}:{}{}",
+            "{}/{}:{}@{}",
             self.provider,
             self.id,
             self.thinking.as_str(),
-            if self.service_tier == ServiceTier::Auto {
-                String::new()
-            } else {
-                format!("@{}", self.service_tier.as_str())
-            }
+            self.service_tier.as_str(),
         )
     }
 

@@ -2,6 +2,9 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use crate::agent::model::select_model_for_subagent;
+use crate::agent::subagent::apply_model_overrides;
+use serde_json::json;
 
 fn mc() -> ModelConfig {
     ModelConfig {
@@ -788,4 +791,197 @@ async fn non_vision_model_warns_once_per_turn_with_image_in_history() {
         .blocks
         .iter()
         .any(|b| matches!(b, ContentBlock::Image { .. })));
+}
+
+#[test]
+fn select_model_for_subagent_inherits_a_supported_tier() {
+    // The child model's own default and the configured default both say
+    // Priority; the tier the user chose for the session still wins.
+    let mut child = mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]);
+    child.service_tier = Some(ServiceTier::Priority);
+    let (mut cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", child)]),
+        None,
+    )));
+    cfg.agent.service_tier = Some(ServiceTier::Priority);
+    let (m, _) =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o", None, &ServiceTier::Flex).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Flex);
+}
+
+#[test]
+fn select_model_for_subagent_keeps_its_own_tier_when_undeclared() {
+    // Inheritance adds: a tier the target model does not declare leaves the
+    // usual order in place instead of clamping the child to Auto.
+    let (mut cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Priority]))]),
+        None,
+    )));
+    cfg.agent.service_tier = Some(ServiceTier::Priority);
+    let (m, _) =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o", None, &ServiceTier::Flex).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Priority);
+}
+
+#[test]
+fn select_model_for_subagent_auto_parent_inherits_nothing() {
+    // `auto` is a declared tier here, so only the "never inherit auto"
+    // rule keeps the child on its own default.
+    let mut child = mc_tiers(&[ServiceTier::Auto, ServiceTier::Flex]);
+    child.service_tier = Some(ServiceTier::Flex);
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", child)]),
+        None,
+    )));
+    let (m, _) =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o", None, &ServiceTier::Auto).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Flex);
+}
+
+#[test]
+fn select_model_for_subagent_inherits_from_the_provider_list() {
+    let mut p = provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc())]),
+        None,
+    );
+    p.service_tiers = vec![ServiceTier::Flex, ServiceTier::Priority];
+    let (cfg, reg) = build(one_provider(p));
+    let (m, _) =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o", None, &ServiceTier::Flex).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Flex);
+}
+
+#[test]
+fn select_model_for_subagent_model_list_replaces_the_provider_list() {
+    let mut p = provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Priority]))]),
+        None,
+    );
+    p.service_tiers = vec![ServiceTier::Flex];
+    let (cfg, reg) = build(one_provider(p));
+    let (m, _) =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o", None, &ServiceTier::Flex).unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Auto);
+}
+
+#[test]
+fn select_model_for_subagent_explicit_tier_wins() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]),
+        )]),
+        None,
+    )));
+    let (m, _) = select_model_for_subagent(
+        &reg,
+        &cfg,
+        "openai/gpt-4o@priority",
+        None,
+        &ServiceTier::Flex,
+    )
+    .unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Priority);
+
+    // An explicit tier the model does not declare is still an error.
+    let err =
+        select_model_for_subagent(&reg, &cfg, "openai/gpt-4o@bogus", None, &ServiceTier::Flex)
+            .unwrap_err();
+    assert!(matches!(err, Error::Config(_)));
+}
+
+#[test]
+fn select_model_for_subagent_inherits_a_custom_tier() {
+    let (cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[(
+            "gpt-4o",
+            mc_tiers(&[ServiceTier::Flex, ServiceTier::Custom("vip".into())]),
+        )]),
+        None,
+    )));
+    let (m, _) = select_model_for_subagent(
+        &reg,
+        &cfg,
+        "openai/gpt-4o",
+        None,
+        &ServiceTier::Custom("vip".into()),
+    )
+    .unwrap();
+    assert_eq!(m.service_tier, ServiceTier::Custom("vip".into()));
+}
+
+/// The tier a spawn override picks must come from the live session, not the
+/// configured default. A turn never runs here, so the provider is only built.
+#[test]
+fn subagent_model_override_inherits_the_session_tier() {
+    let dir = tempdir().unwrap();
+    let (mut cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[
+            (
+                "gpt-4o",
+                mc_tiers(&[ServiceTier::Flex, ServiceTier::Priority]),
+            ),
+            ("gpt-4o-mini", mc_tiers(&[ServiceTier::Priority])),
+        ]),
+        None,
+    )));
+    cfg.agent.service_tier = Some(ServiceTier::Priority);
+    let support = SubagentSupport::new(reg, cfg, dir.path().to_path_buf());
+    let mut agent = agent_with(Vec::new(), dir.path());
+    agent.model.service_tier = ServiceTier::Flex;
+
+    let overridden = apply_model_overrides(
+        agent.clone(),
+        &support,
+        &json!({ "model": "openai/gpt-4o" }),
+    )
+    .unwrap();
+    assert_eq!(overridden.run_model().service_tier, ServiceTier::Flex);
+
+    // A target that does not declare Flex keeps the usual order.
+    let fallback =
+        apply_model_overrides(agent, &support, &json!({ "model": "openai/gpt-4o-mini" })).unwrap();
+    assert_eq!(fallback.run_model().service_tier, ServiceTier::Priority);
+}
+
+/// A rehydrated child replays the model it recorded, so a recorded `auto`
+/// must not adopt the configured default.
+#[test]
+fn subagent_restore_keeps_a_recorded_auto_tier() {
+    let dir = tempdir().unwrap();
+    let (mut cfg, reg) = build(one_provider(provider(
+        Api::OpenAiCompletions,
+        Some("sk-test"),
+        models(&[("gpt-4o", mc_tiers(&[ServiceTier::Priority]))]),
+        None,
+    )));
+    cfg.agent.service_tier = Some(ServiceTier::Priority);
+    let support = SubagentSupport::new(reg, cfg, dir.path().to_path_buf());
+    let mut agent = agent_with(Vec::new(), dir.path());
+    agent.model.service_tier = ServiceTier::Flex;
+    let recorded = RunModel {
+        provider: "openai".into(),
+        id: "gpt-4o".into(),
+        thinking: ThinkingLevel::Off,
+        service_tier: ServiceTier::Auto,
+    };
+    let restored =
+        apply_model_overrides(agent, &support, &json!({ "model": recorded.query() })).unwrap();
+    assert_eq!(restored.run_model().service_tier, ServiceTier::Auto);
 }

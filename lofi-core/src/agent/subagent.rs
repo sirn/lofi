@@ -21,7 +21,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
 use super::mailbox::{Mailbox, MailboxScope, PARENT_ADDRESS};
-use super::{lock, select_model, Agent, AgentEvent, RunControls, TurnRequest};
+use super::{lock, Agent, AgentEvent, RunControls, TurnRequest};
 use crate::models::ModelRegistry;
 use crate::session::store::{SessionCursor, SessionFile, SessionStore};
 
@@ -2591,7 +2591,11 @@ fn trim_dangling_tool_calls(messages: &mut Vec<Message>) {
 }
 
 /// Apply the model and thinking overrides of a spawn call to the agent.
-fn apply_model_overrides(agent: Agent, support: &SubagentSupport, args: &Value) -> Result<Agent> {
+pub(super) fn apply_model_overrides(
+    agent: Agent,
+    support: &SubagentSupport,
+    args: &Value,
+) -> Result<Agent> {
     let mut agent = agent;
     let model_query = str_arg(args, "model")?;
     let thinking_arg = str_arg(args, "thinking")?;
@@ -2604,16 +2608,15 @@ fn apply_model_overrides(agent: Agent, support: &SubagentSupport, args: &Value) 
     if let Some(query) = model_query {
         // An explicit level is resolved together with the model so it is
         // validated against the supported levels of the target (and wins
-        // over an unsupported configured default).
-        let (mut model, thinking) = match thinking_level {
-            Some(level) => super::select_model_with_level(
-                &support.registry,
-                &support.config,
-                Some(query),
-                level,
-            ),
-            None => select_model(&support.registry, &support.config, Some(query)),
-        }
+        // over an unsupported configured default). The session's service
+        // tier carries over when the target model declares it.
+        let (mut model, thinking) = super::model::select_model_for_subagent(
+            &support.registry,
+            &support.config,
+            query,
+            thinking_level,
+            &agent.model.service_tier,
+        )
         .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
         model.thinking = thinking;
         let provider_cfg = support

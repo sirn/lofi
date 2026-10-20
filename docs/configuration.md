@@ -95,7 +95,8 @@ configuration order, then the first configured backend model.
 For a backend, `model` comes first, followed by its `models` list.
 An empty backend model configuration supplies the choice `default`.
 
-`--continue` and `--resume <id>` restore the session's selected model.
+`--continue` and `--resume <id>` restore the session's selected model and
+service tier, including `auto`.
 An explicit `--model` overrides that selection.
 Switching between provider and backend models keeps the conversation history,
 tools, jobs, and shell policy.

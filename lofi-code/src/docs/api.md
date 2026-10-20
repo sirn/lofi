@@ -319,8 +319,15 @@ log reads, mechanical edits).
 - `id` (string, optional) — resume a previous subagent run, continuing its
   context with this prompt. `model`, `thinking`, and `system` are rejected
   on resume; `timeout_ms`, `output_limit`, and `token_budget` still apply.
+  A resumed run keeps the model and service tier it first ran with while
+  that model and tier are still available; otherwise it uses the session
+  model.
 - `model` (string, optional) — model query (e.g. `anthropic/claude-haiku-4.5`)
-  overriding the session model. List choices with `lofi.models()`.
+  overriding the session model. List choices with `lofi.models()`. The run
+  keeps the session service tier when it is not `auto` and the new model
+  declares it (see `service_tiers` in `lofi.models()`); otherwise the
+  normal default order applies (model, provider, then the configured
+  `[agent]` tier). A `@tier` suffix in `model` always wins.
 - `thinking` (string, optional) — thinking level (`off`, `low`, `medium`,
   `high`, `xhigh`).
 - `system` (string, optional) — system prompt override.
