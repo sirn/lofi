@@ -163,17 +163,17 @@ pub enum AgentEvent {
         cost: f64,
         usage: Usage,
     },
-    /// Response model identity and stable session display model. Terminal
-    /// events carry the response identity for durable turn records and replay.
-    BackendModel {
+    /// The model the engine reported for this turn: the id it ran, and the
+    /// label to show. A provider-driven turn reports the id it was asked for;
+    /// a child reports the id and window it resolved.
+    ModelReported {
         id: String,
         display: String,
     },
-    /// External context state, per-turn token totals and cumulative USD cost.
-    BackendUsage {
+    /// The context state the engine reported after a step. Spend travels on
+    /// the terminal turn events, so every transport reports it the same way.
+    ContextReported {
         context: Option<lofi_types::ContextUsage>,
-        usage: Option<Usage>,
-        cost: Option<f64>,
     },
     RoundCommitted {
         byte_start: u64,

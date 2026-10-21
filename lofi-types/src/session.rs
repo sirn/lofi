@@ -6,11 +6,11 @@ use crate::{ContextUsage, Message, NativeToolRecord, RunModel, StopReason, Usage
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventKind {
     Message(Message),
-    /// External context and cumulative USD cost; token usage is per turn.
-    BackendUsage {
+    /// The context state the engine reported after a step. Spend is on the
+    /// turn markers. The old tag stays readable so existing sessions replay.
+    #[serde(alias = "backend_usage")]
+    ContextReported {
         context: Option<ContextUsage>,
-        usage: Option<Usage>,
-        cost: Option<f64>,
     },
     UserShell {
         command: String,
@@ -70,6 +70,11 @@ pub enum SessionEventKind {
         error: String,
         cost: f64,
         usage: Usage,
+        /// The turn's messages stay in the model context on replay, bounded by
+        /// its discard boundary. Logs written before this field carry false,
+        /// which keeps their whole failed turn out of the context.
+        #[serde(default)]
+        keep_context: bool,
     },
     /// A turn explicitly interrupted by the user.
     /// message, completed rounds and the partial current response remain both

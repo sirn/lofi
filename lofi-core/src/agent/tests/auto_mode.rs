@@ -115,32 +115,106 @@ fn continue_turn_clears_the_hints() {
     );
 }
 
-struct ReplyProvider(&'static str);
+/// The evaluator answers a one-shot text call; nothing else matters here.
+struct ReplyBackend(&'static str);
 
 #[async_trait]
-impl Provider for ReplyProvider {
-    async fn stream(
+impl crate::backend::Backend for ReplyBackend {
+    fn name(&self) -> &'static str {
+        "test"
+    }
+
+    fn selection(&self) -> crate::backend::ModelSelection {
+        crate::backend::ModelSelection {
+            model: "reply".into(),
+            thinking: ThinkingLevel::Off,
+            service_tier: ServiceTier::Auto,
+        }
+    }
+
+    fn choice(&self) -> lofi_types::ModelChoice {
+        lofi_types::ModelChoice {
+            provider: "test".into(),
+            id: "reply".into(),
+            name: "reply".into(),
+            thinking_levels: Vec::new(),
+            service_tiers: Vec::new(),
+            supports_image: false,
+            context_window: None,
+        }
+    }
+
+    fn system_prompt(&self) -> &'static str {
+        ""
+    }
+
+    fn tool_executor(&self) -> ToolExecutor {
+        panic!("the evaluator never executes tools")
+    }
+
+    fn with_selection(&self, _query: &str) -> Result<crate::backend::BackendRef> {
+        panic!("not used")
+    }
+
+    fn with_tool_executor(&self, _executor: ToolExecutor) -> crate::backend::BackendRef {
+        panic!("not used")
+    }
+
+    fn with_system_prompt(&self, _prompt: String) -> crate::backend::BackendRef {
+        panic!("not used")
+    }
+
+    fn fork(&self, _executor: ToolExecutor) -> crate::backend::BackendRef {
+        panic!("not used")
+    }
+
+    fn subagents(&self) -> crate::SubagentRegistry {
+        panic!("not used")
+    }
+
+    fn subagent_hook(&self) -> Option<lofi_code::SubagentFn> {
+        None
+    }
+
+    async fn run_turn(
         &self,
-        _model: &Model,
-        _messages: &[Message],
-        _tools: &[ToolSchema],
-    ) -> Result<futures::stream::BoxStream<'static, Result<StreamingEvent>>> {
-        let text = self.0.to_string();
-        Ok(Box::pin(stream::iter([
-            Ok(StreamingEvent::TextDelta(text)),
-            Ok(StreamingEvent::Done {
-                usage: Usage::default(),
-                stop_reason: None,
-            }),
-        ])))
+        _messages: &mut Vec<Message>,
+        _request: TurnRequest,
+        _events: tokio::sync::mpsc::Sender<AgentEvent>,
+        _cursor: Option<&crate::session::store::SessionCursor>,
+        _controls: RunControls,
+    ) -> Result<crate::session::recorder::TurnOutcome> {
+        panic!("not used")
+    }
+
+    fn open_turn(&self) -> Result<Box<dyn crate::agent::turn_session::ExchangeDriver>> {
+        panic!("not used")
+    }
+
+    fn turn_policy(&self) -> crate::agent::turn_session::TurnPolicy {
+        crate::agent::turn_session::TurnPolicy {
+            auto_continue: lofi_types::AutoContinuePolicy::default(),
+            retry: crate::retry::RetryPolicy::default(),
+            hard_cap: None,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: crate::backend::CompletionRequest,
+    ) -> Result<crate::backend::Completion> {
+        Ok(crate::backend::Completion {
+            text: self.0.to_string(),
+            usage: Usage::default(),
+            cost: None,
+        })
     }
 }
 
 async fn evaluate(reply: &'static str, hints: lofi_code::AutoModeHints) -> AutoModeOutcome {
-    let provider: Arc<dyn Provider> = Arc::new(ReplyProvider(reply));
+    let evaluator: crate::backend::BackendRef = Arc::new(ReplyBackend(reply));
     evaluate_command(
-        &provider,
-        &model(),
+        &evaluator,
         "jj abandon",
         std::path::Path::new("/repo"),
         None,
@@ -245,7 +319,9 @@ fn a_child_gets_its_own_context_and_no_parent_evaluator() {
         lofi_types::Config::default(),
         dir.path().to_path_buf(),
     );
-    crate::agent::subagent::isolate_auto_mode(&mut agent, &support);
+    let mut executor = agent.tool_executor();
+    crate::agent::subagent::isolate_auto_mode(&mut executor, &support);
+    agent = agent.with_tool_executor(executor);
 
     assert!(!Arc::ptr_eq(&parent_hints, agent.auto_mode_hints()));
     assert!(

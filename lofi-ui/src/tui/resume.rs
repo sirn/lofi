@@ -3,6 +3,22 @@ use super::*;
 
 pub(super) use lofi_core::session::replay::last_run_model_from_index;
 
+/// Records the indexed replay applies to the gauges: the per-turn
+/// accounting, plus the compaction that resets them. One definition, because
+/// the sweep that reads them and the loop that applies them must agree on the
+/// set or every later turn reads the wrong record.
+fn is_accounting(kind: store::IndexKind) -> bool {
+    matches!(
+        kind,
+        store::IndexKind::TurnEnd
+            | store::IndexKind::TurnFailed
+            | store::IndexKind::TurnCancelled
+            | store::IndexKind::SubagentUsage
+            | store::IndexKind::ContextReported
+            | store::IndexKind::Compaction
+    )
+}
+
 /// Restore the transcript as file-backed turn shells. Turns need only their
 /// prompt, offsets, and terminal accounting at startup; their full blocks are
 /// materialized from disk only when the viewport reaches them. This includes
@@ -50,14 +66,7 @@ pub(super) fn replay_indexed_session(
     for (turn, &start_pos) in starts.iter().enumerate() {
         let end_pos = starts.get(turn + 1).copied().unwrap_or(visible.len());
         for &i in &visible[start_pos..end_pos] {
-            if matches!(
-                index[i].kind,
-                store::IndexKind::TurnEnd
-                    | store::IndexKind::TurnFailed
-                    | store::IndexKind::TurnCancelled
-                    | store::IndexKind::SubagentUsage
-                    | store::IndexKind::BackendUsage
-            ) {
+            if is_accounting(index[i].kind) {
                 flat_outcomes.push(index[i].offset);
             }
         }
@@ -82,24 +91,20 @@ pub(super) fn replay_indexed_session(
             // as app-injected, not typed input.
             let (prompt, kind) = prompts.get(turn).cloned().unwrap_or_default();
             app.apply_file_backed_replay_event(AgentEvent::Prompt { prompt, kind });
-            for &i in selected {
-                if !matches!(
-                    index[i].kind,
-                    store::IndexKind::TurnEnd
-                        | store::IndexKind::TurnFailed
-                        | store::IndexKind::TurnCancelled
-                        | store::IndexKind::SubagentUsage
-                        | store::IndexKind::BackendUsage
-                ) {
-                    continue;
-                }
-                let Some(event) = outcomes.next() else {
-                    break;
-                };
-                replay_selected_session_events(std::slice::from_ref(&event), |ev| {
-                    app.apply_file_backed_replay_event(ev);
-                });
+        }
+        // A shell turn has no accounting of its own, but a compaction or a
+        // subagent's spend that followed it belongs to this range: apply what
+        // the sweep read, or the gauges drift.
+        for &i in selected {
+            if !is_accounting(index[i].kind) {
+                continue;
             }
+            let Some(event) = outcomes.next() else {
+                break;
+            };
+            replay_selected_session_events(std::slice::from_ref(&event), |ev| {
+                app.apply_file_backed_replay_event(ev);
+            });
         }
         let start = index[visible[start_pos]].offset;
         let lineage_end = visible.last().map_or(file_size, |&i| index[i].end_offset);

@@ -1,11 +1,102 @@
 use futures::StreamExt;
 use lofi_code::policy::auto_mode::{self, AutoModeRisk};
 use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome};
-use lofi_providers::{open, Provider};
-use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Model, Role};
+use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Role};
 use std::sync::Arc;
 
 use lofi_error::{Error, Result};
+
+use crate::backend::{BackendFactory, BackendRef};
+
+/// Attach the shell evaluator to a session executor.
+///
+/// Only the named provider credentials are resolved, and no backend process
+/// starts until a command needs a decision. The evaluator is a backend of its
+/// own, so an HTTP provider and a CLI child both work, and neither shares the
+/// turn slot of the session whose command is judged.
+///
+/// # Errors
+/// Returns [`Error::Config`] when the evaluator model or its credentials are
+/// missing.
+pub async fn configure(
+    mut executor: super::ToolExecutor,
+    config: &Config,
+    env: &[(String, String)],
+) -> Result<super::ToolExecutor> {
+    let Some(auto_cfg) = config
+        .shell_policy
+        .auto_mode
+        .as_ref()
+        .filter(|mode| mode.enable)
+        .cloned()
+    else {
+        executor.auto_mode = None;
+        executor.auto_mode_config = None;
+        return Ok(executor);
+    };
+    let _env_guard = crate::config_loader::apply_env_specs(env);
+    let query = auto_cfg.query();
+    let parsed = crate::backend::parse_query(&query)
+        .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+    let mut evaluator_config = config.clone();
+    evaluator_config
+        .providers
+        .retain(|name, _| name == &parsed.provider);
+    evaluator_config
+        .backends
+        .retain(|name, _| name == &parsed.provider);
+    crate::config_loader::resolve_config(&mut evaluator_config).await?;
+    let registry = match crate::models::ModelRegistry::load_async(&evaluator_config).await {
+        Ok(registry) => registry,
+        Err(error) => {
+            tracing::debug!(%error, "auto-mode discovery failed; using static models");
+            crate::models::ModelRegistry::load(&evaluator_config)?
+        }
+    };
+    attach(&mut executor, &evaluator_config, &registry)?;
+    Ok(executor)
+}
+
+/// Build the evaluator from an already resolved config and its catalog.
+///
+/// The session resolves the evaluator's provider once and a child re-attaches
+/// from that same config, so neither builds a request from the raw
+/// `$VAR` and `!cmd` forms. The catalog comes from the caller: a provider
+/// that discovers its models lists models a static catalog does not have, and
+/// the evaluator may name one of them.
+pub(super) fn attach(
+    executor: &mut super::ToolExecutor,
+    config: &Config,
+    registry: &crate::models::ModelRegistry,
+) -> Result<()> {
+    let Some(auto_cfg) = config
+        .shell_policy
+        .auto_mode
+        .as_ref()
+        .filter(|mode| mode.enable)
+        .cloned()
+    else {
+        executor.auto_mode = None;
+        executor.auto_mode_config = None;
+        return Ok(());
+    };
+    let factory = BackendFactory::new(config.clone(), &executor.root, Vec::new())?
+        .with_resolved_registry(registry.clone());
+    let query = auto_cfg.query();
+    let evaluator = factory
+        .open_resolved(Some(&query), executor.clone())
+        .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+    let hints = executor.auto_mode_hints.clone();
+    executor.auto_mode = Some(build_auto_mode(
+        evaluator,
+        &auto_cfg,
+        &executor.root,
+        executor.skills_dir.as_deref(),
+        &hints,
+    ));
+    executor.auto_mode_config = Some(std::sync::Arc::new(config.clone()));
+    Ok(())
+}
 
 /// A fresh, empty context handle. Each agent gets its own so a subagent
 /// cannot read the hints of the session that spawned it.
@@ -33,53 +124,18 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// # Errors
-/// Returns [`Error::Config`] when the auto-mode config names a provider or
-/// model that does not exist or is not available (no credentials).
+/// Build the evaluator from an opened backend. The evaluator answers a
+/// one-shot text call, so it works on an HTTP provider and on a CLI backend
+/// alike, and it never shares the turn slot of the session it judges.
+#[must_use]
 pub fn build_auto_mode(
-    config: &Config,
-    registry: &crate::models::ModelRegistry,
+    evaluator: BackendRef,
     auto_cfg: &AutoModeConfig,
     cwd: &std::path::Path,
     skills_dir: Option<&std::path::Path>,
     hints: &AutoModeHintHandle,
-) -> Result<Option<AutoModeFn>> {
-    if !auto_cfg.enable {
-        return Ok(None);
-    }
-
-    let qualified = format!("{}/{}", auto_cfg.provider, auto_cfg.model);
-    let model = registry.resolve(&qualified).cloned().ok_or_else(|| {
-        Error::Config(format!(
-            "auto-mode model \"{qualified}\" not found in registry"
-        ))
-    })?;
-
-    let provider_cfg = config.providers.get(&auto_cfg.provider).ok_or_else(|| {
-        Error::Config(format!(
-            "auto-mode provider \"{}\" not found in config",
-            auto_cfg.provider
-        ))
-    })?;
-
-    let is_available = provider_cfg.no_auth
-        || provider_cfg
-            .api_key
-            .as_deref()
-            .is_some_and(|k| !k.is_empty())
-        || provider_cfg
-            .headers
-            .as_ref()
-            .is_some_and(|h| h.values().any(|v| !v.is_empty()));
-    if !is_available {
-        return Err(Error::Config(format!(
-            "auto-mode provider \"{}\" has no credentials",
-            auto_cfg.provider
-        )));
-    }
-
-    let provider: Arc<dyn Provider> = Arc::from(open(model.api, provider_cfg)?);
-    let max_tokens = auto_cfg.max_tokens.or(model.max_tokens);
+) -> AutoModeFn {
+    let max_tokens = auto_cfg.max_tokens;
     let cwd = cwd.to_path_buf();
 
     // Skill roots that actually exist are marked pre-vetted in the evaluator
@@ -94,9 +150,8 @@ pub fn build_auto_mode(
     }
 
     let hints = hints.clone();
-    let auto_mode_fn: AutoModeFn = Arc::new(move |command: String| {
-        let provider = provider.clone();
-        let model = model.clone();
+    Arc::new(move |command: String| {
+        let evaluator = evaluator.clone();
         let cwd = cwd.clone();
         let skill_dirs = skill_dirs.clone();
         let turn = hints
@@ -105,16 +160,7 @@ pub fn build_auto_mode(
             .clone();
         Box::pin(async move {
             let handle = tokio::task::spawn(async move {
-                evaluate_command(
-                    &provider,
-                    &model,
-                    &command,
-                    &cwd,
-                    max_tokens,
-                    &skill_dirs,
-                    &turn,
-                )
-                .await
+                evaluate_command(&evaluator, &command, &cwd, max_tokens, &skill_dirs, &turn).await
             });
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
             let outcome = match handle.await {
@@ -127,14 +173,11 @@ pub fn build_auto_mode(
             outcome
         })
             as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
-    });
-
-    Ok(Some(auto_mode_fn))
+    })
 }
 
 pub(super) async fn evaluate_command(
-    provider: &Arc<dyn Provider>,
-    model: &Model,
+    evaluator: &BackendRef,
     command: &str,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
@@ -148,42 +191,16 @@ pub(super) async fn evaluate_command(
     let user =
         auto_mode::build_user_message(command, &cwd.display().to_string(), &skill_dirs, turn);
 
-    let mut model = model.clone();
-    model.thinking = lofi_types::ThinkingLevel::Off;
-    if let Some(mt) = max_tokens {
-        model.max_tokens = Some(mt);
-    }
-
-    let messages = vec![
-        Message {
-            origin: None,
-            role: Role::System,
-            blocks: vec![ContentBlock::Text {
-                text: auto_mode::system_prompt().to_string(),
-            }],
-            kind: lofi_types::PromptKind::User,
-        },
-        Message {
-            origin: None,
-            role: Role::User,
-            blocks: vec![ContentBlock::Text { text: user }],
-            kind: lofi_types::PromptKind::User,
-        },
-    ];
-
     let started = std::time::Instant::now();
-    let stream = match provider.stream(&model, &messages, &[]).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "auto-mode: provider stream failed");
-            return AutoModeOutcome::Failed {
-                reason: format!("provider request failed: {e}"),
-            };
-        }
+    let request = crate::backend::CompletionRequest {
+        system: auto_mode::system_prompt().to_string(),
+        prompt: user,
+        max_tokens,
     };
-
-    match collect_text(stream).await {
-        Ok((text, usage)) => {
+    match evaluator.complete(request).await {
+        Ok(completion) => {
+            let text = completion.text;
+            let usage = completion.usage;
             let decision = auto_mode::parse_decision(&text);
             if let Some(d) = decision {
                 tracing::debug!(
@@ -212,9 +229,9 @@ pub(super) async fn evaluate_command(
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "auto-mode: stream error");
+            tracing::warn!(error = %e, "auto-mode: evaluation failed");
             AutoModeOutcome::Failed {
-                reason: format!("evaluation stream failed: {e}"),
+                reason: format!("evaluation failed: {e}"),
             }
         }
     }
@@ -279,7 +296,7 @@ fn assistant_text(message: &Message) -> Option<String> {
 
 /// Collect the answer and the usage the evaluation spent, so the cost and
 /// the prompt-cache hit rate stay observable.
-async fn collect_text(
+pub(crate) async fn collect_text(
     mut stream: futures::stream::BoxStream<'static, Result<lofi_types::StreamingEvent>>,
 ) -> Result<(String, lofi_types::Usage)> {
     let mut text = String::new();

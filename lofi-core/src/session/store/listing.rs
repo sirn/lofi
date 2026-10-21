@@ -477,6 +477,7 @@ fn quick_entry_preview(path: &Path) -> Option<String> {
             if matches!(
                 event.kind.as_str(),
                 "cursor"
+                    | "context_reported"
                     | "backend_usage"
                     | "tool_timing"
                     | "thinking_timing"

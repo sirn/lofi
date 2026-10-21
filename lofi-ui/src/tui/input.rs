@@ -6,7 +6,7 @@ use super::*;
 pub(super) fn handle_event(
     ev: &Event,
     app: &mut App,
-    agent: Option<&Backend>,
+    agent: Option<&BackendRef>,
     current_run: &mut Option<RunHandle>,
 ) {
     if let Event::Mouse(m) = ev {
@@ -321,9 +321,11 @@ fn install_run(app: &mut App, current_run: &mut Option<RunHandle>, run: RunHandl
     *current_run = Some(run);
     app.run = Some(0);
     app.run_start = Some(Instant::now());
+    app.run_event_at = Some(Instant::now());
+    app.cancel_at = None;
     app.run_model_label = Some(app.session_model());
     app.run_selected_model_label = Some(
-        app.selected_external_model_label
+        app.selected_model_label
             .as_ref()
             .unwrap_or(&app.model_label)
             .clone(),
@@ -334,7 +336,7 @@ fn install_run(app: &mut App, current_run: &mut Option<RunHandle>, run: RunHandl
 fn spawn_agent_run(
     app: &mut App,
     current_run: &mut Option<RunHandle>,
-    agent: &Backend,
+    agent: &BackendRef,
     prompt: Option<String>,
     prompt_kind: lofi_types::PromptKind,
 ) {
@@ -418,7 +420,7 @@ fn spawn_agent_run(
                     *stored = messages;
                 }
                 match result {
-                    Ok(Ok(())) => Ok(()),
+                    Ok(Ok(_)) => Ok(()),
                     Ok(Err(error)) => Err(error.to_string()),
                     Err(payload) => Err(format!(
                         "agent task panicked: {}",
@@ -535,7 +537,7 @@ pub(super) fn spawn_user_shell(
 
 pub(super) fn spawn_prompt(
     app: &mut App,
-    agent: Option<&Backend>,
+    agent: Option<&BackendRef>,
     current_run: &mut Option<RunHandle>,
     prompt: String,
     kind: lofi_types::PromptKind,
@@ -560,7 +562,7 @@ pub(super) fn spawn_prompt(
 
 pub(super) fn spawn_continue(
     app: &mut App,
-    agent: Option<&Backend>,
+    agent: Option<&BackendRef>,
     current_run: &mut Option<RunHandle>,
 ) {
     if let Some(agent) = agent {
@@ -610,7 +612,13 @@ fn interrupt_run(app: &mut App, current_run: &mut Option<RunHandle>) {
         // agent run checkpoints each completed round, flushes the partial
         // current response, and writes a TurnCancelled marker before its
         // channel closes. Both paths finish through the event loop.
+        //
+        // The task must not be aborted from here: it is a blocking task (an
+        // abort only detaches a running closure), and a turn that resumed
+        // later would overwrite the shared history with its own snapshot and
+        // append to the transcript off an old leaf.
         r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        app.cancel_at.get_or_insert_with(Instant::now);
         app.ctrl_c_at = None;
     }
 }
@@ -642,7 +650,15 @@ pub(super) fn handle_ctrl_c(app: &mut App, current_run: &mut Option<RunHandle>) 
         return;
     }
     if current_run.is_some() {
-        interrupt_run(app, current_run);
+        // A cancel the turn never answers leaves the key with nothing to do:
+        // it only raises the flag, and nothing is polling it. Escalate to
+        // quit, which gives the turn one short flush budget and then detaches
+        // its task.
+        if app.cancel_unacknowledged() {
+            request_quit(app, current_run);
+        } else {
+            interrupt_run(app, current_run);
+        }
         app.ctrl_c_at = None;
         return;
     }

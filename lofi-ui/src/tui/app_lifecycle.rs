@@ -21,7 +21,6 @@ impl App {
             layout: TranscriptLayout::new(),
             input: String::new(),
             input_cursor: 0,
-            external_backend: false,
             lifecycle: AgentLifecycle::new(
                 compaction,
                 if ctx_limit > 0 {
@@ -35,13 +34,13 @@ impl App {
             history_idx: None,
             input_stash: String::new(),
             model_label,
-            selected_external_model_label: None,
+            selected_model_label: None,
             thinking_label,
             thinking,
             service_label,
             service_tier,
             status_usage: None,
-            backend_context: None,
+            reported_context: None,
             ctx_limit: if ctx_limit > 0 {
                 ctx_limit
             } else {
@@ -104,6 +103,8 @@ impl App {
             kill_ring: String::new(),
             last_kill_was_kill: false,
             ctrl_c_at: None,
+            cancel_at: None,
+            run_event_at: None,
             log_rect: Rect::default(),
             input_rect: Rect::default(),
             log_vis: Vec::new(),
@@ -249,17 +250,22 @@ impl App {
                 self.transcript.merge_last_turn_range(byte_start, byte_end);
                 return;
             }
-            AgentEvent::BackendModel { id, display } => {
+            AgentEvent::ModelReported { id, display } => {
                 let run_label = self.run_model_label.as_ref().unwrap_or(&self.model_label);
                 if let Some((provider, _)) = run_label.split_once('/') {
-                    let response_label = format!("{provider}/{id}");
+                    // The report names the model only. Keep the effort and the
+                    // tier the turn runs with, so the working line keeps them.
+                    let suffix = format!(
+                        "{}{}",
+                        self.thinking_label.as_deref().unwrap_or(""),
+                        self.service_label.as_deref().unwrap_or("")
+                    );
+                    let response_label = format!("{provider}/{id}{suffix}");
                     let display_label = format!("{provider}/{display}");
                     if self
                         .run_selected_model_label
                         .as_ref()
-                        .is_none_or(|selected| {
-                            Some(selected) == self.selected_external_model_label.as_ref()
-                        })
+                        .is_none_or(|selected| Some(selected) == self.selected_model_label.as_ref())
                     {
                         self.model_label = display_label;
                     }
@@ -267,11 +273,14 @@ impl App {
                 }
                 return;
             }
-            AgentEvent::BackendUsage { context, cost, .. } => {
-                self.backend_context = context;
-                if let Some(cost) = cost {
-                    self.cost = cost;
+            AgentEvent::ContextReported { context } => {
+                // Spend arrives on the terminal turn events only. The context
+                // window is the compaction denominator, so a report from any
+                // engine updates it.
+                if let Some(size) = context.and_then(|context| context.size) {
+                    self.lifecycle.set_context_window(size);
                 }
+                self.reported_context = context;
                 return;
             }
             AgentEvent::SubagentUsage { cost, usage } => {
@@ -429,10 +438,15 @@ impl App {
         self.run_selected_model_label = None;
         self.retry = None;
         self.pending_prompt_start = false;
+        self.cancel_at = None;
+        self.run_event_at = None;
     }
 
     pub(super) fn reset_compaction_gauges(&mut self) {
         self.status_usage = None;
+        // A rewritten history invalidates the fill the engine last reported;
+        // the next round or turn reports the new one.
+        self.reported_context = None;
         self.settled_usage_fresh = false;
         self.compacted = false;
     }
@@ -452,6 +466,24 @@ impl App {
 
     pub(super) fn run_active(&self) -> bool {
         self.run.is_some()
+    }
+
+    /// Whether the user asked the current run to stop and it has not settled.
+    pub(super) fn cancel_pending(&self) -> bool {
+        self.cancel_at.is_some()
+    }
+
+    /// Whether a cancel request met no answer: the turn was told to stop and
+    /// has reported nothing since. The turn polls the flag itself, so silence
+    /// for this long means it is blocked inside a call that never observes it.
+    pub(super) fn cancel_unacknowledged(&self) -> bool {
+        let Some(requested) = self.cancel_at else {
+            return false;
+        };
+        let since = self
+            .run_event_at
+            .map_or(requested, |reported| reported.max(requested));
+        since.elapsed() >= CANCEL_STALL
     }
 
     pub(super) fn busy(&self) -> bool {
@@ -503,18 +535,28 @@ impl App {
             .unwrap_or_else(|| self.session_model())
     }
 
-    /// Raw model identity for the session header (`store::create`). The App
-    /// holds the rendered `model_label` (`provider/id`) transiently; this
-    /// splits it back to raw fields so the header stores raw data, not a
-    /// formatted string.
+    /// Raw model identity for the session header (`store::create`) and for the
+    /// markers the UI writes itself (queued prompts, user shell). The App holds
+    /// the rendered `model_label` (`provider/label`) transiently; this splits
+    /// it back into raw fields so the header stores raw data, and pairs it with
+    /// the selected name so a resume re-selects what the user picked instead of
+    /// the id the backend reported.
     pub(super) fn run_model(&self) -> RunModel {
         let (provider, id) = match self.model_label.split_once('/') {
             Some((p, r)) => (p, r),
             None => ("", self.model_label.as_str()),
         };
+        let selected = self
+            .selected_model_label
+            .as_deref()
+            .and_then(|label| label.split_once('/'))
+            .filter(|(label_provider, _)| *label_provider == provider)
+            .map_or(id, |(_, selected)| selected);
         RunModel {
             provider: provider.to_string(),
             id: id.to_string(),
+            selected: selected.to_string(),
+            display: (selected != id).then(|| id.to_string()),
             thinking: self.thinking.clone(),
             service_tier: self.service_tier.clone(),
         }
@@ -655,9 +697,6 @@ impl App {
 
     /// Let core evaluate soft-compaction policy; the UI only renders outcomes.
     pub(super) fn maybe_auto_compact(&mut self) {
-        if self.external_backend {
-            return;
-        }
         if !std::mem::take(&mut self.settled_usage_fresh) {
             return;
         }

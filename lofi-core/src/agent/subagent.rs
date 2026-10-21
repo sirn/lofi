@@ -1,9 +1,14 @@
-//! In-process subagents: an `Agent` hook that runs a child agent turn on a
-//! forked message history and returns the child's final text to the caller.
+//! In-process subagents: a `lofi.subagent` hook that runs a child backend turn
+//! on a forked message history and returns the child's final text to the
+//! caller.
 //!
 //! The sandbox exposes the hook as `lofi.subagent`. Each spawn registers an
 //! entry in the session's [`SubagentRegistry`]; passing `id` resumes that
 //! entry with its stored history instead of starting fresh.
+//!
+//! A child is an ordinary backend from the same factory as its parent, so a
+//! CLI parent spawns an HTTP child and the reverse. Nothing here branches on
+//! the transport.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -21,8 +26,10 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
 use super::mailbox::{Mailbox, MailboxScope, PARENT_ADDRESS};
-use super::{lock, Agent, AgentEvent, RunControls, TurnRequest};
+use super::{lock, Agent, AgentEvent, RunControls, ToolExecutor, TurnRequest};
+use crate::backend::{Backend, BackendFactory, BackendRef};
 use crate::models::ModelRegistry;
+use crate::session::recorder::TurnOutcome;
 use crate::session::store::{SessionCursor, SessionFile, SessionStore};
 
 /// Maximum time a subagent turn may run when `timeout_ms` is not set.
@@ -102,7 +109,7 @@ impl Status {
 
 struct Entry {
     status: Status,
-    agent: Agent,
+    backend: BackendRef,
     messages: Vec<Message>,
     /// False only for entries rehydrated from a transcript after a restart:
     /// their history replays from the cursor on the first resume, so a
@@ -440,7 +447,7 @@ impl SubagentRegistry {
     ///
     /// Memory: reads only the header (via the listing) and a bounded tail
     /// window per file. Histories replay lazily on resume.
-    pub fn rehydrate(&self, template: &Agent, support: &SubagentSupport) {
+    pub fn rehydrate(&self, template: &dyn Backend, support: &SubagentSupport) {
         if !support.persist_sessions {
             return;
         }
@@ -527,7 +534,7 @@ impl SubagentRegistry {
                 }
                 entry.cancel.store(true, Ordering::SeqCst);
                 entry.notify_terminal = false;
-                entry.agent.jobs().kill_owned(id);
+                entry.backend.tool_executor().jobs().kill_owned(id);
                 if let Some(abort) = &entry.abort {
                     abort.abort();
                 }
@@ -623,8 +630,8 @@ impl SubagentRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn agent_of(&self, id: &str) -> Option<Agent> {
-        lock(&self.entries).get(id).map(|e| e.agent.clone())
+    pub(crate) fn backend_of(&self, id: &str) -> Option<BackendRef> {
+        lock(&self.entries).get(id).map(|e| e.backend.clone())
     }
 
     #[cfg(test)]
@@ -645,6 +652,12 @@ pub struct SubagentSupport {
     /// Whether subagent turns write transcripts. Disabled by the host when
     /// the parent session does not persist (`--no-session`, print mode).
     persist_sessions: bool,
+    /// Environment specs the session was opened with, so a child that
+    /// overrides its model to another provider resolves that provider's
+    /// credentials the same way.
+    env: Vec<(String, String)>,
+    /// Skill directory next to the session's config file.
+    skills_dir: Option<PathBuf>,
 }
 
 impl SubagentSupport {
@@ -655,6 +668,8 @@ impl SubagentSupport {
             config,
             cwd,
             persist_sessions: true,
+            env: Vec::new(),
+            skills_dir: None,
         }
     }
 
@@ -662,6 +677,33 @@ impl SubagentSupport {
     pub fn with_persistence(mut self, persist_sessions: bool) -> Self {
         self.persist_sessions = persist_sessions;
         self
+    }
+
+    #[must_use]
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    #[must_use]
+    pub fn with_skills_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.skills_dir = dir;
+        self
+    }
+
+    /// The factory a model override opens its child through. Built on demand:
+    /// a spawn without an override keeps the template's own selection and
+    /// never resolves another provider.
+    ///
+    /// The factory carries this catalog, so an override can name a model the
+    /// provider discovered at startup.
+    fn factory(&self) -> Result<BackendFactory> {
+        Ok(
+            BackendFactory::new(self.config.clone(), &self.cwd, self.env.clone())?
+                .with_resolved_registry(self.registry.clone())
+                .with_skills_dir(self.skills_dir.clone())
+                .with_subagent_persistence(self.persist_sessions),
+        )
     }
 
     /// Build the `lofi.models` hook: the registry's available choices as JSON.
@@ -807,7 +849,9 @@ impl Drop for SettleOnDrop {
         // its start stamp becomes the oldest eviction victim, and a caller
         // reading the kill result right after could lose it.
         entry.used = self.registry.stamp();
-        entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+        entry.backend = entry
+            .backend
+            .with_tool_executor(entry.backend.tool_executor().reset_exec_worker());
         entry.outcome = Some(outcome);
         if entry.cursor.is_some() {
             // The claim moved the history into the run, which died with it;
@@ -836,6 +880,23 @@ impl Drop for SettleOnDrop {
     }
 }
 
+/// The run-management hook of one backend. Every child is an ordinary
+/// backend forked from this template, so the parent's transport does not
+/// constrain the child's.
+pub(crate) fn backend_hook(
+    template: BackendRef,
+    support: SubagentSupport,
+    registry: SubagentRegistry,
+) -> SubagentFn {
+    Arc::new(move |op: SubagentOp, args: Value| {
+        let template = template.clone();
+        let support = support.clone();
+        let registry = registry.clone();
+        Box::pin(async move { dispatch(template, support, registry, op, args).await })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
+    })
+}
+
 impl Agent {
     /// Build the `lofi.subagent*` hook for this agent, or `None` when the
     /// agent has no subagent support (nested subagent agents).
@@ -847,20 +908,11 @@ impl Agent {
             // unavailable.
             return self.mailbox.clone().map(mailbox_hook);
         };
-        let mut template = self.clone();
-        template.subagent_support = None;
-        // Fresh registry per child: entries store child agents, so sharing
-        // this registry would form an Arc cycle that leaks both the entries
-        // and their sandbox workers.
-        template.subagents = SubagentRegistry::default();
-        let registry = self.subagents.clone();
-        Some(Arc::new(move |op: SubagentOp, args: Value| {
-            let template = template.clone();
-            let support = support.clone();
-            let registry = registry.clone();
-            Box::pin(async move { dispatch(template, support, registry, op, args).await })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
-        }))
+        Some(backend_hook(
+            Arc::new(self.clone()),
+            support,
+            self.subagents.clone(),
+        ))
     }
 
     /// Attach subagent support so the agent's sandbox exposes `lofi.subagent`.
@@ -937,7 +989,7 @@ fn u64_arg(args: &Value, key: &str) -> Result<Option<u64>> {
 // The hook returns errors as a JSON body (never a tool error) so the parent
 // model can react to `status` and resume by `id` after a failure.
 async fn dispatch(
-    template: Agent,
+    template: BackendRef,
     support: SubagentSupport,
     registry: SubagentRegistry,
     op: SubagentOp,
@@ -945,7 +997,7 @@ async fn dispatch(
 ) -> Value {
     match op {
         SubagentOp::Run => run(template, support, registry, args).await,
-        SubagentOp::Spawn => spawn(&template, &support, &registry, &args),
+        SubagentOp::Spawn => spawn(&template, &support, &registry, &args).await,
         SubagentOp::Status => status_op(&registry, &args),
         SubagentOp::List => list_op(&registry, &args),
         SubagentOp::Wait => wait_op(&registry, args).await,
@@ -1006,14 +1058,14 @@ fn unknown_id(id: &str) -> Value {
 /// Foreground `lofi.subagent`: start the run and await it. Dropping this
 /// future (exec timeout, Esc) arms `CancelOnDrop` and cancels the child.
 async fn run(
-    template: Agent,
+    template: BackendRef,
     support: SubagentSupport,
     registry: SubagentRegistry,
     args: Value,
 ) -> Value {
     // Foreground runs return their outcome to the caller directly: a
     // terminal notice on top would queue a duplicate as a parent prompt.
-    let started = match start(&template, &support, &registry, &args, false) {
+    let started = match start(&template, &support, &registry, &args, false).await {
         Ok(started) => started,
         Err(rejection) => return rejection_json(rejection, &args),
     };
@@ -1032,8 +1084,8 @@ async fn run(
 
 /// Background `lofi.subagentSpawn`: start the run and return its handle id
 /// at once. No `CancelOnDrop`: the run survives the end of this exec.
-fn spawn(
-    template: &Agent,
+async fn spawn(
+    template: &BackendRef,
     support: &SubagentSupport,
     registry: &SubagentRegistry,
     args: &Value,
@@ -1047,7 +1099,7 @@ fn spawn(
             });
         }
     }
-    let started = match start(template, support, registry, args, true) {
+    let started = match start(template, support, registry, args, true).await {
         Ok(started) => started,
         Err(rejection) => return rejection_json(rejection, args),
     };
@@ -1274,7 +1326,7 @@ fn kill_op(registry: &SubagentRegistry, args: &Value) -> Value {
             state["reason"] = json!(reason);
         }
         entry.events.push("state", state);
-        (entry.agent.jobs(), entry.abort.clone())
+        (entry.backend.tool_executor().jobs(), entry.abort.clone())
     };
     // The child's process tree dies with it.
     jobs.kill_owned(&id);
@@ -1385,8 +1437,8 @@ struct Started {
 /// Spawning on the sandbox worker runtime would stop the run unsettled
 /// when the worker idles out; `set_host_handle` records the host runtime
 /// at the start of every parent turn.
-fn start(
-    template: &Agent,
+async fn start(
+    template: &BackendRef,
     support: &SubagentSupport,
     registry: &SubagentRegistry,
     args: &Value,
@@ -1407,8 +1459,8 @@ fn start(
     if args.get("id").is_some_and(|v| !v.is_null()) && id.is_none() {
         return Err(Error::Tool("id must be a non-empty string".into()).into());
     }
-    let (agent, messages, cursor, cancel, id) =
-        prepare(template, support, registry, id, args, notify)?;
+    let (backend, messages, cursor, cancel, id) =
+        prepare(template, support, registry, id, args, notify).await?;
     // The transcript id lets the caller locate the persisted session later;
     // the registry id alone is meaningless after a restart or an eviction.
     let session_id = cursor.as_ref().map(SessionCursor::id);
@@ -1436,7 +1488,7 @@ fn start(
         let task_session_id = session_id.clone();
         registry.host_handle().spawn(async move {
             run_task(
-                agent,
+                backend,
                 messages,
                 cursor,
                 cancel,
@@ -1470,7 +1522,7 @@ fn start(
 /// abort), so every run settles exactly once.
 #[allow(clippy::too_many_arguments)]
 async fn run_task(
-    agent: Agent,
+    backend: BackendRef,
     messages: Vec<Message>,
     cursor: Option<SessionCursor>,
     cancel: Arc<AtomicBool>,
@@ -1497,7 +1549,7 @@ async fn run_task(
         armed: true,
     };
     let outcome = run_turn_with_timeout(
-        agent,
+        backend,
         messages,
         cursor.clone(),
         cancel,
@@ -1756,14 +1808,13 @@ fn read_settled_marker(path: &Path) -> Option<SettledRun> {
     }
 }
 
-/// Drain the child event stream into usage totals, the pressure flag, and
-/// the entry's public event log. Sender clones escape the turn through tool
-/// contexts, so the channel may never close: the caller stops the drain
-/// explicitly and the task flushes what is buffered before exiting.
+/// Drain the child event stream into usage totals and the entry's public event
+/// log. Sender clones escape the turn through tool contexts, so the channel may
+/// never close: the caller stops the drain explicitly and the task flushes what
+/// is buffered before exiting.
 fn spawn_event_drain(
     mut rx: mpsc::Receiver<AgentEvent>,
     totals: Arc<std::sync::Mutex<ChildUsage>>,
-    pressure: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     token_budget: Option<u64>,
     registry: SubagentRegistry,
@@ -1775,21 +1826,17 @@ fn spawn_event_drain(
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let drain = tokio::spawn(async move {
         let note = |event: &AgentEvent| {
-            match event {
-                AgentEvent::RoundUsage { cost, usage } => {
-                    let spent = {
-                        let mut totals = lock(&totals);
-                        totals.add(*cost, usage);
-                        totals.total()
-                    };
-                    // Cancel as soon as the budget is crossed; the settle path
-                    // reports the breach as the failure reason.
-                    if token_budget.is_some_and(|budget| spent > budget) {
-                        cancel.store(true, Ordering::SeqCst);
-                    }
+            if let AgentEvent::RoundUsage { cost, usage } = event {
+                let spent = {
+                    let mut totals = lock(&totals);
+                    totals.add(*cost, usage);
+                    totals.total()
+                };
+                // Cancel as soon as the budget is crossed; the settle path
+                // reports the breach as the failure reason.
+                if token_budget.is_some_and(|budget| spent > budget) {
+                    cancel.store(true, Ordering::SeqCst);
                 }
-                AgentEvent::ContextPressure { .. } => pressure.store(true, Ordering::SeqCst),
-                _ => {}
             }
             let public = match event {
                 AgentEvent::Text(text) => Some(("text", json!({ "text": cap_event_text(text) }))),
@@ -1852,7 +1899,7 @@ fn cap_event_text(text: &str) -> String {
 /// an idle entry.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_with_timeout(
-    agent: Agent,
+    backend: BackendRef,
     mut messages: Vec<Message>,
     cursor: Option<SessionCursor>,
     cancel: Arc<AtomicBool>,
@@ -1875,19 +1922,15 @@ async fn run_turn_with_timeout(
     // The child events have no consumer: the parent transcript records the
     // tool call, not the child stream. Collect the usage so the spend is
     // still visible in the tool result; drain the rest.
-    // run_turn reports a context-pressure stop as Ok: the flag separates it
-    // from a real completion, which ends on the final assistant message.
-    let pressure = Arc::new(AtomicBool::new(false));
     let (stop_tx, drain) = spawn_event_drain(
         rx,
         totals.clone(),
-        pressure.clone(),
         cancel.clone(),
         token_budget,
         registry.clone(),
         id.clone(),
     );
-    let turn = agent.run_turn(
+    let turn = backend.run_turn(
         &mut messages,
         TurnRequest::prompt(prompt, PromptKind::User),
         tx,
@@ -1916,7 +1959,6 @@ async fn run_turn_with_timeout(
         outcome,
         budget_over,
         &cancel,
-        &pressure,
         cursor.as_ref(),
         pre_run_leaf,
         timeout,
@@ -1951,7 +1993,9 @@ async fn run_turn_with_timeout(
         entry.messages = messages;
         // Idle entries must not hold a sandbox thread: it restarts
         // lazily on the first exec of the next resume.
-        entry.agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+        entry.backend = entry
+            .backend
+            .with_tool_executor(entry.backend.tool_executor().reset_exec_worker());
         true
     } else {
         false
@@ -1981,36 +2025,38 @@ async fn run_turn_with_timeout(
 /// this call, so the breach is visible even when the provider finished the
 /// round before noticing the cancel flag.
 fn classify_outcome(
-    outcome: std::result::Result<Result<()>, tokio::time::error::Elapsed>,
+    outcome: std::result::Result<Result<TurnOutcome>, tokio::time::error::Elapsed>,
     budget_over: Option<(u64, u64)>,
     cancel: &Arc<AtomicBool>,
-    pressure: &Arc<AtomicBool>,
     cursor: Option<&SessionCursor>,
     pre_run_leaf: Option<String>,
     timeout: Duration,
 ) -> (Status, Option<String>, bool) {
     match outcome {
-        Ok(Ok(())) => {
+        Ok(Ok(outcome)) => {
             if let Some((spent, budget)) = budget_over {
                 (
                     Status::Failed,
                     Some(format!("token budget exceeded ({spent} > {budget})")),
                     true,
                 )
-            // run_turn reports cancellation as Ok: the flag decides.
-            } else if cancel.load(Ordering::SeqCst) {
-                (Status::Cancelled, Some("cancelled".to_string()), true)
-            // ContextPressure ends run_turn with Ok: without this check the run
-            // would surface as completed with an intermediate note as result. A
-            // resume does not compact the child history, so it would stop again.
-            } else if pressure.load(Ordering::SeqCst) {
-                (
-                    Status::Failed,
-                    Some("context window is full".to_string()),
-                    true,
-                )
             } else {
-                (Status::Completed, None, true)
+                match outcome {
+                    TurnOutcome::Finished => (Status::Completed, None, true),
+                    TurnOutcome::Cancelled | TurnOutcome::Detached => {
+                        (Status::Cancelled, Some("cancelled".to_string()), true)
+                    }
+                    // A pressure turn stops with the window full: a resume does
+                    // not compact the child history, so it would stop again.
+                    TurnOutcome::ContextPressure => (
+                        Status::Failed,
+                        Some("context window is full".to_string()),
+                        true,
+                    ),
+                    // A failed turn settles as `Err` from the turn session, so
+                    // this arm is a guard on that contract, not a live path.
+                    TurnOutcome::Failed(error) => (Status::Failed, Some(error), true),
+                }
             }
         }
         Ok(Err(e)) => (Status::Failed, Some(e.to_string()), true),
@@ -2086,32 +2132,151 @@ impl ChildUsage {
 /// Give a child its own turn context and its own evaluator. A clone of the
 /// template shares the handle the parent evaluator captured, so without this
 /// a child reads the session's context and its own turns overwrite it.
-pub(super) fn isolate_auto_mode(agent: &mut Agent, support: &SubagentSupport) {
-    agent.auto_mode_hints = super::auto_mode::hint_handle();
-    let Some(auto_cfg) = support.config.shell_policy.auto_mode.as_ref() else {
-        agent.auto_mode = None;
+pub(super) fn isolate_auto_mode(executor: &mut ToolExecutor, support: &SubagentSupport) {
+    executor.auto_mode_hints = super::auto_mode::hint_handle();
+    if support.config.shell_policy.auto_mode.is_none() {
+        executor.auto_mode = None;
+        executor.auto_mode_config = None;
+        return;
+    }
+    // The session config is unresolved and its provider table is pruned to the
+    // model's own provider, so the child takes the evaluator config its parent
+    // opened: same catalog entry, same resolved credentials.
+    let Some(config) = executor.auto_mode_config.clone() else {
+        executor.auto_mode = None;
         return;
     };
-    match super::auto_mode::build_auto_mode(
-        &support.config,
-        &support.registry,
-        auto_cfg,
-        &agent.root,
-        agent.skills_dir.as_deref(),
-        &agent.auto_mode_hints,
-    ) {
-        Ok(fn_) => agent.auto_mode = fn_,
+    let mut child = executor.clone();
+    match super::auto_mode::attach(&mut child, &config, &support.registry) {
+        Ok(()) => {
+            executor.auto_mode = child.auto_mode;
+            executor.auto_mode_config = child.auto_mode_config;
+        }
         Err(error) => {
             tracing::warn!(%error, "subagent: auto-mode disabled for the child");
-            agent.auto_mode = None;
+            executor.auto_mode = None;
+            executor.auto_mode_config = None;
         }
     }
 }
 
+/// The child's execution state: the session's jobs, policy, truncation and
+/// sandbox configuration stay shared; the sandbox thread, the auto-mode
+/// context and the run-management hook are the child's own.
+fn child_executor(template: &dyn Backend, support: &SubagentSupport) -> ToolExecutor {
+    let mut executor = template
+        .tool_executor()
+        .reset_exec_worker()
+        .with_fresh_auto_mode_hints();
+    isolate_auto_mode(&mut executor, support);
+    // A child cannot manage runs; it gets its own inbox once it has an id.
+    executor.with_child_identity("", None, None, None)
+}
+
+/// The query a model override opens.
+///
+/// The target model is resolved with the level, and it inherits the session's
+/// non-auto service tier when it declares one: a child spawned from a
+/// flex-tier session stays on flex where the target supports it.
+pub(super) fn override_query(
+    support: &SubagentSupport,
+    template: &dyn Backend,
+    model: &str,
+    level: Option<ThinkingLevel>,
+) -> Result<String> {
+    let (model, thinking) = super::model::select_model_for_subagent(
+        &support.registry,
+        &support.config,
+        model,
+        level,
+        &template.selection().service_tier,
+    )
+    .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
+    Ok(format!(
+        "{}/{}:{}@{}",
+        model.provider,
+        model.id,
+        thinking.as_str(),
+        model.service_tier.as_str()
+    ))
+}
+
+/// The same child at another thinking level. Off is always allowed, and a
+/// session model that declares no levels still runs at Off.
+fn with_thinking(
+    child: BackendRef,
+    level: &ThinkingLevel,
+) -> std::result::Result<BackendRef, RunRejection> {
+    if *level == ThinkingLevel::Off {
+        return Ok(child);
+    }
+    let levels = child.choice().thinking_levels;
+    if levels.is_empty() {
+        return Err(Error::Tool("the session model does not support thinking".into()).into());
+    }
+    if !levels.contains(level) {
+        let allowed: Vec<&str> = levels.iter().map(ThinkingLevel::as_str).collect();
+        return Err(Error::Tool(format!(
+            "thinking level {} not supported by the session model; allowed: {}",
+            level.as_str(),
+            allowed.join(", ")
+        ))
+        .into());
+    }
+    let selection = child.selection();
+    Ok(child.with_selection(&format!(
+        "{}/{}:{}",
+        child.name(),
+        selection.model,
+        level.as_str()
+    ))?)
+}
+
+/// The child backend: the template's transport and selection, unless the call
+/// names another model, in which case the factory opens whichever transport
+/// serves it.
+async fn child_backend(
+    template: &BackendRef,
+    support: &SubagentSupport,
+    args: &Value,
+) -> std::result::Result<BackendRef, RunRejection> {
+    let model = str_arg(args, "model")?;
+    let level = str_arg(args, "thinking")?
+        .map(|level| {
+            ThinkingLevel::parse(level)
+                .ok_or_else(|| Error::Tool(format!("unknown thinking level: {level}")))
+        })
+        .transpose()?;
+    let mut child = if let Some(query) = model {
+        // An explicit level is resolved together with the model so it is
+        // validated against the supported levels of the target.
+        let query = override_query(support, template.as_ref(), query, level.clone())?;
+        let executor = child_executor(template.as_ref(), support);
+        // The factory opens a session backend; a child forks from it so it
+        // runs without run management of its own.
+        let opened = support
+            .factory()?
+            .open(Some(&query), executor.clone())
+            .await
+            .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
+        opened.fork(executor)
+    } else {
+        let child = template.fork(child_executor(template.as_ref(), support));
+        match level {
+            Some(level) => with_thinking(child, &level)?,
+            None => child,
+        }
+    };
+    if let Some(system) = str_arg(args, "system")? {
+        child = child.with_system_prompt(system.to_string());
+    }
+    Ok(child)
+}
+
 /// Build or resume the entry, and hand out the state the turn needs.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
-fn prepare(
-    template: &Agent,
+async fn prepare(
+    template: &BackendRef,
     support: &SubagentSupport,
     registry: &SubagentRegistry,
     id: Option<String>,
@@ -2119,7 +2284,7 @@ fn prepare(
     notify: bool,
 ) -> std::result::Result<
     (
-        Agent,
+        BackendRef,
         Vec<Message>,
         Option<SessionCursor>,
         Arc<AtomicBool>,
@@ -2131,18 +2296,11 @@ fn prepare(
         return prepare_resume(registry, id, args, notify);
     }
 
-    let mut agent = template.clone();
+    // Built before the entry exists, so a rejected override leaves no state.
+    let mut agent = child_backend(template, support, args).await?;
     // The job registry stays shared with the session: an isolated registry
     // would leak child processes at session end.
-    // Fresh sandbox thread per subagent: sharing the parent's `ExecWorker`
-    // deadlocks, because the parent worker is busy awaiting this hook while
-    // the child's exec jobs queue behind it.
-    agent.exec_worker = Arc::new(std::sync::OnceLock::new());
-    isolate_auto_mode(&mut agent, support);
-    let mut agent = apply_model_overrides(agent, support, args)?;
-    if let Some(system) = str_arg(args, "system")? {
-        agent = agent.with_system_prompt(system.to_string());
-    }
+    let jobs = template.tool_executor().jobs();
 
     let cancel = Arc::new(AtomicBool::new(false));
     // Reserve capacity, the id, and a placeholder entry under one lock;
@@ -2167,24 +2325,17 @@ fn prepare(
             // A killed owner's job bar outlives its entry (its old worker
             // may still finish in-flight work): do not hand the id to a
             // new run, which would then be unable to spawn jobs.
-            if !entries.contains_key(&id) && !agent.jobs().owner_cancelled(&id) {
+            if !entries.contains_key(&id) && !jobs.owner_cancelled(&id) {
                 break id;
             }
         };
-        // Tag the child's jobs with the run id so a kill or a session
-        // switch cancels exactly its process tree.
-        agent.job_owner = Some(id.clone());
-        agent.mailbox = Some(MailboxScope {
-            mailbox: registry.mailbox.clone(),
-            me: id.clone(),
-        });
         registry.mailbox.open(&id);
         let (state_tx, _) = watch::channel(Status::Running);
         entries.insert(
             id.clone(),
             Entry {
                 status: Status::Running,
-                agent: agent.clone(),
+                backend: agent.clone(),
                 messages: Vec::new(),
                 history_loaded: true,
                 cancel: cancel.clone(),
@@ -2211,6 +2362,22 @@ fn prepare(
         );
         id
     };
+    // The child has an identity now: its jobs are tagged with the run id so a
+    // kill or a session switch cancels exactly its process tree, and its
+    // sandbox gets its own inbox.
+    let scope = MailboxScope {
+        mailbox: registry.mailbox.clone(),
+        me: id.clone(),
+    };
+    agent = agent.with_tool_executor(agent.tool_executor().with_child_identity(
+        &id,
+        Some(scope.clone()),
+        Some(mailbox_hook(scope)),
+        None,
+    ));
+    if let Some(entry) = lock(&registry.entries).get_mut(&id) {
+        entry.backend = agent.clone();
+    }
     let cursor = if support.persist_sessions {
         let created = SessionStore::open().and_then(|store| {
             attach_mailbox_journal(registry, &store);
@@ -2268,7 +2435,7 @@ fn entry_session_id(entry: &Entry) -> Option<String> {
 /// system prompt comes from the replayed lineage (a header-level read could
 /// pick a record from an abandoned branch).
 fn restore_entry(
-    template: &Agent,
+    template: &dyn Backend,
     support: &SubagentSupport,
     registry: &SubagentRegistry,
     file: &SessionFile,
@@ -2304,35 +2471,53 @@ fn restore_entry(
     // Restore the model the transcript ran with. When it is gone (provider
     // or model removed from the config), keep the session model and say so
     // on the entry instead of failing the restore.
-    let base = template.clone();
     let mut note = None;
-    let overrides = json!({ "model": meta.model.query() });
-    let mut agent = match apply_model_overrides(base.clone(), support, &overrides) {
-        Ok(overridden) => overridden,
-        Err(e) => {
-            note = Some(format!(
-                "transcript model {} is unavailable ({e}); resume uses the session model",
-                meta.model.label(),
-            ));
-            base
+    let executor = child_executor(template, support);
+    let mut child = template.fork(executor.clone());
+    let selection = child.selection();
+    let current = format!(
+        "{}/{}:{}",
+        child.name(),
+        selection.model,
+        selection.thinking.as_str()
+    );
+    let restored = format!(
+        "{}/{}:{}",
+        meta.model.provider,
+        meta.model.selected_or_id(),
+        meta.model.thinking.as_str()
+    );
+    if restored != current {
+        match support
+            .factory()
+            .and_then(|factory| factory.open_resolved(Some(&restored), executor.clone()))
+        {
+            // The factory opens a session backend; a restored child runs as a
+            // child, so it forks from it.
+            Ok(opened) => child = opened.fork(executor.clone()),
+            Err(e) => {
+                note = Some(format!(
+                    "transcript model {} is unavailable ({e}); resume uses the session model",
+                    meta.model.label(),
+                ));
+            }
         }
-    };
-    agent.exec_worker = Arc::new(std::sync::OnceLock::new());
-    isolate_auto_mode(&mut agent, support);
-    // The template is the session agent: a restored child must not inherit
-    // its run-management hook, or the resume would manage runs through a
-    // private registry instead of messaging its parent.
-    agent.subagent_support = None;
-    agent.subagents = SubagentRegistry::default();
-    agent.job_owner = Some(id.clone());
-    agent.mailbox = Some(MailboxScope {
+    }
+    // A restored child cannot manage runs: it messages its parent instead.
+    let scope = MailboxScope {
         mailbox: registry.mailbox.clone(),
         me: id.clone(),
-    });
+    };
+    child = child.with_tool_executor(child.tool_executor().with_child_identity(
+        &id,
+        Some(scope.clone()),
+        Some(mailbox_hook(scope)),
+        None,
+    ));
     let (state_tx, _) = watch::channel(status);
     let entry = Entry {
         status,
-        agent,
+        backend: child,
         messages: Vec::new(),
         history_loaded: false,
         cancel: Arc::new(AtomicBool::new(false)),
@@ -2394,7 +2579,7 @@ fn prepare_resume(
     notify: bool,
 ) -> std::result::Result<
     (
-        Agent,
+        BackendRef,
         Vec<Message>,
         Option<SessionCursor>,
         Arc<AtomicBool>,
@@ -2445,7 +2630,7 @@ fn prepare_resume(
         entry.task = task;
         // A previous kill barred this owner from acquiring jobs; the new run
         // needs them again.
-        entry.agent.jobs().uncancel_owner(&id);
+        entry.backend.tool_executor().jobs().uncancel_owner(&id);
         // Fresh cancel flag per run: the previous run's flag may still be
         // observed by its lingering sandbox work, and resetting it would
         // uncancel that work.
@@ -2478,7 +2663,7 @@ fn prepare_resume(
             (false, _) => Vec::new(),
         };
         (
-            entry.agent.clone(),
+            entry.backend.clone(),
             history,
             entry.cursor.clone(),
             entry.transcript_path.clone(),
@@ -2615,76 +2800,6 @@ fn trim_dangling_tool_calls(messages: &mut Vec<Message>) {
         }
         messages.truncate(assistant);
     }
-}
-
-/// Apply the model and thinking overrides of a spawn call to the agent.
-pub(super) fn apply_model_overrides(
-    agent: Agent,
-    support: &SubagentSupport,
-    args: &Value,
-) -> Result<Agent> {
-    let mut agent = agent;
-    let model_query = str_arg(args, "model")?;
-    let thinking_arg = str_arg(args, "thinking")?;
-    let thinking_level = thinking_arg
-        .map(|level| {
-            ThinkingLevel::parse(level)
-                .ok_or_else(|| Error::Tool(format!("unknown thinking level: {level}")))
-        })
-        .transpose()?;
-    if let Some(query) = model_query {
-        // An explicit level is resolved together with the model so it is
-        // validated against the supported levels of the target (and wins
-        // over an unsupported configured default). The session's service
-        // tier carries over when the target model declares it.
-        let (mut model, thinking) = super::model::select_model_for_subagent(
-            &support.registry,
-            &support.config,
-            query,
-            thinking_level,
-            &agent.model.service_tier,
-        )
-        .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
-        model.thinking = thinking;
-        let provider_cfg = support
-            .config
-            .providers
-            .get(&model.provider)
-            .ok_or_else(|| Error::Tool(format!("provider not found: {}", model.provider)))?;
-        let provider = lofi_providers::open(model.api, provider_cfg)
-            .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
-        let auto_continue = support
-            .registry
-            .auto_continue_policy(&support.config.agent, &model);
-        agent = agent
-            .with_model(provider, model)
-            .with_auto_continue(auto_continue);
-    } else if let Some(level) = thinking_level {
-        if level != ThinkingLevel::Off {
-            let levels: Vec<ThinkingLevel> = support
-                .registry
-                .choices()
-                .iter()
-                .find(|c| c.provider == agent.model.provider && c.id == agent.model.id)
-                .map(|c| c.thinking_levels.clone())
-                .unwrap_or_default();
-            if levels.is_empty() {
-                return Err(Error::Tool(
-                    "the session model does not support thinking".into(),
-                ));
-            }
-            if !levels.contains(&level) {
-                let allowed: Vec<&str> = levels.iter().map(ThinkingLevel::as_str).collect();
-                return Err(Error::Tool(format!(
-                    "thinking level {} not supported by the session model; allowed: {}",
-                    level.as_str(),
-                    allowed.join(", ")
-                )));
-            }
-        }
-        agent.model.thinking = level;
-    }
-    Ok(agent)
 }
 
 /// Answer of the run: the text of its final assistant message, truncated to

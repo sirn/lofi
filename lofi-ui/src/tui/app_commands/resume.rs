@@ -225,20 +225,8 @@ impl App {
         self.record_subagent_spend();
         match entry.file.open_snapshot() {
             Ok((cursor, snapshot)) => {
-                match lofi_core::backend::saved_backend(&cursor) {
-                    Ok(None) => {}
-                    Ok(Some(_)) => {
-                        self.notify(
-                            NotifyKind::Warn,
-                            "resume external backend sessions from the CLI",
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        self.notify(NotifyKind::Error, error.to_string());
-                        return;
-                    }
-                }
+                // An external backend keeps its own binding; the next turn
+                // reopens its session from that checkpoint.
                 let index = snapshot.index;
                 let file_size = snapshot.file_size;
                 let loaded = self.restore_indexed_session(
@@ -266,7 +254,7 @@ impl App {
                 }
                 if !self.model_choices.is_empty() {
                     if let Some(m) = last_run_model_from_index(&cursor, &index) {
-                        let restored = format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str());
+                        let restored = restore_label(&m);
                         let current = format!("{}:{}", self.model_label, self.thinking.as_str());
                         if restored != current {
                             self.pending_model_switch = Some(restored);
@@ -292,8 +280,21 @@ impl App {
             return None;
         }
         let m = store::last_run_model(events)?;
-        let restored = format!("{}/{}:{}", m.provider, m.id, m.thinking.as_str());
+        let restored = restore_label(&m);
         let current = format!("{}:{}", self.model_label, self.thinking.as_str());
         (restored != current).then_some(restored)
     }
+}
+
+/// The switch query that restores a session's model and effort.
+///
+/// The marker carries the name the user selected next to the id the backend
+/// reported, because a reported id (what a CLI resolves) is not selectable.
+fn restore_label(model: &lofi_types::RunModel) -> String {
+    format!(
+        "{}/{}:{}",
+        model.provider,
+        model.selected_or_id(),
+        model.thinking.as_str()
+    )
 }

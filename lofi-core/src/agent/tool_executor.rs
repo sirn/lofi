@@ -15,6 +15,9 @@ pub struct ToolExecutor {
     pub(super) confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     pub(super) confirm_counter: Arc<AtomicU64>,
     pub(super) auto_mode: Option<lofi_code::AutoModeFn>,
+    /// Config the evaluator was opened from, with its provider resolved. A
+    /// child re-attaches from it, so its requests carry the same credentials.
+    pub(super) auto_mode_config: Option<Arc<lofi_types::Config>>,
     /// Turn context the evaluator reads; see [`Agent::auto_mode_hints`].
     pub(super) auto_mode_hints: lofi_code::AutoModeHintHandle,
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
@@ -25,6 +28,16 @@ pub struct ToolExecutor {
     /// `lofi.subagent` hook, `None` where subagents are unsupported (nested
     /// subagent sandboxes).
     pub(super) subagent: Option<lofi_code::SubagentFn>,
+    /// Mailbox capability of a spawned child: its own inbox plus the right to
+    /// write to the parent. `None` on a session executor, which addresses
+    /// runs through the registry instead.
+    pub(super) mailbox: Option<super::mailbox::MailboxScope>,
+    /// Spawned subagents of this session, resumable by id. The registry lives
+    /// here so a CLI backend exposes the same runs an HTTP one does.
+    pub(super) subagents: super::SubagentRegistry,
+    /// Config and registry the subagent hook resolves model overrides with.
+    /// `None` on a child, which cannot spawn its own subagents.
+    pub(super) subagent_support: Option<super::SubagentSupport>,
     /// `lofi.models` hook, `None` where the host has no model registry.
     pub(super) models: Option<lofi_code::ModelsFn>,
 }
@@ -32,13 +45,17 @@ pub struct ToolExecutor {
 /// Hooks for one tool call. All callbacks belong to the owning session.
 #[derive(Clone, Default)]
 pub struct ToolCallContext {
-    pub events: Option<Sender<AgentEvent>>,
+    pub events: Option<crate::agent::turn_session::EventSink>,
     pub session: Option<crate::session::store::SessionCursor>,
     pub recall: Option<RecallFn>,
     pub result: Option<ResultFn>,
     pub cancel: Option<Arc<AtomicBool>>,
     pub on_job_acquired: Option<lofi_code::JobAcquireFn>,
     pub record_tool: Option<Arc<dyn Fn(ContentBlock) -> Result<()> + Send + Sync>>,
+    /// The lifetime of the turn that owns this context. A tool that settles
+    /// after the turn dropped must not extend the transcript. None means the
+    /// caller is not a turn, so nothing is sealed.
+    pub alive: Option<Arc<AtomicBool>>,
 }
 
 impl ToolExecutor {
@@ -65,6 +82,7 @@ impl ToolExecutor {
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
+            auto_mode_config: None,
             auto_mode_hints: super::auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
@@ -72,6 +90,9 @@ impl ToolExecutor {
             job_owner: None,
             exec_worker: Arc::new(std::sync::OnceLock::new()),
             subagent: None,
+            mailbox: None,
+            subagents: super::SubagentRegistry::default(),
+            subagent_support: None,
             models: None,
         })
     }
@@ -80,40 +101,44 @@ impl ToolExecutor {
     /// # Errors
     /// Returns evaluator configuration, credential or model registry errors.
     pub async fn with_auto_mode_config(
-        mut self,
+        self,
         config: &lofi_types::Config,
         env: &[(String, String)],
     ) -> Result<Self> {
-        let Some(auto_cfg) = config
-            .shell_policy
-            .auto_mode
-            .as_ref()
-            .filter(|mode| mode.enable)
-        else {
-            return Ok(self);
-        };
-        let _env_guard = crate::config_loader::apply_env_specs(env);
-        let mut evaluator_config = config.clone();
-        evaluator_config
-            .providers
-            .retain(|name, _| name == &auto_cfg.provider);
-        crate::config_loader::resolve_config(&mut evaluator_config).await?;
-        let registry = match ModelRegistry::load_async(&evaluator_config).await {
-            Ok(registry) => registry,
-            Err(error) => {
-                tracing::debug!(%error, "auto-mode discovery failed; using static models");
-                ModelRegistry::load(&evaluator_config)?
-            }
-        };
-        self.auto_mode = super::auto_mode::build_auto_mode(
-            &evaluator_config,
-            &registry,
-            auto_cfg,
-            &self.root,
-            self.skills_dir.as_deref(),
-            &self.auto_mode_hints,
-        )?;
-        Ok(self)
+        super::auto_mode::configure(self, config, env).await
+    }
+
+    #[must_use]
+    pub fn subagent_hook(&self) -> Option<lofi_code::SubagentFn> {
+        self.subagent.clone()
+    }
+
+    /// Install the `lofi.subagent` hook the sandbox reports from.
+    #[must_use]
+    pub fn with_subagent_hook(mut self, hook: Option<lofi_code::SubagentFn>) -> Self {
+        self.subagent = hook;
+        self
+    }
+
+    /// Spawned subagents of this session, shared by every clone.
+    #[must_use]
+    pub fn subagents(&self) -> super::SubagentRegistry {
+        self.subagents.clone()
+    }
+
+    /// Config and registry a subagent hook resolves model overrides with.
+    #[must_use]
+    pub fn subagent_support(&self) -> Option<super::SubagentSupport> {
+        self.subagent_support.clone()
+    }
+
+    /// Attach subagent support: the session's registry, its model listing and
+    /// the config a child's model override resolves against.
+    #[must_use]
+    pub fn with_subagent_support(mut self, support: super::SubagentSupport) -> Self {
+        self.models = Some(support.models_fn());
+        self.subagent_support = Some(support);
+        self
     }
 
     #[must_use]
@@ -130,6 +155,7 @@ impl ToolExecutor {
     pub fn without_subagent(mut self) -> Self {
         self.subagent = None;
         self.models = None;
+        self.subagent_support = None;
         self
     }
 
@@ -145,6 +171,60 @@ impl ToolExecutor {
     #[must_use]
     pub fn with_skills_dir(mut self, path: Option<PathBuf>) -> Self {
         self.skills_dir = path;
+        self
+    }
+
+    /// Execution state for a spawned child: the session's jobs, policy and
+    /// sandbox configuration stay shared, while the identity, the hook and
+    /// the sandbox thread are the child's own.
+    #[must_use]
+    pub(crate) fn with_child_identity(
+        mut self,
+        owner: &str,
+        mailbox: Option<super::mailbox::MailboxScope>,
+        subagent: Option<lofi_code::SubagentFn>,
+        models: Option<lofi_code::ModelsFn>,
+    ) -> Self {
+        self.job_owner = Some(owner.to_string());
+        self.mailbox = mailbox;
+        self.subagent = subagent;
+        self.models = models;
+        // A child owns its own runs and cannot spawn: a shared registry would
+        // also form an Arc cycle with the entries that hold the children.
+        self.subagents = super::SubagentRegistry::default();
+        self.subagent_support = None;
+        self.reset_exec_worker()
+    }
+
+    /// A fresh sandbox thread, so an idle entry does not hold one: it
+    /// restarts lazily on the first exec of the next resume.
+    #[must_use]
+    pub fn reset_exec_worker(mut self) -> Self {
+        // Sharing the parent's worker deadlocks: the parent worker is busy
+        // awaiting the subagent hook while the child's exec jobs queue
+        // behind it.
+        self.exec_worker = Arc::new(std::sync::OnceLock::new());
+        self
+    }
+
+    /// Owning subagent run id, when this executor belongs to a child.
+    #[must_use]
+    pub fn job_owner(&self) -> Option<&str> {
+        self.job_owner.as_deref()
+    }
+
+    /// Give this executor a fresh auto-mode turn context, so a child does not
+    /// read the session hints its parent's evaluator captured.
+    #[must_use]
+    pub fn with_fresh_auto_mode_hints(mut self) -> Self {
+        self.auto_mode_hints = super::auto_mode::hint_handle();
+        self
+    }
+
+    /// Replace the auto-mode evaluator, or drop it.
+    #[must_use]
+    pub fn with_auto_mode(mut self, auto_mode: Option<lofi_code::AutoModeFn>) -> Self {
+        self.auto_mode = auto_mode;
         self
     }
 
@@ -200,19 +280,8 @@ impl ToolExecutor {
                 input: input.clone(),
             })?;
         }
-        let mut stats = TurnStats::new();
-        stats.tool_start(id);
         let result = self
-            .execute_tools(
-                &[(id, "exec", input)],
-                context.events.as_ref(),
-                Some(&mut stats),
-                context.session,
-                context.recall,
-                context.result,
-                context.cancel.as_ref(),
-                context.on_job_acquired,
-            )
+            .execute_tools(&[(id, "exec", input)], &context)
             .await?
             .pop()
             .ok_or_else(|| Error::State("exec returned no result".into()))?;
@@ -226,21 +295,20 @@ impl ToolExecutor {
         self.exec_worker.get_or_init(lofi_code::ExecWorker::spawn)
     }
 
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn execute_tools(
         &self,
         tool_uses: &[(&str, &str, &serde_json::Value)],
-        tx: Option<&Sender<AgentEvent>>,
-        mut stats: Option<&mut TurnStats>,
-        native_cursor: Option<crate::session::store::SessionCursor>,
-        recall: Option<RecallFn>,
-        result: Option<ResultFn>,
-        cancel: Option<&Arc<AtomicBool>>,
-        on_job_acquired: Option<lofi_code::JobAcquireFn>,
+        call: &ToolCallContext,
     ) -> Result<Vec<ContentBlock>> {
         if tool_uses.is_empty() {
             return Ok(Vec::new());
         }
+        let native_cursor = call.session.clone();
+        let recall = call.recall.clone();
+        let result = call.result.clone();
+        let cancel = call.cancel.as_ref();
+        let on_job_acquired = call.on_job_acquired.clone();
         let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         // Native tool events are emitted from a *sync* `on_tool_event`
         // callback inside the sandbox, so they can't `await` on the bounded
@@ -250,12 +318,12 @@ impl ToolExecutor {
         // through an unbounded channel whose forwarder drains onto the
         // bounded channel with `send().await` — lossless and order-preserving.
         let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        let relay_dst = tx.cloned();
+        let relay_dst = call.events.clone();
         let _forwarder = tokio::spawn(async move {
             while let Some(ev) = relay_rx.recv().await {
                 match &relay_dst {
                     Some(dst) => {
-                        if dst.send(ev).await.is_err() {
+                        if !dst.emit(ev).await {
                             break;
                         }
                     }
@@ -266,11 +334,12 @@ impl ToolExecutor {
             }
         });
         for (id, name, input) in tool_uses {
+            let dispatch = std::time::Instant::now();
             if *name != "exec" {
                 let content = format!("unknown tool: {name}");
-                let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
+                let elapsed_ms = dispatch.elapsed().as_millis() as u64;
                 if !emit(
-                    tx,
+                    call.events.as_ref(),
                     AgentEvent::ToolEnd {
                         id: id.to_string(),
                         result: content.clone(),
@@ -293,9 +362,9 @@ impl ToolExecutor {
             let (code, strings, display) = parse_exec_input(input);
             if code.is_empty() {
                 let content = "exec: missing required 'code' argument".to_string();
-                let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
+                let elapsed_ms = dispatch.elapsed().as_millis() as u64;
                 if !emit(
-                    tx,
+                    call.events.as_ref(),
                     AgentEvent::ToolEnd {
                         id: id.to_string(),
                         result: content.clone(),
@@ -319,7 +388,7 @@ impl ToolExecutor {
             // if the consumer is gone, stop instead of running tools (which
             // may shell out or mutate files) for a dead receiver.
             if !emit(
-                tx,
+                call.events.as_ref(),
                 AgentEvent::ToolInput {
                     id: id.to_string(),
                     code: code.clone(),
@@ -500,7 +569,13 @@ impl ToolExecutor {
                     });
                 }
             }
-            if let Some(cursor) = native_cursor.as_ref() {
+            // A tool that outlives its turn may not extend a transcript no turn
+            // will settle.
+            let live = call
+                .alive
+                .as_ref()
+                .is_none_or(|alive| alive.load(std::sync::atomic::Ordering::Acquire));
+            if let (Some(cursor), true) = (native_cursor.as_ref(), live) {
                 let records = std::mem::take(&mut *lock(&native_records));
                 if let Err(error) =
                     cursor.record(crate::session::recorder::SessionRecord::NativeTools { records })
@@ -510,9 +585,9 @@ impl ToolExecutor {
                     )));
                 }
             }
-            let elapsed_ms = stats.as_deref_mut().map_or(0, |s| s.tool_end(id));
+            let elapsed_ms = dispatch.elapsed().as_millis() as u64;
             if !emit(
-                tx,
+                call.events.as_ref(),
                 AgentEvent::ToolEnd {
                     id: id.to_string(),
                     result: content.clone(),
@@ -532,6 +607,18 @@ impl ToolExecutor {
             });
         }
         Ok(results)
+    }
+}
+
+/// Publish one tool event through the turn's sink.
+///
+/// The sink folds the event into the accounting the transcript summary is
+/// built from, so a tool's elapsed time survives a resume. False when the
+/// consumer is gone.
+async fn emit(events: Option<&crate::agent::turn_session::EventSink>, event: AgentEvent) -> bool {
+    match events {
+        Some(events) => events.emit(event).await,
+        None => true,
     }
 }
 

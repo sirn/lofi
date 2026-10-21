@@ -272,6 +272,71 @@ fn resumed_user_shell_and_final_turn_are_file_backed_shells() {
 }
 
 #[test]
+fn resumed_shell_turn_applies_the_accounting_that_follows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::SessionStore::new(dir.path().join("sessions"));
+    let cursor = store
+        .create_cursor(std::path::Path::new("/workspace"), &"p/m".into())
+        .unwrap();
+    let kinds = [
+        SessionEventKind::UserShell {
+            command: "pwd".into(),
+            output: "/workspace".into(),
+            exit_code: Some(0),
+            signal: None,
+            duration_ms: 1,
+            truncated: false,
+            cancelled: false,
+            exclude_from_context: false,
+        },
+        // A run that settled while the shell command ran: the records fall
+        // inside the shell turn's range.
+        SessionEventKind::SubagentUsage {
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                ..Usage::default()
+            },
+            cost: 0.5,
+        },
+        msg(user("second")),
+        msg(assistant("second answer")),
+        SessionEventKind::TurnEnd {
+            model: "p/m".into(),
+            elapsed_ms: 1,
+            cost: 0.0,
+            usage: Usage::default(),
+            stop_reason: None,
+        },
+    ];
+    let mut events: Vec<_> = kinds
+        .into_iter()
+        .map(|kind| SessionEvent {
+            id: String::new(),
+            parent_id: None,
+            kind,
+        })
+        .collect();
+    cursor.append_events(&mut events).unwrap();
+    let snapshot = cursor.snapshot().unwrap();
+
+    let mut a = app();
+    a.session.cursor = Some(cursor.clone());
+    a.restore_indexed_session(
+        &cursor,
+        &snapshot.index,
+        snapshot.file_size,
+        snapshot.history_start,
+        snapshot.contiguous,
+    )
+    .unwrap();
+
+    assert!((a.cost - 0.5).abs() < 1e-9);
+    assert_eq!(a.total_in, 7);
+    assert_eq!(a.total_out, 3);
+}
+
+#[test]
 fn text_deltas_accumulate_into_one_text_block() {
     let mut a = app();
     push_turn(&mut a);
@@ -807,7 +872,8 @@ fn offline_switcher(root: &std::path::Path) -> crate::tui::ModelSwitcher {
         }
     }))
     .unwrap();
-    crate::tui::ModelSwitcher::from_external(config, root.to_path_buf(), Vec::new()).unwrap()
+    let factory = lofi_core::backend::BackendFactory::new(config, root, Vec::new()).unwrap();
+    crate::tui::ModelSwitcher::new(factory)
 }
 
 // The lock serializes against the process-global LOFI_STATE_HOME, not
@@ -826,9 +892,10 @@ async fn switcher_rebuild_propagates_subagent_persistence() {
     let root = tempfile::tempdir().unwrap();
     let build = || offline_switcher(root.path());
 
-    let (agent, ..) = build()
+    let agent = build()
         .with_subagent_persistence(false)
-        .rebuild(None, "test/m")
+        .switch(None, "test/m")
+        .await
         .unwrap();
     let hook = agent.subagent_hook().unwrap();
     let _ = hook(
@@ -843,7 +910,7 @@ async fn switcher_rebuild_propagates_subagent_persistence() {
     );
 
     // Control: the switcher default persists, so the spawn path writes.
-    let (agent, ..) = build().rebuild(None, "test/m").unwrap();
+    let agent = build().switch(None, "test/m").await.unwrap();
     let hook = agent.subagent_hook().unwrap();
     let _ = hook(
         SubagentOp::Run,
@@ -925,7 +992,7 @@ async fn new_session_clears_the_subagent_registry() {
     std::env::set_var("LOFI_STATE_HOME", state.path());
     let root = tempfile::tempdir().unwrap();
     let switcher = offline_switcher(root.path()).with_subagent_persistence(false);
-    let (agent, ..) = switcher.rebuild(None, "test/m").unwrap();
+    let agent = switcher.switch(None, "test/m").await.unwrap();
     let registry = agent.subagents();
     let hook = agent.subagent_hook().unwrap();
     let out = hook(

@@ -14,8 +14,8 @@ impl Provider for PanickingProvider {
     }
 }
 
-fn panicking_agent(root: &Path) -> Agent {
-    Agent::new(
+fn panicking_agent(root: &Path) -> lofi_core::Agent {
+    lofi_core::Agent::new(
         Box::new(PanickingProvider),
         Model {
             id: "panic".into(),
@@ -39,7 +39,7 @@ fn panicking_agent(root: &Path) -> Agent {
         root.join("tmp"),
         String::new(),
         None,
-        0,
+        lofi_types::CompactionConfig::default(),
         &lofi_types::BashConfig::default(),
         &[],
         lofi_types::TruncateConfig::default(),
@@ -52,7 +52,7 @@ async fn run_agent_task_panic_tui_e2e_child() {
     let root = tempfile::tempdir().unwrap();
     let agent = panicking_agent(root.path());
     run(
-        Some(agent.into()),
+        Some(std::sync::Arc::new(agent)),
         "test/panic".into(),
         ThinkingLevel::Off,
         ServiceTier::Auto,
@@ -197,12 +197,54 @@ async fn agent_task_panic_is_visible_in_tui_e2e() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_finished_run_settles_even_when_a_sender_outlives_it() {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let handle = tokio::spawn(async {});
+    for _ in 0..10 {
+        if handle.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(handle.is_finished(), "the task must finish for this test");
+    // The turn's own sender died with the task; this clone stands for a
+    // `TurnIo` that a worker thread kept, which is what leaves the channel
+    // open after the run is over.
+    tx.send(AgentEvent::Notice("late".into())).await.unwrap();
+    let mut run = Some(RunHandle {
+        handle,
+        rx,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        preempt: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        session_cursor: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+
+    super::run::close_finished_run(&mut run);
+
+    let run = run.as_mut().expect("run kept until the loop settles it");
+    assert!(
+        matches!(run.rx.recv().await, Some(AgentEvent::Notice(_))),
+        "buffered events still arrive first"
+    );
+    assert!(
+        run.rx.recv().await.is_none(),
+        "the loop must see the channel close with the sender still alive"
+    );
+    assert!(
+        tx.send(AgentEvent::Notice("after".into())).await.is_err(),
+        "a late sender gets a closed channel"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_task_panic_is_visible_and_task_settles() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let root = tempfile::tempdir().unwrap();
-            let agent = Backend::from(panicking_agent(root.path()));
+            let agent: lofi_core::backend::BackendRef =
+                std::sync::Arc::new(panicking_agent(root.path()));
             let mut a = app();
             let mut run = None;
 

@@ -66,7 +66,12 @@ impl App {
         // usage rather than only the non-cached slice; the soft-compaction
         // policy reads the same `context_tokens` value. When the provider
         // reports cache activity, append the hit rate as `N% cached`.
-        let used = self.status_usage.map_or(0, |u| u.context_tokens());
+        // The transport's own context report wins; otherwise the last
+        // round's usage is the fill. Both transports read this one rule.
+        let used = self.reported_context.map_or_else(
+            || self.status_usage.map_or(0, |u| u.context_tokens()),
+            |context| context.used,
+        );
         let cached_suffix = if labels {
             self.status_usage.and_then(|u| {
                 let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
@@ -86,29 +91,19 @@ impl App {
             compact_count(used)
         };
         let context_label = if labels { "context " } else { "" };
-        if self.external_backend {
-            segments.push(self.backend_context.map_or_else(
-                || "context unknown".to_string(),
-                |context| {
-                    format!(
-                        "{}{}/{}",
-                        context_label,
-                        compact_count(context.used),
-                        context
-                            .size
-                            .map_or_else(|| "unknown".to_string(), compact_count)
-                    )
-                },
-            ));
-        } else {
-            segments.push(format!(
-                "{}{}/{}{}",
-                context_label,
-                used_str,
-                compact_count(self.ctx_limit),
-                cached_suffix.unwrap_or_default()
-            ));
-        }
+        // A transport that reports its own window (the CLI child) is the
+        // authority; otherwise the configured model window is.
+        let size = self
+            .reported_context
+            .and_then(|context| context.size)
+            .unwrap_or(self.ctx_limit);
+        segments.push(format!(
+            "{}{}/{}{}",
+            context_label,
+            used_str,
+            compact_count(size),
+            cached_suffix.unwrap_or_default()
+        ));
         segments
     }
 

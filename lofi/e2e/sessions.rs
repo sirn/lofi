@@ -465,6 +465,8 @@ fn repeated_tool_turns_and_compaction_keep_memory_bounded() {
         tui.wait_for(&format!("MEMORY_TURN_{n}"), WAIT);
         fixture.wait_for_event_count("turn_end", n + 1);
         if n % 4 == 3 {
+            // The journal records turn_end before the app clears its run state.
+            tui.wait_idle(WAIT);
             tui.submit("/compact");
             tui.wait_for("Compacted", WAIT);
             samples.push(tui.resident_kib());
@@ -1499,6 +1501,8 @@ fn repeated_compaction_preserves_summary_and_tail_across_restart() {
         tui.wait_for(&format!("repeated answer {name}"), WAIT);
         fixture.wait_for_event_count("turn_end", index + 1);
     }
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/compact");
     tui.wait_for("Compacted", WAIT);
     fixture.wait_for_event_count("compaction", 1);
@@ -1506,6 +1510,8 @@ fn repeated_compaction_preserves_summary_and_tail_across_restart() {
     tui.wait_for("repeated answer five", WAIT);
     fixture.wait_for_event_count("turn_end", 5);
     tui.clear_output();
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/compact");
     tui.wait_for("Compacted", WAIT);
     fixture.wait_for_event_count("compaction", 2);
@@ -1570,6 +1576,8 @@ fn new_continue_and_explicit_resume_select_the_requested_history() {
     tui.submit("explicit first prompt");
     tui.wait_for("explicit first answer", WAIT);
     fixture.wait_for_event_count("turn_end", 1);
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     let first_path = fixture.session_files().into_iter().next().unwrap();
     let first_id = first_path
         .file_stem()
@@ -1627,8 +1635,9 @@ fn new_session_kills_jobs_and_drops_old_job_notices() {
 
     tui.submit("start the old session job");
     tui.wait_for("new session job started", WAIT);
-    // `/new` is refused while a run settles; settle the turn first.
     fixture.wait_for_event_count("turn_end", 1);
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     let pid = spawned_pid(&fixture);
     let mut job = ProcessGuard::new(pid);
     assert!(process_is_alive(pid));
@@ -1665,6 +1674,8 @@ fn resume_picker_kills_current_session_jobs_and_drops_their_notices() {
     tui.submit("resume job saved prompt");
     tui.wait_for("resume job saved answer", WAIT);
     fixture.wait_for_event_count("turn_end", 1);
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/new");
     tui.submit("start the resume current job");
     tui.wait_for("Permission Required", WAIT);
@@ -1760,6 +1771,8 @@ fn resume_picker_switches_to_a_saved_session_and_restores_its_model() {
     tui.submit("picker saved prompt");
     tui.wait_for("picker saved answer", WAIT);
     fixture.wait_for_event_count("turn_end", 1);
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/new");
     tui.submit("/model");
     tui.wait_for("Switch model", WAIT);
@@ -1770,6 +1783,8 @@ fn resume_picker_switches_to_a_saved_session_and_restores_its_model() {
     fixture.wait_for_event_count("turn_end", 2);
 
     tui.clear_output();
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/resume");
     tui.wait_for("Resume a session", WAIT);
     tui.send(b"\x1b[B\r");
@@ -2441,12 +2456,15 @@ fn resumed_many_turn_session_scrolls_to_first_turn() {
         tui.wait_for_screen("resize-input-marker", WAIT);
         tui.send(b"\x15");
     }
-    tui.clear_output();
+    // No clear_output here: the app writes only the cells that changed since
+    // its own last frame, so a blanked screen never learns the rows the app
+    // holds still. These prompts share their first 16 characters, so each
+    // scroll rewrites two cells per row and nothing else.
     for _ in 0..40 {
         tui.send(b"\x1b[5~");
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
-    tui.wait_for("scroll prompt 000", WAIT);
+    tui.wait_for_screen("scroll prompt 000", WAIT);
 }
 
 /// Resumed geometry starts as a byte estimate; tall lines-heavy turns make the

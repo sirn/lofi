@@ -502,6 +502,7 @@ fn tree_rollback_after_compacted_failed_turn_keeps_checkpoint_context() {
             error: "boom".into(),
             cost: 0.0,
             usage: Usage::default(),
+            keep_context: false,
         },
     ]);
     cursor.append_events(&mut failed).unwrap();

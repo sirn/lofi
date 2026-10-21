@@ -3,8 +3,7 @@
 
 use super::*;
 use crate::agent::model::select_model_for_subagent;
-use crate::agent::subagent::apply_model_overrides;
-use serde_json::json;
+use crate::agent::subagent::override_query;
 
 fn mc() -> ModelConfig {
     ModelConfig {
@@ -625,8 +624,8 @@ fn add_usage_bills_cache_tokens_at_their_own_rate() {
         cache_write_price: Some(0.5),
         per_request_price: None,
     };
-    let mut stats = TurnStats::new();
-    stats.add_usage(
+    let mut stats = crate::agent::native::Spend::default();
+    stats.add(
         Usage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
@@ -658,8 +657,8 @@ fn add_usage_falls_back_to_input_rate_when_cache_prices_unset() {
         cache_write_price: None,
         per_request_price: None,
     };
-    let mut stats = TurnStats::new();
-    stats.add_usage(
+    let mut stats = crate::agent::native::Spend::default();
+    stats.add(
         Usage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
@@ -946,18 +945,15 @@ fn subagent_model_override_inherits_the_session_tier() {
     let mut agent = agent_with(Vec::new(), dir.path());
     agent.model.service_tier = ServiceTier::Flex;
 
-    let overridden = apply_model_overrides(
-        agent.clone(),
-        &support,
-        &json!({ "model": "openai/gpt-4o" }),
-    )
-    .unwrap();
-    assert_eq!(overridden.run_model().service_tier, ServiceTier::Flex);
+    let overridden = override_query(&support, &agent, "openai/gpt-4o", None).unwrap();
+    assert_eq!(RunModel::parse(&overridden).service_tier, ServiceTier::Flex);
 
     // A target that does not declare Flex keeps the usual order.
-    let fallback =
-        apply_model_overrides(agent, &support, &json!({ "model": "openai/gpt-4o-mini" })).unwrap();
-    assert_eq!(fallback.run_model().service_tier, ServiceTier::Priority);
+    let fallback = override_query(&support, &agent, "openai/gpt-4o-mini", None).unwrap();
+    assert_eq!(
+        RunModel::parse(&fallback).service_tier,
+        ServiceTier::Priority
+    );
 }
 
 /// A rehydrated child replays the model it recorded, so a recorded `auto`
@@ -978,10 +974,11 @@ fn subagent_restore_keeps_a_recorded_auto_tier() {
     let recorded = RunModel {
         provider: "openai".into(),
         id: "gpt-4o".into(),
+        selected: "gpt-4o".into(),
+        display: None,
         thinking: ThinkingLevel::Off,
         service_tier: ServiceTier::Auto,
     };
-    let restored =
-        apply_model_overrides(agent, &support, &json!({ "model": recorded.query() })).unwrap();
-    assert_eq!(restored.run_model().service_tier, ServiceTier::Auto);
+    let restored = override_query(&support, &agent, &recorded.query(), None).unwrap();
+    assert_eq!(RunModel::parse(&restored).service_tier, ServiceTier::Auto);
 }

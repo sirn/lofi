@@ -19,8 +19,7 @@ fn automatic_policy_approval_uses_the_configured_model_and_skips_the_modal() {
 
 [auto_mode]
 enable = true
-provider = "mock"
-model = "alt"
+model = "mock/alt"
 max_tokens = 128
 "#,
     )
@@ -40,6 +39,44 @@ max_tokens = 128
     assert!(requests[1].body.contains("auto-approved.txt"));
     assert!(requests[1].body.contains(r#""model":"alt""#));
     assert!(requests[1].body.contains(r#""max_completion_tokens":128"#));
+}
+
+#[test]
+fn automatic_policy_approval_accepts_a_provider_and_model_pair() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "auto-policy-split-call",
+            r#"return await lofi.bash({ cmd: "printf split-policy-file > split-approved.txt" });"#,
+        ),
+        text_response(r#"{"risk":"low","reason":"fixture approval"}"#),
+        text_response("split policy final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        r#"mode = "confirm"
+
+[auto_mode]
+enable = true
+provider = "mock"
+model = "alt"
+max_tokens = 128
+"#,
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("use automatic policy approval");
+    tui.wait_for("split policy final answer", WAIT);
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("split-approved.txt")).unwrap(),
+        "split-policy-file"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].body.contains("shell-command risk evaluator"));
+    assert!(requests[1].body.contains(r#""model":"alt""#));
 }
 
 #[test]
@@ -204,6 +241,72 @@ intent = true
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].path, "/models");
     assert!(requests[2].body.contains("Continue the task now"));
+}
+
+#[test]
+fn automatic_policy_approval_uses_a_discovered_model() {
+    let models = serde_json::json!({
+        "data": [{ "id": "remote-evaluator", "context_length": 64000 }]
+    });
+    let server = MockServer::start(vec![
+        MockResponse::json(&models),
+        tool_response(
+            "auto-policy-discovered-call",
+            r#"return await lofi.bash({ cmd: "printf discovered-policy-file > discovered-approved.txt" });"#,
+        ),
+        text_response(r#"{"risk":"low","reason":"fixture approval"}"#),
+        text_response("discovered policy final answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!(
+            r#"{config}
+[providers.plexus]
+base_url = "{}"
+api_type = "openai-completions"
+no_auth = true
+
+[providers.plexus.auto_models]
+enabled = true
+models_url = "{}/models"
+auth = false
+ttl_seconds = 3600
+"#,
+            server.url(),
+            server.url()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.config.parent().unwrap().join("policy.toml"),
+        r#"mode = "confirm"
+
+[auto_mode]
+enable = true
+max_tokens = 4096
+model = "remote-evaluator"
+provider = "plexus"
+"#,
+    )
+    .unwrap();
+    let mut tui = fixture.spawn(&["--model", "mock/chat"]);
+
+    tui.submit("use automatic policy approval");
+    tui.wait_for("discovered policy final answer", WAIT);
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("discovered-approved.txt")).unwrap(),
+        "discovered-policy-file"
+    );
+    let requests = server.requests();
+    assert_eq!(requests[0].path, "/models");
+    let evaluator = requests
+        .iter()
+        .find(|request| request.body.contains("shell-command risk evaluator"))
+        .expect("the evaluator ran");
+    assert!(evaluator.body.contains(r#""model":"remote-evaluator""#));
 }
 
 #[test]

@@ -19,21 +19,36 @@ impl Component for WorkingLine {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
         let frame = SPINNER[cx.app.spinner_frame() % SPINNER.len()];
+        let mut content = vec![
+            Span::styled(
+                format!(
+                    "Working for {} with ",
+                    prim::fmt_duration(cx.app.run_elapsed())
+                ),
+                Style::new().fg(t.subtle),
+            ),
+            Span::styled(cx.app.run_label(), Style::new().fg(t.muted)),
+        ];
+        // A cancel is a request the turn answers on its own schedule. Say so
+        // while it is pending, and say plainly when the turn has stopped
+        // answering it, because only the user can end that run.
+        if cx.app.cancel_pending() {
+            let (text, style) = if cx.app.cancel_unacknowledged() {
+                (
+                    " · cancelling — no response, Ctrl-C to quit",
+                    Style::new().fg(t.error),
+                )
+            } else {
+                (" · cancelling", Style::new().fg(t.subtle))
+            };
+            content.push(Span::styled(text, style));
+        }
         vec![prim::render(
             vec![
                 Span::raw("  "),
                 Span::styled(format!("{frame} "), Style::new().fg(active_indicator(t))),
             ],
-            vec![
-                Span::styled(
-                    format!(
-                        "Working for {} with ",
-                        prim::fmt_duration(cx.app.run_elapsed())
-                    ),
-                    Style::new().fg(t.subtle),
-                ),
-                Span::styled(cx.app.run_label(), Style::new().fg(t.muted)),
-            ],
+            content,
             vec![],
         )]
     }

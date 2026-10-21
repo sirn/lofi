@@ -271,16 +271,8 @@ fn replay_visible_events(visible: &[&SessionEvent], mut emit: impl FnMut(AgentEv
                     exclude_from_context: *exclude_from_context,
                 });
             }
-            SessionEventKind::BackendUsage {
-                context,
-                usage,
-                cost,
-            } => {
-                emit(AgentEvent::BackendUsage {
-                    context: *context,
-                    usage: *usage,
-                    cost: *cost,
-                });
+            SessionEventKind::ContextReported { context } => {
+                emit(AgentEvent::ContextReported { context: *context });
             }
             SessionEventKind::SubagentUsage { usage, cost } => {
                 emit(AgentEvent::SubagentUsage {
@@ -422,8 +414,12 @@ impl LeafFirstContextFilter {
                 self.discarding_assistant = false;
                 None
             }
-            SessionEventKind::TurnFailed { .. } => {
-                self.skipping_failed_turn = true;
+            SessionEventKind::TurnFailed { keep_context, .. } => {
+                // A failure that recorded where it stopped keeps its prompt and
+                // its completed rounds: the context filter only drops the round
+                // its discard boundary names. A log from before the flag exists
+                // has no such boundary, so its whole failed turn stays out.
+                self.skipping_failed_turn = !keep_context;
                 self.discarding_assistant = false;
                 None
             }
@@ -808,7 +804,7 @@ mod tests {
         }
     }
 
-    fn turn_failed() -> SessionEvent {
+    fn turn_failed(keep_context: bool) -> SessionEvent {
         SessionEvent {
             id: String::new(),
             parent_id: None,
@@ -818,6 +814,7 @@ mod tests {
                 error: "boom".into(),
                 cost: 0.0,
                 usage: Usage::default(),
+                keep_context,
             },
         }
     }
@@ -920,7 +917,7 @@ mod tests {
             user_msg_with_kind("retry notice", lofi_types::PromptKind::Notice),
             assistant_msg("failed partial"),
             round_discarded("discarding partial response after failure: boom"),
-            turn_failed(),
+            turn_failed(false),
         ];
         chain(&mut events);
 
@@ -947,6 +944,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_turn_that_kept_context_keeps_its_prompt() {
+        // A failure that never ran a round writes a kept turn and no discard
+        // marker. Its prompt stays in context, as it did live.
+        let mut events = vec![
+            user_msg("previous prompt"),
+            assistant_msg("previous reply"),
+            turn_end(),
+            user_msg("failed prompt"),
+            turn_failed(true),
+            user_msg("next prompt"),
+            assistant_msg("next reply"),
+            turn_end(),
+        ];
+        chain(&mut events);
+
+        let messages = messages_from_events(&events);
+        let texts: Vec<&str> = messages
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                ContentBlock::Text { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+
+        assert_eq!(
+            texts,
+            [
+                "previous prompt",
+                "previous reply",
+                "failed prompt",
+                "next prompt",
+                "next reply"
+            ]
+        );
+    }
+
+    #[test]
     fn failed_turn_without_discard_marker_hides_the_whole_turn() {
         // Logs from before the failure arm wrote a discard marker have no
         // boundary inside the failed turn, so the skip runs to the previous
@@ -957,7 +991,7 @@ mod tests {
             turn_end(),
             user_msg("failed prompt"),
             assistant_msg("failed partial"),
-            turn_failed(),
+            turn_failed(false),
         ];
         chain(&mut events);
 
@@ -981,7 +1015,7 @@ mod tests {
             turn_cancelled(),
             user_msg("failed prompt"),
             assistant_msg("failed partial"),
-            turn_failed(),
+            turn_failed(false),
         ];
         chain(&mut events);
 

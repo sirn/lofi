@@ -489,6 +489,27 @@ impl SessionCursor {
         Ok(events)
     }
 
+    /// Selected-lineage events after `ancestor`, leaf first. Returns `None`
+    /// when `ancestor` is not on the selected lineage.
+    ///
+    /// # Errors
+    /// Propagates indexing and event parsing failures.
+    pub(crate) fn lineage_after(&self, ancestor: Option<&str>) -> Result<Option<Vec<EventIndex>>> {
+        let leaf = self.lock_leaf();
+        let (_meta, index, _size) = load_index(&self.path)?;
+        let selected = indexed_lineage(index, leaf.as_deref())?;
+        let start = match ancestor {
+            None => 0,
+            Some(ancestor) => match selected.iter().position(|entry| entry.id.matches(ancestor)) {
+                Some(position) => position + 1,
+                None => return Ok(None),
+            },
+        };
+        let mut suffix: Vec<EventIndex> = selected[start..].to_vec();
+        suffix.reverse();
+        Ok(Some(suffix))
+    }
+
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
     pub fn append_events(&self, events: &mut [SessionEvent]) -> Result<(u64, u64)> {

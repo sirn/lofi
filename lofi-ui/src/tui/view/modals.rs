@@ -542,7 +542,7 @@ pub(super) fn render_model_picker(f: &mut Frame, area: Rect, app: &App) {
     let active = picker.choices.iter().position(|c| {
         format!("{}/{}", c.provider, c.id)
             == app
-                .selected_external_model_label
+                .selected_model_label
                 .as_ref()
                 .unwrap_or(&app.model_label)
                 .as_str()

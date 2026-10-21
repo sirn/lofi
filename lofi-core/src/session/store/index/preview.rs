@@ -24,7 +24,7 @@ impl SummaryAccumulator {
     pub(in crate::session::store) fn push(&mut self, offset: u64, kind: IndexKind) {
         match kind {
             IndexKind::Cursor
-            | IndexKind::BackendUsage
+            | IndexKind::ContextReported
             | IndexKind::JobLifecycle
             | IndexKind::SubagentUsage
             | IndexKind::Other => {}

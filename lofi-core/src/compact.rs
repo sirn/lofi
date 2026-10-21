@@ -356,6 +356,7 @@ mod tests {
                 error: "boom".into(),
                 cost: 0.0,
                 usage: lofi_types::Usage::default(),
+                keep_context: false,
             },
         );
         push_event(

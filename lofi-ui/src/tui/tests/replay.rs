@@ -307,6 +307,7 @@ fn messages_from_events_excludes_failed_turn_branch() {
             error: "boom".into(),
             cost: 0.01,
             usage: Usage::default(),
+            keep_context: false,
         },
     ]
     .into_iter()

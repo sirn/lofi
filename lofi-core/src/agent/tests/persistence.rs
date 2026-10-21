@@ -60,6 +60,44 @@ async fn user_prompt_is_persisted_before_first_provider_round() {
 }
 
 #[tokio::test]
+async fn failed_admission_checkpoint_fails_the_turn_before_the_request() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"meta\",\"version\":1,\"created\":0,\"cwd\":\"\",\"model\":\"m\"}\n",
+    )
+    .unwrap();
+    // A transcript that cannot take the prompt fails admission. The provider
+    // never yields, so a turn that reached it would not return at all.
+    let agent = Agent {
+        provider: Arc::new(NeverProvider),
+        ..agent_with(Vec::new(), dir.path())
+    };
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let cursor = crate::session::store::SessionCursor::new(path, None);
+    let mut messages = Vec::new();
+    let run = agent.run_turn(
+        &mut messages,
+        TurnRequest::prompt("keep this".into(), lofi_types::PromptKind::User),
+        tx,
+        Some(&cursor),
+        RunControls {
+            cancel: None,
+            preempt: None,
+        },
+    );
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+    assert!(
+        matches!(out, Ok(Err(_))),
+        "a prompt the transcript cannot hold must fail the turn"
+    );
+    assert!(messages.is_empty(), "the prompt never entered the history");
+}
+
+#[tokio::test]
 async fn startup_notice_uses_the_durable_prompt_path() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.jsonl");

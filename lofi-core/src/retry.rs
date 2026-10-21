@@ -75,6 +75,12 @@ impl RetrySession {
         }
     }
 
+    /// Undo a retry that never started, so a turn that stops between the
+    /// failure and the retry reports no pair it did not open.
+    pub fn abandon(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_sub(1);
+    }
+
     pub fn reset_after_progress(&mut self) -> Option<u32> {
         let previous = self.consecutive_failures;
         self.consecutive_failures = 0;
@@ -92,11 +98,6 @@ impl RetrySession {
             max_retries: self.policy.max_retries,
             delay: self.policy.delay_for(self.consecutive_failures),
         })
-    }
-
-    #[must_use]
-    pub fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures
     }
 }
 
@@ -355,5 +356,25 @@ mod tests {
         assert!(session.retry(&error).is_none());
         assert_eq!(session.reset_after_progress(), Some(1));
         assert_eq!(session.retry(&error).unwrap().attempt, 1);
+    }
+
+    #[test]
+    fn abandon_undoes_a_retry_that_never_started() {
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(5),
+        };
+        let mut session = RetrySession::new(policy);
+        let error = Error::Provider("HTTP 500".to_string());
+
+        assert_eq!(session.retry(&error).unwrap().attempt, 1);
+        session.abandon();
+
+        assert_eq!(
+            session.reset_after_progress(),
+            None,
+            "no pair was opened, so there is no pair to close"
+        );
     }
 }

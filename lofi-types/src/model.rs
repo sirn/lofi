@@ -65,7 +65,19 @@ pub struct Model {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct RunModel {
     pub provider: String,
+    /// The model id the backend reported for the turn. A CLI backend reports
+    /// the id it resolved, which is often not a selectable name.
     pub id: String,
+    /// The name the user selected inside the backend; `default` when the
+    /// backend ran its own default. This is what a resume re-selects, because
+    /// a reported id (for example `claude-opus-5-5`) is not selectable.
+    #[serde(default)]
+    pub selected: String,
+    /// The label the backend shows for the selection, when it differs from
+    /// `selected` (for example the context-window suffix a CLI reports). The
+    /// header renders this so a resumed session keeps the label the user saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
     #[serde(default)]
     pub thinking: ThinkingLevel,
     #[serde(default)]
@@ -73,6 +85,18 @@ pub struct RunModel {
 }
 
 impl RunModel {
+    /// The selectable name behind this turn: the selection, or the reported id
+    /// when the turn predates `selected` (or a native backend, where the two
+    /// are the same).
+    #[must_use]
+    pub fn selected_or_id(&self) -> &str {
+        if self.selected.is_empty() {
+            &self.id
+        } else {
+            &self.selected
+        }
+    }
+
     /// A model query that round-trips through `parse_model_query`: unlike
     /// `label` it always emits the thinking level and the service tier, so a
     /// restored `off` level or `auto` tier is not silently replaced by a
@@ -82,10 +106,18 @@ impl RunModel {
         format!(
             "{}/{}:{}@{}",
             self.provider,
-            self.id,
+            self.selected_or_id(),
             self.thinking.as_str(),
             self.service_tier.as_str(),
         )
+    }
+
+    /// The label the session header shows for this turn.
+    #[must_use]
+    pub fn display_or_selected(&self) -> &str {
+        self.display
+            .as_deref()
+            .unwrap_or_else(|| self.selected_or_id())
     }
 
     #[must_use]
@@ -148,6 +180,8 @@ impl RunModel {
             (core.clone(), ThinkingLevel::Off)
         };
         Self {
+            selected: id.clone(),
+            display: None,
             provider,
             id,
             thinking,
@@ -181,6 +215,10 @@ impl<'de> serde::Deserialize<'de> for RunModel {
                 provider: String,
                 id: String,
                 #[serde(default)]
+                selected: String,
+                #[serde(default)]
+                display: Option<String>,
+                #[serde(default)]
                 thinking: ThinkingLevel,
                 #[serde(default)]
                 service_tier: ServiceTier,
@@ -191,11 +229,15 @@ impl<'de> serde::Deserialize<'de> for RunModel {
             Repr::Obj {
                 provider,
                 id,
+                selected,
+                display,
                 thinking,
                 service_tier,
             } => Self {
                 provider,
                 id,
+                selected,
+                display,
                 thinking,
                 service_tier,
             },

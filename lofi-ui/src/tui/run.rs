@@ -1,6 +1,18 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Split a `provider/model:level` query into the model and its effort.
+#[allow(dead_code)]
+fn split_thinking_suffix(query: &str) -> (&str, Option<ThinkingLevel>) {
+    match query.rsplit_once(':') {
+        Some((head, tail)) if !head.is_empty() => match ThinkingLevel::parse(tail) {
+            Some(level) => (head, Some(level)),
+            None => (query, None),
+        },
+        _ => (query, None),
+    }
+}
+
 /// Cancel an in-flight run and wait for its recorder to flush. Aborting the
 /// task skips that flush, so the deadline sits far beyond any healthy
 /// round; the engine's cancel flag and idle timeout bound the wait on
@@ -30,6 +42,23 @@ pub(crate) async fn settle_run_for_quit(run: RunHandle, timeout: Duration) -> bo
         let _ = handle.await;
     }
     aborted_by_deadline
+}
+
+/// Settle a run whose task ended but whose channel did not.
+///
+/// The loop waits for the event channel to close before it settles a run. A
+/// sender clone that outlived the task (a `TurnIo` travels to worker threads)
+/// keeps that channel open forever: the status line ticks, queued prompts
+/// never start, and nothing reports the turn. Cancellation cannot break that
+/// wait either: Escape and Ctrl-C only raise a flag that a live turn polls, so
+/// the key press reaches nothing. Closing the receiver here ends the wait;
+/// buffered events still arrive first.
+pub(super) fn close_finished_run(current_run: &mut Option<RunHandle>) {
+    if let Some(run) = current_run.as_mut() {
+        if run.handle.is_finished() {
+            run.rx.close();
+        }
+    }
 }
 
 pub(crate) struct RunHandle {
@@ -156,7 +185,7 @@ impl Drop for TerminalGuard {
 /// hint instead of running.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
-    agent: Option<Backend>,
+    agent: Option<BackendRef>,
     model_label: String,
     thinking: ThinkingLevel,
     service_tier: ServiceTier,
@@ -243,7 +272,7 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> &str {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn run_loop(
     guard: &mut TerminalGuard,
-    mut agent: Option<Backend>,
+    mut agent: Option<BackendRef>,
     theme: Theme,
     theme_mode: lofi_types::ThemeMode,
     model_label: String,
@@ -265,10 +294,9 @@ pub(crate) async fn run_loop(
         contiguous,
         cwd,
     } = session;
-    let model_choices = switcher.as_ref().map_or_else(
-        || agent.as_ref().map_or_else(Vec::new, Backend::model_choices),
-        |s| s.choices().to_vec(),
-    );
+    let model_choices = switcher
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.choices().to_vec());
     let mut app = App::new(
         model_label,
         thinking,
@@ -277,11 +305,9 @@ pub(crate) async fn run_loop(
         compaction,
         system_prompt,
     );
-    app.external_backend = agent
-        .as_ref()
-        .is_some_and(|backend| backend.native().is_none());
-    if app.external_backend {
-        app.selected_external_model_label = agent.as_ref().map(Backend::model_label);
+    if let Some(backend) = agent.as_ref() {
+        app.selected_model_label =
+            Some(format!("{}/{}", backend.name(), backend.selection().model));
     }
     app.theme = theme;
     app.theme_mode = theme_mode;
@@ -339,14 +365,14 @@ pub(crate) async fn run_loop(
         tokio::sync::mpsc::unbounded_channel::<lofi_core::ConfirmRequest>();
     if let Some(a) = agent.take() {
         let a = a.with_confirm_tx(confirm_tx.clone());
-        // Clone the session's job registry for the `/job` modal and the
-        // running-jobs badge. Cheap: shares the agent's map.
-        app.jobs = Some(a.jobs());
-        app.subagents = a.subagents();
+        // Session-scoped state, read through the executor both backends own.
+        let executor = a.tool_executor();
+        app.jobs = Some(executor.jobs());
+        app.subagents = Some(a.subagents());
         // The `/policy` dialog writes the choice here; every exec in the
         // session reads it. Cloned (not moved) so model switches keep it.
-        app.policy_override = Some(a.policy_override().clone());
-        app.auto_mode_configured = a.has_auto_mode();
+        app.policy_override = Some(executor.policy_override());
+        app.auto_mode_configured = executor.has_auto_mode();
         agent = Some(a);
     }
 
@@ -425,6 +451,7 @@ pub(crate) async fn run_loop(
             } => {
                 match ev {
                     Some(e) => {
+                        app.run_event_at = Some(Instant::now());
                         if let Some(run) = current_run.as_ref() {
                             attach_run_cursor(&mut app, run);
                         }
@@ -573,55 +600,38 @@ pub(crate) async fn run_loop(
                             handle_event(&ev, &mut app, agent.as_ref(), &mut current_run);
                         }
                     if let Some(q) = app.pending_model_switch.take() {
-                        let target_external = q.split_once('/').is_some_and(|(name, _)| {
-                            switcher.as_ref().is_some_and(|s| s.config.backends.contains_key(name))
-                        });
-                        let same_external = app.external_backend && q.split_once('/').is_some_and(|(name, _)| {
-                            agent.as_ref().is_some_and(|a| a.model_label().starts_with(&format!("{name}/")))
-                        });
-                        if same_external {
-                            if let Some(backend) = agent.as_mut() {
-                                match backend.select_model(&q) {
-                                    Ok(()) => {
-                                        app.model_label = backend.model_label();
-                                        app.selected_external_model_label = Some(app.model_label.clone());
-                                        app.notify(NotifyKind::Info, format!("selected {} for the next turn", app.model_label));
-                                        app.bump_render_epoch();
-                                    }
-                                    Err(e) => app.notify(NotifyKind::Error, format!("switch model: {e}")),
-                                }
-                            }
-                        } else if let Some(switcher) = switcher.as_ref() {
-                            match switcher.rebuild_backend(agent.as_ref(), &q).await {
-                                Ok((new_agent, model, level)) => {
-                                    app.external_backend = target_external;
-                                    app.backend_context = None;
-                                    if let Some(model) = model {
-                                        let tier = model.service_tier.clone();
-                                        app.selected_external_model_label = None;
-                                        app.apply_model_switch(&model, level, tier);
-                                    } else {
-                                        app.model_label = new_agent.model_label();
-                                        app.selected_external_model_label = Some(app.model_label.clone());
-                                        app.thinking = ThinkingLevel::Off;
-                                        app.thinking_label = None;
-                                        app.service_tier = ServiceTier::Auto;
-                                        app.service_label = None;
-                                        app.notify(NotifyKind::Info, format!("selected {} for the next turn", app.model_label));
-                                    }
+                        // The query names the backend and the selection, so
+                        // one path switches a model and a transport alike.
+                        if let Some(switcher) = switcher.as_ref() {
+                            match switcher.switch(agent.as_ref(), &q).await {
+                                Ok(new_agent) => {
+                                    let selection = new_agent.selection();
+                                    let choice = new_agent.choice();
+                                    let label =
+                                        format!("{}/{}", new_agent.name(), selection.model);
+                                    app.reported_context = None;
+                                    app.selected_model_label = None;
+                                    app.apply_model_switch(
+                                        &label,
+                                        selection.thinking,
+                                        selection.service_tier,
+                                        choice.context_window,
+                                    );
                                     let new_agent = new_agent.with_confirm_tx(confirm_tx.clone());
                                     app.no_models_hint = None;
                                     app.system_prompt = new_agent.system_prompt().into();
-                                    app.jobs = Some(new_agent.jobs());
-                                    let new_subagents = new_agent.subagents();
+                                    let executor = new_agent.tool_executor();
+                                    app.jobs = Some(executor.jobs());
+                                    app.policy_override = Some(executor.policy_override());
+                                    app.auto_mode_configured = executor.has_auto_mode();
+                                    let new_subagents = Some(new_agent.subagents());
                                     // A switch that swaps the registry
                                     // instance orphans the old one's runs:
                                     // settle their spend and cancel them,
                                     // then listen to the new instance. A
                                     // switch that keeps it must not cancel
                                     // its live runs.
-                                    let subagents_changed = match (&app.subagents, &new_subagents)
-                                    {
+                                    let subagents_changed = match (&app.subagents, &new_subagents) {
                                         (Some(old), Some(new)) => !old.same_instance(new),
                                         (old, new) => old.is_some() != new.is_some(),
                                     };
@@ -636,8 +646,6 @@ pub(crate) async fn run_loop(
                                             .as_ref()
                                             .map(lofi_core::SubagentRegistry::subscribe_notices);
                                     }
-                                    app.policy_override = Some(new_agent.policy_override());
-                                    app.auto_mode_configured = new_agent.has_auto_mode();
                                     app.jobs_receiver_stale = true;
                                     app.notified_jobs.clear();
                                     agent = Some(new_agent);
@@ -721,6 +729,7 @@ pub(crate) async fn run_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
+                close_finished_run(&mut current_run);
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
@@ -941,7 +950,14 @@ pub(crate) async fn run_loop(
 
         if app.should_quit {
             if let Some(r) = current_run.take() {
-                if settle_run_for_quit(r, QUIT_FLUSH_TIMEOUT).await {
+                // A turn that never answered a cancel has no flush in
+                // progress; waiting the full budget only delays the exit.
+                let budget = if app.cancel_unacknowledged() {
+                    ABANDON_FLUSH_TIMEOUT
+                } else {
+                    QUIT_FLUSH_TIMEOUT
+                };
+                if settle_run_for_quit(r, budget).await {
                     last_err =
                         Some("quit: run aborted before its final transcript write".to_string());
                 }

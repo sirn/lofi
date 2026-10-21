@@ -530,6 +530,53 @@ async fn ctrl_c_on_empty_input_interrupts_run() {
     run.take().unwrap().handle.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_keeps_cancelling_while_the_run_still_reports() {
+    let mut a = app();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+    a.cancel_at = Some(Instant::now().checked_sub(CANCEL_STALL * 2).unwrap());
+    a.run_event_at = Some(Instant::now());
+
+    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
+
+    assert!(!a.should_quit, "a turn that still reports is not stuck");
+    assert!(cancel.load(Ordering::Relaxed));
+    run.take().unwrap().handle.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_quits_when_a_cancel_met_no_answer() {
+    let mut a = app();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Some(RunHandle {
+        handle: tokio::spawn(std::future::pending()),
+        rx,
+        cancel: cancel.clone(),
+        preempt: Arc::new(AtomicBool::new(false)),
+        session_cursor: Arc::new(std::sync::Mutex::new(None)),
+        user_shell: None,
+    });
+    let stalled = Instant::now().checked_sub(CANCEL_STALL * 2).unwrap();
+    a.cancel_at = Some(stalled);
+    a.run_event_at = Some(stalled);
+
+    handle_event(&ctrl_key(KeyCode::Char('c')), &mut a, None, &mut run);
+
+    assert!(a.should_quit, "an unanswered cancel must leave a way out");
+    assert!(run.is_some(), "quit must not abort the handle");
+    run.take().unwrap().handle.abort();
+}
+
 #[test]
 fn navigate_jk_moves_cursor_and_clamps() {
     let mut a = app();

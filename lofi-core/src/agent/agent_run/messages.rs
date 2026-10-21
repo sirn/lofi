@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn stamp_message_origin(message: &mut Message, model: &Model) {
+pub(in crate::agent) fn stamp_message_origin(message: &mut Message, model: &Model) {
     message.origin = Some(lofi_types::ModelOrigin::from(model));
 }
 
@@ -99,7 +99,7 @@ pub(in crate::agent) fn assistant_announces_tool_intent(message: &Message) -> bo
 /// cancel, closed channel). The fully-failed turn is truncated by the caller
 /// afterwards, so the synthesized results are dropped there; on a cancelled
 /// turn they are what keep the retained partial provider-valid.
-pub(super) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
+pub(in crate::agent) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
     let Some(assistant_index) = messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return;
     };
@@ -146,7 +146,7 @@ pub(super) fn close_orphaned_tool_uses(messages: &mut Vec<Message>) {
 }
 
 /// Count attached images across the request history, for the omit notice.
-pub(super) fn count_image_blocks(messages: &[Message]) -> usize {
+pub(in crate::agent) fn count_image_blocks(messages: &[Message]) -> usize {
     messages
         .iter()
         .flat_map(|m| m.blocks.iter())
@@ -163,7 +163,7 @@ pub(super) fn count_image_blocks(messages: &[Message]) -> usize {
 /// images carried on a `ToolResult` are dropped with a marker appended to its
 /// text. The model still sees that an attachment was present. Used only on the
 /// send path; the durable transcript is untouched.
-pub(super) fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
+pub(in crate::agent) fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
     use std::fmt::Write as _;
     messages
         .iter()
@@ -212,7 +212,7 @@ pub(super) fn strip_image_blocks(messages: &[Message]) -> Vec<Message> {
 /// tool results, and schemas are bounded elsewhere), so the byte pressure
 /// signal thresholds just the image payload. 8 MiB sits far under every
 /// provider body cap after base64 inflation (x4/3) plus envelope overhead.
-pub(super) const MAX_REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Sentinel error message marking a stop-before-send due to an oversized
 /// image payload. The run loop intercepts it and routes to the existing
@@ -220,11 +220,10 @@ pub(super) const MAX_REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// the turn. A sentinel string, not a new `Error` variant, because only this
 /// send/loop pair needs to distinguish it and a variant would leak an
 /// internal control-flow detail into the shared error type.
-pub(super) const IMAGE_PRESSURE_SENTINEL: &str = "__lofi_image_pressure__";
-
+///
 /// Sum the base64 payload bytes of every attached image across the request
 /// history. Base64 length is `4 * ceil(n/3)` for `n` raw bytes.
-pub(super) fn image_payload_bytes(messages: &[Message]) -> u64 {
+pub(in crate::agent) fn image_payload_bytes(messages: &[Message]) -> u64 {
     messages
         .iter()
         .flat_map(|m| m.blocks.iter())

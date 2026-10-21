@@ -855,7 +855,12 @@ async fn run_continuation_force_stops_at_hard_cap() {
         retry: crate::retry::RetryPolicy::default(),
         system_prompt: "sys".to_string(),
         max_output_tokens: None,
-        reserved_context_tokens: 20, // hard cap = 100 - 20 = 80
+        // hard cap = 100 - 20 = 80
+        compaction: lofi_types::CompactionConfig {
+            reserved_context_tokens: 20,
+            ..Default::default()
+        },
+        auto_mode_config: None,
         bash_env: lofi_code::BashEnv::default(),
         shell_policy: lofi_code::policy::defaults::resolve(
             &lofi_types::ShellPolicyConfig::default(),
@@ -874,6 +879,7 @@ async fn run_continuation_force_stops_at_hard_cap() {
         subagents: SubagentRegistry::default(),
         job_owner: None,
         mailbox: None,
+        source: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut messages = vec![user_msg("go")];
@@ -931,7 +937,12 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         retry: crate::retry::RetryPolicy::default(),
         system_prompt: "sys".to_string(),
         max_output_tokens: None,
-        reserved_context_tokens: 0, // token cap disabled; byte cap is the trigger
+        // token cap sits at the window, so the byte cap is the trigger
+        compaction: lofi_types::CompactionConfig {
+            reserved_context_tokens: 0,
+            ..Default::default()
+        },
+        auto_mode_config: None,
         bash_env: lofi_code::BashEnv::default(),
         shell_policy: lofi_code::policy::defaults::resolve(
             &lofi_types::ShellPolicyConfig::default(),
@@ -950,6 +961,7 @@ async fn run_continuation_image_byte_pressure_stops_before_send() {
         subagents: SubagentRegistry::default(),
         job_owner: None,
         mailbox: None,
+        source: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     // 7 MiB raw -> ~9.3 MiB base64, over the 8 MiB request image budget.

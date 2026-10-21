@@ -89,6 +89,11 @@ pub enum Error {
     #[error("tool error: {0}")]
     Tool(String),
 
+    /// The request cannot be sent in this context: the history must be
+    /// compacted before the model is asked again.
+    #[error("context pressure: {0}")]
+    ContextPressure(String),
+
     /// The operation was cancelled because the event consumer went away
     /// (receiver dropped or closed). Translated to a graceful exit at the
     /// public `Agent::run` boundary.

@@ -57,7 +57,8 @@ models = ["sonnet", "opus", "haiku"]
 
 Lofi starts the installed `claude` command.
 Claude Code uses its own login and credentials.
-It manages model requests, context, and compaction.
+Lofi owns the conversation and the compaction policy.
+Claude Code carries one turn at a time.
 Lofi supplies the system prompt and the session's `exec` tool through MCP.
 Shell approval uses Lofi's `policy.toml`.
 
@@ -118,6 +119,7 @@ The supported backend type is `claude-code`.
 | `command` | string | `claude` | Executable name on PATH or path to the executable. |
 | `model` | string | none | Initial model. Also included in the model list. |
 | `models` | string array | empty | Additional model choices. |
+| `context_window` | integer | `200000` | Context window Lofi budgets before the child reports its own. |
 
 For a specific installation, set `command`:
 
@@ -139,9 +141,23 @@ Claude Code's built-in tools, slash commands, hooks, Chrome integration, and
 user/project/local settings are disabled for this process.
 Managed Claude Code policy can still apply.
 
+Claude Code is a transport, not a second agent.
+Lofi tracks the conversation, so the child holds no decision Lofi cannot see.
 Claude Code saves its conversation alongside Lofi's transcript.
 Lofi reuses the Claude Code session ID when its context matches the conversation.
-After cancellation or a disconnect, use `--continue` or `--resume <id>`.
+Messages that the CLI did not see, such as user shell output, travel as a delta.
+A cancelled or failed turn closes the child.
+The next turn reopens the CLI session from its checkpoint.
+After a restart, use `--continue` or `--resume <id>`.
+A `/compact` or a changed system prompt rewrites the context.
+Lofi then starts a new Claude Code session from the compacted history.
+
+Compaction belongs to Lofi on this backend.
+`[compaction]` decides when the context is full and what the summary holds.
+A turn stops at `context_window - reserved_context_tokens` and reports
+`ContextPressure` like a provider turn, so the same policy applies.
+The child is started with `--autocompact 1000000`, so it never rewrites a
+transcript Lofi tracks.
 Cancelling a turn stops the process group.
 A missing Claude Code session produces an error.
 `--no-session` disables the Lofi transcript; Claude Code still saves its session.
@@ -154,14 +170,28 @@ If that report omits the model, the first response supplies the label.
 The turn indicator and saved turn records use the model reported for that turn.
 Resume restores the header label and the selected model alias.
 
-Claude Code reports token usage per turn and cumulative USD cost.
-The context gauge uses the last response's context usage.
-It shows `context unknown` when no context data is available.
+Claude Code reports cumulative USD cost for its child process.
+Lofi stores the spend of each turn as the delta since the previous turn.
+A turn record therefore holds its own cost.
+A cancelled turn has no reported cost, so it records none.
+It still records the usage of the rounds it ran, from the last response the
+child reported.
+The context gauge uses the context window the child reports.
+It falls back to the configured window until the first turn ends.
+Claude Code accepts `low`, `medium`, `high`, `xhigh`, and `max` effort levels.
+Use `/thinking` to select `--effort` for the next turn; `off` passes no flag.
 
-Automatic shell approval uses the Lofi provider and model configured in
-`policy.toml` under `[auto_mode]`.
+Automatic shell approval uses the `[auto_mode]` model query in `policy.toml`.
 Only an `allow` result approves a command.
 Evaluator errors and requests for confirmation keep the normal approval prompt.
+
+`lofi.subagent` works on this backend.
+A child is an ordinary backend from the same factory.
+A Claude Code session can spawn a Claude Code child or an HTTP child.
+An HTTP session can spawn a Claude Code child.
+A child that names another model with `lofi.subagent` opens that model's transport.
+A child shares the session's job registry, policy, and truncation limits.
+It has its own sandbox thread, its own auto-mode context, and its own inbox.
 
 ## Value resolution
 
@@ -584,9 +614,12 @@ All mappings are optional. The defaults are the four `pricing.*` token paths sho
 
 ## Compaction
 
-`[compaction]` controls context compaction for provider models.
-Use `/compact` to compact their context manually.
-Claude Code manages compaction for its backend models.
+`[compaction]` controls context compaction for every transport.
+The soft and hard thresholds read the same fill on either transport.
+Use `/compact` to compact the context manually.
+Claude Code keeps its own context inside the child process.
+A compaction rewrites Lofi's transcript, and the next turn starts a new child.
+The child never resumes the discarded session.
 
 ```toml
 [compaction]
@@ -848,9 +881,8 @@ The evaluator sees the command, the workspace root, and the request that started
 ```toml
 [auto_mode]
 enable = true
-provider = "openai"
-model = "gpt-4o-mini"
+model = "openai/gpt-4o-mini"
 # max_tokens = 1024
 ```
 
-`provider` is a provider key from `config.toml`; `model` is one of that provider's model ids. Evaluations use that provider's `response_start_timeout_ms`, and `max_tokens` defaults to the selected model's output limit.
+`model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms`. `max_tokens` defaults to the selected model's output limit.

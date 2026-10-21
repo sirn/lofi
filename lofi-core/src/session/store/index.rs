@@ -138,7 +138,9 @@ pub enum IndexKind {
     /// `JobStarted` / `JobFinished` markers; lets reconciliation skip the
     /// full event slice.
     JobLifecycle,
-    BackendUsage,
+    /// The context state a backend reported. Old files spell the tag
+    /// `backend_usage`; both map here.
+    ContextReported,
     SubagentUsage,
     /// Terminal record of a subagent run; rehydration finds it as the leaf
     /// of the selected lineage. Never model- or display-visible.
@@ -166,7 +168,7 @@ pub(super) fn index_kind(kind_type: &str, role: Option<&str>) -> IndexKind {
         "native_tool" => IndexKind::NativeTool,
         "cursor" => IndexKind::Cursor,
         "job_started" | "job_finished" => IndexKind::JobLifecycle,
-        "backend_usage" => IndexKind::BackendUsage,
+        "context_reported" | "backend_usage" => IndexKind::ContextReported,
         "subagent_usage" => IndexKind::SubagentUsage,
         "run_settled" => IndexKind::RunSettled,
         _ => IndexKind::Other,
@@ -193,7 +195,7 @@ pub(super) fn index_kind_for_event(kind: &SessionEventKind) -> IndexKind {
         SessionEventKind::TurnCancelled { .. } => IndexKind::TurnCancelled,
         SessionEventKind::Compaction { .. } => IndexKind::Compaction,
         SessionEventKind::NativeTool(_) => IndexKind::NativeTool,
-        SessionEventKind::BackendUsage { .. } => IndexKind::BackendUsage,
+        SessionEventKind::ContextReported { .. } => IndexKind::ContextReported,
         SessionEventKind::SubagentUsage { .. } => IndexKind::SubagentUsage,
         SessionEventKind::RunSettled { .. } => IndexKind::RunSettled,
         SessionEventKind::JobStarted { .. } | SessionEventKind::JobFinished { .. } => {

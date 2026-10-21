@@ -188,7 +188,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         retry: crate::retry::RetryPolicy::default(),
         system_prompt: "sys".to_string(),
         max_output_tokens: None,
-        reserved_context_tokens: 0,
+        compaction: lofi_types::CompactionConfig::default(),
         bash_env: lofi_code::BashEnv::default(),
         shell_policy: lofi_code::policy::defaults::resolve(
             &lofi_types::ShellPolicyConfig::default(),
@@ -196,6 +196,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_tx: None,
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
+        auto_mode_config: None,
         auto_mode_hints: super::auto_mode::hint_handle(),
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
@@ -207,6 +208,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         auto_continue: lofi_types::AutoContinuePolicy::default(),
         subagent_support: None,
         subagents: SubagentRegistry::default(),
+        source: None,
     }
 }
 
@@ -297,3 +299,4 @@ mod recovery;
 mod retry;
 mod round;
 mod subagent;
+mod turn;

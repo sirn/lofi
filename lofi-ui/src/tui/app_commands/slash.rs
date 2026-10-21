@@ -5,15 +5,6 @@ impl App {
     /// recognized command (so the caller does not start a run).
     pub(in crate::tui) fn slash_command(&mut self, line: &str) -> bool {
         let cmd = line.trim();
-        if self.external_backend
-            && matches!(
-                cmd,
-                "/clear" | "/compact" | "/new" | "/resume" | "/tree" | "/thinking" | "/service"
-            )
-        {
-            self.notify(NotifyKind::Warn, "this operation is not supported by the external backend; start or resume a session from the CLI");
-            return true;
-        }
         match cmd {
             "/clear" => {
                 self.clear_log();

@@ -2,27 +2,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use lofi_types::{
-    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, ServiceTier, StreamingEvent,
-    ThinkingLevel, Usage,
+    ContentBlock, Message, Model, NativeToolRecord, Role, RunModel, ServiceTier, ThinkingLevel,
+    Usage,
 };
 use tokio::sync::mpsc::Sender;
 
-use crate::config_loader::load_config_or_default;
+use crate::backend;
 use crate::models::ModelRegistry;
-use crate::session::recorder::{SessionRecorder, TurnOutcome};
 use crate::state;
 use lofi_code::policy::ResolvedPolicy;
 use lofi_code::{BashEnv, ExecCtx, ExecOptions, RecallFn, ResultFn, ToolEvent};
 use lofi_error::{Error, Result};
-use lofi_providers::MessageAssembler;
 use lofi_providers::ToolSchema;
 use lofi_providers::{open, Provider};
 use lofi_types::BashConfig;
+#[cfg(test)]
+use lofi_types::StreamingEvent;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -37,23 +37,30 @@ pub struct ConfirmRequest {
 mod agent_run;
 #[cfg(test)]
 use agent_run::assistant_announces_tool_intent;
-pub use agent_run::{RunControls, TurnInput, TurnRequest};
+pub(crate) use agent_run::messages::MAX_REQUEST_IMAGE_BYTES;
 mod auto_mode;
 mod event;
 mod exec;
 mod mailbox;
 mod model;
+pub(crate) mod native;
 mod subagent;
 mod tool_executor;
+pub(crate) mod turn;
+pub(crate) mod turn_session;
 pub use lofi_code::SubagentOp;
+pub(crate) use subagent::backend_hook;
 pub use subagent::{
     SubagentNotice, SubagentNoticeKind, SubagentRegistry, SubagentRunning, SubagentSupport,
 };
 pub use tool_executor::{ToolCallContext, ToolExecutor};
+pub(crate) use turn_session::ToolRecorder;
+pub use turn_session::{RunControls, TurnInput, TurnRequest};
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use auto_mode::collect_text;
 pub use event::AgentEvent;
 #[cfg(test)]
 pub(crate) use exec::extract_code_prefix;
@@ -61,7 +68,9 @@ pub(crate) use exec::{cap_exec_result, cap_tool_result, CodePrefixDecoder};
 pub use exec::{
     exec_input_code_and_label, exec_label, exec_result_display, exec_tool_schema, parse_exec_input,
 };
-pub use model::{build_agent, rebuild_agent, select_model, select_model_with_level};
+pub(crate) use model::assemble_system_prompt;
+pub(crate) use model::{parse_model_query, NO_MODELS_HINT};
+pub use model::{rebuild_agent, select_model, select_model_with_level};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
 
@@ -79,112 +88,47 @@ pub(crate) const MAX_EXEC_RESULT_BYTES: usize = 200 * 1024;
 const PER_EVENT_OVERHEAD: usize = 64;
 /// User-role notice appended once per turn when the provider reports a
 /// token-limit stop, nudging the model to pick up where it was cut off.
-const TRUNCATION_CONTINUATION_PROMPT: &str =
+pub(crate) const TRUNCATION_CONTINUATION_PROMPT: &str =
     "Your previous response was cut off at the token limit. Continue where you left off.";
-const THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained reasoning but no final answer. Continue the task and give the final answer.";
-const LOST_TOOL_CONTINUATION_PROMPT: &str = "Your tool call was not received. Continue the task by issuing the required tool call again. If no tool call is required, give the final answer.";
-const INTENT_CONTINUATION_PROMPT: &str = "Continue the task now. If the task is already complete, give the final answer. Do not only describe the next action.";
+pub(crate) const THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained reasoning but no final answer. Continue the task and give the final answer.";
+pub(crate) const LOST_TOOL_CONTINUATION_PROMPT: &str = "Your tool call was not received. Continue the task by issuing the required tool call again. If no tool call is required, give the final answer.";
+pub(crate) const INTENT_CONTINUATION_PROMPT: &str = "Continue the task now. If the task is already complete, give the final answer. Do not only describe the next action.";
+
+/// Spend of one complete usage report, or `None` when the model carries no
+/// price. The same arithmetic bills a finished round and a one-shot call.
+#[must_use]
+pub fn usage_cost(model: &Model, usage: Usage) -> Option<f64> {
+    let (Some(input), Some(output)) = (model.input_price, model.output_price) else {
+        return model.per_request_price;
+    };
+    let cache_read = model.cache_read_price.unwrap_or(input);
+    let cache_write = model.cache_write_price.unwrap_or(input);
+    let mut cost = usage.input_tokens as f64 / 1_000_000.0 * input
+        + usage.cache_read_tokens as f64 / 1_000_000.0 * cache_read
+        + usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write
+        + usage.output_tokens as f64 / 1_000_000.0 * output;
+    if let Some(per_request) = model.per_request_price {
+        cost += per_request;
+    }
+    Some(cost)
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-struct TurnStats {
-    turn_start: Instant,
-    tool_starts: HashMap<String, Instant>,
-    tool_elapsed: HashMap<String, Duration>,
-    thinking_elapsed: Vec<Duration>,
-    cost: f64,
-    usage: Usage,
-    // Stop reason of the latest finished round; the final round's value is
-    // what the turn summary and the durable TurnEnd marker carry.
-    stop_reason: Option<lofi_types::StopReason>,
-}
-
-impl TurnStats {
-    fn new() -> Self {
-        Self {
-            turn_start: Instant::now(),
-            tool_starts: HashMap::new(),
-            tool_elapsed: HashMap::new(),
-            thinking_elapsed: Vec::new(),
-            cost: 0.0,
-            usage: Usage::default(),
-            stop_reason: None,
-        }
-    }
-
-    fn tool_start(&mut self, id: &str) {
-        self.tool_starts.insert(id.to_string(), Instant::now());
-    }
-
-    fn tool_end(&mut self, id: &str) -> u64 {
-        let ms = self
-            .tool_starts
-            .get(id)
-            .map_or(0, |s| s.elapsed().as_millis() as u64);
-        self.tool_elapsed
-            .insert(id.to_string(), Duration::from_millis(ms));
-        ms
-    }
-
-    fn add_usage(&mut self, usage: Usage, model: &Model) {
-        self.usage = usage;
-        if let (Some(ip), Some(op)) = (model.input_price, model.output_price) {
-            // `input_tokens` excludes the cached slice (see provider usage
-            // parsers). Cache reads and writes are billed at their own rates
-            // when the model reports them; otherwise they fall through to
-            // the input rate so the full prompt is still accounted for.
-            let cache_read_rate = model.cache_read_price.unwrap_or(ip);
-            let cache_write_rate = model.cache_write_price.unwrap_or(ip);
-            self.cost += usage.input_tokens as f64 / 1_000_000.0 * ip
-                + usage.cache_read_tokens as f64 / 1_000_000.0 * cache_read_rate
-                + usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write_rate
-                + usage.output_tokens as f64 / 1_000_000.0 * op;
-        }
-        if let Some(pr) = model.per_request_price {
-            self.cost += pr;
-        }
-    }
-
-    /// Snapshot the turn's accumulators for the session recorder. The order
-    /// of `tool_elapsed` matches insertion (i.e. first-seen tool-call order),
-    /// and `thinking_elapsed` is in emission order — both preserved by the
-    /// recorder so the resumed view's markers match the live one's.
-    fn summary(&self, elapsed_ms: u64) -> crate::session::recorder::TurnSummary {
-        let mut tool_elapsed: Vec<(String, u64)> = self
-            .tool_elapsed
-            .iter()
-            .map(|(id, d)| (id.clone(), d.as_millis() as u64))
-            .collect();
-        tool_elapsed.sort_by(|a, b| a.0.cmp(&b.0));
-        crate::session::recorder::TurnSummary {
-            elapsed_ms,
-            cost: self.cost,
-            usage: self.usage,
-            tool_elapsed,
-            thinking_elapsed: self
-                .thinking_elapsed
-                .iter()
-                .map(|d| d.as_millis() as u64)
-                .collect(),
-            stop_reason: self.stop_reason,
-        }
-    }
-}
-
 /// Cheaply cloneable because the provider is held in an `Arc`.
 #[derive(Clone)]
 pub struct Agent {
-    provider: Arc<dyn Provider>,
-    model: Model,
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) model: Model,
     root: PathBuf,
     tmp_dir: PathBuf,
     tmp_lease: Option<Arc<state::SessionTempDir>>,
     retry: crate::retry::RetryPolicy,
-    system_prompt: String,
+    pub(crate) system_prompt: String,
     max_output_tokens: Option<u64>,
-    reserved_context_tokens: u64,
+    compaction: lofi_types::CompactionConfig,
     bash_env: BashEnv,
     shell_policy: ResolvedPolicy,
     truncate: lofi_code::TruncatedCap,
@@ -193,6 +137,8 @@ pub struct Agent {
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
+    /// Config the evaluator was opened from, with its provider resolved.
+    auto_mode_config: Option<Arc<lofi_types::Config>>,
     /// Turn context for the auto-mode evaluator: the request a command
     /// answers. The turn loop writes it at the start of each turn.
     auto_mode_hints: lofi_code::AutoModeHintHandle,
@@ -221,6 +167,9 @@ pub struct Agent {
     subagent_support: Option<SubagentSupport>,
     /// Spawned subagents of this session, resumable by id.
     subagents: SubagentRegistry,
+    /// The config and registry this backend was opened from. Model selection
+    /// rebuilds the transport from here, so no caller keeps a second copy.
+    pub(crate) source: Option<Arc<backend::NativeSource>>,
 }
 
 impl Agent {
@@ -233,7 +182,7 @@ impl Agent {
         tmp_dir: PathBuf,
         system_prompt: String,
         max_output_tokens: Option<u64>,
-        reserved_context_tokens: u64,
+        compaction: lofi_types::CompactionConfig,
         bash: &BashConfig,
         env: &[(String, String)],
         truncate: lofi_types::TruncateConfig,
@@ -255,7 +204,7 @@ impl Agent {
             retry: crate::retry::RetryPolicy::default(),
             system_prompt,
             max_output_tokens,
-            reserved_context_tokens,
+            compaction,
             bash_env,
             shell_policy,
             truncate,
@@ -264,6 +213,7 @@ impl Agent {
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
+            auto_mode_config: None,
             auto_mode_hints: auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
@@ -273,6 +223,7 @@ impl Agent {
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
             subagent_support: None,
             subagents: SubagentRegistry::default(),
+            source: None,
         }
     }
 
@@ -294,7 +245,7 @@ impl Agent {
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
-            reserved_context_tokens: self.reserved_context_tokens,
+            compaction: self.compaction.clone(),
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
             truncate: self.truncate,
@@ -303,6 +254,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_config: self.auto_mode_config.clone(),
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -312,6 +264,7 @@ impl Agent {
             exec_worker: self.exec_worker.clone(),
             subagent_support: self.subagent_support.clone(),
             subagents: self.subagents.clone(),
+            source: self.source.clone(),
         }
     }
 
@@ -326,12 +279,13 @@ impl Agent {
             retry: self.retry,
             system_prompt,
             max_output_tokens: self.max_output_tokens,
-            reserved_context_tokens: self.reserved_context_tokens,
+            compaction: self.compaction.clone(),
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_config: self.auto_mode_config.clone(),
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -344,6 +298,7 @@ impl Agent {
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
+            source: self.source.clone(),
         }
     }
 
@@ -358,12 +313,13 @@ impl Agent {
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
-            reserved_context_tokens: self.reserved_context_tokens,
+            compaction: self.compaction.clone(),
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_config: self.auto_mode_config.clone(),
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir,
@@ -376,7 +332,74 @@ impl Agent {
             truncate: self.truncate,
             image: self.image,
             auto_continue: self.auto_continue,
+            source: self.source.clone(),
         }
+    }
+
+    /// Replace every session-scoped field from an executor. Both backends own
+    /// the same kind of executor, so a switch or a fork moves between them
+    /// without copying twenty fields by hand.
+    #[must_use]
+    pub fn with_executor(&self, executor: &ToolExecutor) -> Self {
+        Self {
+            root: executor.root.clone(),
+            tmp_dir: executor.tmp_dir.clone(),
+            tmp_lease: executor.tmp_lease.clone(),
+            bash_env: executor.bash_env.clone(),
+            shell_policy: executor.shell_policy.clone(),
+            truncate: executor.truncate,
+            image: executor.image,
+            confirm_tx: executor.confirm_tx.clone(),
+            confirm_counter: executor.confirm_counter.clone(),
+            auto_mode: executor.auto_mode.clone(),
+            auto_mode_config: executor.auto_mode_config.clone(),
+            auto_mode_hints: executor.auto_mode_hints.clone(),
+            policy_override: executor.policy_override.clone(),
+            skills_dir: executor.skills_dir.clone(),
+            jobs: executor.jobs.clone(),
+            job_owner: executor.job_owner.clone(),
+            exec_worker: executor.exec_worker.clone(),
+            mailbox: executor.mailbox.clone(),
+            // Session state lives in the executor, so a backend opened from
+            // the same executor joins the runs the session already has.
+            subagents: executor.subagents.clone(),
+            subagent_support: executor.subagent_support.clone(),
+            ..self.clone()
+        }
+    }
+
+    /// A new conversation that shares the backend configuration and nothing
+    /// else: its own transcript slot, its own nested-subagent scope.
+    #[must_use]
+    pub fn forked(&self, executor: &ToolExecutor) -> Self {
+        let mut child = self.with_executor(executor);
+        child.mailbox = None;
+        child.subagent_support = None;
+        child.subagents = SubagentRegistry::default();
+        child
+    }
+
+    #[must_use]
+    pub fn with_source(&self, source: Arc<backend::NativeSource>) -> Self {
+        Self {
+            source: Some(source),
+            ..self.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn source(&self) -> Option<&Arc<backend::NativeSource>> {
+        self.source.as_ref()
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
     }
 
     #[must_use]
@@ -404,6 +427,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_config: self.auto_mode_config.clone(),
             auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -411,6 +435,9 @@ impl Agent {
             job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent: self.subagent_hook(),
+            mailbox: self.mailbox.clone(),
+            subagents: self.subagents.clone(),
+            subagent_support: self.subagent_support.clone(),
             models: self
                 .subagent_support
                 .as_ref()
@@ -431,11 +458,22 @@ impl Agent {
         self.confirm_tx = executor.confirm_tx;
         self.confirm_counter = executor.confirm_counter;
         self.auto_mode = executor.auto_mode;
+        self.auto_mode_config = executor.auto_mode_config;
         self.auto_mode_hints = executor.auto_mode_hints;
         self.policy_override = executor.policy_override;
         self.skills_dir = executor.skills_dir;
         self.jobs = executor.jobs;
         self.exec_worker = executor.exec_worker;
+        self.job_owner = executor.job_owner;
+        // A fork built from this executor carries the mailbox the spawner
+        // chose for the child; the session agent has none either way.
+        self.mailbox = executor.mailbox;
+        // Session state follows the executor, so switching transports keeps
+        // the same runs and the same override resolution.
+        self.subagents = executor.subagents;
+        if self.subagent_support.is_none() {
+            self.subagent_support = executor.subagent_support;
+        }
         self
     }
 
@@ -457,17 +495,6 @@ impl Agent {
     #[must_use]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
-    }
-
-    #[must_use]
-    pub fn hard_compact_threshold(&self) -> Option<u64> {
-        if self.reserved_context_tokens == 0 {
-            return None;
-        }
-        self.model
-            .context_window
-            .filter(|&w| w > self.reserved_context_tokens)
-            .map(|w| w - self.reserved_context_tokens)
     }
 
     #[must_use]
@@ -519,6 +546,8 @@ impl Agent {
         RunModel {
             provider: self.model.provider.clone(),
             id: self.model.id.clone(),
+            selected: self.model.id.clone(),
+            display: None,
             thinking: self.model.thinking.clone(),
             service_tier: self.model.service_tier.clone(),
         }
@@ -554,25 +583,5 @@ impl Agent {
         let input = prev_input_tokens.unwrap_or(0);
         let headroom = window.saturating_sub(input);
         (headroom > 0).then(|| cap.min(headroom))
-    }
-}
-
-/// Lossless event emit. An awaited [`Sender::send`] applies backpressure
-/// when the 64-slot channel fills instead of dropping the event; the outer
-/// `run` loop detects a closed channel and exits gracefully.
-async fn emit(tx: Option<&Sender<AgentEvent>>, ev: AgentEvent) -> bool {
-    if let Some(t) = tx {
-        // Awaited (lossless) send: a tool/error/terminal event must not be
-        // silently dropped when the 64-slot channel fills. A closed channel
-        // (receiver gone) is reported to the caller so the round can stop
-        // instead of continuing to consume/produce for a dead consumer.
-        return t.send(ev).await.is_ok();
-    }
-    true
-}
-
-async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
-    while !cancel.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

@@ -2,8 +2,8 @@ use crate::support::{
     anthropic_text_response, anthropic_tool_response, anthropic_usage_response,
     eof_cut_responses_response, event_types, google_text_response, google_thinking_usage_response,
     google_tool_response, lost_tool_response, responses_response, responses_tool_response,
-    text_response, thinking_response, tool_response, transcript_text, wait_for_process_exit,
-    Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
+    text_response, text_response_with_usage, thinking_response, tool_response, transcript_text,
+    wait_for_process_exit, Fixture, MockResponse, MockServer, ProcessGuard, WAIT,
 };
 
 #[test]
@@ -224,6 +224,31 @@ fn openai_responses_streams_reasoning_text_and_usage_through_the_tui() {
     assert!(transcript.contains("responses thinking marker"));
     assert!(transcript.contains("responses answer marker"));
     assert!(transcript.contains("cache_read_tokens"));
+}
+
+#[test]
+fn a_provider_turn_records_the_context_it_reported() {
+    let server = MockServer::start(vec![text_response_with_usage("answer marker", 1000)]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+    tui.submit("prompt marker");
+    fixture.wait_for_event_count("turn_end", 1);
+    tui.submit("/quit");
+    tui.wait_exit();
+
+    // The same report a CLI child sends, so the gauge has one source on
+    // either transport.
+    let reported: Vec<_> = fixture
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "context_reported")
+        .collect();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0]["context"]["used"].as_u64().unwrap() >= 1000,
+        "{reported:?}"
+    );
+    assert_eq!(reported[0]["context"]["size"], 100_000);
 }
 
 type ThinkingResponse = fn(&str, &str) -> MockResponse;

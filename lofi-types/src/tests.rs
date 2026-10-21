@@ -59,6 +59,8 @@ fn run_model_label_includes_service_tier() {
     let m = RunModel {
         provider: "openai".into(),
         id: "gpt-5.6-sol".into(),
+        selected: "gpt-5.6-sol".into(),
+        display: None,
         thinking: ThinkingLevel::High,
         service_tier: ServiceTier::Flex,
     };
@@ -607,6 +609,19 @@ fn shell_policy_presets_remain_deserializable() {
 }
 
 #[test]
+fn auto_mode_query_accepts_both_config_shapes() {
+    let split: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"provider":"mock","model":"alt"}"#).unwrap();
+    assert_eq!(split.query(), "mock/alt");
+    let qualified: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt:high"}"#).unwrap();
+    assert_eq!(qualified.query(), "mock/alt:high");
+    let migrated: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"provider":"mock","model":"mock/alt"}"#).unwrap();
+    assert_eq!(migrated.query(), "mock/alt");
+}
+
+#[test]
 fn bash_config_serde_round_trip() {
     let json = r#"{"strip_env":false,"pass_env":["GITHUB_TOKEN","NPM_TOKEN"],"env_file":"~/.config/lofi/secrets.env"}"#;
     let cfg: BashConfig = serde_json::from_str(json).unwrap();
@@ -641,6 +656,8 @@ fn run_model_query_emits_the_tier() {
     let m = RunModel {
         provider: "openai".into(),
         id: "gpt-5.6-sol".into(),
+        selected: "gpt-5.6-sol".into(),
+        display: None,
         thinking: ThinkingLevel::High,
         service_tier: ServiceTier::Auto,
     };

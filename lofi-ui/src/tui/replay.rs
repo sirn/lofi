@@ -355,8 +355,8 @@ pub(super) fn apply_event_to_turns(turns: &mut Vec<Turn>, ev: AgentEvent) {
         | AgentEvent::TurnCommitted { .. }
         | AgentEvent::RoundUsage { .. }
         | AgentEvent::SubagentUsage { .. }
-        | AgentEvent::BackendUsage { .. }
-        | AgentEvent::BackendModel { .. }
+        | AgentEvent::ContextReported { .. }
+        | AgentEvent::ModelReported { .. }
         | AgentEvent::RunStart
         | AgentEvent::Prompt { .. }
         | AgentEvent::UserShellStart { .. }

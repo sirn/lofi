@@ -289,7 +289,7 @@ fn turn_end_model_is_raw_not_rendered() {
     let header = std::fs::read_to_string(&path).unwrap();
     assert!(
         header.contains(
-            "\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"thinking\":\"medium\",\"service_tier\":\"auto\"}"
+            "\"model\":{\"provider\":\"openai\",\"id\":\"gpt-5.6-sol\",\"selected\":\"gpt-5.6-sol\",\"thinking\":\"medium\",\"service_tier\":\"auto\"}"
         ),
         "header model must be a raw object: {header}"
     );
@@ -314,7 +314,7 @@ fn turn_end_model_is_raw_not_rendered() {
     let turn_end_line = body.lines().last().unwrap();
     assert!(
         turn_end_line.contains(
-            "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"thinking\":\"high\",\"service_tier\":\"auto\"}"
+            "\"model\":{\"provider\":\"anthropic\",\"id\":\"claude\",\"selected\":\"claude\",\"thinking\":\"high\",\"service_tier\":\"auto\"}"
         ),
         "turn-end model must be a raw object: {turn_end_line}"
     );
@@ -865,6 +865,7 @@ fn last_run_model_uses_turn_failed() {
                 error: "oops".into(),
                 cost: 0.0,
                 usage: Usage::default(),
+                keep_context: false,
             },
         },
     ];

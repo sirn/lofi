@@ -81,74 +81,31 @@ use tokio::time::MissedTickBehavior;
 pub(crate) use types::*;
 
 use crate::tui::view::HStack;
-use lofi_core::backend::Backend;
-use lofi_core::{Agent, AgentEvent, AgentLifecycle, HardCompactOutcome};
+use lofi_core::backend::{BackendFactory, BackendRef};
+use lofi_core::{AgentEvent, AgentLifecycle, HardCompactOutcome};
 use lofi_error::{Error, Result};
 
-/// Native and external model choices share one picker. Native startup keeps
-/// its resolved registry; external startup resolves credentials only when
-/// a native model is selected.
+/// One picker for every transport. The factory resolves a query to a provider
+/// or a backend, so the UI never branches on which one the user picked.
 pub(crate) struct ModelSwitcher {
-    registry: lofi_core::ModelRegistry,
-    config: lofi_types::Config,
-    root: PathBuf,
-    env: Vec<(String, String)>,
+    factory: BackendFactory,
     choices: Vec<lofi_types::ModelChoice>,
-    unresolved_config: Option<lofi_types::Config>,
     executor: Option<lofi_core::agent::ToolExecutor>,
-    // Inherited from the session: a non-persisting session also disables
-    // subagent transcripts, including after a model switch rebuilds the agent.
-    persist_sessions: bool,
 }
 
 impl ModelSwitcher {
-    pub(crate) fn new(
-        registry: lofi_core::ModelRegistry,
-        config: lofi_types::Config,
-        root: PathBuf,
-        env: Vec<(String, String)>,
-    ) -> Self {
-        let choices = registry.choices();
+    pub(crate) fn new(factory: BackendFactory) -> Self {
+        let choices = factory.choices();
         Self {
-            registry,
-            config,
-            root,
-            env,
+            factory,
             choices,
-            unresolved_config: None,
             executor: None,
-            persist_sessions: true,
         }
     }
 
     pub(crate) fn with_subagent_persistence(mut self, persist_sessions: bool) -> Self {
-        self.persist_sessions = persist_sessions;
+        self.factory = self.factory.with_subagent_persistence(persist_sessions);
         self
-    }
-
-    pub(crate) fn from_external(
-        config: lofi_types::Config,
-        root: PathBuf,
-        env: Vec<(String, String)>,
-    ) -> Result<Self> {
-        let mut choices_config = config.clone();
-        let _guard = lofi_core::config_loader::apply_env_specs(&env);
-        for provider in choices_config.providers.values_mut() {
-            if provider.api_key.is_none() {
-                provider.api_key = provider
-                    .env_name
-                    .as_ref()
-                    .and_then(|name| std::env::var(name).ok());
-            }
-        }
-        let registry = lofi_core::ModelRegistry::load(&choices_config)?;
-        let mut switcher = Self::new(registry, config.clone(), root, env);
-        switcher.unresolved_config = Some(config);
-        Ok(switcher)
-    }
-
-    pub(crate) fn choices(&self) -> &[lofi_types::ModelChoice] {
-        &self.choices
     }
 
     pub(crate) fn with_tool_executor(mut self, executor: lofi_core::agent::ToolExecutor) -> Self {
@@ -156,105 +113,29 @@ impl ModelSwitcher {
         self
     }
 
-    pub(crate) fn external(
-        &self,
-        existing: Option<&Backend>,
-        query: &str,
-    ) -> Result<Option<Backend>> {
-        let Some((name, _)) = query.split_once('/') else {
-            return Ok(None);
-        };
-        let Some(config) = self.config.backends.get(name) else {
-            return Ok(None);
-        };
-        let mut backend = Backend::external(
-            name.into(),
-            config.clone(),
-            self.root.clone(),
-            existing
-                .map(Backend::tool_executor)
-                .or_else(|| self.executor.clone())
-                .ok_or_else(|| Error::State("missing tool executor".into()))?,
-        );
-        backend.select_model(query)?;
-        Ok(Some(backend))
+    pub(crate) fn choices(&self) -> &[lofi_types::ModelChoice] {
+        &self.choices
     }
 
-    pub(crate) async fn rebuild_backend(
+    /// Switch the running conversation to another model or another backend.
+    ///
+    /// # Errors
+    /// Returns a configuration error for an unknown model or backend.
+    pub(crate) async fn switch(
         &self,
-        existing: Option<&Backend>,
+        current: Option<&BackendRef>,
         query: &str,
-    ) -> Result<(Backend, Option<lofi_types::Model>, ThinkingLevel)> {
-        if let Some(backend) = self.external(existing, query)? {
-            return Ok((backend, None, ThinkingLevel::Off));
+    ) -> Result<BackendRef> {
+        if let Some(current) = current {
+            return self.factory.switch(current, query).await;
         }
-        let (agent, model, level) = if let Some(config) = &self.unresolved_config {
-            let provider = query.split_once('/').map_or("", |(name, _)| name);
-            let mut config = config.clone();
-            // The external backend config resolves a single provider, so
-            // `lofi.models()` and `model` overrides stay limited to it.
-            config.providers.retain(|name, _| name == provider);
-            let guard = lofi_core::config_loader::apply_env_specs(&self.env);
-            lofi_core::config_loader::resolve_config(&mut config).await?;
-            drop(guard);
-            let registry = match lofi_core::ModelRegistry::load_async(&config).await {
-                Ok(registry) => registry,
-                Err(_) => lofi_core::ModelRegistry::load(&config)?,
-            };
-            let (agent, model, level) = lofi_core::rebuild_agent(
-                existing.and_then(Backend::native),
-                &registry,
-                &config,
-                Some(query),
-                &self.root,
-                &self.env,
-            )?;
-            (self.with_subagents(agent, registry, &config), model, level)
-        } else {
-            self.rebuild(existing.and_then(Backend::native), query)?
+        // Opening the first backend of a session has no state to inherit;
+        // the factory supplies the executor a session starts with.
+        let executor = match self.executor.clone() {
+            Some(executor) => executor,
+            None => self.factory.executor()?,
         };
-        let agent = if let Some(existing) = existing {
-            agent
-                .with_system_prompt(existing.system_prompt().into())
-                .with_tool_executor(existing.tool_executor())
-        } else {
-            agent
-        };
-        Ok((agent.into(), Some(model), level))
-    }
-
-    pub(crate) fn rebuild(
-        &self,
-        existing: Option<&Agent>,
-        query: &str,
-    ) -> Result<(Agent, lofi_types::Model, ThinkingLevel)> {
-        let (agent, model, level) = lofi_core::rebuild_agent(
-            existing,
-            &self.registry,
-            &self.config,
-            Some(query),
-            &self.root,
-            &self.env,
-        )?;
-        Ok((
-            self.with_subagents(agent, self.registry.clone(), &self.config),
-            model,
-            level,
-        ))
-    }
-
-    /// Attach the subagent hooks. One place, so every construction path wires
-    /// the same persistence policy.
-    fn with_subagents(
-        &self,
-        agent: Agent,
-        registry: lofi_core::ModelRegistry,
-        config: &lofi_types::Config,
-    ) -> Agent {
-        agent.with_subagent_support(
-            lofi_core::SubagentSupport::new(registry, config.clone(), self.root.clone())
-                .with_persistence(self.persist_sessions),
-        )
+        self.factory.open(Some(query), executor).await
     }
 }
 
@@ -278,6 +159,16 @@ const QUIT_DOUBLE_PRESS: Duration = Duration::from_secs(2);
 /// by abort is the one sanctioned transcript loss (the process giving up),
 /// so the budget errs toward waiting it out.
 const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_mins(1);
+/// How long a run may stay silent after the user asked it to stop before the
+/// status line calls the request unacknowledged and Ctrl-C escalates to quit.
+/// The turn polls the flag every 20ms, so a healthy cancel answers in well
+/// under a second; a turn blocked inside a tool or a provider read answers
+/// only when that call returns.
+const CANCEL_STALL: Duration = Duration::from_secs(15);
+/// Flush budget for a quit that follows an unanswered cancel. Such a turn is
+/// blocked inside a call that observes neither the flag nor the quitting
+/// process, so the full quit budget would only delay the exit.
+const ABANDON_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CTX_LIMIT: u64 = 200_000;
 const DETAIL_VIEW_ROWS: usize = 10;
 
@@ -308,7 +199,6 @@ pub(crate) struct App {
     input: String,
     input_cursor: usize,
     lifecycle: AgentLifecycle,
-    external_backend: bool,
     /// The system prompt the agent was built with; pinned onto the durable
     /// transcript at each context boundary so a resumed or compacted history
     /// replays the exact governing prompt rather than what today's config
@@ -318,13 +208,16 @@ pub(crate) struct App {
     history_idx: Option<usize>,
     input_stash: String,
     model_label: String,
-    selected_external_model_label: Option<String>,
+    /// The `provider/model` the user picked, kept while a turn reports the id
+    /// it actually ran so the header can show both.
+    selected_model_label: Option<String>,
     thinking_label: Option<String>,
     thinking: ThinkingLevel,
     service_label: Option<String>,
     service_tier: ServiceTier,
     status_usage: Option<Usage>,
-    backend_context: Option<lofi_types::ContextUsage>,
+    /// The context state the engine reported after its last step.
+    reported_context: Option<lofi_types::ContextUsage>,
     total_in: u64,
     total_out: u64,
     prompt_queue: Vec<QueuedPrompt>,
@@ -420,6 +313,13 @@ pub(crate) struct App {
     /// appends to the kill ring instead of replacing it.
     last_kill_was_kill: bool,
     ctrl_c_at: Option<Instant>,
+    /// When the user first asked the current run to stop. Cancellation is
+    /// cooperative — the turn polls the flag — so this alone cannot settle a
+    /// run that stopped listening; see `cancel_unacknowledged`.
+    cancel_at: Option<Instant>,
+    /// When the current run last delivered an event. A cancel that lands while
+    /// a slow step still reports is not a stall.
+    run_event_at: Option<Instant>,
     log_rect: Rect,
     input_rect: Rect,
     log_vis: Vec<view::VisLine>,

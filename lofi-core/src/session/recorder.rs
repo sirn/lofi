@@ -47,10 +47,8 @@ pub struct TurnSummary {
 
 /// One durable session write. Callers never build a [`SessionEvent`].
 pub enum SessionRecord<'a> {
-    BackendUsage {
+    ContextReported {
         context: Option<lofi_types::ContextUsage>,
-        usage: Option<Usage>,
-        cost: Option<f64>,
     },
     /// Spend of subagent runs that settled since the last record, as deltas.
     SubagentUsage {
@@ -148,19 +146,11 @@ impl store::SessionCursor {
     /// Propagates transcript serialization and I/O failures.
     pub fn record(&self, record: SessionRecord<'_>) -> Result<(u64, u64)> {
         match record {
-            SessionRecord::BackendUsage {
-                context,
-                usage,
-                cost,
-            } => {
+            SessionRecord::ContextReported { context } => {
                 let mut events = [SessionEvent {
                     id: String::new(),
                     parent_id: None,
-                    kind: SessionEventKind::BackendUsage {
-                        context,
-                        usage,
-                        cost,
-                    },
+                    kind: SessionEventKind::ContextReported { context },
                 }];
                 self.append_events(&mut events)
             }
@@ -320,14 +310,24 @@ impl SessionRecorder {
     ///
     /// # Errors
     /// Propagates transcript serialization and I/O failures.
-    pub fn discard_round(&mut self, detail: &str) -> Result<()> {
+    pub fn discard_round(&mut self, detail: &str) -> Result<Option<(u64, u64)>> {
         self.flush_pending_discard()?;
         self.pending_discard = Some(detail.to_string());
-        self.flush_pending_discard().map(|_| ())
+        self.flush_pending_discard()
     }
 
     pub fn note_recorded_messages_removed(&mut self, count: usize) {
         self.recorded_messages_removed += count;
+    }
+
+    /// Drop a discard that could not be recorded.
+    ///
+    /// Nothing left the history, so a later flush must not stamp a boundary
+    /// that explains a removal, and must not skip the messages the failed
+    /// discard granted credit to.
+    pub fn cancel_discard(&mut self, count: usize) {
+        self.pending_discard = None;
+        self.recorded_messages_removed = self.recorded_messages_removed.saturating_sub(count);
     }
 
     #[must_use]
@@ -399,6 +399,9 @@ impl SessionRecorder {
                 error: error.clone(),
                 cost: summary.cost,
                 usage: summary.usage,
+                // The turn removed only the round that failed, and recorded
+                // that removal; everything it completed stays in the context.
+                keep_context: true,
             }),
             TurnOutcome::Cancelled => Some(SessionEventKind::TurnCancelled {
                 model: self.model.clone(),
@@ -812,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_discard_boundary_retries_before_later_messages() {
+    fn failed_discard_removes_nothing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let backup = dir.path().join("s.backup");
@@ -822,28 +825,30 @@ mod tests {
         let mut clean = summary(10);
         clean.thinking_elapsed.clear();
         clean.tool_elapsed.clear();
-        let mut messages = vec![user_msg("go"), assistant_text("discarded")];
+        let messages = vec![user_msg("go"), assistant_text("discarded")];
         recorder.checkpoint(&messages, &clean).unwrap();
 
         std::fs::rename(&path, &backup).unwrap();
         std::fs::create_dir(&path).unwrap();
+        recorder.note_recorded_messages_removed(1);
         assert!(recorder.discard_round("discard boundary").is_err());
+        recorder.cancel_discard(1);
         std::fs::remove_dir(&path).unwrap();
         std::fs::rename(&backup, &path).unwrap();
 
-        messages.pop();
-        recorder.note_recorded_messages_removed(1);
-        messages.push(assistant_text("recovery"));
         recorder
             .flush(&messages, &TurnOutcome::Finished, &clean)
             .unwrap();
 
         let events = cursor.load_tree_events().unwrap();
-        let kinds: Vec<_> = events.iter().map(|event| &event.kind).collect();
-        assert!(matches!(kinds[1], SessionEventKind::Message(_)));
-        assert!(matches!(kinds[2], SessionEventKind::RoundDiscarded { .. }));
-        assert!(matches!(kinds[3], SessionEventKind::Message(_)));
-        assert!(matches!(kinds[4], SessionEventKind::TurnEnd { .. }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, SessionEventKind::RoundDiscarded { .. })),
+            "a boundary that never landed must not appear later"
+        );
+        let rebuilt = crate::session::replay::messages_from_events(&events);
+        assert_eq!(rebuilt.len(), messages.len(), "the round stays in context");
     }
 
     #[test]

@@ -8,11 +8,7 @@ impl App {
         if self.model_choices.is_empty() {
             self.notify(
                 NotifyKind::Warn,
-                if self.external_backend {
-                    "no models configured (set models in the backend configuration)"
-                } else {
-                    "no models available (set a provider API key)"
-                },
+                "no models available (set a provider API key or configure backend models)",
             );
             return;
         }
@@ -22,7 +18,7 @@ impl App {
             .position(|c| {
                 format!("{}/{}", c.provider, c.id)
                     == self
-                        .selected_external_model_label
+                        .selected_model_label
                         .as_ref()
                         .unwrap_or(&self.model_label)
                         .as_str()
@@ -61,10 +57,14 @@ impl App {
 
     fn current_thinking_choices(&self) -> Vec<ThinkingLevel> {
         let mut out = vec![ThinkingLevel::Off];
+        let label = self
+            .selected_model_label
+            .as_ref()
+            .unwrap_or(&self.model_label);
         if let Some(c) = self
             .model_choices
             .iter()
-            .find(|c| format!("{}/{}", c.provider, c.id) == self.model_label)
+            .find(|c| format!("{}/{}", c.provider, c.id) == label.as_str())
         {
             for level in &c.thinking_levels {
                 if level != &ThinkingLevel::Off && !out.contains(level) {
@@ -121,7 +121,7 @@ impl App {
                 };
                 self.pending_model_switch = Some(format!(
                     "{}:{}{}",
-                    self.model_label,
+                    self.switch_label(),
                     self.thinking.as_str(),
                     tier_suffix
                 ));
@@ -217,33 +217,40 @@ impl App {
         if let Some(picker) = self.thinking_picker.take() {
             if let Some(level) = picker.levels.get(picker.selected) {
                 self.pending_model_switch =
-                    Some(format!("{}:{}", self.model_label, level.as_str()));
+                    Some(format!("{}:{}", self.switch_label(), level.as_str()));
             }
         }
     }
 
+    /// The label a model switch must carry: the selected entry for an
+    /// external backend, whose displayed model is what the CLI reports.
+    fn switch_label(&self) -> String {
+        self.selected_model_label
+            .clone()
+            .unwrap_or_else(|| self.model_label.clone())
+    }
+
     pub(in crate::tui) fn apply_model_switch(
         &mut self,
-        model: &lofi_types::Model,
+        label: &str,
         level: ThinkingLevel,
         tier: ServiceTier,
+        context_window: Option<u64>,
     ) {
-        self.model_label = format!("{}/{}", model.provider, model.id);
+        self.model_label = label.to_string();
         self.thinking_label = (level != ThinkingLevel::Off).then(|| format!(":{}", level.as_str()));
         self.thinking = level;
         self.service_label = (tier != ServiceTier::Auto).then(|| format!("@{}", tier.as_str()));
         self.service_tier = tier;
-        self.ctx_limit = model
-            .context_window
+        self.ctx_limit = context_window
             .filter(|&l| l > 0)
             .unwrap_or(DEFAULT_CTX_LIMIT);
         self.lifecycle.set_context_window(self.ctx_limit);
         self.notify(
             NotifyKind::Info,
             format!(
-                "switched to {}/{}{}{}",
-                model.provider,
-                model.id,
+                "switched to {}{}{} for the next turn",
+                label,
                 self.thinking_label.as_deref().unwrap_or(""),
                 self.service_label.as_deref().unwrap_or("")
             ),

@@ -313,10 +313,30 @@ pub enum BashApprovalMode {
 pub struct AutoModeConfig {
     #[serde(default)]
     pub enable: bool,
-    pub provider: String,
+    /// The model to run: an id, or a model query
+    /// `provider-or-backend/model[:level][@tier]`.
     pub model: String,
+    /// The provider or backend that runs `model`, in a config written before
+    /// model queries. Read the pair through [`AutoModeConfig::query`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+}
+
+impl AutoModeConfig {
+    /// The model query to resolve.
+    ///
+    /// A config that names a provider and an id separately joins them into one
+    /// query, which is what the two fields meant together. A model that is
+    /// already qualified keeps the provider it names.
+    #[must_use]
+    pub fn query(&self) -> String {
+        match &self.provider {
+            Some(provider) if !self.model.contains('/') => format!("{provider}/{}", self.model),
+            _ => self.model.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -535,6 +555,11 @@ pub enum BackendConfig {
         model: Option<String>,
         #[serde(default)]
         models: Vec<String>,
+        /// The window Lofi budgets for this backend. The child reports its
+        /// own window, but compaction needs a window before the first turn,
+        /// exactly as a provider model does.
+        #[serde(default = "default_claude_context_window")]
+        context_window: Option<u64>,
     },
 }
 
@@ -552,10 +577,24 @@ impl BackendConfig {
             Self::ClaudeCode { models, .. } => models,
         }
     }
+
+    #[must_use]
+    pub fn context_window(&self) -> Option<u64> {
+        match self {
+            Self::ClaudeCode { context_window, .. } => *context_window,
+        }
+    }
 }
 
 fn default_claude_command() -> String {
     "claude".into()
+}
+
+/// The standard Claude Code window. A turn that omits it can still run; the
+/// hard cap then waits for the first reported fill.
+#[allow(clippy::unnecessary_wraps)]
+fn default_claude_context_window() -> Option<u64> {
+    Some(200_000)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

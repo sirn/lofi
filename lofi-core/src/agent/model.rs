@@ -2,82 +2,9 @@
 
 use super::*;
 
-/// Shared by the `lofi-ui` presentation drivers (`run_print`, `run_interactive`)
-/// so the resolution ladder (config load, registry + discovery, model +
-/// thinking-level resolution, transport construction) stays in one place.
-/// With no `--model`, the first available model (config order) is selected; if
-/// no provider has credentials (or the selected provider is disabled),
-/// [`Error::NoModels`] is returned so the interactive UI can launch and show
-/// a friendly message. Remote discovery failures
-/// fall back to static-only [`ModelRegistry::load`].
-/// # Errors
-/// Propagates [`Error`] from config load, model resolution, thinking-level
-/// validation, or provider construction.
-pub async fn build_agent(
-    config_path: Option<&std::path::Path>,
-    model: Option<&str>,
-    root: &std::path::Path,
-    env: &[(String, String)],
-) -> Result<(
-    Agent,
-    Model,
-    ThinkingLevel,
-    lofi_types::Config,
-    ModelRegistry,
-)> {
-    // --env specs are applied to the process environment for the duration of
-    // config resolution so $VAR / env_name / !cmd values see them. The guard
-    // is held for the whole build (registration/open also read provider
-    // config) and restores prior values on drop.
-    let _env_guard = crate::config_loader::apply_env_specs(env);
-    let config_path = match config_path {
-        Some(p) => p.to_path_buf(),
-        None => crate::config_loader::user_config_path()?,
-    };
-    let config = load_config_or_default(&config_path).await?;
-
-    let registry = match ModelRegistry::load_async(&config).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(error = %e, "async model load failed; falling back to static");
-            ModelRegistry::load(&config)?
-        }
-    };
-
-    let (agent, model_obj, level) = rebuild_agent(None, &registry, &config, model, root, env)?;
-    let agent = agent.with_system_prompt(assemble_system_prompt(config_path.parent(), root));
-    let agent = agent.with_subagent_support(SubagentSupport::new(
-        registry.clone(),
-        config.clone(),
-        root.to_path_buf(),
-    ));
-    let skills_dir = config_path.parent().map(|p| p.join("skills"));
-    let agent = agent.with_skills_dir(skills_dir.clone());
-    let agent = if let Some(auto_cfg) = config.shell_policy.auto_mode.as_ref() {
-        match super::auto_mode::build_auto_mode(
-            &config,
-            &registry,
-            auto_cfg,
-            root,
-            skills_dir.as_deref(),
-            agent.auto_mode_hints(),
-        ) {
-            Ok(Some(fn_)) => agent.with_auto_mode(fn_),
-            Ok(None) => agent,
-            Err(e) => {
-                tracing::warn!(error = %e, "auto-mode: disabled due to configuration error");
-                agent
-            }
-        }
-    } else {
-        agent
-    };
-    Ok((agent, model_obj, level, config, registry))
-}
-
 /// Walking stops at the repository boundary so unrelated ancestor
 /// instructions cannot affect the workspace.
-pub(super) fn assemble_system_prompt(
+pub(crate) fn assemble_system_prompt(
     config_dir: Option<&std::path::Path>,
     root: &std::path::Path,
 ) -> String {
@@ -260,7 +187,7 @@ pub fn rebuild_agent(
             tmp_lease.path().to_path_buf(),
             SYSTEM_PROMPT.to_string(),
             None,
-            config.compaction.reserved_context_tokens,
+            config.compaction.clone(),
             &config.bash,
             env,
             config.truncate,
@@ -275,10 +202,10 @@ pub fn rebuild_agent(
 }
 
 pub(crate) struct ModelQuery {
-    provider: String,
-    model: String,
-    level: Option<ThinkingLevel>,
-    tier: Option<ServiceTier>,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) level: Option<ThinkingLevel>,
+    pub(crate) tier: Option<ServiceTier>,
 }
 
 /// The provider qualifier is mandatory: bare ids are rejected so a prompt
@@ -307,15 +234,13 @@ pub(crate) fn parse_model_query(query: &str) -> Result<ModelQuery> {
         }
         None => (query, None),
     };
+    // An unrecognized level becomes a provider-defined `Custom`: the CLI
+    // accepts `max`, and each backend still validates against its own list.
     let (qual, level) = match qual.rsplit_once(':') {
-        Some((head, tail)) if !tail.is_empty() => match ThinkingLevel::parse(tail) {
-            Some(l) => (head, Some(l)),
-            None => {
-                return Err(Error::Config(format!(
-                    "unknown thinking level `{tail}` in `{query}` (expected off|low|medium|high|xhigh)"
-                )));
-            }
-        },
+        Some((head, tail)) if !tail.is_empty() => (
+            head,
+            Some(ThinkingLevel::parse(tail).unwrap_or_else(|| ThinkingLevel::Custom(tail.into()))),
+        ),
         _ => (qual, None),
     };
     let (provider, model) = qual.split_once('/').ok_or_else(|| {

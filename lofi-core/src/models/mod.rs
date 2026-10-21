@@ -57,6 +57,27 @@ impl ModelRegistry {
         })
     }
 
+    /// Like [`ModelRegistry::load`], plus every entry of the discovery
+    /// cache. Startup uses this so a picker or a subagent override can name a
+    /// discovered model before any provider is opened. The cache is read, never
+    /// refreshed: a stale entry costs a failed open, not a network delay.
+    ///
+    /// # Errors
+    /// Propagates static model registry errors.
+    pub fn load_with_cache(config: &Config) -> Result<Self> {
+        let mut augmented = config.clone();
+        if let Ok(cache_path) = state::discovery_cache_path() {
+            let cached = read_auto_cache(&cache_path).unwrap_or_default();
+            for (name, pcfg) in &mut augmented.providers {
+                let enabled = pcfg.auto_models.as_ref().is_some_and(|am| am.enabled);
+                if let (true, Some(entry)) = (enabled, cached.get(name)) {
+                    inject_discovered(&mut pcfg.models, &entry.entries);
+                }
+            }
+        }
+        Self::load(&augmented)
+    }
+
     /// Static models win on `provider/id` collision: a discovered entry that
     /// duplicates a static one only fills fields the static entry left unset.
     /// A successful refresh (even one yielding zero models) replaces that
@@ -202,7 +223,7 @@ impl ModelRegistry {
             .collect();
         out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
         for (name, backend) in &self.backends {
-            out.extend(crate::backend::Backend::configured_models(
+            out.extend(crate::backend::configured_models(
                 name,
                 backend,
                 backend.model(),
@@ -267,7 +288,7 @@ impl ModelRegistry {
             .collect();
         for (name, backend) in &self.backends {
             lines.extend(
-                crate::backend::Backend::configured_models(name, backend, backend.model())
+                crate::backend::configured_models(name, backend, backend.model())
                     .into_iter()
                     .map(|model| format!("{}/{} — {}", model.provider, model.id, model.name)),
             );
@@ -900,6 +921,59 @@ mod tests {
         let reg = ModelRegistry::load_async(&cfg).await.unwrap();
         let m = reg.resolve("anthropic/claude-opus-4").unwrap();
         assert_eq!(m.api, Api::AnthropicMessages);
+
+        match prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+
+    #[test]
+    fn load_with_cache_lists_a_discovered_model_without_a_fetch() {
+        let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let cache_path = crate::state::discovery_cache_path().unwrap();
+        let mut cache: HashMap<String, CachedDiscovery> = HashMap::new();
+        cache.insert(
+            "anthropic".to_string(),
+            CachedDiscovery {
+                fetched_at: auto::now_ms(),
+                entries: vec![(
+                    "claude-opus-4".to_string(),
+                    mc_named("claude-opus-4", "Claude Opus 4").1,
+                )],
+            },
+        );
+        write_auto_cache(&cache_path, &cache).unwrap();
+
+        let mut providers = IndexMap::new();
+        let mut p = pcfg(Api::AnthropicMessages, IndexMap::new());
+        p.auto_models = Some(AutoModelsConfig {
+            enabled: true,
+            auth: true,
+            models_url: None,
+            path: "data".to_string(),
+            api_type_field: None,
+            api_type_mappings: HashMap::new(),
+            field_mappings: FieldMappings::default(),
+            thinking_levels: vec![],
+            thinking_level: None,
+            service_tiers: Vec::new(),
+            service_tier: None,
+            ttl_seconds: None,
+        });
+        providers.insert("anthropic".to_string(), p);
+        let cfg = config_with(providers);
+
+        // A subagent override resolves against this catalog before any
+        // provider is opened, so it must see the cached discovery.
+        let reg = ModelRegistry::load_with_cache(&cfg).unwrap();
+        assert!(
+            reg.available().iter().any(|m| m.id == "claude-opus-4"),
+            "the cached model must reach the startup catalog"
+        );
 
         match prev {
             Some(v) => std::env::set_var("XDG_STATE_HOME", v),

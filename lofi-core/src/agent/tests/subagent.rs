@@ -364,6 +364,8 @@ async fn timeout_rolls_back_the_unfinished_turn() {
             // The timed-out run's settle marker, at the rollback point.
             crate::session::store::IndexKind::RunSettled,
             crate::session::store::IndexKind::UserPrompt,
+            // The round reports its context fill before the answer lands.
+            crate::session::store::IndexKind::ContextReported,
             crate::session::store::IndexKind::AssistantMessage,
             crate::session::store::IndexKind::TurnEnd,
             // The resumed run's settle marker ends the lineage.
@@ -658,6 +660,7 @@ async fn without_subagent_makes_models_unavailable_in_the_sandbox() {
         cancel: None,
         on_job_acquired: None,
         record_tool: None,
+        alive: None,
     };
     let out = executor
         .execute(
@@ -1521,7 +1524,7 @@ async fn a_restored_run_keeps_its_mailbox_and_no_run_management() {
     agent.subagents().rehydrate(&agent, &support(dir.path()));
     // The restored entry is a child, not a second manager: its hook answers
     // mailbox ops and reports run management as unavailable.
-    let restored = agent.subagents().agent_of("runid004").unwrap();
+    let restored = agent.subagents().backend_of("runid004").unwrap();
     let hook = restored.subagent_hook().unwrap();
     let managed = hook(SubagentOp::List, json!({})).await;
     assert_eq!(managed["status"], json!("unavailable"), "{managed}");

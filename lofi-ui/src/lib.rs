@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use lofi_core::{build_agent, AgentEvent};
+use lofi_core::AgentEvent;
 use lofi_error::{Error, Result};
 use lofi_types::{ServiceTier, ThinkingLevel};
 
@@ -128,255 +128,169 @@ impl PrintOptions {
 pub async fn run_interactive(opts: InteractiveOptions) -> Result<()> {
     let env = env_pairs(&opts.env)?;
     let session = resolve_session(&opts)?;
-    let saved_backend = session
-        .cursor
-        .as_ref()
-        .map(lofi_core::backend::saved_backend)
-        .transpose()?
-        .flatten();
-    let last_provider = session.last_run_model().map(|model| model.provider);
-    if let Some((mut backend, name, config)) = external_backend(
-        opts.config_path.as_deref(),
-        opts.backend.as_deref(),
-        last_provider.as_deref().or(saved_backend.as_deref()),
-        opts.model.as_deref(),
-        &opts.root,
-        &env,
-    )
-    .await?
-    {
-        if opts.model.is_none() && saved_backend.as_deref() == Some(&name) {
-            let model = session
-                .cursor
-                .as_ref()
-                .map(lofi_core::backend::saved_model)
-                .transpose()?
-                .flatten();
-            backend.select_model(model.as_deref().unwrap_or("default"))?;
-        }
-        let label = if opts.model.is_none() && saved_backend.as_deref() == Some(&name) {
-            session
-                .cursor
-                .as_ref()
-                .map(lofi_core::backend::saved_model_label)
-                .transpose()?
-                .flatten()
-                .unwrap_or_else(|| backend.model_label())
-        } else {
-            backend.model_label()
-        };
-        let switcher =
-            tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env.clone())?
-                .with_subagent_persistence(!opts.no_session);
-        let system_prompt = backend.system_prompt().to_string();
-        return Box::pin(tui::run(
-            Some(backend),
-            label,
-            ThinkingLevel::Off,
-            ServiceTier::Auto,
-            config.ui.theme,
-            session,
-            None,
-            0,
-            config.compaction,
-            Some(switcher),
-            system_prompt,
-        ))
-        .await;
-    }
-
-    // Restore the model, thinking level, and service tier the user last ran
-    // with unless --model was given: the resumed session's final turn marker
-    // carries them (raw, on the active path), so a fresh/ephemeral session
-    // with no turns falls through to the config default.
-    // `resolve_startup_agent` falls back to that default when the restored
-    // model is no longer resolvable.
+    // Restore the model, effort and tier the user last ran with unless
+    // --model was given: the resumed session's final turn marker carries
+    // them, so a fresh session falls through to the configured default.
     let restored = opts
         .model
         .is_none()
         .then(|| session.last_run_model())
-        .flatten()
-        .map(|m| m.query());
-
-    let (agent, label, thinking, service_tier, hint, ctx_limit, compaction, ui_theme, switcher) =
-        match resolve_startup_agent(&opts, restored.as_deref()).await? {
-            StartupAgent::Ready(built) => {
-                let (agent, model, thinking, config, registry) = *built;
-                let agent = agent.with_subagent_persistence(!opts.no_session);
-                let root = opts.root.clone();
-                let compaction = config.compaction.clone();
-                let ui_theme = config.ui.theme;
-                let switcher = tui::ModelSwitcher::new(registry, config, root, env)
-                    .with_subagent_persistence(!opts.no_session);
-                (
-                    Some(agent),
-                    format!("{}/{}", model.provider, model.id),
-                    thinking,
-                    model.service_tier.clone(),
-                    None,
-                    model.context_window.unwrap_or(0),
-                    compaction,
-                    ui_theme,
-                    Some(switcher),
-                )
-            }
-            StartupAgent::NoModel(hint) => {
-                let path = opts
-                    .config_path
-                    .clone()
-                    .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
-                let config = lofi_core::config_loader::load_backend_config(&path)?;
-                let executor = lofi_core::agent::ToolExecutor::new(&opts.root, &config, &env)?
-                    .with_skills_dir(path.parent().map(|p| p.join("skills")))
-                    .with_auto_mode_config(&config, &env)
-                    .await?;
-                let switcher =
-                    tui::ModelSwitcher::from_external(config.clone(), opts.root.clone(), env)?
-                        .with_subagent_persistence(!opts.no_session)
-                        .with_tool_executor(executor);
-                (
-                    None,
-                    "(no model)".to_string(),
-                    ThinkingLevel::Off,
-                    ServiceTier::Auto,
-                    Some(hint),
-                    0,
-                    config.compaction,
-                    config.ui.theme,
-                    Some(switcher),
-                )
-            }
-        };
-    // Pull the agent's resolved system prompt into a plain string before
-    // `agent` moves into the TUI so the transcript can pin it at each context
-    // boundary (lineage birth in `SessionSink::cursor_or_create`, post-compact
-    // in `AgentLifecycle::compact`).
-    let system_prompt = agent
-        .as_ref()
-        .map_or_else(String::new, |a| a.system_prompt().to_string());
+        .flatten();
+    let query = opts
+        .model
+        .clone()
+        .or_else(|| restored.as_ref().map(lofi_types::RunModel::query));
+    let started = match startup(&opts, query.as_deref(), &env).await {
+        Ok(started) => Ok(started),
+        // A restored model that no longer resolves must not stop a resume.
+        Err(_) if restored.is_some() => startup(&opts, None, &env).await,
+        Err(error) => Err(error),
+    };
+    let hint = match started {
+        Ok(started) => started,
+        Err(error) => return no_model_tui(&opts, error, session, env).await,
+    };
+    let Startup {
+        backend,
+        factory,
+        compaction,
+        theme,
+    } = hint;
+    let selection = backend.selection();
+    let choice = backend.choice();
+    // A resumed session shows the label its last turn recorded, so a backend
+    // that reports a longer name (a CLI reports the context window it runs)
+    // keeps the header the user left.
+    let label = match restored.filter(|model| model.provider == backend.name()) {
+        Some(model) => format!("{}/{}", backend.name(), model.display_or_selected()),
+        None => format!("{}/{}", backend.name(), selection.model),
+    };
+    let ctx_limit = choice.context_window.filter(|&l| l > 0).unwrap_or(0);
+    let system_prompt = backend.system_prompt().to_string();
+    let switcher = tui::ModelSwitcher::new(factory).with_subagent_persistence(!opts.no_session);
     Box::pin(tui::run(
-        agent.map(Into::into),
+        Some(backend),
         label,
-        thinking,
-        service_tier,
-        ui_theme,
+        selection.thinking,
+        selection.service_tier,
+        theme,
         session,
-        hint,
+        None,
         ctx_limit,
         compaction,
-        switcher,
+        Some(switcher),
         system_prompt,
     ))
     .await
 }
 
-/// `Ready`'s payload is boxed: it holds the agent, config, and model
-/// registry (a KB+ together), and the variant is built once and unpacked
-/// immediately, so a single allocation keeps the enum off the stack.
-enum StartupAgent {
-    Ready(
-        Box<(
-            lofi_core::Agent,
-            lofi_types::Model,
-            ThinkingLevel,
-            lofi_types::Config,
-            lofi_core::ModelRegistry,
-        )>,
-    ),
-    NoModel(String),
+/// What one open backend needs from its config.
+struct Startup {
+    backend: lofi_core::backend::BackendRef,
+    factory: lofi_core::backend::BackendFactory,
+    compaction: lofi_types::CompactionConfig,
+    theme: lofi_types::ThemeMode,
 }
 
-async fn external_backend(
-    config_path: Option<&std::path::Path>,
-    requested: Option<&str>,
-    saved: Option<&str>,
-    model: Option<&str>,
-    root: &std::path::Path,
+async fn startup(
+    opts: &InteractiveOptions,
+    query: Option<&str>,
     env: &[(String, String)],
-) -> Result<Option<(lofi_core::backend::Backend, String, lofi_types::Config)>> {
-    let _env_guard = lofi_core::config_loader::apply_env_specs(env);
-    let path = config_path
-        .map(std::path::Path::to_path_buf)
+) -> Result<Startup> {
+    let path = opts
+        .config_path
+        .clone()
         .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
     let config = lofi_core::config_loader::load_backend_config(&path)?;
-    if config.backends.is_empty() && requested.is_none() {
-        return Ok(None);
-    }
-    let mut selected = model.map(str::to_owned);
-    if selected.is_none() && requested.is_none() && saved.is_none() {
-        selected.clone_from(&config.default_model);
-        if selected.is_none() {
-            if let Some(provider) = config.default_provider.as_deref() {
-                if let Some(backend) = config.backends.get(provider) {
-                    let choice = lofi_core::backend::Backend::configured_models(
-                        provider,
-                        backend,
-                        backend.model(),
-                    )
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::Config("backend has no models".into()))?;
-                    selected = Some(format!("{}/{}", choice.provider, choice.id));
-                }
-            } else {
-                let config = lofi_core::config_loader::load_config_or_default(&path).await?;
-                let registry = match lofi_core::ModelRegistry::load_async(&config).await {
-                    Ok(registry) => registry,
-                    Err(_) => lofi_core::ModelRegistry::load(&config)?,
-                };
-                selected = registry
-                    .available()
-                    .first()
-                    .map(|model| format!("{}/{}", model.provider, model.id));
-                if selected.is_none() {
-                    selected = registry
-                        .choices()
-                        .first()
-                        .map(|model| format!("{}/{}", model.provider, model.id));
-                }
-            }
-        }
-    }
-    let model_backend = selected
-        .as_deref()
-        .and_then(|query| query.split_once('/'))
-        .map(|(name, _)| name);
-    let saved = saved.map(|name| {
-        if config.backends.contains_key(name) {
-            name
-        } else {
-            "native"
-        }
-    });
-    let name = requested
-        .or(model_backend
-            .filter(|name| config.backends.contains_key(*name))
-            .or_else(|| model_backend.map(|_| "native")))
-        .or(saved)
-        .unwrap_or("native");
-    if name == "native" {
-        return Ok(None);
-    }
-    let backend_config = config
-        .backends
-        .get(name)
-        .ok_or_else(|| Error::Config(format!("unknown backend: {name}")))?
-        .clone();
-    let executor = lofi_core::agent::ToolExecutor::new(root, &config, env)?
-        .with_skills_dir(path.parent().map(|p| p.join("skills")))
+    let factory =
+        lofi_core::backend::BackendFactory::new(config.clone(), &opts.root, env.to_vec())?
+            .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
+            .with_subagent_persistence(!opts.no_session);
+    let executor = factory
+        .executor()?
+        .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
         .with_auto_mode_config(&config, env)
         .await?;
-    let name = name.to_string();
-    let mut backend =
-        lofi_core::backend::Backend::external(name.clone(), backend_config, root.into(), executor);
-    if let Some(model) = selected.as_deref() {
-        backend.select_model(model)?;
-    } else if saved.is_none() {
-        if let Some(choice) = backend.model_choices().first() {
-            backend.select_model(&choice.id)?;
-        }
+    let query = constrain(&config, opts, query)?;
+    let backend = factory.open(query.as_deref(), executor).await?;
+    Ok(Startup {
+        backend,
+        factory,
+        compaction: config.compaction,
+        theme: config.ui.theme,
+    })
+}
+
+/// Honour --backend: the flag constrains the selection instead of silently
+/// switching the provider a qualified query named.
+fn constrain(
+    config: &lofi_types::Config,
+    opts: &InteractiveOptions,
+    query: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(name) = opts.backend.as_deref() else {
+        return Ok(query.map(str::to_owned));
+    };
+    if let Some(query) = query {
+        return match query.split_once('/') {
+            Some((prefix, _)) if prefix == name => Ok(Some(query.to_owned())),
+            _ => Err(Error::Config(format!(
+                "model \"{query}\" conflicts with --backend \"{name}\""
+            ))),
+        };
     }
-    Ok(Some((backend, name, config)))
+    // A backend that names its own default model leads with it.
+    let model = config
+        .backends
+        .get(name)
+        .and_then(|backend| {
+            backend
+                .model()
+                .or_else(|| backend.models().first().map(String::as_str))
+        })
+        .unwrap_or("default");
+    Ok(Some(format!("{name}/{model}")))
+}
+
+/// A missing-model launch is not fatal: the TUI still opens so the user can
+/// read transcripts, browse /resume and quit.
+async fn no_model_tui(
+    opts: &InteractiveOptions,
+    error: Error,
+    session: tui::SessionConfig,
+    env: Vec<(String, String)>,
+) -> Result<()> {
+    let Error::NoModels(hint) = error else {
+        return Err(error);
+    };
+    let path = opts
+        .config_path
+        .clone()
+        .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
+    let config = lofi_core::config_loader::load_backend_config(&path)?;
+    let factory = lofi_core::backend::BackendFactory::new(config.clone(), &opts.root, env.clone())?
+        .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
+        .with_subagent_persistence(!opts.no_session);
+    let executor = factory
+        .executor()?
+        .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
+        .with_auto_mode_config(&config, &env)
+        .await?;
+    let switcher = tui::ModelSwitcher::new(factory).with_tool_executor(executor);
+    Box::pin(tui::run(
+        None,
+        "(no model)".to_string(),
+        ThinkingLevel::Off,
+        ServiceTier::Auto,
+        config.ui.theme,
+        session,
+        Some(hint),
+        0,
+        config.compaction,
+        Some(switcher),
+        String::new(),
+    ))
+    .await
 }
 
 /// Parse the `-e`/`--env` specs into (name, value) pairs, resolving bare
@@ -391,49 +305,11 @@ fn env_pairs(specs: &[String]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-/// Build the startup agent. `--model` takes precedence over a restored
-/// session model; with neither, `build_agent` falls back to the config
-/// default. If the restored model can no longer be resolved (removed from
-/// the config since the session ran, or its provider lost its API key), fall
-/// back to the default so resume still opens the transcript instead of
-/// aborting. An explicit `--model` that fails to resolve is not silently
-/// replaced — it surfaces via the error arms below rather than masked by
-/// the default.
-async fn resolve_startup_agent(
-    opts: &InteractiveOptions,
-    restored: Option<&str>,
-) -> Result<StartupAgent> {
-    let env = env_pairs(&opts.env)?;
-    let requested = opts.model.as_deref().or(restored);
-    match build_agent(
-        opts.config_path.as_deref(),
-        requested,
-        opts.root.as_path(),
-        &env,
-    )
-    .await
-    {
-        Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
-        // The restored model is gone from the registry (config changed since
-        // the session ran, or its provider lost its API key): fall back to
-        // the default so the transcript is still readable instead of aborting.
-        Err(_) if restored.is_some() => {
-            match build_agent(opts.config_path.as_deref(), None, opts.root.as_path(), &env).await {
-                Ok(built) => Ok(StartupAgent::Ready(Box::new(built))),
-                Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
-                Err(e) => Err(e),
-            }
-        }
-        Err(Error::NoModels(hint)) => Ok(StartupAgent::NoModel(hint)),
-        Err(e) => Err(e),
-    }
-}
-
 /// Independent of model resolution so the no-model launch path still gets a
 /// session (and thus `/resume`, transcript browsing, etc.).
 /// # Errors
-/// Returns [`Error::State`] when `--resume <id>` matches no session, or
-/// propagates [`Error::Io`] from the store.
+/// Returns `Error::State` when `--resume <id>` matches no session, or
+/// propagates `Error::Io` from the store.
 fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
     if opts.no_session {
         return Ok(tui::SessionConfig::ephemeral(opts.root.clone()));
@@ -475,45 +351,34 @@ fn resolve_session(opts: &InteractiveOptions) -> Result<tui::SessionConfig> {
     ))
 }
 
-/// Builds the agent via [`lofi_core::build_agent`], then drives
-/// [`lofi_core::Agent::run_turn`] concurrently with a stdio consumer:
-/// - [`AgentEvent::Text`] deltas are written to stdout via
-///   `std::io::stdout().write_all` (never `println!`, which is denied by the
-///   workspace lints);
-/// - [`AgentEvent::Error`] is written to stderr;
-/// - [`AgentEvent::Done`] writes a trailing newline to stdout;
-/// - `ToolStart` / `ToolEnd` are surfaced as short stderr markers so stdout
-///   stays clean for piping.
+/// Drives one turn of the selected backend and writes its events to stdio.
+/// - `AgentEvent::Text` deltas go to stdout;
+/// - errors and tool markers go to stderr, so stdout stays pipeable.
 /// # Errors
-/// Propagates [`Error`] from config load, model resolution, provider
-/// construction, or the agent run. The binary caller is responsible for
-/// translating the returned error into a nonzero exit code.
+/// Propagates config, model resolution and turn errors.
 #[allow(clippy::too_many_lines)]
 pub async fn run_print(opts: PrintOptions) -> Result<()> {
     let env = env_pairs(&opts.env)?;
-    let agent = match external_backend(
-        opts.config_path.as_deref(),
-        opts.backend.as_deref(),
-        None,
-        opts.model.as_deref(),
-        &opts.root,
-        &env,
-    )
-    .await?
-    {
-        Some((backend, _, _)) => backend,
-        // Print mode writes no transcript of its own; subagents match it.
-        None => build_agent(
-            opts.config_path.as_deref(),
-            opts.model.as_deref(),
-            &opts.root,
-            &env,
-        )
-        .await?
-        .0
-        .with_subagent_persistence(false)
-        .into(),
-    };
+    let path = opts
+        .config_path
+        .clone()
+        .map_or_else(lofi_core::config_loader::user_config_path, Ok)?;
+    let config = lofi_core::config_loader::load_backend_config(&path)?;
+    // Print mode writes no transcript of its own; subagents match it.
+    let factory = lofi_core::backend::BackendFactory::new(config.clone(), &opts.root, env.clone())?
+        .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
+        .with_subagent_persistence(false);
+    let executor = factory
+        .executor()?
+        .with_skills_dir(path.parent().map(|dir| dir.join("skills")))
+        .with_auto_mode_config(&config, &env)
+        .await?;
+    let query = opts.model.clone().or_else(|| {
+        opts.backend
+            .as_deref()
+            .map(|name| format!("{name}/default"))
+    });
+    let agent = factory.open(query.as_deref(), executor).await?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
 
@@ -561,8 +426,8 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
                 | AgentEvent::TurnCommitted { .. }
                 | AgentEvent::RoundUsage { .. }
                 | AgentEvent::SubagentUsage { .. }
-                | AgentEvent::BackendUsage { .. }
-                | AgentEvent::BackendModel { .. }
+                | AgentEvent::ContextReported { .. }
+                | AgentEvent::ModelReported { .. }
                 | AgentEvent::RetryEnd { .. }
                 | AgentEvent::RunStart
                 | AgentEvent::Prompt { .. }
@@ -650,42 +515,34 @@ pub async fn run_print(opts: PrintOptions) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
 
-    #[test]
-    fn print_options_builder() {
-        let opts = PrintOptions::new("hello", "/tmp/ws")
-            .with_model("openai/gpt-4o")
-            .with_config_path("/tmp/cfg.toml");
-        assert_eq!(opts.prompt, "hello");
-        assert_eq!(opts.root, PathBuf::from("/tmp/ws"));
-        assert_eq!(opts.model.as_deref(), Some("openai/gpt-4o"));
-        assert_eq!(
-            opts.config_path.as_deref(),
-            Some(std::path::Path::new("/tmp/cfg.toml"))
-        );
-    }
+    fn dual_provider_config(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("lofi.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_model = "alpha/a1"
 
-    #[test]
-    fn interactive_options_builder() {
-        let opts = InteractiveOptions::new("/tmp/ws")
-            .with_model("openai/gpt-4o")
-            .with_config_path("/tmp/cfg.toml");
-        assert_eq!(opts.root, PathBuf::from("/tmp/ws"));
-        assert_eq!(opts.model.as_deref(), Some("openai/gpt-4o"));
-        assert_eq!(
-            opts.config_path.as_deref(),
-            Some(std::path::Path::new("/tmp/cfg.toml"))
-        );
-    }
+[providers.alpha]
+api_type = "openai-completions"
+api_key = "alpha-key"
 
-    fn dual_provider_config(dir: &std::path::Path) -> std::path::PathBuf {
-        let cfg = dir.join("config.toml");
-        std::fs::write(&cfg, "[providers.alpha]\nno_auth = true\n\n[providers.alpha.models]\na1 = {}\n\n[providers.beta]\nno_auth = true\n\n[providers.beta.models]\nb1 = {}\n").unwrap();
-        cfg
+[providers.alpha.models]
+a1 = {}
+
+[providers.beta]
+api_type = "openai-completions"
+api_key = "beta-key"
+
+[providers.beta.models]
+b1 = {}
+"#,
+        )
+        .unwrap();
+        path
     }
 
     #[tokio::test]
@@ -695,14 +552,10 @@ mod tests {
         let opts = InteractiveOptions::new(tmp.path())
             .with_config_path(&cfg)
             .with_model("beta/b1");
-        match resolve_startup_agent(&opts, None).await.unwrap() {
-            StartupAgent::Ready(built) => {
-                let (_agent, model, _thinking, _config, _registry) = *built;
-                assert_eq!(model.provider, "beta");
-                assert_eq!(model.id, "b1");
-            }
-            StartupAgent::NoModel(hint) => panic!("expected a built agent, got NoModel: {hint}"),
-        }
+        let env = env_pairs(&opts.env).unwrap();
+        let started = startup(&opts, opts.model.as_deref(), &env).await.unwrap();
+        assert_eq!(started.backend.name(), "beta");
+        assert_eq!(started.backend.selection().model, "b1");
     }
 
     #[tokio::test]
@@ -710,13 +563,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = dual_provider_config(tmp.path());
         let opts = InteractiveOptions::new(tmp.path()).with_config_path(&cfg);
-        match resolve_startup_agent(&opts, None).await.unwrap() {
-            StartupAgent::Ready(built) => {
-                let (_agent, model, _thinking, _config, _registry) = *built;
-                assert_eq!(model.provider, "alpha");
-                assert_eq!(model.id, "a1");
-            }
-            StartupAgent::NoModel(hint) => panic!("expected a built agent, got NoModel: {hint}"),
-        }
+        let env = env_pairs(&opts.env).unwrap();
+        let started = startup(&opts, None, &env).await.unwrap();
+        assert_eq!(started.backend.name(), "alpha");
+        assert_eq!(started.backend.selection().model, "a1");
     }
 }

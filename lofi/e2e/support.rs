@@ -1519,8 +1519,17 @@ impl TerminalOutput {
     fn clear(&mut self) {
         self.raw.clear();
         self.transcript.clear();
-        self.screen = TerminalScreen::new();
+        // The app writes only the cells that changed since its own previous
+        // frame, so the grid must keep every cell it already drew: a blanked
+        // grid never learns the rows the app holds still. A wait can then still
+        // match text from before the clear, so a test that needs content to
+        // disappear waits with `wait_gone`.
     }
+}
+
+/// Collapse whitespace so a needle matches text the terminal wrapped.
+fn normalize_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 enum ParseState {
@@ -2059,6 +2068,23 @@ impl Tui {
         self.send(b"\r");
     }
 
+    /// Wait until no turn is running. The journal records `turn_end` before the
+    /// app handles the run's completion, so a test that reads the journal and
+    /// then drives a turn-sensitive command needs this between the two. The
+    /// working line is the screen's own statement that a turn runs.
+    pub fn wait_idle(&self, timeout: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if !self.screen_text().contains("Working for") {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for the running turn to finish");
+    }
+
+    /// Reset the recorded output. The visible screen keeps its content: it
+    /// mirrors the terminal, and the app never repaints a cell it already drew.
     pub fn clear_output(&self) {
         self.output.lock().unwrap().clear();
     }
@@ -2167,6 +2193,23 @@ impl Tui {
         self.wait_for_any_mode(&[needle], timeout, false);
     }
 
+    /// Wait until the needle leaves the visible screen. A modal that closes
+    /// leaves its own footer behind, so this is the only honest way to see
+    /// that the key just sent reached the layer underneath.
+    pub fn wait_gone(&self, needle: &str, timeout: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if !self.screen_text().contains(needle) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {needle:?} to leave the screen; screen:\n{}",
+            self.screen_text()
+        );
+    }
+
     pub fn wait_for_scrollback(&mut self, needle: &str, timeout: Duration) {
         self.wait_for_any_mode(&[needle], timeout, true);
     }
@@ -2176,15 +2219,19 @@ impl Tui {
         while start.elapsed() < timeout {
             let found = {
                 let output = self.output.lock().unwrap();
-                let raw = String::from_utf8_lossy(&output.raw);
+                // The byte log holds text the screen no longer shows, which is
+                // how a status toast that appeared and vanished inside one wait
+                // still counts.
+                let raw = normalize_ws(&String::from_utf8_lossy(&output.raw));
+                let screen = output.screen.text();
                 let text = if scrollback {
-                    format!("{}\n{}", output.transcript, output.screen.text())
+                    format!("{}\n{screen}", output.transcript)
                 } else {
-                    output.screen.text()
+                    screen
                 };
-                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let text = normalize_ws(&text);
                 needles.iter().any(|needle| {
-                    let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let needle = normalize_ws(needle);
                     text.contains(&needle) || raw.contains(&needle)
                 })
             };

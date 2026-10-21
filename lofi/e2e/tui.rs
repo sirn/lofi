@@ -795,6 +795,27 @@ fn mid_run_model_switch_keeps_the_working_line_model() {
 }
 
 #[test]
+fn working_line_keeps_the_thinking_level_and_service_tier() {
+    let server = MockServer::start(vec![delayed_text_response(
+        "suffix answer marker",
+        std::time::Duration::from_secs(2),
+    )]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("suffix prompt marker");
+    tui.wait_for("Working for", WAIT);
+
+    let working = tui.screen_row("Working for").expect("working row");
+    assert!(
+        working.contains("mock/chat:medium@flex"),
+        "working line must carry the run effort and tier: {working}"
+    );
+
+    tui.wait_for("suffix answer marker", WAIT);
+}
+
+#[test]
 fn no_model_mode_launches_and_rejects_prompts_without_a_request() {
     let fixture = Fixture::without_models();
     let mut tui = fixture.spawn(&[]);
@@ -879,10 +900,15 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
     tui.submit("/job");
     tui.wait_for("background jobs", WAIT);
     tui.send(b"\r");
+    // The drill-in footer proves the modal opened. Its body marker alone does
+    // not: the transcript carries the same text inside the spawned command.
+    tui.wait_for("esc back", WAIT);
     tui.wait_for("modal-job-screen-marker", WAIT);
     tui.clear_output();
     tui.send(b"\x1b");
-    tui.wait_for("x", WAIT);
+    // Esc then "x" are two keys only once the drill-in is gone; sent together
+    // the parser reads them as Alt+x.
+    tui.wait_gone("esc back", WAIT);
     tui.clear_output();
     tui.send(b"x");
     tui.wait_for("this job?", WAIT);
@@ -1056,7 +1082,10 @@ fn user_shell_cancel_keeps_the_output_streamed_so_far() {
     let fixture = Fixture::new(&server);
     let mut tui = fixture.spawn(&[]);
 
-    tui.submit("!printf cancel-keeps-marker; sleep 30");
+    // The marker is built by printf so it appears only in the streamed
+    // output, never in the echoed command line. Waiting for it also proves
+    // the reader captured the bytes before the cancel.
+    tui.submit("!printf 'cancel-%s-marker' keeps; sleep 30");
     tui.wait_for("cancel-keeps-marker", WAIT);
     tui.wait_for("Running", WAIT);
 
@@ -1275,8 +1304,7 @@ fn accepting_auto_mode_dialog_keeps_the_draft_in_the_input_box() {
 
 [auto_mode]
 enable = true
-provider = "mock"
-model = "alt"
+model = "mock/alt"
 max_tokens = 128
 "#,
     )

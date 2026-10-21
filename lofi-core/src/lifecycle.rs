@@ -381,7 +381,10 @@ impl AgentLifecycle {
     }
 }
 
-fn history_from_cursor(cursor: &SessionCursor, leaf_first_offsets: &[u64]) -> Result<Vec<Message>> {
+pub(crate) fn history_from_cursor(
+    cursor: &SessionCursor,
+    leaf_first_offsets: &[u64],
+) -> Result<Vec<Message>> {
     let mut projection = crate::session::replay::AgentHistoryProjection::default();
     cursor.visit_events(leaf_first_offsets, |event| {
         projection.push(&event);
@@ -480,6 +483,72 @@ fn parse_recall_line(line: &str) -> RecallRequest {
         page,
         expand: Vec::new(),
     }
+}
+
+/// How far the backend context is behind the session lineage.
+#[derive(Debug)]
+pub(crate) enum CatchUp {
+    /// The backend saw the current lineage head.
+    Current,
+    /// The backend saw an ancestor; only these messages are missing.
+    Delta(Vec<Message>),
+    /// The backend saw another lineage, or the history was rewritten.
+    Diverged,
+}
+
+/// Compare a backend checkpoint with the selected lineage up to the frontier a
+/// turn admitted.
+pub(crate) fn lineage_catch_up(
+    cursor: &SessionCursor,
+    frontier: Option<&str>,
+    seen: Option<&str>,
+) -> Result<CatchUp> {
+    // The child lacks nothing between its last reply and the frame this turn
+    // sends: the prompt is the frame, and its notices travel with it.
+    if frontier == seen {
+        return Ok(CatchUp::Current);
+    }
+    let Some(suffix) = cursor.lineage_after(seen)? else {
+        return Ok(CatchUp::Diverged);
+    };
+    // Stop at the frontier: what this turn recorded after it is the frame, and
+    // sending it as well would repeat the prompt or the child's own reply.
+    // The events are leaf first, so the window the child missed runs from the
+    // frontier down to the entry after `seen`.
+    let suffix = match frontier {
+        None => return Ok(CatchUp::Diverged),
+        Some(frontier) => match suffix.iter().position(|entry| entry.id.matches(frontier)) {
+            Some(position) => &suffix[position..],
+            None => return Ok(CatchUp::Diverged),
+        },
+    };
+    // Compaction and a fresh system prompt rewrite the context framing, so a
+    // resume would keep stale framing.
+    if suffix.iter().any(|entry| {
+        matches!(
+            entry.kind,
+            crate::session::store::IndexKind::Compaction
+                | crate::session::store::IndexKind::SystemMessage
+        )
+    }) {
+        return Ok(CatchUp::Diverged);
+    }
+    // A failed turn stamps a boundary the projection reads, so a delta cannot
+    // prove the child saw the head while the suffix holds one. Rebuild the
+    // prompt from the lineage instead.
+    if suffix
+        .iter()
+        .any(|entry| entry.kind == crate::session::store::IndexKind::TurnFailed)
+    {
+        return Ok(CatchUp::Diverged);
+    }
+    let offsets: Vec<u64> = suffix.iter().map(|entry| entry.offset).collect();
+    let messages = history_from_cursor(cursor, &offsets)?;
+    Ok(if messages.is_empty() {
+        CatchUp::Current
+    } else {
+        CatchUp::Delta(messages)
+    })
 }
 
 #[cfg(test)]
@@ -890,6 +959,7 @@ mod tests {
                     error: "boom".into(),
                     cost: 0.0,
                     usage: Usage::default(),
+                    keep_context: false,
                 },
             },
         ];

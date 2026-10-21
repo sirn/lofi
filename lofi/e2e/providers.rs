@@ -724,6 +724,8 @@ fn responses_compaction_preserves_tool_image_data_before_and_after_resume() {
         fixture.wait_for_event_count("turn_end", turn + 1);
         tui.clear_output();
     }
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/compact");
     tui.wait_for("Compacted", WAIT);
     tui.submit("inspect retained screenshot again");

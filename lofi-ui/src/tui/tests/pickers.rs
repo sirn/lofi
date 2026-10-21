@@ -98,7 +98,12 @@ fn apply_model_switch_updates_label_and_ctx_limit() {
         cache_write_price: None,
         per_request_price: None,
     };
-    a.apply_model_switch(&model, ThinkingLevel::XHigh, ServiceTier::Auto);
+    a.apply_model_switch(
+        &format!("{}/{}", model.provider, model.id),
+        ThinkingLevel::XHigh,
+        ServiceTier::Auto,
+        model.context_window,
+    );
     assert_eq!(a.model_label, "anthropic/claude");
     assert_eq!(a.thinking_label.as_deref(), Some(":xhigh"));
     assert_eq!(a.ctx_limit, 200_000);
@@ -127,7 +132,12 @@ fn apply_model_switch_with_no_context_window_uses_default() {
         cache_write_price: None,
         per_request_price: None,
     };
-    a.apply_model_switch(&model, ThinkingLevel::Off, ServiceTier::Auto);
+    a.apply_model_switch(
+        &format!("{}/{}", model.provider, model.id),
+        ThinkingLevel::Off,
+        ServiceTier::Auto,
+        model.context_window,
+    );
     assert_eq!(a.ctx_limit, DEFAULT_CTX_LIMIT);
 }
 
