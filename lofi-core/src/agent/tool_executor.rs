@@ -15,6 +15,8 @@ pub struct ToolExecutor {
     pub(super) confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     pub(super) confirm_counter: Arc<AtomicU64>,
     pub(super) auto_mode: Option<lofi_code::AutoModeFn>,
+    /// Turn context the evaluator reads; see [`Agent::auto_mode_hints`].
+    pub(super) auto_mode_hints: lofi_code::AutoModeHintHandle,
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
     pub(super) skills_dir: Option<PathBuf>,
     pub(super) jobs: lofi_code::tools::JobRegistry,
@@ -63,6 +65,7 @@ impl ToolExecutor {
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
+            auto_mode_hints: super::auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
@@ -108,6 +111,7 @@ impl ToolExecutor {
             auto_cfg,
             &self.root,
             self.skills_dir.as_deref(),
+            &self.auto_mode_hints,
         )?;
         Ok(self)
     }

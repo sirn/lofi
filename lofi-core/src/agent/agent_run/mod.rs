@@ -129,6 +129,19 @@ impl Agent {
                 })
             }
         };
+        // Refresh the auto-mode context from the history the turn starts
+        // with. Deriving it here (instead of accumulating it as the turn
+        // runs) is what makes compaction, rewind, and a new session drop the
+        // context: the scan simply stops finding the old requests.
+        let typed_prompt = prompt
+            .as_ref()
+            .and_then(super::auto_mode::typed_prompt)
+            .map(str::to_string);
+        *self
+            .auto_mode_hints()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            super::auto_mode::derive_hints(messages, typed_prompt.as_deref());
         let mut stats = TurnStats::new();
         let mut recorder =
             session.map(|cursor| SessionRecorder::new(cursor.clone(), self.run_model()));

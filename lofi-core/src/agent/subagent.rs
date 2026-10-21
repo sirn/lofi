@@ -2083,8 +2083,33 @@ impl ChildUsage {
     }
 }
 
+/// Give a child its own turn context and its own evaluator. A clone of the
+/// template shares the handle the parent evaluator captured, so without this
+/// a child reads the session's context and its own turns overwrite it.
+pub(super) fn isolate_auto_mode(agent: &mut Agent, support: &SubagentSupport) {
+    agent.auto_mode_hints = super::auto_mode::hint_handle();
+    let Some(auto_cfg) = support.config.shell_policy.auto_mode.as_ref() else {
+        agent.auto_mode = None;
+        return;
+    };
+    match super::auto_mode::build_auto_mode(
+        &support.config,
+        &support.registry,
+        auto_cfg,
+        &agent.root,
+        agent.skills_dir.as_deref(),
+        &agent.auto_mode_hints,
+    ) {
+        Ok(fn_) => agent.auto_mode = fn_,
+        Err(error) => {
+            tracing::warn!(%error, "subagent: auto-mode disabled for the child");
+            agent.auto_mode = None;
+        }
+    }
+}
+
 /// Build or resume the entry, and hand out the state the turn needs.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn prepare(
     template: &Agent,
     support: &SubagentSupport,
@@ -2113,6 +2138,7 @@ fn prepare(
     // deadlocks, because the parent worker is busy awaiting this hook while
     // the child's exec jobs queue behind it.
     agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+    isolate_auto_mode(&mut agent, support);
     let mut agent = apply_model_overrides(agent, support, args)?;
     if let Some(system) = str_arg(args, "system")? {
         agent = agent.with_system_prompt(system.to_string());
@@ -2292,6 +2318,7 @@ fn restore_entry(
         }
     };
     agent.exec_worker = Arc::new(std::sync::OnceLock::new());
+    isolate_auto_mode(&mut agent, support);
     // The template is the session agent: a restored child must not inherit
     // its run-management hook, or the resume would manage runs through a
     // private registry instead of messaging its parent.

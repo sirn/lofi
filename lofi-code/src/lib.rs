@@ -27,9 +27,9 @@ mod tests;
 pub use compile::compile_ts;
 pub use contract::{exec_tool_input_schema, EXEC_TOOL_DESCRIPTION, EXEC_TOOL_NAME};
 pub use ctx::{
-    AutoModeFn, AutoModeOutcome, ConfirmFn, ConfirmPrompt, ConfirmReason, ExecCtx, ExecImage,
-    ExecOptions, ExecResult, JobAcquireFn, JobReleaseFn, ModelsFn, RecallFn, ResultFn, SubagentFn,
-    SubagentOp, ToolEvent, DEFAULT_GUEST_TIMEOUT,
+    AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome, ConfirmFn, ConfirmPrompt,
+    ConfirmReason, ExecCtx, ExecImage, ExecOptions, ExecResult, JobAcquireFn, JobReleaseFn,
+    ModelsFn, RecallFn, ResultFn, SubagentFn, SubagentOp, ToolEvent, DEFAULT_GUEST_TIMEOUT,
 };
 pub use run::exec;
 pub use tools::truncate::TruncatedCap;

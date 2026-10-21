@@ -193,6 +193,9 @@ pub struct Agent {
     confirm_tx: Option<tokio::sync::mpsc::UnboundedSender<ConfirmRequest>>,
     confirm_counter: Arc<AtomicU64>,
     auto_mode: Option<lofi_code::AutoModeFn>,
+    /// Turn context for the auto-mode evaluator: the request a command
+    /// answers. The turn loop writes it at the start of each turn.
+    auto_mode_hints: lofi_code::AutoModeHintHandle,
     /// Session-scoped `/policy` approval override. Shared with the TUI so
     /// the dialog pick reaches tools built by later execs, and cloned into
     /// every rebuilt agent so a model switch keeps the choice.
@@ -261,6 +264,7 @@ impl Agent {
             confirm_tx: None,
             confirm_counter: Arc::new(AtomicU64::new(0)),
             auto_mode: None,
+            auto_mode_hints: auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
@@ -299,6 +303,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
@@ -327,6 +332,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
@@ -358,6 +364,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir,
             jobs: self.jobs.clone(),
@@ -397,6 +404,7 @@ impl Agent {
             confirm_tx: self.confirm_tx.clone(),
             confirm_counter: self.confirm_counter.clone(),
             auto_mode: self.auto_mode.clone(),
+            auto_mode_hints: self.auto_mode_hints.clone(),
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
@@ -423,6 +431,7 @@ impl Agent {
         self.confirm_tx = executor.confirm_tx;
         self.confirm_counter = executor.confirm_counter;
         self.auto_mode = executor.auto_mode;
+        self.auto_mode_hints = executor.auto_mode_hints;
         self.policy_override = executor.policy_override;
         self.skills_dir = executor.skills_dir;
         self.jobs = executor.jobs;
@@ -436,6 +445,13 @@ impl Agent {
             auto_mode: Some(auto_mode),
             ..self.clone()
         }
+    }
+
+    /// The turn-context handle the evaluator reads. The turn loop replaces
+    /// its contents at the start of every turn.
+    #[must_use]
+    pub fn auto_mode_hints(&self) -> &lofi_code::AutoModeHintHandle {
+        &self.auto_mode_hints
     }
 
     #[must_use]

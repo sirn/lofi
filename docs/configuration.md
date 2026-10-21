@@ -833,7 +833,17 @@ action = "ask"
 
 ### Automatic approval
 
-Automatic mode asks a small model to pre-approve commands that would otherwise require confirmation. Only an `allow` answer skips the normal prompt.
+Automatic mode asks a small model to pre-approve commands that would otherwise require confirmation. The evaluator answers with one risk level:
+- `low` runs the command without a prompt.
+- `confirm` shows the normal confirmation prompt.
+- `block` shows the normal confirmation prompt with the evaluator's reason.
+
+Auto mode never denies a command. An unparseable answer, a provider error, or a timeout shows the normal prompt too.
+A read outside the workspace, a public read, and a read-only `ssh` command stay `low`.
+A public read is a `GET`, a `HEAD`, or a GraphQL query, with or without a token.
+A write outside the workspace, a saved download, an upload, and a read of a credential file show the prompt.
+
+The evaluator sees the command, the workspace root, and the request that started the turn. For a request of three words or fewer, it also sees the previous request and the agent's last message, so a terse "yes" is judged against the question it answers. The evaluator treats that context as untrusted data: it can raise the risk, never lower it. The context comes from the live history, so compaction, rewind, and a new session drop it. A subagent never inherits the context of its parent.
 
 ```toml
 [auto_mode]

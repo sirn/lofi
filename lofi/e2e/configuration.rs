@@ -9,7 +9,7 @@ fn automatic_policy_approval_uses_the_configured_model_and_skips_the_modal() {
             "auto-policy-call",
             r#"return await lofi.bash({ cmd: "printf auto-policy-file > auto-approved.txt" });"#,
         ),
-        text_response(r#"{"decision":"allow","reason":"fixture approval"}"#),
+        text_response(r#"{"risk":"low","reason":"fixture approval"}"#),
         text_response("auto policy final answer"),
     ]);
     let fixture = Fixture::new(&server);
@@ -36,7 +36,7 @@ max_tokens = 128
     );
     let requests = server.requests();
     assert_eq!(requests.len(), 3);
-    assert!(requests[1].body.contains("shell-command safety evaluator"));
+    assert!(requests[1].body.contains("shell-command risk evaluator"));
     assert!(requests[1].body.contains("auto-approved.txt"));
     assert!(requests[1].body.contains(r#""model":"alt""#));
     assert!(requests[1].body.contains(r#""max_completion_tokens":128"#));

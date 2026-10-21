@@ -1263,7 +1263,7 @@ fn accepting_auto_mode_dialog_keeps_the_draft_in_the_input_box() {
             r#"return await lofi.bash({ cmd: "printf auto-draft-ran" });"#,
         ),
         delayed_text_response(
-            r#"{"decision":"ask","reason":"fixture asks"}"#,
+            r#"{"risk":"confirm","reason":"fixture asks"}"#,
             std::time::Duration::from_millis(400),
         ),
         text_response("auto draft final answer"),

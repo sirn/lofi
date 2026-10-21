@@ -60,6 +60,7 @@ pub async fn build_agent(
             auto_cfg,
             root,
             skills_dir.as_deref(),
+            agent.auto_mode_hints(),
         ) {
             Ok(Some(fn_)) => agent.with_auto_mode(fn_),
             Ok(None) => agent,

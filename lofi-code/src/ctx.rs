@@ -76,9 +76,20 @@ pub type JobAcquireFn = Arc<dyn Fn(u64) -> Option<JobReleaseFn> + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {
     Policy,
-    AutoEvaluating { started_at: std::time::Instant },
-    AutoAsk { reason: String },
-    AutoFailed { reason: String },
+    AutoEvaluating {
+        started_at: std::time::Instant,
+    },
+    AutoAsk {
+        reason: String,
+    },
+    /// The evaluator answered "block": clear harm. The command still goes to
+    /// the normal prompt, so a block escalates and never denies.
+    AutoRisk {
+        reason: String,
+    },
+    AutoFailed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -101,10 +112,39 @@ pub type ConfirmFn = Arc<
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoModeOutcome {
-    Allow { reason: String },
-    Ask { reason: String },
-    Failed { reason: String },
+    Allow {
+        reason: String,
+    },
+    Ask {
+        reason: String,
+    },
+    /// The evaluator judged clear harm. Still only a prompt: auto mode never
+    /// denies a command, so the user keeps the final word.
+    HighRisk {
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
+
+/// Turn context for one auto-mode evaluation, so a terse command can be
+/// judged against the request it answers. Every field is bounded with
+/// [`crate::policy::auto_mode::bound`] by the turn loop that fills it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoModeHints {
+    /// The request that started the current turn.
+    pub prompt: Option<String>,
+    /// The previous typed request. Only set when the current request is
+    /// terse, because such a request cannot resolve its own references.
+    pub prior_prompt: Option<String>,
+    /// The agent's last assistant text. Set with `prior_prompt`.
+    pub prior_reply: Option<String>,
+}
+
+/// Shared handle: the turn loop writes the hints of the turn it starts, and
+/// the evaluator reads them when a command needs a decision.
+pub type AutoModeHintHandle = Arc<std::sync::Mutex<AutoModeHints>>;
 
 pub type AutoModeFn = Arc<
     dyn Fn(

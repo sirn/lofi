@@ -600,7 +600,7 @@ max_tokens = 128
 fn external_auto_mode_approves_with_only_the_evaluator_provider() {
     let fixture = claude_fixture();
     let server = MockServer::start(vec![text_response(
-        r#"{"decision":"allow","reason":"fixture approval"}"#,
+        r#"{"risk":"low","reason":"fixture approval"}"#,
     )]);
     configure_auto_mode(&fixture, &server);
     let output = fixture.output(&["--print", "shell"]);
@@ -613,13 +613,13 @@ fn external_auto_mode_approves_with_only_the_evaluator_provider() {
     assert!(!fixture.workspace.join("unused-credential").exists());
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].body.contains("shell-command safety evaluator"));
+    assert!(requests[0].body.contains("shell-command risk evaluator"));
     assert!(requests[0].body.contains(r#""model":"judge""#));
 }
 
 #[test]
 fn external_auto_mode_does_not_approve_ask_or_invalid_results() {
-    for response in [r#"{"decision":"ask","reason":"needs review"}"#, "invalid"] {
+    for response in [r#"{"risk":"confirm","reason":"needs review"}"#, "invalid"] {
         let fixture = claude_fixture();
         let server = MockServer::start(vec![text_response(response)]);
         configure_auto_mode(&fixture, &server);
@@ -639,7 +639,7 @@ fn external_auto_mode_does_not_approve_ask_or_invalid_results() {
 fn external_auto_mode_tui_requests_confirmation_when_evaluator_asks() {
     let fixture = claude_fixture();
     let server = MockServer::start(vec![text_response(
-        r#"{"decision":"ask","reason":"needs review"}"#,
+        r#"{"risk":"confirm","reason":"needs review"}"#,
     )]);
     configure_auto_mode(&fixture, &server);
     let mut tui = fixture.spawn(&[]);

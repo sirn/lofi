@@ -765,6 +765,13 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
                 format!("Auto evaluation asks: {reason}")
             }
         }
+        lofi_core::ConfirmReason::AutoRisk { reason } => {
+            if reason.trim().is_empty() {
+                "Auto evaluation sees clear harm.".to_string()
+            } else {
+                format!("Auto evaluation sees clear harm: {reason}")
+            }
+        }
         lofi_core::ConfirmReason::AutoFailed { reason } => {
             format!("Auto evaluation could not decide: {reason}")
         }

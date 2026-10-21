@@ -378,7 +378,7 @@ fn working_status_is_replaced_in_place_by_done_status() {
 }
 
 #[test]
-fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
+fn auto_evaluation_dialog_renders_elapsed_ask_and_harm_reasons() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -429,6 +429,18 @@ fn auto_evaluation_dialog_renders_elapsed_state_and_ask_reason() {
     assert!(
         asking.contains("Auto evaluation asks: command deletes a file"),
         "{asking}"
+    );
+
+    *reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = lofi_core::ConfirmReason::AutoRisk {
+        reason: "wipes work".to_string(),
+    };
+    term.draw(|f| crate::tui::view::render(f, &mut a)).unwrap();
+    let blocking = screen(&term);
+    assert!(
+        blocking.contains("Auto evaluation sees clear harm: wipes work"),
+        "{blocking}"
     );
 }
 

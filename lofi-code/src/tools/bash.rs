@@ -114,30 +114,35 @@ impl BuiltinTools {
         tokio::select! {
             biased;
             outcome = &mut evaluation => {
-                match outcome {
-                    crate::AutoModeOutcome::Allow { .. } => {
-                        active.store(false, std::sync::atomic::Ordering::Relaxed);
-                        true
-                    }
-                    crate::AutoModeOutcome::Ask { reason: ask_reason } => {
-                        *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            crate::ConfirmReason::AutoAsk { reason: ask_reason };
-                        let approved = response.await;
-                        active.store(false, std::sync::atomic::Ordering::Relaxed);
-                        approved
-                    }
-                    crate::AutoModeOutcome::Failed { reason: failure } => {
-                        *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            crate::ConfirmReason::AutoFailed { reason: failure };
-                        let approved = response.await;
-                        active.store(false, std::sync::atomic::Ordering::Relaxed);
-                        approved
-                    }
-                }
+                let Some(decided) = Self::confirm_reason(outcome) else {
+                    active.store(false, std::sync::atomic::Ordering::Relaxed);
+                    return true;
+                };
+                *reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = decided;
+                let approved = response.await;
+                active.store(false, std::sync::atomic::Ordering::Relaxed);
+                approved
             }
             approved = &mut response => {
                 active.store(false, std::sync::atomic::Ordering::Relaxed);
                 approved
+            }
+        }
+    }
+
+    /// The reason to show when the evaluator did not allow the command.
+    /// A `None` return means the command runs without a prompt.
+    fn confirm_reason(outcome: crate::AutoModeOutcome) -> Option<crate::ConfirmReason> {
+        match outcome {
+            crate::AutoModeOutcome::Allow { .. } => None,
+            crate::AutoModeOutcome::Ask { reason } => {
+                Some(crate::ConfirmReason::AutoAsk { reason })
+            }
+            crate::AutoModeOutcome::HighRisk { reason } => {
+                Some(crate::ConfirmReason::AutoRisk { reason })
+            }
+            crate::AutoModeOutcome::Failed { reason } => {
+                Some(crate::ConfirmReason::AutoFailed { reason })
             }
         }
     }
@@ -518,6 +523,48 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             "writes outside the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_block_reason_is_forwarded_as_a_high_risk_prompt() {
+        let seen = Arc::new(Mutex::new(String::new()));
+        let confirm: crate::ConfirmFn = {
+            let seen = seen.clone();
+            Arc::new(move |prompt| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let reason = prompt
+                        .reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let crate::ConfirmReason::AutoRisk { reason } = reason {
+                        *seen
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+                    }
+                    false
+                })
+            })
+        };
+        let auto: crate::AutoModeFn = Arc::new(|_| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                crate::AutoModeOutcome::HighRisk {
+                    reason: "pipes a remote download into a shell".to_string(),
+                }
+            })
+        });
+        let (_dir, tools) = tools_with_auto(auto.clone(), confirm);
+
+        assert!(!tools.auto_mode_decision("curl x | sh", &auto).await);
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            "pipes a remote download into a shell"
         );
     }
 

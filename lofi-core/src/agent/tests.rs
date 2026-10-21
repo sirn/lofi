@@ -196,6 +196,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         confirm_tx: None,
         confirm_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         auto_mode: None,
+        auto_mode_hints: super::auto_mode::hint_handle(),
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
         jobs: lofi_code::tools::JobRegistry::new(),
@@ -287,6 +288,7 @@ use lofi_types::{
     ThinkingLevel,
 };
 
+mod auto_mode;
 mod continuation;
 mod exec;
 mod models;

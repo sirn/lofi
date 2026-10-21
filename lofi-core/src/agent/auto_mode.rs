@@ -1,11 +1,18 @@
 use futures::StreamExt;
-use lofi_code::policy::auto_mode;
-use lofi_code::{AutoModeFn, AutoModeOutcome};
+use lofi_code::policy::auto_mode::{self, AutoModeRisk};
+use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome};
 use lofi_providers::{open, Provider};
 use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Model, Role};
 use std::sync::Arc;
 
 use lofi_error::{Error, Result};
+
+/// A fresh, empty context handle. Each agent gets its own so a subagent
+/// cannot read the hints of the session that spawned it.
+#[must_use]
+pub fn hint_handle() -> AutoModeHintHandle {
+    Arc::new(std::sync::Mutex::new(AutoModeHints::default()))
+}
 
 /// Abort a spawned provider evaluation if the surrounding auto-mode future is
 /// dropped because the user overrides it. Dropping a bare Tokio `JoinHandle`
@@ -35,6 +42,7 @@ pub fn build_auto_mode(
     auto_cfg: &AutoModeConfig,
     cwd: &std::path::Path,
     skills_dir: Option<&std::path::Path>,
+    hints: &AutoModeHintHandle,
 ) -> Result<Option<AutoModeFn>> {
     if !auto_cfg.enable {
         return Ok(None);
@@ -85,14 +93,28 @@ pub fn build_auto_mode(
         skill_dirs.push(ws_skills);
     }
 
+    let hints = hints.clone();
     let auto_mode_fn: AutoModeFn = Arc::new(move |command: String| {
         let provider = provider.clone();
         let model = model.clone();
         let cwd = cwd.clone();
         let skill_dirs = skill_dirs.clone();
+        let turn = hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         Box::pin(async move {
             let handle = tokio::task::spawn(async move {
-                evaluate_command(&provider, &model, &command, &cwd, max_tokens, &skill_dirs).await
+                evaluate_command(
+                    &provider,
+                    &model,
+                    &command,
+                    &cwd,
+                    max_tokens,
+                    &skill_dirs,
+                    &turn,
+                )
+                .await
             });
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
             let outcome = match handle.await {
@@ -110,17 +132,21 @@ pub fn build_auto_mode(
     Ok(Some(auto_mode_fn))
 }
 
-async fn evaluate_command(
+pub(super) async fn evaluate_command(
     provider: &Arc<dyn Provider>,
     model: &Model,
     command: &str,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
     skill_dirs: &[std::path::PathBuf],
+    turn: &AutoModeHints,
 ) -> AutoModeOutcome {
     let skill_dirs: Vec<&std::path::Path> =
         skill_dirs.iter().map(std::path::PathBuf::as_path).collect();
-    let prompt = auto_mode::build_prompt(command, &cwd.display().to_string(), &skill_dirs);
+    // The system message is the same on every call so the provider's prompt
+    // cache covers it; only the user message changes per command.
+    let user =
+        auto_mode::build_user_message(command, &cwd.display().to_string(), &skill_dirs, turn);
 
     let mut model = model.clone();
     model.thinking = lofi_types::ThinkingLevel::Off;
@@ -128,13 +154,24 @@ async fn evaluate_command(
         model.max_tokens = Some(mt);
     }
 
-    let messages = vec![Message {
-        origin: None,
-        role: Role::User,
-        blocks: vec![ContentBlock::Text { text: prompt }],
-        kind: lofi_types::PromptKind::User,
-    }];
+    let messages = vec![
+        Message {
+            origin: None,
+            role: Role::System,
+            blocks: vec![ContentBlock::Text {
+                text: auto_mode::system_prompt().to_string(),
+            }],
+            kind: lofi_types::PromptKind::User,
+        },
+        Message {
+            origin: None,
+            role: Role::User,
+            blocks: vec![ContentBlock::Text { text: user }],
+            kind: lofi_types::PromptKind::User,
+        },
+    ];
 
+    let started = std::time::Instant::now();
     let stream = match provider.stream(&model, &messages, &[]).await {
         Ok(s) => s,
         Err(e) => {
@@ -146,23 +183,23 @@ async fn evaluate_command(
     };
 
     match collect_text(stream).await {
-        Ok(text) => {
+        Ok((text, usage)) => {
             let decision = auto_mode::parse_decision(&text);
             if let Some(d) = decision {
-                if d.allow {
-                    tracing::debug!(
-                        command = command,
-                        reason = d.reason.as_str(),
-                        "auto-mode: approved"
-                    );
-                    AutoModeOutcome::Allow { reason: d.reason }
-                } else {
-                    tracing::debug!(
-                        command = command,
-                        reason = d.reason.as_str(),
-                        "auto-mode: deferred to confirmation"
-                    );
-                    AutoModeOutcome::Ask { reason: d.reason }
+                tracing::debug!(
+                    command = command,
+                    risk = ?d.risk,
+                    reason = d.reason.as_str(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    cache_read_tokens = usage.cache_read_tokens,
+                    "auto-mode: evaluated"
+                );
+                match d.risk {
+                    AutoModeRisk::Low => AutoModeOutcome::Allow { reason: d.reason },
+                    AutoModeRisk::Confirm => AutoModeOutcome::Ask { reason: d.reason },
+                    AutoModeRisk::Block => AutoModeOutcome::HighRisk { reason: d.reason },
                 }
             } else {
                 tracing::warn!(
@@ -183,14 +220,77 @@ async fn evaluate_command(
     }
 }
 
+/// Derive the evaluator context for the turn that is starting. Derived from
+/// the live history instead of accumulated, so compaction, rewind, and a new
+/// session drop the context without extra bookkeeping.
+///
+/// The current request is always passed. The earlier request and the agent's
+/// last message are passed only for a terse request, because "yes" answers
+/// the agent's question and cannot be judged on its own.
+#[must_use]
+pub fn derive_hints(messages: &[Message], current: Option<&str>) -> AutoModeHints {
+    let Some(current) = current else {
+        return AutoModeHints::default();
+    };
+    let mut hints = AutoModeHints {
+        prompt: Some(auto_mode::bound(current)),
+        ..AutoModeHints::default()
+    };
+    if !auto_mode::is_terse(current) {
+        return hints;
+    }
+    hints.prior_prompt = messages
+        .iter()
+        .rev()
+        .find_map(typed_prompt)
+        .map(auto_mode::bound);
+    hints.prior_reply = messages
+        .iter()
+        .rev()
+        .find_map(assistant_text)
+        .map(|text| auto_mode::bound(&text));
+    hints
+}
+
+/// The text of a request that a human typed. Compaction summaries and
+/// app-injected notices are model- or app-written, so they are not requests.
+pub(super) fn typed_prompt(message: &Message) -> Option<&str> {
+    if message.role != Role::User || message.kind != lofi_types::PromptKind::User {
+        return None;
+    }
+    let text = message.blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+        _ => None,
+    })?;
+    (!text.starts_with(crate::compact::HANDOFF_PREAMBLE)).then_some(text)
+}
+
+/// The last text the agent produced, which carries the question a terse
+/// request answers.
+fn assistant_text(message: &Message) -> Option<String> {
+    if message.role != Role::Assistant {
+        return None;
+    }
+    message.blocks.iter().rev().find_map(|block| match block {
+        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// Collect the answer and the usage the evaluation spent, so the cost and
+/// the prompt-cache hit rate stay observable.
 async fn collect_text(
     mut stream: futures::stream::BoxStream<'static, Result<lofi_types::StreamingEvent>>,
-) -> Result<String> {
+) -> Result<(String, lofi_types::Usage)> {
     let mut text = String::new();
+    let mut usage = lofi_types::Usage::default();
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(lofi_types::StreamingEvent::TextDelta(d)) => text.push_str(&d),
-            Ok(lofi_types::StreamingEvent::Done { .. }) => break,
+            Ok(lofi_types::StreamingEvent::Done { usage: spent, .. }) => {
+                usage = spent;
+                break;
+            }
             Ok(lofi_types::StreamingEvent::Error(msg)) => {
                 return Err(Error::Provider(msg));
             }
@@ -198,5 +298,5 @@ async fn collect_text(
             Err(e) => return Err(e),
         }
     }
-    Ok(text)
+    Ok((text, usage))
 }
