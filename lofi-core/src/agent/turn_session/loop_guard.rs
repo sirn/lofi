@@ -1,5 +1,8 @@
-//! Loop detection, which only the provider transport needs: a child process
-//! runs its own rounds and never exposes them.
+//! Loop detection: a reasoning pattern or tool cycle that repeats.
+//!
+//! The turn judges the pattern. Every thinking delta reaches the turn's sink
+//! and the turn owns the history a cycle repeats in, so both transports get
+//! the same check without code of their own.
 
 use lofi_types::{ContentBlock, Message};
 
@@ -11,13 +14,14 @@ const TOOL_LOOP_REPETITIONS: usize = 5;
 const TOOL_LOOP_MAX_CYCLE: usize = 5;
 
 #[derive(Default)]
-pub(super) struct LoopDetector {
+pub(super) struct LoopGuard {
     thinking: Vec<u8>,
     thinking_checked_at: usize,
     tool_rounds: Vec<String>,
 }
 
-impl LoopDetector {
+impl LoopGuard {
+    /// A new round starts no loop: only what one round streams can repeat.
     pub(super) fn start_round(&mut self) {
         self.thinking.clear();
         self.thinking_checked_at = 0;
@@ -149,7 +153,7 @@ mod tests {
 
     #[test]
     fn thinking_loop_requires_three_repeated_long_suffixes() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         let pattern = "abcdefghij".repeat(10);
         assert!(detector.add_thinking(&pattern).is_none());
         assert!(detector.add_thinking(&pattern).is_none());
@@ -160,7 +164,7 @@ mod tests {
 
     #[test]
     fn thinking_loop_checks_a_short_final_delta() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         let pattern = "abcdefghij".repeat(10);
         assert!(detector
             .add_thinking(&format!("{}{}", pattern.repeat(2), &pattern[..1]))
@@ -173,7 +177,7 @@ mod tests {
 
     #[test]
     fn thinking_loop_does_not_span_provider_rounds() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         let pattern = "abcdefghij".repeat(10);
         for _ in 0..3 {
             detector.start_round();
@@ -190,7 +194,7 @@ mod tests {
         let mut near = format!("{pattern}{pattern}{pattern}");
         near.replace_range(near.len() - 1.., "~");
 
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         assert!(detector.add_thinking(&near).is_none());
         detector.start_round();
         assert!(detector
@@ -200,7 +204,7 @@ mod tests {
 
     #[test]
     fn changing_tool_results_do_not_trigger_a_loop() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         for result in ["1", "2", "3", "4", "5"] {
             assert!(detector
                 .add_tool_round(format!("same-call:{result}"))
@@ -210,7 +214,7 @@ mod tests {
 
     #[test]
     fn identical_tool_result_rounds_trigger_after_five_repetitions() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         for _ in 0..TOOL_LOOP_REPETITIONS - 1 {
             assert!(detector.add_tool_round("same".into()).is_none());
         }
@@ -221,7 +225,7 @@ mod tests {
 
     #[test]
     fn alternating_tool_result_cycle_is_detected() {
-        let mut detector = LoopDetector::default();
+        let mut detector = LoopGuard::default();
         for fingerprint in ["a", "b"].into_iter().cycle().take(9) {
             assert!(detector.add_tool_round(fingerprint.into()).is_none());
         }

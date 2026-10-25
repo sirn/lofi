@@ -1,7 +1,5 @@
 //! The provider transport: one exchange is one provider round.
 
-mod detector;
-
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -15,10 +13,9 @@ use super::agent_run::messages::{
     strip_image_blocks, MAX_REQUEST_IMAGE_BYTES,
 };
 use super::turn_session::{
-    Anomaly, Exchange, ExchangeDriver, ExchangeFailure, Settlement, TurnIo, TurnPolicy,
+    Exchange, ExchangeDriver, ExchangeFailure, Settlement, TurnIo, TurnPolicy,
 };
 use super::{usage_cost, Agent, AgentEvent};
-use detector::{tool_round_fingerprint, LoopDetector};
 
 /// The provider transport's per-turn state. It must not leak across turns, so
 /// the turn opens one driver per turn.
@@ -71,7 +68,6 @@ impl Spend {
 /// Per-turn state of the provider transport.
 #[derive(Default)]
 pub(in crate::agent) struct NativeTurnState {
-    detector: LoopDetector,
     /// The image-omit notice fires once per turn, not once per round.
     omit_notice_sent: bool,
     spend: Spend,
@@ -218,14 +214,12 @@ impl Agent {
             requested.await?
         };
         let mut stream = stream;
-        state.detector.start_round();
         let mut assembler = lofi_providers::MessageAssembler::new();
         let mut round_stop_reason: Option<lofi_types::StopReason> = None;
         let mut round_bytes = 0usize;
         let mut tool_raw: HashMap<String, String> = HashMap::new();
         let mut tool_emitted: HashMap<String, usize> = HashMap::new();
         let mut tool_decoders: HashMap<String, super::CodePrefixDecoder> = HashMap::new();
-        let mut round_loop_detail: Option<String> = None;
         let mut provider_progress = false;
         let collect = async {
             let mut thinking_open: Option<Instant> = None;
@@ -256,10 +250,6 @@ impl Agent {
                             return Err(Error::Cancelled);
                         }
                     }
-                    if let Some(detail) = state.detector.finish_thinking() {
-                        round_loop_detail = Some(detail);
-                        break;
-                    }
                 }
                 match &e {
                     StreamingEvent::TextDelta(delta) => {
@@ -272,10 +262,13 @@ impl Agent {
                             thinking_open = Some(Instant::now());
                         }
                         if !sink.thinking(delta.clone()).await {
+                            // The sink published this delta before the turn
+                            // stopped the round on it, so the partial must
+                            // carry it: the transcript rebuilds a round from
+                            // the messages the exchange appends, not from the
+                            // stream it read.
+                            assembler.push(StreamingEvent::ThinkingDelta(delta.clone()));
                             return Err(Error::Cancelled);
-                        }
-                        if let Some(detail) = state.detector.add_thinking(delta) {
-                            round_loop_detail = Some(detail);
                         }
                     }
                     StreamingEvent::ToolUseStart { id, name } => {
@@ -389,12 +382,6 @@ impl Agent {
                 if terminal {
                     break;
                 }
-                if round_loop_detail.is_some() {
-                    break;
-                }
-            }
-            if round_loop_detail.is_none() {
-                round_loop_detail = state.detector.finish_thinking();
             }
             if let Some(start) = thinking_open.take() {
                 let elapsed = start.elapsed();
@@ -455,14 +442,7 @@ impl Agent {
                 .collect()
         };
         if tool_uses.is_empty() {
-            let mut exchange = Exchange::done(round_stop_reason);
-            exchange.anomaly = round_loop_detail
-                .clone()
-                .map(|detail| Anomaly::LoopDetected {
-                    detail,
-                    removal: Some(assistant_index),
-                });
-            return Ok(exchange);
+            return Ok(Exchange::done(round_stop_reason));
         }
         // The prompt is durable before the first tool runs.
         io.commit(messages).await;
@@ -525,25 +505,12 @@ impl Agent {
                 results.push(result);
             }
         }
-        let result_index = messages.len();
         messages.push(Message {
             origin: None,
             role: lofi_types::Role::Tool,
             blocks: results,
             kind: lofi_types::PromptKind::User,
         });
-        let tool_loop_detail = state.detector.add_tool_round(tool_round_fingerprint(
-            &messages[assistant_index],
-            &messages[result_index],
-        ));
-        let mut exchange = Exchange::continued(round_stop_reason);
-        exchange.anomaly =
-            round_loop_detail
-                .or(tool_loop_detail)
-                .map(|detail| Anomaly::LoopDetected {
-                    detail,
-                    removal: None,
-                });
-        Ok(exchange)
+        Ok(Exchange::continued(round_stop_reason))
     }
 }

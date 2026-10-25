@@ -14,6 +14,7 @@ use lofi_types::{ContentBlock, ContextUsage, Message, PromptKind, StopReason, Us
 use tokio::sync::mpsc::Sender;
 
 use super::super::AgentEvent;
+use super::loop_guard::{tool_round_fingerprint, LoopGuard};
 use crate::agent::ToolCallContext;
 use crate::session::recorder::{SessionRecord, SessionRecorder, TurnSummary};
 use crate::session::store::SessionCursor;
@@ -33,6 +34,24 @@ pub struct EventSink {
     /// The lifetime of the turn this sink belongs to. None on a channel that
     /// only carries events.
     alive: Option<Arc<AtomicBool>>,
+    /// The loop check of this turn, and the pattern it stopped on.
+    loops: Arc<Mutex<LoopState>>,
+}
+
+/// A repeated pattern, and where the turn saw it.
+#[derive(Default)]
+struct LoopState {
+    guard: LoopGuard,
+    stop: Option<LoopStop>,
+}
+
+/// What stopped a round.
+pub(crate) struct LoopStop {
+    pub detail: String,
+    /// True when the pattern is inside the terminal assistant message, which
+    /// the repair removes. A tool cycle repeats across messages, so nothing
+    /// single can go.
+    pub in_message: bool,
 }
 
 impl EventSink {
@@ -42,10 +61,12 @@ impl EventSink {
             accounting: Arc::new(Mutex::new(Accounting::default())),
             cursor,
             alive: None,
+            loops: Arc::new(Mutex::new(LoopState::default())),
         }
     }
 
-    /// Publish one event. False when the consumer is gone.
+    /// Publish one event. False when the consumer is gone, or when the turn
+    /// stopped the round this event belongs to.
     ///
     /// The turn and the core helpers it calls use this. A transport uses the
     /// named helpers below, which cannot express a terminal marker.
@@ -63,7 +84,85 @@ impl EventSink {
             "only the turn writes a terminal marker"
         );
         self.fold(&event);
-        self.tx.send(event).await.is_ok()
+        // An event is the only point at which the turn reaches a transport
+        // while it streams, so a false return is how the turn interrupts one
+        // mid-round. A pattern the round already repeated is such a stop: the
+        // transport abandons what it was reading, exactly as it does when the
+        // consumer goes away, and the turn repairs the round.
+        let stopped = self.loop_stopped();
+        self.tx.send(event).await.is_ok() && !stopped
+    }
+
+    /// A new round starts no loop: only what one round streams can repeat.
+    pub(crate) fn start_round(&self) {
+        let mut loops = self.loops();
+        loops.guard.start_round();
+        loops.stop = None;
+    }
+
+    /// The pattern that stopped a round, once the turn repairs it.
+    pub(crate) fn take_loop_stop(&self) -> Option<LoopStop> {
+        self.loops().stop.take()
+    }
+
+    /// Whether a tool cycle repeated across the round's own messages.
+    ///
+    /// The turn owns the history, so it fingerprints the pairs a transport
+    /// appended without asking which transport appended them.
+    pub(crate) fn observe_tool_rounds(&self, round: &[Message]) {
+        for pair in round.windows(2) {
+            let [assistant, result] = pair else {
+                continue;
+            };
+            if assistant.role == lofi_types::Role::Assistant
+                && result.role == lofi_types::Role::Tool
+            {
+                self.observe_tool_round(tool_round_fingerprint(assistant, result));
+            }
+        }
+    }
+
+    fn loop_stopped(&self) -> bool {
+        self.loops().stop.is_some()
+    }
+
+    fn observe_tool_round(&self, fingerprint: String) {
+        let mut loops = self.loops();
+        if loops.stop.is_none() {
+            loops.stop = loops
+                .guard
+                .add_tool_round(fingerprint)
+                .map(|detail| LoopStop {
+                    detail,
+                    in_message: false,
+                });
+        }
+    }
+
+    fn observe_thinking(&self, delta: &str) {
+        let mut loops = self.loops();
+        if loops.stop.is_none() {
+            loops.stop = loops.guard.add_thinking(delta).map(|detail| LoopStop {
+                detail,
+                in_message: true,
+            });
+        }
+    }
+
+    fn observe_thinking_end(&self) {
+        let mut loops = self.loops();
+        if loops.stop.is_none() {
+            loops.stop = loops.guard.finish_thinking().map(|detail| LoopStop {
+                detail,
+                in_message: true,
+            });
+        }
+    }
+
+    fn loops(&self) -> MutexGuard<'_, LoopState> {
+        self.loops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn fold(&self, event: &AgentEvent) {
@@ -82,6 +181,13 @@ impl EventSink {
                 }
                 _ => {}
             }
+        }
+        // The reasoning text arrives here whatever transport streams it, so
+        // the check that reads it cannot live in one of them.
+        match event {
+            AgentEvent::Thinking(delta) => self.observe_thinking(delta),
+            AgentEvent::ThinkingEnd { .. } => self.observe_thinking_end(),
+            _ => {}
         }
         // Two records describe the session, not the turn: they travel as
         // events and land here, so a transport never writes a record.

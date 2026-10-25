@@ -8,12 +8,12 @@
 
 pub mod contract;
 pub mod io;
+mod loop_guard;
 mod record;
 mod recovery;
 
 pub use contract::{
-    Anomaly, Exchange, ExchangeDriver, ExchangeFailure, Rollback, Settlement, ToolRecorder,
-    TurnPolicy,
+    Exchange, ExchangeDriver, ExchangeFailure, Rollback, Settlement, ToolRecorder, TurnPolicy,
 };
 pub(crate) use io::{Admission, CancelToken, EventSink, ExchangeInput, TurnIo};
 pub(crate) use record::{discard_round, record_notice, record_prompt};
@@ -39,7 +39,7 @@ use crate::session::store::SessionCursor;
 
 use recovery::{
     handle_loop_detection, handle_thinking_only_stop, notice_message, recovery_round_exceeded,
-    terminal_recovery_prompt, RecoveryAction, THINKING_ONLY_PROMPT,
+    terminal_recovery_prompt, RecoveryAction, RecoveryPlan, THINKING_ONLY_PROMPT,
 };
 
 /// Input for a new prompt or a silent hard-compaction continuation.
@@ -238,12 +238,16 @@ pub async fn run(
             break Ok(TurnOutcome::Finished);
         }
         let round_start = messages.len();
+        io.events().start_round();
         let result = driver.run(&io, messages).await;
         // Publish the identity of the attempt, also when it failed: a child
         // reports the model it actually ran before the failure, and the
         // transcript must name that model rather than the selection.
         io.set_model(driver.run_model());
         if result.is_ok() {
+            // A tool cycle repeats across the messages the exchange appended,
+            // whatever transport appended them.
+            io.events().observe_tool_rounds(&messages[round_start..]);
             if let Some(attempt) = retry.reset_after_progress() {
                 let _ = io
                     .events()
@@ -255,6 +259,9 @@ pub async fn run(
                     .await;
             }
         }
+        // The turn judges a repeated pattern, so the round it stopped is
+        // repaired here whether the transport returned or abandoned it.
+        let loop_stop = io.events().take_loop_stop();
         match result {
             Ok(exchange) => {
                 io.events()
@@ -284,10 +291,12 @@ pub async fn run(
                     assistant.filter(|index| assistant_is_thinking_only(&messages[*index]));
                 let terminal_prompt =
                     terminal_recovery_prompt(&exchange, announced, policy.auto_continue);
-                let mut plan = exchange.anomaly.as_ref().and_then(|anomaly| match anomaly {
-                    Anomaly::LoopDetected { detail, removal } => {
-                        handle_loop_detection(Some(detail), *removal, &mut loop_recovered)
-                    }
+                let mut plan = loop_stop.as_ref().and_then(|stop| {
+                    handle_loop_detection(
+                        Some(&stop.detail),
+                        stop.in_message.then_some(assistant).flatten(),
+                        &mut loop_recovered,
+                    )
                 });
                 if plan.is_none() && exchange.finished {
                     let thinking_only_prompt = (exchange.stop_reason != Some(StopReason::Other))
@@ -299,36 +308,10 @@ pub async fn run(
                     );
                 }
                 if let Some(plan) = plan {
-                    // Transcript durability must precede removal from model history.
-                    if let Some((index, detail)) = plan.removal {
-                        if let Err(error) = discard_round(&io, messages, 1, &detail).await {
-                            break 'turn Err(error);
-                        }
-                        messages.remove(index);
-                    }
-                    // An orphan reasoning item must not enter the next provider request.
-                    match record_notice(&mut driver_view, &io, messages, plan.notice).await {
-                        Ok(true) => {}
-                        Ok(false) => break 'turn Ok(TurnOutcome::Detached),
+                    match repair_round(&mut driver_view, &io, messages, plan, &policy).await {
+                        Ok(None) => continue,
+                        Ok(Some(outcome)) => break Ok(outcome),
                         Err(error) => break 'turn Err(error),
-                    }
-                    match plan.action {
-                        // The repair asks again, so the cap that ends the turn
-                        // belongs here too: a recovery round must not push a
-                        // full context over the window.
-                        RecoveryAction::Continue => {
-                            if hard_cap_exceeded(&io, &policy) {
-                                break Ok(TurnOutcome::ContextPressure);
-                            }
-                            continue;
-                        }
-                        RecoveryAction::Stop => {
-                            break Ok(if io.events().is_closed() {
-                                TurnOutcome::Detached
-                            } else {
-                                TurnOutcome::Finished
-                            });
-                        }
                     }
                 }
                 io.commit(messages).await;
@@ -375,6 +358,29 @@ pub async fn run(
                 error: Error::Cancelled,
                 ..
             }) => {
+                // The transport abandoned the round because the turn stopped
+                // it: a pattern the turn judges is not the user's interrupt.
+                if let Some(stop) = &loop_stop {
+                    let removed = messages.len() - round_start;
+                    if removed > 0 {
+                        let discarded = discard_round(&io, messages, removed, &stop.detail).await;
+                        if let Err(discard_error) = discarded {
+                            keep_partial(messages, round_start);
+                            let _ = io.commit_durable(messages).await;
+                            break 'turn Err(discard_error);
+                        }
+                        messages.truncate(round_start);
+                    }
+                    if let Some(plan) =
+                        handle_loop_detection(Some(&stop.detail), None, &mut loop_recovered)
+                    {
+                        match repair_round(&mut driver_view, &io, messages, plan, &policy).await {
+                            Ok(None) => continue,
+                            Ok(Some(outcome)) => break Ok(outcome),
+                            Err(error) => break 'turn Err(error),
+                        }
+                    }
+                }
                 keep_partial(messages, round_start);
                 // A set cancel flag is an explicit user interruption; a closed
                 // receiver is only a detached consumer.
@@ -559,6 +565,38 @@ pub(super) fn terminal_assistant(messages: &[Message], round_start: usize) -> Op
 /// The round's partial stays in the history: its unanswered tool calls must
 /// be closed, or a provider that requires a result for every call rejects the
 /// next request.
+/// Apply a recovery plan: drop what the pattern repeated, report it, and say
+/// whether the turn goes on.
+async fn repair_round(
+    driver: &mut TurnDriver,
+    io: &TurnIo,
+    messages: &mut Vec<Message>,
+    plan: RecoveryPlan,
+    policy: &TurnPolicy,
+) -> Result<Option<TurnOutcome>> {
+    // Transcript durability must precede removal from model history.
+    if let Some((index, detail)) = plan.removal {
+        discard_round(io, messages, 1, &detail).await?;
+        messages.remove(index);
+    }
+    // An orphan reasoning item must not enter the next provider request.
+    if !record_notice(driver, io, messages, plan.notice).await? {
+        return Ok(Some(TurnOutcome::Detached));
+    }
+    Ok(match plan.action {
+        // The repair asks again, so the cap that ends the turn belongs here
+        // too: a recovery round must not push a full context over the window.
+        RecoveryAction::Continue => {
+            hard_cap_exceeded(io, policy).then_some(TurnOutcome::ContextPressure)
+        }
+        RecoveryAction::Stop => Some(if io.events().is_closed() {
+            TurnOutcome::Detached
+        } else {
+            TurnOutcome::Finished
+        }),
+    })
+}
+
 fn keep_partial(messages: &mut Vec<Message>, round_start: usize) {
     if messages.len() > round_start {
         close_orphaned_tool_uses(messages);

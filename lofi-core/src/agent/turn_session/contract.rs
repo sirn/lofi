@@ -22,8 +22,6 @@ pub struct Exchange {
     /// The model asked for no more tools.
     pub finished: bool,
     pub stop_reason: Option<StopReason>,
-    /// Something the turn must repair, in the turn's own terms.
-    pub anomaly: Option<Anomaly>,
 }
 
 impl Exchange {
@@ -32,7 +30,6 @@ impl Exchange {
         Self {
             finished: true,
             stop_reason,
-            anomaly: None,
         }
     }
 
@@ -41,19 +38,8 @@ impl Exchange {
         Self {
             finished: false,
             stop_reason,
-            anomaly: None,
         }
     }
-}
-
-/// A repair the turn owns the policy for. The transport only reports the fact.
-pub enum Anomaly {
-    /// A repeated reasoning pattern or tool cycle. The optional index is the
-    /// assistant message the transport interrupted, which the repair removes.
-    LoopDetected {
-        detail: String,
-        removal: Option<usize>,
-    },
 }
 
 /// An exchange that did not complete.
@@ -128,9 +114,8 @@ pub struct TurnPolicy {
 /// A turn-scoped transport.
 ///
 /// The driver holds the per-turn state that must not leak across turns: the
-/// loop detector, the omission notice, the child handle and its delivery
-/// facts. It never settles: the turn does that, and then tells the driver what
-/// landed.
+/// omission notice, the child handle and its delivery facts. It never settles:
+/// the turn does that, and then tells the driver what landed.
 #[async_trait]
 pub trait ExchangeDriver: Send {
     /// Produce the next assistant message for this history and run the tools
