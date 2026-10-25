@@ -791,7 +791,7 @@ async fn job_completion_queues_a_notice() {
     .await
     .unwrap();
     wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
-    let notices = jobs.drain_notices();
+    let notices = jobs.take_notices();
     assert_eq!(notices.len(), 1, "notices: {notices:?}");
     assert!(
         notices[0].text.contains("failed"),
@@ -817,7 +817,7 @@ async fn job_periodic_tick_goes_to_ui_not_model() {
     // Wait past one tick interval so the progress ticker fires.
     tokio::time::sleep(std::time::Duration::from_millis(6_500)).await;
     // A tick lands in the single notice queue, to become a queued prompt.
-    let notices = jobs.drain_notices();
+    let notices = jobs.take_notices();
     assert!(!notices.is_empty(), "no tick queued");
     assert!(
         notices[0].text.contains("running"),
@@ -840,7 +840,7 @@ async fn job_terminal_queues_a_notice() {
     .await
     .unwrap();
     wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
-    let notices = jobs.drain_notices();
+    let notices = jobs.take_notices();
     assert_eq!(notices.len(), 1, "terminal notices: {notices:?}");
 }
 #[tokio::test]
@@ -903,7 +903,7 @@ async fn job_notify_disabled_suppresses_notice() {
     .await
     .unwrap();
     wait_for_job(&cx, spawned.value["id"].as_str().unwrap()).await;
-    assert!(jobs.drain_notices().is_empty());
+    assert!(jobs.take_notices().is_empty());
 }
 
 #[tokio::test]

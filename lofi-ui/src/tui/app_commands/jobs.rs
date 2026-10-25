@@ -17,6 +17,22 @@ impl App {
         });
     }
 
+    /// Take the notices the registry queued since the last tick, oldest
+    /// first. Taking a notice is also what drops its job from the
+    /// notification area, so the caller must hand every one of these over
+    /// before the next frame.
+    pub(in crate::tui) fn take_job_notices(&mut self) -> Vec<QueuedPrompt> {
+        self.jobs.as_ref().map_or_else(Vec::new, |jobs| {
+            jobs.take_notices()
+                .into_iter()
+                .map(|notice| QueuedPrompt {
+                    text: notice.text,
+                    kind: lofi_types::PromptKind::Notice,
+                })
+                .collect()
+        })
+    }
+
     /// Fresh job snapshot for the modal, newest first. Empty when no agent.
     pub(in crate::tui) fn jobs_snapshot(&self) -> Vec<lofi_core::JobInfo> {
         self.jobs

@@ -376,15 +376,9 @@ pub(crate) async fn run_loop(
         agent = Some(a);
     }
 
-    // Live notice feed. The job driver pushes onto this the moment a job
-    // transitions; the select arm below reacts without waiting for a tick.
-    // Buffered pre-UI notices flush into this receiver on subscribe.
-    let mut job_notice_rx = app
-        .jobs
-        .as_ref()
-        .map(lofi_core::JobRegistry::subscribe_notices);
-    // The startup registry instance backs this receiver; a backend switch
-    // that swaps the instance re-subscribes at the switch site.
+    // Job notices are pulled from the registry on each tick, never pushed:
+    // taking one is also what drops the job from the notification area, so
+    // the line and the notice prompt change in one frame.
     let mut subagent_notice_rx = app
         .subagents
         .as_ref()
@@ -418,6 +412,10 @@ pub(crate) async fn run_loop(
     // time, so a run drawn between ticks and settled before the next one
     // is still caught.
     let mut subagents_shown = false;
+    // Same for the notification area: a job spawned with `notify: false`
+    // leaves it with no notice to react to, so the tick compares the lines
+    // of the last frame against the registry to take the stale one off.
+    let mut jobs_shown = false;
     loop {
         if dirty && resize.deadline.is_none() {
             // Bracket the draw: a run that starts or settles while the
@@ -646,8 +644,6 @@ pub(crate) async fn run_loop(
                                             .as_ref()
                                             .map(lofi_core::SubagentRegistry::subscribe_notices);
                                     }
-                                    app.jobs_receiver_stale = true;
-                                    app.notified_jobs.clear();
                                     agent = Some(new_agent);
                                     app.bump_render_epoch();
                                 }
@@ -656,13 +652,6 @@ pub(crate) async fn run_loop(
                         } else {
                             app.notify(NotifyKind::Error, "switch model: no model registry");
                         }
-                    }
-                    if app.jobs_receiver_stale {
-                        job_notice_rx = app
-                            .jobs
-                            .as_ref()
-                            .map(lofi_core::JobRegistry::subscribe_notices);
-                        app.jobs_receiver_stale = false;
                     }
                     // Slash commands (notably /tree reconcile) can push
                     // notices into prompt_queue while at rest. The queue's
@@ -730,6 +719,26 @@ pub(crate) async fn run_loop(
             }
             _ = tick.tick() => {
                 close_finished_run(&mut current_run);
+                // One pull per tick. Taking a notice also drops its job from
+                // the notification area, so this loop hands the prompt over
+                // in the same frame the line goes away.
+                for queued in app.take_job_notices() {
+                    if app.busy() {
+                        app.prompt_queue.push(queued);
+                        if let Some(r) = &current_run {
+                            r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if agent.is_some() {
+                        spawn_prompt(
+                            &mut app,
+                            agent.as_ref(),
+                            &mut current_run,
+                            queued.text,
+                            queued.kind,
+                        );
+                    }
+                    dirty = true;
+                }
                 if app.refresh_confirmations() || !app.pending_confirms.is_empty() {
                     dirty = true;
                 }
@@ -739,9 +748,11 @@ pub(crate) async fn run_loop(
                     }
                     dirty = true;
                 }
-                if app.retry.is_some() || app.has_running_jobs() {
+                let jobs_shown_now = !app.running_jobs().is_empty();
+                if app.retry.is_some() || jobs_shown_now || jobs_shown != jobs_shown_now {
                     dirty = true;
                 }
+                jobs_shown = jobs_shown_now;
                 if app
                     .jobs_modal
                     .as_ref()
@@ -822,39 +833,6 @@ pub(crate) async fn run_loop(
                     app.nav_show_cursor();
                     dirty = true;
                 } else if app.remeasure_heights_step(16) {
-                    dirty = true;
-                }
-            }
-            notice = async {
-                match job_notice_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(notice) = notice {
-                    // Settle the job line in the same arm that queues its
-                    // notice so both change in one redraw.
-                    if notice.terminal {
-                        app.notified_jobs.insert(notice.id);
-                    }
-                    let queued = QueuedPrompt {
-                        text: notice.text,
-                        kind: lofi_types::PromptKind::Notice,
-                    };
-                    if app.busy() {
-                        app.prompt_queue.push(queued);
-                        if let Some(r) = &current_run {
-                            r.preempt.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    } else if agent.is_some() {
-                        spawn_prompt(
-                            &mut app,
-                            agent.as_ref(),
-                            &mut current_run,
-                            queued.text,
-                            queued.kind,
-                        );
-                    }
                     dirty = true;
                 }
             }

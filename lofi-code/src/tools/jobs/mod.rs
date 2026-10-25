@@ -61,8 +61,10 @@ const MAX_TTY_WRITE_BYTES: usize = 64 * 1024;
 /// evicted (newest kept) so a long session's registry stays bounded;
 /// running jobs are never evicted.
 const MAX_TERMINAL_JOBS: usize = 64;
-/// Notices buffered while no subscriber is live. Overflow drops the oldest
-/// notices and queues one summary notice with the running drop total.
+/// Notices no host has taken yet. The queue is also the notification
+/// area's state: a finished job keeps its running line while its terminal
+/// notice waits here. Overflow drops the oldest notices and queues one
+/// summary notice with the running drop total.
 const MAX_PENDING_NOTICES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,7 +229,7 @@ struct JobHandle {
     application_cursor: std::sync::atomic::AtomicBool,
 }
 
-/// Oldest-first buffer of notices produced while no UI subscriber is live.
+/// Oldest-first queue of notices no host has taken yet.
 /// Bounded: overflow drops the oldest notices and records one summary
 /// notice carrying the running drop total, so the loss is visible to the
 /// host agent instead of silent.
@@ -251,7 +253,13 @@ impl PendingNotices {
     fn push(&mut self, notice: JobNotice) {
         // Reserve room for a possible summary plus the notice itself.
         while self.queue.len() + 2 > MAX_PENDING_NOTICES {
-            self.queue.pop_front();
+            // A terminal notice is what keeps a finished job's line in the
+            // notification area, so shed progress ticks before it goes.
+            if let Some(index) = self.queue.iter().position(|notice| !notice.terminal) {
+                self.queue.remove(index);
+            } else {
+                self.queue.pop_front();
+            }
             self.dropped_total += 1;
         }
         if self.dropped_total > self.summarized {
@@ -306,14 +314,10 @@ struct Inner {
     /// old behavior. Leaf lock: never take another registry lock while
     /// holding it.
     driver_runtime: Mutex<Option<tokio::runtime::Handle>>,
-    /// Live notice subscribers (one per UI host). Zero subscribers means
-    /// headless; notices still land in `pending` so a late subscriber or a
-    /// `drain_notices` call sees the same sequence.
-    subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<JobNotice>>>,
-    /// Buffered notices produced while no UI subscriber is live, or while a
-    /// test drives the registry headless. `subscribe_notices` flushes this
-    /// buffer through the newly added subscriber. Bounded; overflow is
-    /// summarized by [`PendingNotices`].
+    /// Notices no host has taken yet. One authority for both the notice
+    /// stream and the notification area: a host takes the queue as a whole,
+    /// so a terminal notice leaves it in the same step that hands the
+    /// notice over. Bounded; overflow is summarized by [`PendingNotices`].
     pending: Mutex<PendingNotices>,
 }
 
@@ -346,16 +350,17 @@ impl JobRegistry {
                 jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 cancelled_owners: std::sync::Mutex::new(std::collections::HashSet::new()),
                 driver_runtime: Mutex::new(tokio::runtime::Handle::try_current().ok()),
-                subscribers: std::sync::Mutex::new(Vec::new()),
                 pending: std::sync::Mutex::new(PendingNotices::new()),
             }),
         }
     }
 
-    /// Take all queued notices, leaving the queue empty. Used by tests and
-    /// any host that has not subscribed to the live notice channel.
+    /// Take every queued notice, oldest first, leaving the queue empty.
+    /// A job's terminal notice lives in the queue until a host takes it, so
+    /// this same call also drops that job's line from the notification area:
+    /// the line and the notice prompt change in one frame.
     #[must_use]
-    pub fn drain_notices(&self) -> Vec<JobNotice> {
+    pub fn take_notices(&self) -> Vec<JobNotice> {
         self.inner
             .pending
             .lock()
@@ -363,40 +368,42 @@ impl JobRegistry {
             .unwrap_or_default()
     }
 
-    /// Subscribe to live job-completion notices. Any notices buffered before
-    /// the subscription flush through the returned receiver first, so tests
-    /// and the live UI see the same stream regardless of subscribe timing.
+    /// Point-in-time snapshot of every job this session owns, newest first.
+    /// Cheap and allocation-bounded: copies the small per-job fields, never
+    /// the log. The `/job` list polls this each frame.
     #[must_use]
-    pub fn subscribe_notices(&self) -> tokio::sync::mpsc::UnboundedReceiver<JobNotice> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Install the subscriber and drain the buffer under the same lock
-        // order used by publish. Otherwise a completion can land after the
-        // buffer drain but before subscriber insertion and remain stranded
-        // in `pending` until a second subscriber appears.
-        let mut subscribers = self
-            .inner
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        subscribers.push(tx.clone());
-        let buffered = self
+    pub fn snapshot(&self) -> Vec<JobInfo> {
+        self.collect(|_| true)
+    }
+
+    /// The notification area's contents, newest first: every running job,
+    /// plus a finished job whose terminal notice is still queued. A job
+    /// whose `notify` is off never queues one, so it leaves as soon as it
+    /// ends. Taking the queue is what drops a finished job from here.
+    #[must_use]
+    pub fn active_items(&self) -> Vec<JobInfo> {
+        // Hold the queue across the job read. The driver pushes a terminal
+        // notice under the same lock that flips the state, so a queue read
+        // that ended before the flip would find no notice for a job that
+        // already reads as terminal, and the line would go one frame early.
+        // The lock order stays pending, then jobs, then job data.
+        let pending = self
             .inner
             .pending
             .lock()
-            .map(|mut q| q.drain())
-            .unwrap_or_default();
-        for notice in buffered {
-            let _ = tx.send(notice);
-        }
-        rx
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued: std::collections::HashSet<u64> = pending
+            .queue
+            .iter()
+            .filter(|notice| notice.terminal)
+            .map(|notice| notice.id)
+            .collect();
+        self.collect(|job| !job.state.is_terminal() || queued.contains(&job.id))
     }
 
-    /// Point-in-time snapshot of every job this session owns, newest first.
-    /// Cheap and allocation-bounded: copies the small per-job fields, never
-    /// the log. The UI polls this each frame to render the job list and the
-    /// running-count badge.
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<JobInfo> {
+    /// Copy the small per-job fields of every job `keep` accepts, newest
+    /// first. Callers hold no lock past the copy.
+    fn collect(&self, keep: impl Fn(&Job) -> bool) -> Vec<JobInfo> {
         let jobs = self
             .inner
             .jobs
@@ -404,12 +411,15 @@ impl JobRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out: Vec<JobInfo> = jobs
             .values()
-            .map(|h| {
+            .filter_map(|h| {
                 let j = h
                     .data
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                JobInfo {
+                if !keep(&j) {
+                    return None;
+                }
+                Some(JobInfo {
                     id: j.id,
                     cmd: j.cmd.clone(),
                     state: j.state.as_str().to_string(),
@@ -425,7 +435,7 @@ impl JobRegistry {
                     log_path: j.log_path.clone(),
                     tty: j.tty,
                     notify: j.notify.enabled,
-                }
+                })
             })
             .collect();
         out.sort_by_key(|j| std::cmp::Reverse(j.id));
@@ -702,10 +712,9 @@ impl JobRegistry {
     }
 
     /// End the current session's job scope. Running process groups are
-    /// cancelled without notices, completed rows are removed, and buffered
-    /// notices are discarded. Subscribers are disconnected so notices that
-    /// were already delivered to an old receiver cannot enter the next
-    /// session. Hosts must subscribe again after this reset.
+    /// cancelled without notices, completed rows are removed, and queued
+    /// notices are discarded, so nothing from this session can enter the
+    /// next one.
     pub fn reset(&self) {
         let jobs: Vec<Arc<JobHandle>> = {
             let mut jobs = self
@@ -716,18 +725,11 @@ impl JobRegistry {
             self.inner.generation.fetch_add(1, Ordering::SeqCst);
             jobs.drain().map(|(_, handle)| handle).collect()
         };
-        let mut subscribers = self
-            .inner
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        subscribers.clear();
         self.inner
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        drop(subscribers);
         for handle in jobs {
             let (pid, log_path) = {
                 let mut job = handle

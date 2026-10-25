@@ -182,10 +182,97 @@ fn shutdown_cancels_every_running_job() {
 }
 
 #[test]
+fn active_items_lists_running_jobs_and_finished_ones_with_a_queued_notice() {
+    let registry = JobRegistry::new();
+    let running_log = tempfile::NamedTempFile::new().unwrap();
+    let running = handle_with(
+        NotifyOpts::terminal_only(),
+        running_log.path().to_string_lossy().into_owned(),
+    );
+    running.data.lock().unwrap().id = 1;
+    let done_log = tempfile::NamedTempFile::new().unwrap();
+    let done = handle_with(
+        NotifyOpts::terminal_only(),
+        done_log.path().to_string_lossy().into_owned(),
+    );
+    {
+        let mut job = done.data.lock().unwrap();
+        job.id = 2;
+        job.state = State::Completed;
+        job.ended = Some(Instant::now());
+    }
+    {
+        let mut jobs = registry.inner.jobs.lock().unwrap();
+        jobs.insert(1, running);
+        jobs.insert(2, done);
+    }
+    registry.inner.pending.lock().unwrap().push(JobNotice {
+        id: 2,
+        terminal: true,
+        text: "done".into(),
+    });
+
+    let ids = |items: Vec<JobInfo>| items.into_iter().map(|job| job.id).collect::<Vec<_>>();
+    assert_eq!(ids(registry.active_items()), vec![2, 1]);
+
+    // Taking the notice is the same step that drops the finished line.
+    assert_eq!(registry.take_notices().len(), 1);
+    assert_eq!(ids(registry.active_items()), vec![1]);
+    assert_eq!(registry.snapshot().len(), 2);
+}
+
+#[test]
+fn active_items_drops_a_finished_job_that_never_notifies() {
+    let registry = JobRegistry::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let handle = handle_with(
+        NotifyOpts {
+            enabled: false,
+            interval_ms: None,
+            changed: true,
+        },
+        log.path().to_string_lossy().into_owned(),
+    );
+    let id = handle.data.lock().unwrap().id;
+    {
+        let mut job = handle.data.lock().unwrap();
+        job.state = State::Failed;
+        job.exit_code = Some(1);
+        job.ended = Some(Instant::now());
+    }
+    registry.inner.jobs.lock().unwrap().insert(id, handle);
+
+    assert!(registry.active_items().is_empty());
+    assert_eq!(registry.snapshot().len(), 1);
+}
+
+#[test]
+fn notice_overflow_sheds_progress_before_terminal_notices() {
+    let mut pending = PendingNotices::new();
+    pending.push(JobNotice {
+        id: 7,
+        terminal: true,
+        text: "done".into(),
+    });
+    for tick in 0..MAX_PENDING_NOTICES {
+        pending.push(JobNotice {
+            id: 100 + tick as u64,
+            terminal: false,
+            text: "tick".into(),
+        });
+    }
+
+    let kept = pending.drain();
+    assert!(
+        kept.iter().any(|notice| notice.terminal && notice.id == 7),
+        "the terminal notice must outlive progress overflow: {kept:?}"
+    );
+}
+
+#[test]
 fn reset_ends_the_old_scope_and_rejects_its_late_notices() {
     let registry = JobRegistry::new();
     let old_generation = registry.inner.generation.load(Ordering::SeqCst);
-    let mut old_receiver = registry.subscribe_notices();
     let log = tempfile::NamedTempFile::new().unwrap();
     let handle = handle_with(
         NotifyOpts::terminal_only(),
@@ -207,12 +294,12 @@ fn reset_ends_the_old_scope_and_rejects_its_late_notices() {
     registry.reset();
 
     assert!(registry.live_ids().is_empty());
-    assert!(registry.drain_notices().is_empty());
+    assert!(registry.take_notices().is_empty());
     assert_eq!(handle.data.lock().unwrap().state, State::Cancelled);
     assert_eq!(handle.data.lock().unwrap().signal, Some(nix::libc::SIGKILL));
     assert!(handle.cancel.load(Ordering::Relaxed));
-    assert!(old_receiver.try_recv().is_err());
 
+    // A driver from the reset generation may not enqueue into the new one.
     let weak = Arc::downgrade(&registry.inner);
     let stale = JobNotice {
         id,
@@ -220,16 +307,15 @@ fn reset_ends_the_old_scope_and_rejects_its_late_notices() {
         text: "stale".into(),
     };
     push_notice(&weak, old_generation, stale);
+    assert!(registry.take_notices().is_empty());
     let current_generation = registry.inner.generation.load(Ordering::SeqCst);
-    let mut current_receiver = registry.subscribe_notices();
-    assert!(current_receiver.try_recv().is_err());
     let current = JobNotice {
         id,
         terminal: true,
         text: "current".into(),
     };
     push_notice(&weak, current_generation, current.clone());
-    assert_eq!(current_receiver.try_recv().unwrap(), current);
+    assert_eq!(registry.take_notices(), vec![current]);
 }
 
 #[test]
@@ -663,7 +749,7 @@ async fn tty_job_queues_one_idle_notice() {
     let id = spawned["id"].as_str().unwrap().to_owned();
     // One idle window plus a little scheduling slack.
     tokio::time::sleep(Duration::from_millis(900)).await;
-    let notices = tools.jobs.drain_notices();
+    let notices = tools.jobs.take_notices();
     let idle = notices.iter().find(|n| n.text.contains("idle"));
     assert!(idle.is_some(), "notices: {notices:?}");
     assert!(idle.unwrap().text.contains("Name?"), "notices: {notices:?}");

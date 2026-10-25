@@ -133,8 +133,6 @@ impl App {
             // agent; `None` until the agent attaches.
             jobs: None,
             subagents: None,
-            jobs_receiver_stale: false,
-            notified_jobs: std::collections::HashSet::new(),
             jobs_modal: None,
             subagents_modal: None,
         }

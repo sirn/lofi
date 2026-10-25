@@ -146,7 +146,19 @@ pub(super) async fn run_job(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    let notice = {
+    // Take the notice queue before the job record: the notification area
+    // shows a finished job only while its terminal notice waits in the
+    // queue, so the end state and the notice must become visible together.
+    // A frame between them would drop the running line before the notice
+    // that replaces it exists.
+    let inner = jobs.upgrade();
+    let mut pending = inner.as_ref().map(|inner| {
+        inner
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
+    {
         let mut job = handle
             .data
             .lock()
@@ -163,12 +175,23 @@ pub(super) async fn run_job(
         job.ended = Some(job.ended.unwrap_or_else(Instant::now));
         // The terminal notice always fires once when notifications are on,
         // regardless of how `changed` treated the intermediate ticks.
-        if job.notify.enabled {
-            Some(format_notice(&job))
-        } else {
-            None
+        let fresh = inner
+            .as_ref()
+            .is_some_and(|inner| inner.generation.load(Ordering::SeqCst) == generation);
+        if job.notify.enabled && fresh {
+            let text = format_notice(&job);
+            if let Some(pending) = pending.as_mut() {
+                pending.push(JobNotice {
+                    id,
+                    terminal: true,
+                    text,
+                });
+            }
         }
-    };
+    }
+    // Release the queue before the release hook: a hook may spawn or kill
+    // jobs, and those paths take the same locks.
+    drop(pending);
     let hook = handle
         .on_release
         .lock()
@@ -182,18 +205,7 @@ pub(super) async fn run_job(
             .id;
         hook(id);
     }
-    if let Some(text) = notice {
-        push_notice(
-            &jobs,
-            generation,
-            JobNotice {
-                id,
-                terminal: true,
-                text,
-            },
-        );
-    }
-    if let Some(inner) = jobs.upgrade() {
+    if let Some(inner) = inner {
         evict_terminal_excess(&inner);
     }
 }
@@ -235,8 +247,9 @@ pub(super) fn evict_terminal_excess(inner: &Inner) {
     }
 }
 
-/// Publish a notice to every live subscriber, or buffer it for a future
-/// subscriber when the registry is headless (tests, pre-UI agent).
+/// Queue a notice for the host to take. The queue is the only state: while
+/// a terminal notice waits here, the job keeps its line in the notification
+/// area, and taking the notice removes both together.
 pub(super) fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, notice: JobNotice) {
     let Some(inner) = registry.upgrade() else {
         return;
@@ -244,26 +257,17 @@ pub(super) fn push_notice(registry: &std::sync::Weak<Inner>, generation: u64, no
     if inner.generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    let mut subs = inner
-        .subscribers
+    let mut pending = inner
+        .pending
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Reset increments the generation before it clears subscribers. Check
-    // again under the subscriber lock so a publisher that paused after its
-    // first check cannot enqueue an old-session notice after the clear.
+    // Reset increments the generation before it clears the queue. Check again
+    // under the queue lock so a publisher that paused after its first check
+    // cannot enqueue an old-session notice after the clear.
     if inner.generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    // send() on an unbounded channel fails iff the receiver is dropped; prune
-    // dead subscribers on publish so we never hold stale senders.
-    subs.retain(|tx| tx.send(notice.clone()).is_ok());
-    if subs.is_empty() {
-        inner
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(notice);
-    }
+    pending.push(notice);
 }
 
 /// Truncate a command line to 60 characters, appending U+2026 when more

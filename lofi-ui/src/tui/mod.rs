@@ -290,15 +290,6 @@ pub(crate) struct App {
     /// `jobs`. `/new` clears it so old subagent ids cannot resume into the
     /// new session.
     subagents: Option<lofi_core::SubagentRegistry>,
-    /// Set when a session switch resets the shared registry. The run loop
-    /// replaces its receiver so notices already delivered for the old scope
-    /// cannot enter the new session.
-    jobs_receiver_stale: bool,
-    /// Ids of terminal jobs whose completion notice the run loop has queued
-    /// or spawned. The registry flips a job to terminal before its notice
-    /// reaches the select loop; the tail keeps rendering the running line
-    /// until the notice lands so line and notice swap in one frame.
-    notified_jobs: std::collections::HashSet<u64>,
     jobs_modal: Option<JobsModalState>,
     subagents_modal: Option<SubagentsModalState>,
     model_choices: Vec<lofi_types::ModelChoice>,

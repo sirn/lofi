@@ -319,9 +319,7 @@ impl App {
     pub(super) fn reset_session_jobs(&mut self) {
         if let Some(jobs) = &self.jobs {
             jobs.reset();
-            self.jobs_receiver_stale = true;
         }
-        self.notified_jobs.clear();
         self.jobs_modal = None;
         self.prompt_queue
             .retain(|queued| queued.kind == lofi_types::PromptKind::User);

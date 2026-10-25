@@ -918,6 +918,58 @@ fn jobs_modal_lists_opens_output_and_stops_a_running_job() {
 }
 
 #[test]
+fn model_switch_keeps_completed_jobs_out_of_the_running_block() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "settled-job-call",
+            r#"return await lofi.jobSpawn({ cmd: "sleep 0.3; printf settled-job-marker" });"#,
+        ),
+        text_response("settled job spawn answer"),
+        text_response("settled job notice answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start a job");
+    tui.wait_for("settled job spawn answer", WAIT);
+    // The completion notice starts its own turn; once it answers, the tail
+    // holds no job line.
+    tui.wait_for("settled job notice answer", WAIT);
+    tui.wait_gone("running (", WAIT);
+
+    tui.submit("/model");
+    tui.wait_for("Switch model", WAIT);
+    tui.send(b"\x1b[A\r");
+    tui.wait_for("switched to mock/alt", WAIT);
+
+    assert!(
+        !tui.screen_text().contains("running ("),
+        "a completed job came back as running after the switch:
+{}",
+        tui.screen_text()
+    );
+}
+
+#[test]
+fn finished_job_without_notify_leaves_the_running_block() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "quiet-job-call",
+            r#"return await lofi.jobSpawn({ cmd: "sleep 1.2", notify: false });"#,
+        ),
+        text_response("quiet job answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+
+    tui.submit("start a quiet job");
+    tui.wait_for("quiet job answer", WAIT);
+    // No notice will follow this job's end, so the tick must notice that
+    // the line it drew is gone.
+    tui.wait_gone("running (", WAIT);
+}
+
+#[test]
 fn prompts_submitted_during_a_run_are_queued_and_sent_in_order() {
     let server = MockServer::start(vec![
         delayed_text_response(
