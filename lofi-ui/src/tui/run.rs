@@ -312,6 +312,7 @@ pub(crate) async fn run_loop(
     app.theme = theme;
     app.theme_mode = theme_mode;
     app.model_choices = model_choices;
+    app.lifecycle.set_workspace_root(cwd.clone());
     app.session = SessionState { sink, cursor, cwd };
     if let Some(cursor) = app.session.cursor.clone() {
         app.restore_indexed_session(&cursor, &index, file_size, history_start, contiguous)?;

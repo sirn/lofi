@@ -665,6 +665,16 @@ When both thresholds are present, the lower threshold wins. Soft compaction is c
 
 Older tool results and tool-call code become event-id stubs; the compaction handoff tells the model to recover them with `lofi.result(eventId)`. Older thinking is dropped, while assistant prose is retained.
 
+### Workspace memory
+
+A compaction reads `<root>/.lofi/memory.md` and puts it in the handoff as a `Workspace Memory` section.
+The path is fixed; there is no config key.
+The file is clipped at 3000 characters, and the summary says so when the clip happens.
+
+Rewrite the file when the task state changes.
+Do not append to it.
+An append-only file grows past the clip and loses the oldest state first.
+
 ## Bash environment
 
 `[bash]` controls the child-process environment of `lofi.bash`.

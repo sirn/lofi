@@ -6,6 +6,7 @@ pub(super) const SECTION_HEADERS: &[&str] = &[
     "User Preferences",
     "Files And Changes",
     "Commits",
+    "Workspace Memory",
     "APIs Used",
     "Skills",
     "Outstanding Context",
@@ -93,7 +94,12 @@ pub(super) fn split_headers_brief(body: &str) -> (String, String) {
 
 pub(super) fn section_of(headers: &str, name: &str) -> String {
     let tag = format!("[{name}]");
-    let start = headers.find(&tag).map(|i| i + tag.len());
+    // Anchor to a line start: a model-written memory line may quote a tag.
+    let start = if headers.starts_with(&tag) {
+        Some(tag.len())
+    } else {
+        headers.find(&format!("\n{tag}")).map(|i| i + 1 + tag.len())
+    };
     let Some(start) = start else {
         return String::new();
     };
@@ -124,7 +130,8 @@ pub(super) fn extra_section_names(
 }
 
 pub(super) fn merge_section(name: &str, prev: &str, fresh: &str) -> String {
-    if name == "Outstanding Context" {
+    // Volatile sections carry current state; the fresh summary replaces them.
+    if matches!(name, "Outstanding Context" | "Workspace Memory") {
         if fresh.is_empty() {
             return String::new();
         }

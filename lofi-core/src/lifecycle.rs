@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use lofi_types::{
@@ -22,6 +23,7 @@ pub struct AgentLifecycle {
     history: Arc<Mutex<Vec<Message>>>,
     compaction: CompactionConfig,
     context_window: u64,
+    workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ impl AgentLifecycle {
             history: Arc::new(Mutex::new(Vec::new())),
             compaction,
             context_window,
+            workspace_root: None,
         }
     }
 
@@ -213,6 +216,10 @@ impl AgentLifecycle {
         self.context_window = context_window;
     }
 
+    pub fn set_workspace_root(&mut self, root: PathBuf) {
+        self.workspace_root = Some(root);
+    }
+
     #[must_use]
     pub fn compact_budget(&self) -> usize {
         self.compaction
@@ -236,7 +243,9 @@ impl AgentLifecycle {
         let options = CompactOptions {
             max_kept_tokens: self.compact_budget(),
             edit: self.compaction.edit.clone(),
-            hooks: vec![Arc::new(CodeCompactionHook)],
+            hooks: vec![Arc::new(CodeCompactionHook::new(
+                self.workspace_root.clone().unwrap_or_default(),
+            ))],
         };
         let Some(compaction) = compact(&events, &options) else {
             return Ok(None);
@@ -573,6 +582,55 @@ mod tests {
         config.auto.context_ratio = Some(0.5);
         let lifecycle = AgentLifecycle::new(config, 100_000);
         assert_eq!(lifecycle.compact_budget(), 25_000);
+    }
+
+    #[test]
+    fn compaction_summary_carries_the_workspace_memory_file() {
+        let memory = "Next: wire the timer list into the run driver.";
+        let mut config = CompactionConfig::default();
+        config.auto.max_context_tokens = Some(50);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
+        std::fs::write(dir.path().join(".lofi/memory.md"), memory).unwrap();
+        let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
+        let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
+        let mut events = Vec::new();
+        for turn in 0..12 {
+            for (role, text) in [
+                (Role::User, format!("prompt {turn}")),
+                (Role::Assistant, "x".repeat(200 * 1024)),
+            ] {
+                events.push(SessionEvent {
+                    id: String::new(),
+                    parent_id: None,
+                    kind: SessionEventKind::Message(Message {
+                        origin: None,
+                        role,
+                        blocks: vec![ContentBlock::Text { text }],
+                        kind: PromptKind::default(),
+                    }),
+                });
+            }
+        }
+        cursor.append_events(&mut events).unwrap();
+        let mut lifecycle = AgentLifecycle::new(config, 100_000);
+        lifecycle.set_workspace_root(dir.path().to_path_buf());
+
+        let usage = Usage {
+            input_tokens: 100,
+            ..Usage::default()
+        };
+        let compaction = lifecycle
+            .auto_compact(usage, Some(&cursor), "system prompt")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            compaction.summary.contains("[Workspace Memory]"),
+            "{}",
+            compaction.summary
+        );
+        assert!(compaction.summary.contains(memory));
     }
 
     #[test]

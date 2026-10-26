@@ -1,8 +1,13 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use lofi_types::{clip, CompactBlock, CompactionHook, NativeToolRecord, SummarySection};
 
 use crate::docs;
+
+/// The model rewrites this file as its own task state.
+const WORKSPACE_MEMORY: &str = ".lofi/memory.md";
+const WORKSPACE_MEMORY_LIMIT: usize = 3_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileEffect {
@@ -75,7 +80,61 @@ fn skill_blurb(result: &str) -> String {
 }
 
 #[derive(Default)]
-pub struct CodeCompactionHook;
+pub struct CodeCompactionHook {
+    root: PathBuf,
+}
+
+impl CodeCompactionHook {
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn workspace_memory(&self) -> Option<SummarySection> {
+        if self.root.as_os_str().is_empty() {
+            return None;
+        }
+        let text = match std::fs::read_to_string(self.root.join(WORKSPACE_MEMORY)) {
+            Ok(text) => text,
+            // A missing file is the normal "no memory yet" case. Any other
+            // failure would drop the model's task state without a signal.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                return Some(SummarySection {
+                    title: "Workspace Memory".to_string(),
+                    items: vec![format!("cannot read {WORKSPACE_MEMORY}: {err}")],
+                })
+            }
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let clipped = text.chars().count() > WORKSPACE_MEMORY_LIMIT;
+        let text = if clipped {
+            clip(text, WORKSPACE_MEMORY_LIMIT)
+        } else {
+            text.to_string()
+        };
+        // One item per line keeps a model-written "[Header]" line out of
+        // column zero, where the summary merge reads it as a section tag.
+        let mut items: Vec<String> = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty())
+            .map(String::from)
+            .collect();
+        if clipped {
+            items.push(format!(
+                "clipped at {WORKSPACE_MEMORY_LIMIT} characters; rewrite {WORKSPACE_MEMORY} to fit"
+            ));
+        }
+        Some(SummarySection {
+            title: "Workspace Memory".to_string(),
+            items,
+        })
+    }
+}
 
 impl CompactionHook for CodeCompactionHook {
     fn sections(&self, blocks: &[CompactBlock]) -> Vec<SummarySection> {
@@ -94,10 +153,11 @@ impl CompactionHook for CodeCompactionHook {
             }
         }
 
-        let mut sections = vec![SummarySection {
+        let mut sections: Vec<SummarySection> = self.workspace_memory().into_iter().collect();
+        sections.push(SummarySection {
             title: "APIs Used".to_string(),
             items,
-        }];
+        });
         let skills = loaded_skills(blocks);
         if !skills.is_empty() {
             sections.push(SummarySection {
@@ -329,6 +389,12 @@ mod tests {
         }
     }
 
+    fn hook() -> (tempfile::TempDir, CodeCompactionHook) {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = CodeCompactionHook::new(dir.path());
+        (dir, hook)
+    }
+
     fn call(native: Vec<NativeToolRecord>) -> CompactBlock {
         CompactBlock::ToolCall {
             id: "t1".into(),
@@ -344,7 +410,8 @@ mod tests {
             "code-commit",
             "---\nname: code-commit\ndescription: Write a commit message\n---\n\n# Commit\n",
         )])];
-        let sections = CodeCompactionHook.sections(&blocks);
+        let (_dir, hook) = hook();
+        let sections = hook.sections(&blocks);
         let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(skills.items, vec!["code-commit — Write a commit message"]);
         assert!(sections.iter().any(|s| s.title == "APIs Used"));
@@ -356,7 +423,8 @@ mod tests {
             "outline",
             "# Outline\n\nStructural search over a file.\n",
         )])];
-        let sections = CodeCompactionHook.sections(&blocks);
+        let (_dir, hook) = hook();
+        let sections = hook.sections(&blocks);
         let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(
             skills.items,
@@ -379,8 +447,60 @@ mod tests {
             ),
             failed,
         ])];
-        let sections = CodeCompactionHook.sections(&blocks);
+        let (_dir, hook) = hook();
+        let sections = hook.sections(&blocks);
         let skills = sections.iter().find(|s| s.title == "Skills").unwrap();
         assert_eq!(skills.items.len(), 1);
+    }
+
+    #[test]
+    fn sections_lead_with_the_workspace_memory_file() {
+        let (dir, hook) = hook();
+        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
+        std::fs::write(
+            dir.path().join(WORKSPACE_MEMORY),
+            "Next: wire the timer list into the run driver.\n",
+        )
+        .unwrap();
+        let sections = hook.sections(&[]);
+        assert_eq!(sections[0].title, "Workspace Memory");
+        assert_eq!(
+            sections[0].items,
+            vec!["Next: wire the timer list into the run driver."]
+        );
+    }
+
+    #[test]
+    fn sections_split_the_memory_into_items() {
+        let (dir, hook) = hook();
+        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
+        std::fs::write(
+            dir.path().join(WORKSPACE_MEMORY),
+            "[Blocked] waiting on review\n\nNext: ship it\n",
+        )
+        .unwrap();
+        let sections = hook.sections(&[]);
+        assert_eq!(
+            sections[0].items,
+            vec!["[Blocked] waiting on review", "Next: ship it"]
+        );
+    }
+
+    #[test]
+    fn sections_skip_a_missing_workspace_memory_file() {
+        let (_dir, hook) = hook();
+        let sections = hook.sections(&[]);
+        assert!(sections.iter().all(|s| s.title != "Workspace Memory"));
+    }
+
+    #[test]
+    fn sections_clip_a_long_workspace_memory_file() {
+        let (dir, hook) = hook();
+        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
+        std::fs::write(dir.path().join(WORKSPACE_MEMORY), "x".repeat(4_000)).unwrap();
+        let sections = hook.sections(&[]);
+        let memory = &sections[0];
+        assert_eq!(memory.items[0].chars().count(), WORKSPACE_MEMORY_LIMIT);
+        assert!(memory.items[1].contains("clipped at 3000 characters"));
     }
 }

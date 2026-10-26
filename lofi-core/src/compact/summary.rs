@@ -258,6 +258,27 @@ mod tests {
     }
 
     #[test]
+    fn merge_previous_replaces_the_workspace_memory() {
+        let prev =
+            format!("{HANDOFF_PREAMBLE}\n\n[Workspace Memory]\n- old state\n\n[APIs Used]\n- exec");
+        let fresh =
+            format!("{HANDOFF_PREAMBLE}\n\n[Workspace Memory]\n- new state\n\n[APIs Used]\n- exec");
+        let merged = merge_previous(&prev, &fresh);
+        assert!(merged.contains("new state"));
+        assert!(!merged.contains("old state"));
+
+        let fresh = format!("{HANDOFF_PREAMBLE}\n\n[APIs Used]\n- exec");
+        let merged = merge_previous(&merged, &fresh);
+        assert!(!merged.contains("Workspace Memory"));
+    }
+
+    #[test]
+    fn section_of_ignores_a_tag_quoted_inside_another_section() {
+        let headers = "[Workspace Memory]\n- [APIs Used] nothing here\n\n[APIs Used]\n- exec(...)";
+        assert_eq!(section_of(headers, "APIs Used"), "- exec(...)");
+    }
+
+    #[test]
     fn merge_previous_preserves_original_goals() {
         let prev_goals: Vec<String> = (0..8).map(|i| format!("- original goal {i}")).collect();
         let fresh_goals: Vec<String> = (0..5).map(|i| format!("- fresh goal {i}")).collect();
