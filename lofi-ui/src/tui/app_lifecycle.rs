@@ -115,6 +115,7 @@ impl App {
             mode: Mode::Input,
             pending_confirms: Vec::new(),
             deferred_confirms: Vec::new(),
+            confirm_waiting: None,
             confirm_selected: 0,
             confirm_scroll: 0,
             confirm_total: 0,

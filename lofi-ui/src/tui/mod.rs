@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 use base64::Engine;
 use futures::FutureExt as _;
 
+pub(crate) mod program_status;
 pub(crate) mod terminal_bg;
 pub(crate) mod theme;
 #[allow(clippy::wildcard_imports)]
@@ -321,6 +322,10 @@ pub(crate) struct App {
     mode: Mode,
     pending_confirms: Vec<lofi_core::ConfirmRequest>,
     deferred_confirms: Vec<lofi_core::ConfirmRequest>,
+    /// The front confirmation and when it became the user's to answer. The
+    /// terminal report debounces a plain policy prompt against it, so an
+    /// approval that takes a moment never leaves a `blocked` record behind.
+    confirm_waiting: Option<(u64, Instant)>,
     confirm_selected: usize,
     confirm_scroll: usize,
     confirm_total: usize,

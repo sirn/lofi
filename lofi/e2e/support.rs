@@ -1088,6 +1088,10 @@ impl Fixture {
         Tui::spawn(self, args, cwd)
     }
 
+    pub fn spawn_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Tui {
+        Tui::spawn_with_env(self, args, &self.workspace, env)
+    }
+
     pub fn enable_auto_compaction(&self, max_context_tokens: u64) {
         let current = std::fs::read_to_string(&self.config).unwrap();
         std::fs::write(

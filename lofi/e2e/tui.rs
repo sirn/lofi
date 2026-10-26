@@ -970,6 +970,28 @@ fn finished_job_without_notify_leaves_the_running_block() {
 }
 
 #[test]
+fn a_running_job_gets_its_own_program_status_record() {
+    let server = MockServer::start(vec![
+        tool_response(
+            "job-record-call",
+            r#"return await lofi.jobSpawn({ cmd: "sleep 1.2", notify: false });"#,
+        ),
+        text_response("job record answer"),
+    ]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn(&[]);
+    tui.clear_output();
+
+    tui.submit("start a job that outlives the turn");
+    tui.wait_for("job record answer", WAIT);
+    // The job keeps the root `working`; its own record names the command,
+    // so a tab says what still runs instead of only that something does.
+    tui.wait_for("\x1b]7501;state=working:id=job/", WAIT);
+    // Nothing replaces a record for a job that stopped, so it is cleared.
+    tui.wait_for("\x1b]7501;state=clear:id=job/", WAIT);
+}
+
+#[test]
 fn prompts_submitted_during_a_run_are_queued_and_sent_in_order() {
     let server = MockServer::start(vec![
         delayed_text_response(
@@ -1026,6 +1048,93 @@ fn selecting_rendered_text_copies_the_original_markdown_over_osc52() {
     assert!(
         output.contains("\x1b]52;c;Kipjb3B5LW1hcmtkb3duLW1hcmtlcioq\x07"),
         "terminal output: {output:?}"
+    );
+}
+
+#[test]
+fn program_status_reports_each_turn_transition() {
+    let server = MockServer::start(vec![
+        delayed_tool_response(
+            "status-call",
+            "return await lofi.bash({ cmd: \"touch status-ran\" });",
+            std::time::Duration::from_millis(500),
+        ),
+        text_response("status done answer"),
+    ]);
+    let fixture = Fixture::with_policy(&server, "confirm");
+    let mut tui = fixture.spawn(&[]);
+    tui.clear_output();
+
+    tui.submit("run the status command");
+    tui.wait_for("Permission Required", WAIT);
+    // A plain policy prompt reaches the record only after the debounce, so
+    // wait for the report rather than for the modal.
+    tui.wait_for("\x1b]7501;state=blocked", WAIT);
+    tui.send(b"a");
+    tui.wait_for("status done answer", WAIT);
+    tui.wait_idle(WAIT);
+
+    let output = tui.output();
+    let working = "\x1b]7501;state=working:app=lofi\x1b\\";
+    let blocked = "\x1b]7501;state=blocked:kind=permission:app=lofi:msg=";
+    // The finished record carries the line the screen shows, so a tab says
+    // what finished and with which model.
+    let done = "\x1b]7501;state=done:app=lofi:msg=";
+    let at = |needle: &str| {
+        output
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in terminal output: {output:?}"))
+    };
+    let (working_at, blocked_at) = (at(working), at(blocked));
+    let done_at = at(done);
+    assert!(
+        working_at < blocked_at && blocked_at < done_at,
+        "reports must follow the turn: {output:?}"
+    );
+    // Answering the prompt returns the turn to working before it ends.
+    assert!(
+        output[blocked_at..done_at].contains(working),
+        "no working report after the approval: {output:?}"
+    );
+    // The blocked record names the command that waits for approval.
+    let report = &output[blocked_at..];
+    let end = report.find("\x1b\\").expect("terminated report");
+    assert!(
+        end > blocked.len(),
+        "blocked report must carry a base64 message: {report:?}"
+    );
+    assert!(fixture.workspace.join("status-ran").exists());
+}
+
+#[test]
+fn program_status_travels_inside_the_tmux_passthrough() {
+    // tmux parses an escape sequence itself and drops what it does not know,
+    // so `allow-passthrough` alone changes nothing: the report must ride
+    // inside the documented bypass, with every ESC doubled.
+    let server = MockServer::start(vec![text_response("tmux status answer")]);
+    let fixture = Fixture::new(&server);
+    let mut tui = fixture.spawn_with_env(&[], &[("TMUX", "/tmp/tmux-0/default,1,0")]);
+    tui.clear_output();
+
+    tui.submit("run a turn");
+    tui.wait_for("tmux status answer", WAIT);
+    tui.wait_idle(WAIT);
+
+    let output = tui.output();
+    let wrapped = |params: &str| format!("\x1bPtmux;\x1b\x1b]7501;{params}\x1b\x1b\\\x1b\\");
+    assert!(
+        output.contains(&wrapped("state=working:app=lofi")),
+        "no wrapped working report: {output:?}"
+    );
+    // The done record carries a message, so only its head is fixed.
+    assert!(
+        output.contains("\x1bPtmux;\x1b\x1b]7501;state=done:app=lofi:msg="),
+        "no wrapped done report: {output:?}"
+    );
+    assert_eq!(
+        output.matches("7501;").count(),
+        output.matches("\x1b\x1b]7501;").count(),
+        "a bare report never leaves tmux: {output:?}"
     );
 }
 

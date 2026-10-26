@@ -30,7 +30,7 @@ use modals::{
 pub(crate) use prim::RawLine;
 pub(crate) use prim::VisLine;
 #[allow(unused_imports)] // used by tests and render harnesses
-pub(crate) use prim::{truncate, width, wrap};
+pub(crate) use prim::{fmt_duration, truncate, width, wrap};
 pub(crate) use prim::{DetailTarget, RenderLine};
 
 pub(crate) use prim::HStack;

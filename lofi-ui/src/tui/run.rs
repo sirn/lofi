@@ -389,6 +389,11 @@ pub(crate) async fn run_loop(
     let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
     app.lifecycle_tx = Some(lifecycle_tx);
     let mut current_run: Option<RunHandle> = None;
+    // The terminal's own view of the program: one report per phase change.
+    let mut status = program_status::ProgramStatus::new();
+    // What the last run left behind. It stays on screen at rest until the
+    // next run reports `working`.
+    let mut settled = program_status::Settled::default();
     let mut events = tty_events::TtyEvents::start().map_err(Error::Io)?;
     app.sync_color_scheme_reports();
     if app.theme_mode == lofi_types::ThemeMode::Auto {
@@ -456,6 +461,9 @@ pub(crate) async fn run_loop(
                         let mut event = Some(e);
                         for index in 0..64 {
                             let Some(e) = event.take() else { break };
+                            if let Some(s) = program_status::settled(&e) {
+                                settled = s;
+                            }
                             if let AgentEvent::UserShell {
                                 command, output, exit_code, signal, duration_ms,
                                 truncated, cancelled, exclude_from_context,
@@ -492,9 +500,9 @@ pub(crate) async fn run_loop(
                             attach_run_cursor(&mut app, &r);
                             let was_user_shell = r.user_shell.is_some();
                             if let Err(error) = r.handle.await {
-                                app.apply_event(AgentEvent::Error(format!(
-                                    "run task failed: {error}"
-                                )));
+                                let text = format!("run task failed: {error}");
+                                app.apply_event(AgentEvent::Error(text.clone()));
+                                settled = program_status::Settled::failed(text);
                             }
                             app.run_finished();
                             app.debug_sample(if was_user_shell { "user_shell_settled" } else { "agent_settled" });
@@ -925,6 +933,11 @@ pub(crate) async fn run_loop(
                 }
             }
         }
+
+        status.publish(
+            &program_status::report(&app, &settled),
+            &program_status::children(&app),
+        );
 
         if app.should_quit {
             if let Some(r) = current_run.take() {

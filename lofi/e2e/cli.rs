@@ -196,6 +196,21 @@ fn print_mode_streams_text_and_reports_tool_calls_on_stderr() {
 }
 
 #[test]
+fn print_mode_emits_no_program_status_report() {
+    let server = MockServer::start(vec![text_response("print status answer")]);
+    let fixture = Fixture::new(&server);
+
+    let output = fixture.output(&["--print", "print status prompt"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("print status answer"), "{stdout:?}");
+    assert!(
+        !stdout.contains("7501"),
+        "print mode must not report program status: {stdout:?}"
+    );
+}
+
+#[test]
 fn print_mode_returns_nonzero_for_provider_and_model_errors() {
     let server = MockServer::start(vec![crate::support::MockResponse::error(
         401,

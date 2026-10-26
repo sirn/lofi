@@ -275,6 +275,21 @@ fn paste_blocked_while_modal_open() {
 }
 
 #[test]
+fn the_debounce_clock_starts_with_the_prompt_and_clears_with_it() {
+    // The terminal report counts from here, so a prompt the user answers at
+    // once never reports `blocked`.
+    let mut a = app();
+    let (req, _response) = confirm_request("touch queued.txt");
+    a.queue_confirmation(req);
+    a.refresh_confirmations();
+    assert!(a.confirm_waiting.is_some());
+
+    a.pending_confirms.clear();
+    a.refresh_confirmations();
+    assert!(a.confirm_waiting.is_none());
+}
+
+#[test]
 fn auto_evaluation_is_deferred_until_the_ui_grace_expires() {
     let mut a = app();
     let (mut req, _response) = confirm_request("rm generated.txt");

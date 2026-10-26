@@ -773,6 +773,97 @@ fn alt_up_skips_notices_when_restoring_queue() {
 }
 
 #[test]
+fn a_retry_names_the_attempt_in_the_working_report() {
+    let mut a = app();
+    a.run = Some(0);
+    a.retry = Some(RetryState {
+        attempt: 2,
+        max_attempts: 5,
+    });
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Working);
+    assert_eq!(report.msg.as_deref(), Some("retrying, attempt 2 of 5"));
+}
+
+#[test]
+fn a_waiting_confirmation_outranks_the_running_turn() {
+    let mut a = app();
+    a.run = Some(0);
+    let (request, _response) = confirm_request("touch status-ran");
+    a.pending_confirms.push(request);
+    a.confirm_waiting = Some((
+        1,
+        Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+    ));
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Blocked);
+    assert_eq!(report.kind, Some("permission"));
+    assert_eq!(report.msg.as_deref(), Some("touch status-ran"));
+}
+
+#[test]
+fn a_fresh_policy_prompt_keeps_the_report_working() {
+    // An approval the user answers at once needs no blocked record in a tab.
+    let mut a = app();
+    a.run = Some(0);
+    let (request, _response) = confirm_request("touch status-ran");
+    a.pending_confirms.push(request);
+    a.confirm_waiting = Some((1, Instant::now()));
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Working);
+    assert_eq!(report.msg.as_deref(), None);
+}
+
+#[test]
+fn an_auto_evaluation_keeps_the_report_working() {
+    // The evaluator decides on its own, so nothing waits on the user yet.
+    let mut a = app();
+    a.run = Some(0);
+    let (mut request, _response) = confirm_request("touch status-ran");
+    request.reason = Arc::new(std::sync::Mutex::new(
+        lofi_core::ConfirmReason::AutoEvaluating {
+            started_at: Instant::now(),
+        },
+    ));
+    a.pending_confirms.push(request);
+    a.confirm_waiting = Some((
+        1,
+        Instant::now().checked_sub(Duration::from_secs(30)).unwrap(),
+    ));
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Working);
+}
+
+#[test]
+fn an_auto_decision_is_the_users_prompt_at_once() {
+    let mut a = app();
+    a.run = Some(0);
+    let (mut request, _response) = confirm_request("touch status-ran");
+    request.reason = Arc::new(std::sync::Mutex::new(lofi_core::ConfirmReason::AutoAsk {
+        reason: "needs a look".to_string(),
+    }));
+    a.pending_confirms.push(request);
+    a.confirm_waiting = Some((1, Instant::now()));
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Blocked);
+}
+
+#[test]
+fn a_launch_without_a_model_reports_the_reason() {
+    let mut a = app();
+    a.no_models_hint = Some("set OPENAI_API_KEY".to_string());
+    let settled = program_status::Settled::default();
+    let report = program_status::report(&a, &settled);
+    assert_eq!(report.phase, program_status::Phase::Error);
+    assert_eq!(report.msg.as_deref(), Some("set OPENAI_API_KEY"));
+}
+
+#[test]
 fn no_model_submit_surfaces_hint_without_running() {
     let mut a = app();
     a.no_models_hint = Some("set OPENAI_API_KEY".to_string());

@@ -51,6 +51,13 @@ impl App {
             self.confirm_total = 0;
             self.confirm_view_h = 0;
         }
+        // The terminal report counts its debounce from here. Compare ids
+        // against the stored front rather than against `old_front`: a request
+        // answered between ticks leaves the list before this runs, and the
+        // next one has to start its own clock.
+        if new_front != self.confirm_waiting.map(|(id, _)| id) {
+            self.confirm_waiting = new_front.map(|id| (id, Instant::now()));
+        }
 
         old_pending != self.pending_confirms.len()
             || old_deferred != self.deferred_confirms.len()
