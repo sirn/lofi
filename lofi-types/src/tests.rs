@@ -622,6 +622,16 @@ fn auto_mode_query_accepts_both_config_shapes() {
 }
 
 #[test]
+fn auto_mode_timeout_defaults_to_ten_seconds() {
+    let cfg: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt"}"#).unwrap();
+    assert_eq!(cfg.timeout_ms, 10_000);
+    let set: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"model":"mock/alt","timeout_ms":1500}"#).unwrap();
+    assert_eq!(set.timeout_ms, 1500);
+}
+
+#[test]
 fn bash_config_serde_round_trip() {
     let json = r#"{"strip_env":false,"pass_env":["GITHUB_TOKEN","NPM_TOKEN"],"env_file":"~/.config/lofi/secrets.env"}"#;
     let cfg: BashConfig = serde_json::from_str(json).unwrap();

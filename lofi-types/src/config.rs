@@ -322,6 +322,16 @@ pub struct AutoModeConfig {
     pub provider: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    /// How long one evaluation may take before the command falls back to the
+    /// manual prompt. A stalled evaluator holds the command and the turn, so
+    /// the wait is capped here instead of at the provider's own timeout, which
+    /// is sized for a whole turn.
+    #[serde(default = "default_auto_mode_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_auto_mode_timeout_ms() -> u64 {
+    10_000
 }
 
 impl AutoModeConfig {

@@ -883,6 +883,7 @@ The evaluator sees the command, the workspace root, and the request that started
 enable = true
 model = "openai/gpt-4o-mini"
 # max_tokens = 1024
+# timeout_ms = 10000
 ```
 
-`model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms`. `max_tokens` defaults to the selected model's output limit.
+`model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms` as a hard ceiling. `max_tokens` defaults to the selected model's output limit. `timeout_ms` defaults to `10000` and caps one evaluation, because a stalled evaluator holds the command and the turn with it. A timeout is a failure, so the command falls back to the normal prompt.

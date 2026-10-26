@@ -136,6 +136,7 @@ pub fn build_auto_mode(
     hints: &AutoModeHintHandle,
 ) -> AutoModeFn {
     let max_tokens = auto_cfg.max_tokens;
+    let timeout = std::time::Duration::from_millis(auto_cfg.timeout_ms);
     let cwd = cwd.to_path_buf();
 
     // Skill roots that actually exist are marked pre-vetted in the evaluator
@@ -160,7 +161,16 @@ pub fn build_auto_mode(
             .clone();
         Box::pin(async move {
             let handle = tokio::task::spawn(async move {
-                evaluate_command(&evaluator, &command, &cwd, max_tokens, &skill_dirs, &turn).await
+                evaluate_command(
+                    &evaluator,
+                    &command,
+                    &cwd,
+                    max_tokens,
+                    timeout,
+                    &skill_dirs,
+                    &turn,
+                )
+                .await
             });
             let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
             let outcome = match handle.await {
@@ -181,6 +191,7 @@ pub(super) async fn evaluate_command(
     command: &str,
     cwd: &std::path::Path,
     max_tokens: Option<u64>,
+    timeout: std::time::Duration,
     skill_dirs: &[std::path::PathBuf],
     turn: &AutoModeHints,
 ) -> AutoModeOutcome {
@@ -197,8 +208,12 @@ pub(super) async fn evaluate_command(
         prompt: user,
         max_tokens,
     };
-    match evaluator.complete(request).await {
-        Ok(completion) => {
+    // A stalled evaluator holds the command and the turn with it, so one
+    // judgement gets a shorter cap than the provider's start timeout, which is
+    // sized for a whole turn. A timeout is a failure, so the command falls
+    // back to the manual prompt.
+    match tokio::time::timeout(timeout, evaluator.complete(request)).await {
+        Ok(Ok(completion)) => {
             let text = completion.text;
             let usage = completion.usage;
             let decision = auto_mode::parse_decision(&text);
@@ -228,10 +243,19 @@ pub(super) async fn evaluate_command(
                 }
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "auto-mode: evaluation failed");
             AutoModeOutcome::Failed {
                 reason: format!("evaluation failed: {e}"),
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = timeout.as_millis(),
+                "auto-mode: evaluation timed out"
+            );
+            AutoModeOutcome::Failed {
+                reason: format!("evaluation timed out after {} ms", timeout.as_millis()),
             }
         }
     }

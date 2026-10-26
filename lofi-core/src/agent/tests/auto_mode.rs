@@ -116,7 +116,10 @@ fn continue_turn_clears_the_hints() {
 }
 
 /// The evaluator answers a one-shot text call; nothing else matters here.
-struct ReplyBackend(&'static str);
+struct ReplyBackend {
+    reply: &'static str,
+    delay: std::time::Duration,
+}
 
 #[async_trait]
 impl crate::backend::Backend for ReplyBackend {
@@ -203,21 +206,29 @@ impl crate::backend::Backend for ReplyBackend {
         &self,
         _request: crate::backend::CompletionRequest,
     ) -> Result<crate::backend::Completion> {
+        tokio::time::sleep(self.delay).await;
         Ok(crate::backend::Completion {
-            text: self.0.to_string(),
+            text: self.reply.to_string(),
             usage: Usage::default(),
             cost: None,
         })
     }
 }
 
+/// Long enough that no reply in these tests reaches it.
+const EVALUATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn evaluate(reply: &'static str, hints: lofi_code::AutoModeHints) -> AutoModeOutcome {
-    let evaluator: crate::backend::BackendRef = Arc::new(ReplyBackend(reply));
+    let evaluator: crate::backend::BackendRef = Arc::new(ReplyBackend {
+        reply,
+        delay: std::time::Duration::ZERO,
+    });
     evaluate_command(
         &evaluator,
         "jj abandon",
         std::path::Path::new("/repo"),
         None,
+        EVALUATION_TIMEOUT,
         &[],
         &hints,
     )
@@ -359,4 +370,34 @@ async fn terse_follow_up_turn_carries_the_earlier_request_and_reply() {
     assert_eq!(hints.prompt.as_deref(), Some("yes"));
     assert_eq!(hints.prior_prompt.as_deref(), Some("drop the last change"));
     assert_eq!(hints.prior_reply.as_deref(), Some("Drop the last change?"));
+}
+
+#[tokio::test]
+async fn the_configured_timeout_reaches_the_evaluator() {
+    let evaluator: crate::backend::BackendRef = Arc::new(ReplyBackend {
+        reply: r#"{"risk":"low","reason":"too slow"}"#,
+        delay: std::time::Duration::from_secs(30),
+    });
+    let cfg = lofi_types::AutoModeConfig {
+        enable: true,
+        model: "test/reply".into(),
+        provider: None,
+        max_tokens: None,
+        timeout_ms: 20,
+    };
+    let hints = crate::agent::auto_mode::hint_handle();
+    let evaluate = crate::agent::auto_mode::build_auto_mode(
+        evaluator,
+        &cfg,
+        std::path::Path::new("/repo"),
+        None,
+        &hints,
+    );
+
+    assert_eq!(
+        evaluate("jj abandon".to_string()).await,
+        AutoModeOutcome::Failed {
+            reason: "evaluation timed out after 20 ms".into()
+        }
+    );
 }
