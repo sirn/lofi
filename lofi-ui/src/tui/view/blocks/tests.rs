@@ -182,6 +182,9 @@ fn bash_preview_keeps_tail_while_other_tools_keep_head() {
     assert_eq!(native_preview_range("bash", 10), 7..10);
     assert_eq!(native_preview_range("read", 10), 0..3);
     assert_eq!(native_preview_range("bash", 2), 0..2);
+    assert_eq!(native_preview_range("jobRead", 10), 7..10);
+    assert_eq!(native_preview_range("jobScreen", 10), 7..10);
+    assert_eq!(native_preview_range("jobStatus", 10), 0..3);
 }
 
 #[test]
@@ -206,6 +209,273 @@ fn bash_error_body_renders_only_structured_output() {
 }
 
 #[test]
+fn error_results_render_the_message_not_the_envelope() {
+    let raw = serde_json::json!({"ok": false, "error": "no doc entry named 'nope'"}).to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "docs".to_string(),
+        args: "nope".to_string(),
+        result: Some(raw),
+        preview: None,
+        is_error: true,
+        done: true,
+    };
+    assert_eq!(native_body(&tool).lines, vec!["no doc entry named 'nope'"]);
+}
+
+#[test]
+fn subagent_body_renders_the_outcome_result_and_spend() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "id": "s1",
+        "status": "completed",
+        "result": "done\nsecond line",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.02}
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "subagent".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(body.lines, vec!["done", "second line"]);
+    assert_eq!(body.notice.as_deref(), Some("(completed, $0.0200)"));
+}
+
+#[test]
+fn subagent_body_renders_the_outcome_error_and_status() {
+    let raw = serde_json::json!({
+        "ok": false,
+        "id": "s1",
+        "status": "failed",
+        "error": "provider returned 500"
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "subagentWait".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(body.lines, vec!["provider returned 500"]);
+    assert_eq!(body.notice.as_deref(), Some("(failed)"));
+}
+
+#[test]
+fn cached_preview_keeps_the_encoded_field_notice() {
+    let raw =
+        serde_json::json!({"ok": true, "name": "lofi-skills", "content": "# Skills"}).to_string();
+    let mut tool = NativeTool {
+        id: 1,
+        name: "skill".to_string(),
+        args: "lofi-skills".to_string(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    crate::tui::view::blocks::native::cache_native_preview(&mut tool);
+    let preview = tool.preview.expect("preview cached");
+    assert_eq!(preview.lines, vec!["# Skills"]);
+    assert_eq!(preview.notice.as_deref(), Some("(lofi-skills)"));
+}
+
+#[test]
+fn cached_preview_header_reports_the_subagent_status_and_cost() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "id": "s1",
+        "status": "completed",
+        "result": "done",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 5}
+    })
+    .to_string();
+    let mut tool = NativeTool {
+        id: 1,
+        name: "subagent".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    crate::tui::view::blocks::native::cache_native_preview(&mut tool);
+    let preview = tool.preview.expect("preview cached");
+    assert_eq!(
+        preview.header_suffix.as_deref(),
+        Some("(completed, $5.0000)")
+    );
+}
+
+/// Every tool the sandbox binds must render a labelled body. A tool that
+/// falls through to the raw-JSON arm starts its body with `{`, so the table
+/// fails loudly instead of the TUI printing a JSON blob.
+#[test]
+fn every_tool_renders_a_body_without_raw_json() {
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "read",
+            serde_json::json!({"content": "one", "start_line": 1, "total_lines": 1}),
+        ),
+        ("ls", serde_json::json!({"entries": ["src/main.rs"]})),
+        ("find", serde_json::json!({"matches": ["src/main.rs"]})),
+        (
+            "grep",
+            serde_json::json!({"matches": [{"file": "src/main.rs", "line": 4, "content": "fn main"}]}),
+        ),
+        (
+            "write",
+            serde_json::json!({"ok": true, "path": "a.txt", "content": "one"}),
+        ),
+        (
+            "edit",
+            serde_json::json!({"ok": true, "old": "one", "new": "two"}),
+        ),
+        (
+            "patch",
+            serde_json::json!({"ok": true, "path": "a.txt", "hunks": 2}),
+        ),
+        (
+            "bash",
+            serde_json::json!({"ok": true, "output": "one", "duration_ms": 5}),
+        ),
+        (
+            "jobList",
+            serde_json::json!({"ok": true, "jobs": [{"id": "7", "state": "running", "command": "make test"}]}),
+        ),
+        (
+            "jobSpawn",
+            serde_json::json!({"ok": true, "id": "1", "state": "running"}),
+        ),
+        (
+            "jobStatus",
+            serde_json::json!({"ok": true, "id": "1", "state": "completed"}),
+        ),
+        (
+            "jobRead",
+            serde_json::json!({"ok": true, "id": "1", "output": "one", "cursor": 3, "totalBytes": 3, "done": true}),
+        ),
+        (
+            "jobScreen",
+            serde_json::json!({"ok": true, "id": "1", "cols": 80, "rows": 24, "lines": ["$ ls"]}),
+        ),
+        (
+            "jobType",
+            serde_json::json!({"ok": true, "id": "1", "sent": 3}),
+        ),
+        (
+            "jobKeyPress",
+            serde_json::json!({"ok": true, "id": "1", "key": "Enter"}),
+        ),
+        (
+            "jobKill",
+            serde_json::json!({"ok": true, "id": "1", "state": "killed"}),
+        ),
+        ("jobNotify", serde_json::json!({"ok": true, "id": "1"})),
+        (
+            "skills",
+            serde_json::json!({"ok": true, "skills": [{"name": "lofi-skills", "description": "how to"}]}),
+        ),
+        (
+            "skill",
+            serde_json::json!({"ok": true, "name": "lofi-skills", "content": "# Skills"}),
+        ),
+        (
+            "docs",
+            serde_json::json!({"ok": true, "entries": [{"name": "lofi.read", "summary": "Read a file"}]}),
+        ),
+        (
+            "docsSearch",
+            serde_json::json!({"ok": true, "results": [{"name": "lofi.read", "excerpt": "Read a file"}]}),
+        ),
+        (
+            "models",
+            serde_json::json!({"models": [{"model": "plexus/glm-5.3", "name": "GLM"}]}),
+        ),
+        (
+            "recall",
+            serde_json::json!({"text": "earlier", "status": "ok"}),
+        ),
+        ("result", serde_json::json!("paged result")),
+        (
+            "subagent",
+            serde_json::json!({"ok": true, "id": "s1", "status": "completed", "result": "done", "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": 0.02}}),
+        ),
+        (
+            "subagentWait",
+            serde_json::json!({"ok": false, "id": "s1", "status": "failed", "error": "provider returned 500"}),
+        ),
+        (
+            "subagentSpawn",
+            serde_json::json!({"ok": true, "id": "s1", "status": "running"}),
+        ),
+        (
+            "subagentStatus",
+            serde_json::json!({"ok": true, "id": "s1", "status": "done"}),
+        ),
+        (
+            "subagentList",
+            serde_json::json!({"ok": true, "entries": [{"id": "s1", "status": "done"}]}),
+        ),
+        (
+            "subagentRead",
+            serde_json::json!({"ok": true, "events": [{"seq": 0, "type": "state", "status": "done"}, {"seq": 1, "type": "text", "text": "hello"}], "cursor": 2, "done": true}),
+        ),
+        (
+            "subagentKill",
+            serde_json::json!({"ok": true, "id": "s1", "status": "cancelling"}),
+        ),
+        (
+            "subagentNotify",
+            serde_json::json!({"ok": true, "id": "s1"}),
+        ),
+        (
+            "subagentMailboxSend",
+            serde_json::json!({"ok": true, "seq": 1, "to": "parent"}),
+        ),
+        (
+            "subagentMailboxSend",
+            serde_json::json!({"ok": true, "seq": 3, "duplicate": true}),
+        ),
+        (
+            "subagentMailboxReceive",
+            serde_json::json!({"ok": true, "messages": [{"from": "s1", "body": "hello"}]}),
+        ),
+        (
+            "subagentMailboxList",
+            serde_json::json!({"ok": true, "messages": [], "inboxes": [{"agent_id": "s1", "pending": 2}]}),
+        ),
+    ];
+    for (name, result) in cases {
+        let tool = NativeTool {
+            id: 1,
+            name: name.to_string(),
+            args: String::new(),
+            result: Some(result.to_string()),
+            preview: None,
+            is_error: false,
+            done: true,
+        };
+        let body = native_body(&tool);
+        assert!(!body.lines.is_empty(), "{name} renders no body lines");
+        let first = body.lines[0].trim_start();
+        assert!(
+            !first.starts_with('{'),
+            "{name} falls back to raw JSON: {first:?}"
+        );
+    }
+}
+
+#[test]
 fn summarize_tool_args_shortens_job_envelopes() {
     assert_eq!(
         summarize_tool_args("jobStatus", "{\"id\":\"1786294694788353138\"}").as_deref(),
@@ -227,6 +497,20 @@ fn summarize_tool_args_shortens_job_envelopes() {
         summarize_tool_args("read", "{\"path\":\"/tmp/x\"}"),
         None,
         "read is not a job tool — keep verbatim"
+    );
+    assert_eq!(
+        summarize_tool_args("subagentMailboxSend", "{\"to\":\"s1\",\"body\":\"hi\"}").as_deref(),
+        Some("to s1")
+    );
+    assert_eq!(
+        summarize_tool_args("jobStatus", "{\"id\":5}").as_deref(),
+        Some("job 5"),
+        "parse_id also accepts a numeric id"
+    );
+    assert_eq!(
+        summarize_tool_args("subagentMailboxReceive", "{\"limit\":5}"),
+        None,
+        "mailbox receive takes no id or recipient to summarize"
     );
 }
 
@@ -284,6 +568,36 @@ fn job_status_body_renders_compact_summary() {
 }
 
 #[test]
+fn job_notify_body_uses_the_job_notify_field_names() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "id": "1",
+        "notify": true,
+        "intervalMs": 5000,
+        "changed": false,
+        "idleMs": null
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "jobNotify".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    let notify_line = body
+        .lines
+        .iter()
+        .find(|l| l.starts_with("notify:"))
+        .expect("notify line present");
+    assert!(notify_line.contains("interval"), "{notify_line}");
+    assert!(notify_line.contains("changed false"), "{notify_line}");
+}
+
+#[test]
 fn job_read_body_renders_output_with_tail_notice() {
     let raw = serde_json::json!({
         "id": "1",
@@ -331,6 +645,72 @@ fn job_read_body_marks_done_at_end() {
     };
     let body = native_body(&tool);
     assert_eq!(body.notice.as_deref(), Some("(end of log; 71 bytes total)"));
+}
+
+#[test]
+fn job_list_body_renders_string_ids_and_commands() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "jobs": [{"id": "7", "state": "running", "command": "make test"}]
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "jobList".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(body.lines, vec!["job 7 running: make test"]);
+    assert_eq!(body.notice, None);
+}
+
+#[test]
+fn job_list_body_reports_an_empty_list() {
+    let raw = serde_json::json!({"ok": true, "jobs": []}).to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "jobList".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(body.notice.as_deref(), Some("(no jobs)"));
+}
+
+#[test]
+fn subagent_read_body_renders_event_payload_text() {
+    let raw = serde_json::json!({
+        "ok": true,
+        "events": [
+            {"seq": 0, "type": "state", "status": "done"},
+            {"seq": 1, "type": "text", "text": "hello\nworld"},
+            {"seq": 2, "type": "tool_start", "name": "read"}
+        ],
+        "cursor": 3,
+        "done": true
+    })
+    .to_string();
+    let tool = NativeTool {
+        id: 1,
+        name: "subagentRead".to_string(),
+        args: String::new(),
+        result: Some(raw),
+        preview: None,
+        is_error: false,
+        done: true,
+    };
+    let body = native_body(&tool);
+    assert_eq!(
+        body.lines,
+        vec!["#0 state: done", "#1 text: hello", "#2 tool_start: read"]
+    );
 }
 
 #[test]

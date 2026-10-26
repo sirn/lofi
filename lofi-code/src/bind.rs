@@ -24,12 +24,12 @@ pub(super) fn bind_tools<'js>(
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_job_tools(ctx, lofi, tools)?;
-    bind_recall_tool(ctx, lofi, recall)?;
-    bind_result_tool(ctx, lofi, result)?;
+    bind_recall_tool(ctx, lofi, tools, recall)?;
+    bind_result_tool(ctx, lofi, tools, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
-    bind_docs_tools(ctx, lofi)?;
+    bind_docs_tools(ctx, lofi, tools)?;
     bind_subagent_tool(ctx, lofi, tools, subagent)?;
-    bind_models_tool(ctx, lofi, models)?;
+    bind_models_tool(ctx, lofi, tools, models)?;
     Ok(())
 }
 
@@ -39,19 +39,24 @@ pub(super) fn bind_tools<'js>(
 fn bind_models_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
     models: Option<ModelsFn>,
 ) -> rquickjs::Result<()> {
+    let t = tools.clone();
     lofi.set(
         "models",
         Function::new(ctx.clone(), move || -> rquickjs::Result<JsonV> {
-            match &models {
-                Some(list) => Ok(JsonV(list())),
-                None => Ok(JsonV(json!({
+            let id = emit_start(&t, "models", String::new());
+            let value = match &models {
+                Some(list) => list(),
+                None => json!({
                     "ok": false,
                     "status": "unavailable",
                     "error": "lofi.models is not available in this context",
-                }))),
-            }
+                }),
+            };
+            emit_end(&t, id, &value);
+            Ok(JsonV(value))
         }),
     )?;
     Ok(())
@@ -456,7 +461,7 @@ fn bind_job_tools<'js>(
                         t.emit(ToolEvent::Start {
                             id,
                             name: name.into(),
-                            args: native_args_label("bash", &args),
+                            args: job_args_label(name, &args),
                         });
                         let res = method(&t, args).await;
                         let (result, is_error) = tool_preview(&res);
@@ -567,32 +572,65 @@ fn bind_skills_tools<'js>(
     Ok(())
 }
 
-fn bind_docs_tools<'js>(ctx: &Ctx<'js>, lofi: &Object<'js>) -> rquickjs::Result<()> {
+fn bind_docs_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+) -> rquickjs::Result<()> {
+    let t = tools.clone();
     lofi.set(
         "docs",
         Function::new(
             ctx.clone(),
-            Async(move |name: Opt<String>| async move {
-                let val = tokio::task::spawn_blocking(move || match name.0 {
-                    Some(n) => crate::docs::docs_entry(&n),
-                    None => crate::docs::docs_index(),
-                })
-                .await
-                .map_err(|_| rquickjs::Error::Unknown)?;
-                Ok::<JsonV, rquickjs::Error>(JsonV(val))
+            Async(move |name: Opt<String>| {
+                let t = t.clone();
+                async move {
+                    let label = name
+                        .0
+                        .as_deref()
+                        .map_or_else(String::new, |n| cap_first_line(n, 120));
+                    let id = emit_start(&t, "docs", label);
+                    let val = match tokio::task::spawn_blocking(move || match name.0 {
+                        Some(n) => crate::docs::docs_entry(&n),
+                        None => crate::docs::docs_index(),
+                    })
+                    .await
+                    {
+                        Ok(val) => val,
+                        Err(e) => {
+                            emit_end_err(&t, id, &e.to_string());
+                            return Err(rquickjs::Error::Unknown);
+                        }
+                    };
+                    emit_end(&t, id, &val);
+                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
+                }
             }),
         )?,
     )?;
 
+    let t = tools.clone();
     lofi.set(
         "docsSearch",
         Function::new(
             ctx.clone(),
-            Async(move |query: String| async move {
-                let val = tokio::task::spawn_blocking(move || crate::docs::docs_search(&query))
-                    .await
-                    .map_err(|_| rquickjs::Error::Unknown)?;
-                Ok::<JsonV, rquickjs::Error>(JsonV(val))
+            Async(move |query: String| {
+                let t = t.clone();
+                async move {
+                    let id = emit_start(&t, "docsSearch", cap_first_line(&query, 120));
+                    let val =
+                        match tokio::task::spawn_blocking(move || crate::docs::docs_search(&query))
+                            .await
+                        {
+                            Ok(val) => val,
+                            Err(e) => {
+                                emit_end_err(&t, id, &e.to_string());
+                                return Err(rquickjs::Error::Unknown);
+                            }
+                        };
+                    emit_end(&t, id, &val);
+                    Ok::<JsonV, rquickjs::Error>(JsonV(val))
+                }
             }),
         )?,
     )?;
@@ -651,6 +689,24 @@ fn cap_first_line(s: &str, cap: usize) -> String {
     out
 }
 
+/// The header label for a job op: the command for `jobSpawn`, the job id
+/// for every id-addressed op. Without a `cmd` field the bash label falls
+/// back to the whole JSON body.
+fn job_args_label(name: &str, v: &serde_json::Value) -> String {
+    if name == "jobSpawn" {
+        return native_args_label("bash", v);
+    }
+    let id = v.get("id").and_then(|id| {
+        id.as_str()
+            .map(str::to_string)
+            .or_else(|| id.as_u64().map(|n| n.to_string()))
+    });
+    id.map_or_else(
+        || cap_first_line(&v.to_string(), 120),
+        |id| format!("job {id}"),
+    )
+}
+
 fn native_args_label(name: &str, v: &serde_json::Value) -> String {
     let pick = |key: &str| {
         v.get(key)
@@ -671,18 +727,55 @@ fn native_args_label(name: &str, v: &serde_json::Value) -> String {
 
 fn tool_preview(res: &std::result::Result<Json, Error>) -> (String, bool) {
     match res {
-        Ok(v) => {
-            let is_error = v
-                .get("ok")
-                .and_then(serde_json::Value::as_bool)
-                .is_some_and(|ok| !ok);
-            match v {
-                Json::String(s) => (s.clone(), is_error),
-                other => (other.to_string(), is_error),
-            }
-        }
+        Ok(v) => preview_of(v),
         Err(e) => (e.to_string(), true),
     }
+}
+
+/// The preview text and error flag for a resolved tool value. A structured
+/// body reports failure through a false `ok` field; a bare string is its own
+/// preview.
+fn preview_of(value: &Json) -> (String, bool) {
+    let is_error = value
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|ok| !ok);
+    match value {
+        Json::String(s) => (s.clone(), is_error),
+        other => (other.to_string(), is_error),
+    }
+}
+
+/// Emit the opening tool event for a binding that resolves a value from a
+/// host hook rather than from `BuiltinTools`. The returned id pairs the
+/// event with its [`emit_end`].
+fn emit_start(t: &Arc<BuiltinTools>, name: &str, args: String) -> u64 {
+    let id = t.next_tool_id();
+    t.emit(ToolEvent::Start {
+        id,
+        name: name.into(),
+        args,
+    });
+    id
+}
+
+fn emit_end(t: &Arc<BuiltinTools>, id: u64, value: &Json) {
+    let (result, is_error) = preview_of(value);
+    t.emit(ToolEvent::End {
+        id,
+        result,
+        is_error,
+    });
+}
+
+/// Close a started event whose work failed before producing a value, so
+/// the pair never dangles and leaves the tool tile stuck running.
+fn emit_end_err(t: &Arc<BuiltinTools>, id: u64, message: &str) {
+    t.emit(ToolEvent::End {
+        id,
+        result: message.to_string(),
+        is_error: true,
+    });
 }
 
 /// Translate a builtin tool [`lofi_error::Result`] into the owned value that crosses
@@ -698,37 +791,54 @@ fn tool_result(res: std::result::Result<Json, Error>) -> ToolOutput {
 fn bind_recall_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
     recall: Option<RecallFn>,
 ) -> rquickjs::Result<()> {
     let Some(recall) = recall else {
+        let t = tools.clone();
         lofi.set(
             "recall",
             Function::new(
                 ctx.clone(),
-                Async(move |_: Opt<Value>| async move {
-                    Ok::<JsonV, rquickjs::Error>(JsonV(json!({
-                        "text": "recall unavailable: no session file for this session.",
-                        "status": "unavailable",
-                    })))
+                Async(move |_: Opt<Value>| {
+                    let t = t.clone();
+                    async move {
+                        let id = emit_start(&t, "recall", String::new());
+                        let value = json!({
+                            "text": "recall unavailable: no session file for this session.",
+                            "status": "unavailable",
+                        });
+                        emit_end(&t, id, &value);
+                        Ok::<JsonV, rquickjs::Error>(JsonV(value))
+                    }
                 }),
             )?,
         )?;
         return Ok(());
     };
+    let t = tools.clone();
     lofi.set(
         "recall",
         Function::new(
             ctx.clone(),
             Async(move |args: Opt<Value>| {
+                let t = t.clone();
                 let recall = recall.clone();
                 let args = args.0.map_or(serde_json::Value::Null, |v| js_to_json(&v));
                 async move {
                     let req = parse_recall_args(&args);
+                    let label = req
+                        .query
+                        .as_deref()
+                        .map_or_else(String::new, |q| cap_first_line(q, 120));
+                    let id = emit_start(&t, "recall", label);
                     let outcome = recall(&req);
-                    Ok::<JsonV, rquickjs::Error>(JsonV(json!({
+                    let value = json!({
                         "text": outcome.text,
                         "status": outcome.status,
-                    })))
+                    });
+                    emit_end(&t, id, &value);
+                    Ok::<JsonV, rquickjs::Error>(JsonV(value))
                 }
             }),
         )?,
@@ -782,31 +892,42 @@ fn parse_recall_args(json: &serde_json::Value) -> lofi_types::recall::RecallRequ
 fn bind_result_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
     result: Option<ResultFn>,
 ) -> rquickjs::Result<()> {
     let Some(result) = result else {
+        let t = tools.clone();
         lofi.set(
             "result",
             Function::new(
                 ctx.clone(),
-                Async(move |_: String| async move {
-                    Ok::<JsonV, rquickjs::Error>(JsonV(json!(
-                        "result unavailable: no session file for this session."
-                    )))
+                Async(move |id: String| {
+                    let t = t.clone();
+                    async move {
+                        let tool_id = emit_start(&t, "result", cap_first_line(&id, 120));
+                        let value = json!("result unavailable: no session file for this session.");
+                        emit_end(&t, tool_id, &value);
+                        Ok::<JsonV, rquickjs::Error>(JsonV(value))
+                    }
                 }),
             )?,
         )?;
         return Ok(());
     };
+    let t = tools.clone();
     lofi.set(
         "result",
         Function::new(
             ctx.clone(),
             Async(move |id: String| {
+                let t = t.clone();
                 let result = result.clone();
                 async move {
+                    let tool_id = emit_start(&t, "result", cap_first_line(&id, 120));
                     let text = result(&id);
-                    Ok::<JsonV, rquickjs::Error>(JsonV(json!(text)))
+                    let value = json!(text);
+                    emit_end(&t, tool_id, &value);
+                    Ok::<JsonV, rquickjs::Error>(JsonV(value))
                 }
             }),
         )?,

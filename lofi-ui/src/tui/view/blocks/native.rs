@@ -30,14 +30,19 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
     let name = nt.name.as_str();
     let raw = nt.result.as_deref().unwrap_or("");
     if nt.is_error {
-        let display = if name == "bash" {
-            serde_json::from_str::<serde_json::Value>(raw)
-                .ok()
-                .and_then(|value| value.get("output")?.as_str().map(str::to_string))
-                .unwrap_or_else(|| raw.to_string())
-        } else {
-            raw.to_string()
-        };
+        // Failures answer with a message field; bash reports its stderr as
+        // output. Show that line, not the envelope.
+        let field = if name == "bash" { "output" } else { "error" };
+        let display = serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get(field)
+                    .or_else(|| value.get("error"))?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| raw.to_string());
         return NativeBody {
             lines: split_lines(&display),
             numbered: false,
@@ -140,22 +145,35 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
                 notice: b("truncated").then_some("(truncated)".into()),
             }
         }
-        "agent" => {
-            let text = s("text");
-            let model = s("model");
-            let thinking = s("thinking");
-            let rounds = n("rounds");
-            let duration_ms = n("durationMs");
+        // A settled run answers with result and a failed one with error;
+        // neither carries the model name, so the body reports status and
+        // spend instead.
+        "subagent" | "subagentWait" => {
+            let text = if s("result").is_empty() {
+                s("error")
+            } else {
+                s("result")
+            };
+            let status = s("status");
             let cost = v
-                .get("cost")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0);
-            let notice = (!model.is_empty()).then(|| {
+                .get("usage")
+                .and_then(|u| u.get("cost"))
+                .and_then(serde_json::Value::as_f64);
+            let truncated = b("truncated").then(|| {
                 format!(
-                    "({model}, {thinking}, {rounds} rounds, {}, ${cost:.4})",
-                    prim::fmt_duration(std::time::Duration::from_millis(duration_ms as u64))
+                    "(truncated, {} bytes)",
+                    v.get("full_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
                 )
             });
+            let notice = match (cost, truncated) {
+                (Some(cost), Some(t)) => Some(format!("({status}, ${cost:.4}) {t}")),
+                (Some(cost), None) => Some(format!("({status}, ${cost:.4})")),
+                (None, truncated) => {
+                    truncated.or_else(|| (!status.is_empty()).then(|| format!("({status})")))
+                }
+            };
             NativeBody {
                 lines: split_lines(text),
                 numbered: false,
@@ -237,8 +255,12 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
             if v.get("notify").is_some() {
                 notify_bits.push(format!("notify: {}", b("notify")));
             }
+            // jobNotify answers with `intervalMs`/`changed`; the job
+            // snapshot behind jobSpawn/jobStatus/jobKill uses the
+            // `notify*` names.
             if let Some(iv) = v
                 .get("notifyIntervalMs")
+                .or_else(|| v.get("intervalMs"))
                 .and_then(serde_json::Value::as_u64)
             {
                 notify_bits.push(format!(
@@ -246,8 +268,12 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
                     prim::fmt_duration(std::time::Duration::from_millis(iv))
                 ));
             }
-            if v.get("notifyChanged").is_some() {
-                notify_bits.push(format!("changed {}", b("notifyChanged")));
+            if let Some(changed) = v
+                .get("notifyChanged")
+                .or_else(|| v.get("changed"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                notify_bits.push(format!("changed {changed}"));
             }
             if !notify_bits.is_empty() {
                 lines.push(notify_bits.join("  "));
@@ -256,12 +282,328 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
             if !log_path.is_empty() {
                 lines.push(format!("log: {log_path}"));
             }
+            if lines.is_empty() {
+                let id = s("id");
+                if !id.is_empty() {
+                    lines.push(format!("job {id}"));
+                }
+            }
             NativeBody {
                 lines,
                 numbered: false,
                 start_line: 1,
                 is_diff: false,
                 notice: None,
+            }
+        }
+        "patch" => NativeBody {
+            lines: vec![format!("{} — {} hunks applied", s("path"), n("hunks"))],
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
+        "skills" => {
+            let lines = v
+                .get("skills")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .map(|e| {
+                            let name = e.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                            let description =
+                                e.get("description").and_then(|x| x.as_str()).unwrap_or("");
+                            if description.is_empty() {
+                                name.to_string()
+                            } else {
+                                format!("{name} — {description}")
+                            }
+                        })
+                        .collect()
+                });
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "skill" => {
+            let name = s("name");
+            NativeBody {
+                lines: split_lines(s("content")),
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: (!name.is_empty()).then(|| format!("({name})")),
+            }
+        }
+        "docs" => {
+            let content = s("content");
+            if content.is_empty() {
+                let lines =
+                    v.get("entries")
+                        .and_then(|x| x.as_array())
+                        .map_or_else(Vec::new, |a| {
+                            a.iter()
+                                .map(|e| {
+                                    let name = e.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                                    let summary =
+                                        e.get("summary").and_then(|x| x.as_str()).unwrap_or("");
+                                    format!("{name} — {summary}")
+                                })
+                                .collect()
+                        });
+                NativeBody {
+                    lines,
+                    numbered: false,
+                    start_line: 1,
+                    is_diff: false,
+                    notice: None,
+                }
+            } else {
+                let name = s("name");
+                NativeBody {
+                    lines: split_lines(content),
+                    numbered: false,
+                    start_line: 1,
+                    is_diff: false,
+                    notice: (!name.is_empty()).then(|| format!("({name})")),
+                }
+            }
+        }
+        "docsSearch" => {
+            let lines = v
+                .get("results")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .map(|r| {
+                            let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                            let excerpt = r.get("excerpt").and_then(|x| x.as_str()).unwrap_or("");
+                            format!("{name} — {excerpt}")
+                        })
+                        .collect()
+                });
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "models" => {
+            let lines = v
+                .get("models")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .map(|m| {
+                            let model = m.get("model").and_then(|x| x.as_str()).unwrap_or("");
+                            let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                            if name.is_empty() {
+                                model.to_string()
+                            } else {
+                                format!("{model} ({name})")
+                            }
+                        })
+                        .collect()
+                });
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "recall" => {
+            let status = s("status");
+            NativeBody {
+                lines: split_lines(s("text")),
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: (!status.is_empty() && status != "ok").then(|| format!("({status})")),
+            }
+        }
+        "result" => {
+            let text = v.as_str().map_or_else(|| raw.to_string(), String::from);
+            NativeBody {
+                lines: split_lines(&text),
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "jobList" => {
+            let lines = v
+                .get("jobs")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .map(|j| {
+                            let id = j.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                            let state = j.get("state").and_then(|x| x.as_str()).unwrap_or("");
+                            let cmd = j.get("command").and_then(|x| x.as_str()).unwrap_or("");
+                            format!("job {id} {state}: {cmd}")
+                        })
+                        .collect()
+                });
+            let empty = lines.is_empty();
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: empty.then(|| "(no jobs)".to_string()),
+            }
+        }
+        "jobScreen" => {
+            let lines = v
+                .get("lines")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .filter_map(|l| l.as_str().map(String::from))
+                        .collect()
+                });
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: Some(format!("({}x{})", n("cols"), n("rows"))),
+            }
+        }
+        "jobType" => NativeBody {
+            lines: vec![format!("sent {} bytes to job {}", n("sent"), s("id"))],
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
+        "jobKeyPress" => NativeBody {
+            lines: vec![format!("sent {} to job {}", s("key"), s("id"))],
+            numbered: false,
+            start_line: 1,
+            is_diff: false,
+            notice: None,
+        },
+        "subagentSpawn" | "subagentStatus" | "subagentKill" | "subagentNotify" => {
+            let id = s("id");
+            let status = s("status");
+            let mut lines = Vec::new();
+            if !id.is_empty() {
+                lines.push(format!("id: {id}"));
+            }
+            if !status.is_empty() {
+                lines.push(format!("state: {status}"));
+            }
+            for (label, value) in [("note", s("note")), ("error", s("error"))] {
+                if !value.is_empty() {
+                    lines.push(format!("{label}: {value}"));
+                }
+            }
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "subagentList" | "subagentMailboxList" | "subagentMailboxReceive" => {
+            let mut lines = Vec::new();
+            if let Some(rows) = v.get("entries").and_then(|x| x.as_array()) {
+                for e in rows {
+                    let id = e.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                    let status = e.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                    lines.push(format!("{id} — {status}"));
+                }
+            }
+            if let Some(rows) = v.get("inboxes").and_then(|x| x.as_array()) {
+                for e in rows {
+                    let id = e.get("agent_id").and_then(|x| x.as_str()).unwrap_or("");
+                    let pending = e
+                        .get("pending")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    lines.push(format!("{id}: {pending} pending"));
+                }
+            }
+            if let Some(rows) = v.get("messages").and_then(|x| x.as_array()) {
+                lines.extend(rows.iter().map(message_line));
+            }
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "subagentMailboxSend" => {
+            // A deduped retry answers without a `to` field.
+            let line = if b("duplicate") {
+                format!("duplicate of seq {}", n("seq"))
+            } else {
+                format!("sent to {} (seq {})", s("to"), n("seq"))
+            };
+            NativeBody {
+                lines: vec![line],
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: None,
+            }
+        }
+        "subagentRead" => {
+            let lines = v
+                .get("events")
+                .and_then(|x| x.as_array())
+                .map_or_else(Vec::new, |a| {
+                    a.iter()
+                        .map(|e| {
+                            let seq = e
+                                .get("seq")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            let kind = e.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                            // The payload field differs per event kind: text
+                            // for text, result for tool_end, name for
+                            // tool_start, status for state.
+                            let body = ["text", "result", "name", "status"]
+                                .iter()
+                                .find_map(|k| e.get(*k).and_then(|x| x.as_str()))
+                                .unwrap_or("");
+                            // Round usage reports cost and tokens; neither
+                            // is a string payload.
+                            let body = if body.is_empty() && kind == "usage" {
+                                e.get("cost")
+                                    .and_then(serde_json::Value::as_f64)
+                                    .map_or_else(String::new, |cost| format!("${cost:.4}"))
+                            } else {
+                                body.to_string()
+                            };
+                            let first = body.lines().next().unwrap_or("");
+                            if first.is_empty() {
+                                format!("#{seq} {kind}")
+                            } else {
+                                format!("#{seq} {kind}: {first}")
+                            }
+                        })
+                        .collect()
+                });
+            NativeBody {
+                lines,
+                numbered: false,
+                start_line: 1,
+                is_diff: false,
+                notice: b("done").then(|| "(end of events)".to_string()),
             }
         }
         _ => NativeBody {
@@ -274,6 +616,16 @@ pub(super) fn native_body(nt: &NativeTool) -> NativeBody {
     }
 }
 
+/// Notice for a preview that streams an encoded field. The body is not
+/// parsed, so the docs/skill name comes from the args: a scan for the field
+/// would also match that text inside the encoded content.
+fn encoded_notice(name: &str, native: &NativeTool) -> Option<String> {
+    matches!(name, "docs" | "skill")
+        .then(|| native.args.trim())
+        .filter(|args| !args.is_empty())
+        .map(|args| format!("({args})"))
+}
+
 pub(in crate::tui) fn cache_native_preview(native: &mut NativeTool) {
     let Some(raw) = native.result.as_deref().filter(|result| !result.is_empty()) else {
         return;
@@ -281,11 +633,17 @@ pub(in crate::tui) fn cache_native_preview(native: &mut NativeTool) {
     let header_suffix = native_header_suffix(&native.name, Some(raw));
     let encoded_field = match native.name.as_str() {
         "bash" => Some("output"),
-        "write" => Some("content"),
+        "write" | "docs" | "skill" => Some("content"),
         _ => None,
     };
     let encoded = encoded_field.and_then(|field| json_string_field(raw, field));
     let body = encoded.is_none().then(|| native_body(native));
+    // An encoded preview never builds the body, so its notice has to be
+    // derived separately or it is lost once the result is dropped.
+    let notice = body.as_ref().map_or_else(
+        || encoded_notice(&native.name, native),
+        |body| body.notice.clone(),
+    );
     let total_lines = encoded.map_or_else(
         || body.as_ref().map_or(0, |body| body.lines.len()),
         encoded_json_line_count,
@@ -305,7 +663,7 @@ pub(in crate::tui) fn cache_native_preview(native: &mut NativeTool) {
         numbered: body.as_ref().is_some_and(|body| body.numbered),
         start_line: body.as_ref().map_or(1, |body| body.start_line),
         is_diff: body.as_ref().is_some_and(|body| body.is_diff),
-        notice: body.and_then(|body| body.notice),
+        notice,
     }));
 }
 
@@ -322,9 +680,15 @@ pub(crate) fn compact_native_previews(turn: &mut Turn) {
     }
 }
 
+/// Tools whose preview shows the tail: a process log, a terminal screen, or
+/// a paged read all end with the newest or most useful line.
+fn previews_tail(name: &str) -> bool {
+    matches!(name, "bash" | "jobRead" | "jobScreen")
+}
+
 pub(super) fn native_preview_range(name: &str, total: usize) -> std::ops::Range<usize> {
     let shown = total.min(PREVIEW_LINES);
-    let start = if name == "bash" {
+    let start = if previews_tail(name) {
         total.saturating_sub(shown)
     } else {
         0
@@ -344,17 +708,26 @@ pub(super) fn split_lines(s: &str) -> Vec<String> {
 /// the request envelope. Returns `None` for tools we have no tailored
 /// view for; the caller falls back to the verbatim args.
 ///
-/// Only shapes the surface actually emits are recognised (every job op
-/// takes an `id`; `jobSpawn` takes a command). Anything else returns
-/// `None`.
+/// Only shapes the surface actually emits are recognised (job ops and
+/// subagent lookups take an `id`; `jobSpawn` takes a command; a mailbox
+/// send takes `to`). Anything else returns `None`.
 pub(super) fn summarize_tool_args(name: &str, args: &str) -> Option<String> {
     if args.is_empty() {
         return Some(String::new());
     }
-    let id = json_string_field(args, "id");
+    // Job and subagent ids arrive as strings from the bindings, but the
+    // numeric form is accepted too.
+    let id = json_string_field(args, "id")
+        .map(str::to_string)
+        .or_else(|| json_u64_field(args, "id").map(|n| n.to_string()));
     match name {
         "jobSpawn" => json_string_field(args, "cmd").map(|cmd| truncate_args_display(cmd, 60)),
-        "jobStatus" | "jobRead" | "jobKill" | "jobNotify" => id.map(|s| format!("job {s}")),
+        "jobStatus" | "jobRead" | "jobKill" | "jobNotify" | "jobScreen" | "jobType"
+        | "jobKeyPress" => id.map(|s| format!("job {s}")),
+        "subagentStatus" | "subagentRead" | "subagentKill" | "subagentNotify" | "subagentWait" => {
+            id.map(|s| format!("subagent {s}"))
+        }
+        "subagentMailboxSend" => json_string_field(args, "to").map(|to| format!("to {to}")),
         _ => None,
     }
 }
@@ -407,6 +780,18 @@ fn json_u64_field(raw: &str, field: &str) -> Option<u64> {
     rest = rest.strip_prefix(':')?.trim_start();
     let end = rest.bytes().take_while(u8::is_ascii_digit).count();
     (end > 0).then(|| rest[..end].parse().ok()).flatten()
+}
+
+fn json_f64_field(raw: &str, field: &str) -> Option<f64> {
+    let needle = format!("\"{field}\"");
+    let key = raw.find(&needle)?;
+    let mut rest = raw.get(key + needle.len()..)?.trim_start();
+    rest = rest.strip_prefix(':')?.trim_start();
+    let end = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'e' | b'+'))
+        .count();
+    rest.get(..end)?.parse().ok()
 }
 
 fn encoded_json_line_count(encoded: &str) -> usize {
@@ -488,15 +873,12 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
             ));
         }
     }
-    if name == "agent" {
-        let model = json_string_field(raw, "model")?;
-        let thinking = json_string_field(raw, "thinking").unwrap_or("off");
-        let rounds = json_u64_field(raw, "rounds").unwrap_or(0);
-        let duration = json_u64_field(raw, "durationMs").unwrap_or(0);
-        return Some(format!(
-            "({model}:{thinking}, {rounds} rounds, {})",
-            prim::fmt_duration(Duration::from_millis(duration))
-        ));
+    if matches!(name, "subagent" | "subagentWait") {
+        let status = json_string_field(raw, "status")?;
+        return Some(match json_f64_field(raw, "cost") {
+            Some(cost) => format!("({status}, ${cost:.4})"),
+            None => format!("({status})"),
+        });
     }
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     match name {
@@ -525,6 +907,18 @@ fn native_header_suffix(name: &str, result: Option<&str>) -> Option<String> {
             Some(format!("(took {})", prim::fmt_duration(dur)))
         }
         _ => None,
+    }
+}
+
+/// One mailbox message as a preview line: `from: first body line`.
+fn message_line(m: &serde_json::Value) -> String {
+    let from = m.get("from").and_then(|x| x.as_str()).unwrap_or("");
+    let body = m.get("body").and_then(|x| x.as_str()).unwrap_or("");
+    let first = body.lines().next().unwrap_or("");
+    if from.is_empty() {
+        first.to_string()
+    } else {
+        format!("{from}: {first}")
     }
 }
 
@@ -662,7 +1056,7 @@ impl ExecBlockBranch<'_> {
                 line.detail = Some(super::prim::DetailTarget {
                     key: key.clone(),
                     total: visual_total.max(total),
-                    tail: self.nt.name == "bash",
+                    tail: previews_tail(&self.nt.name),
                     row: None,
                 });
             }

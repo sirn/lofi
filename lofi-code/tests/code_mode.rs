@@ -549,6 +549,91 @@ async fn write_and_edit_emit_written_content_as_result() {
 }
 
 #[tokio::test]
+async fn hook_backed_tools_emit_tool_events() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let events: Arc<Mutex<Vec<ToolEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let cb = {
+        let events = events.clone();
+        Arc::new(move |ev: ToolEvent| events.lock().unwrap().push(ev))
+            as Arc<dyn Fn(ToolEvent) + Send + Sync>
+    };
+    let recall: lofi_code::RecallFn = Arc::new(|_req| lofi_types::recall::RecallOutcome {
+        text: "recalled text".to_string(),
+        status: "ok".to_string(),
+    });
+    let result: lofi_code::ResultFn = Arc::new(|id: &str| format!("result for {id}"));
+    let models: lofi_code::ModelsFn = Arc::new(|| serde_json::json!({ "models": [] }));
+    let cx = ExecCtx {
+        root: dir.path().to_path_buf(),
+        tmp_dir: std::env::temp_dir().join("lofi-test"),
+        strings: HashMap::new(),
+        on_tool_event: Some(cb),
+        recall: Some(recall),
+        result: Some(result),
+        bash_env: BashEnv::default(),
+        shell_policy: lofi_code::policy::defaults::resolve(
+            &lofi_types::ShellPolicyConfig::default(),
+        ),
+        confirm: None,
+        auto_mode: None,
+        policy_override: lofi_code::policy::PolicyOverride::default(),
+        skills_dir: None,
+        truncate: lofi_code::TruncatedCap::default(),
+        jobs: lofi_code::tools::JobRegistry::new(),
+        job_owner: None,
+        on_job_acquired: None,
+        subagent: None,
+        models: Some(models),
+    };
+    let src = "await lofi.docs('lofi.read'); \
+               await lofi.docsSearch('read'); \
+               await lofi.models(); \
+               await lofi.recall({ query: 'earlier' }); \
+               await lofi.result('evt-1'); \
+               return 'ok';";
+    lofi_code::exec(src, &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    let evs = events.lock().unwrap();
+    let mut started: Vec<&str> = evs
+        .iter()
+        .filter_map(|e| match e {
+            ToolEvent::Start { name, .. } => Some(name.as_str()),
+            ToolEvent::End { .. } => None,
+        })
+        .collect();
+    started.sort_unstable();
+    assert_eq!(
+        started,
+        vec!["docs", "docsSearch", "models", "recall", "result"],
+        "every hook-backed tool must open a tool event: {evs:?}"
+    );
+    let ids: Vec<u64> = evs
+        .iter()
+        .filter_map(|e| match e {
+            ToolEvent::Start { id, .. } => Some(*id),
+            ToolEvent::End { .. } => None,
+        })
+        .collect();
+    let ends: Vec<(u64, bool)> = evs
+        .iter()
+        .filter_map(|e| match e {
+            ToolEvent::End { id, is_error, .. } => Some((*id, *is_error)),
+            ToolEvent::Start { .. } => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), ids.len(), "each start needs an end: {evs:?}");
+    for (id, is_error) in ends {
+        assert!(ids.contains(&id), "end {id} has no start: {evs:?}");
+        assert!(
+            !is_error,
+            "a successful call must not end as an error: {evs:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn exec_distinguishes_implicit_undefined_from_null() {
     let dir = tempfile::tempdir().unwrap();
     let res = exec("print('hi');", &ctx(dir.path()), &ExecOptions::default())
