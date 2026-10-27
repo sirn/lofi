@@ -362,6 +362,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1627,6 +1628,7 @@ name = "lofi-code"
 version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "futures",
  "globset",
  "ignore",

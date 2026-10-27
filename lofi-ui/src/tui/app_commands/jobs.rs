@@ -33,6 +33,22 @@ impl App {
         })
     }
 
+    /// Take the wake-up notices fired by `notifyAt`/`notifyEvery` timers
+    /// since the last tick, oldest first. Unlike job notices these carry no
+    /// notification-area line, so nothing else changes when one is taken.
+    pub(in crate::tui) fn take_timer_notices(&mut self) -> Vec<QueuedPrompt> {
+        self.timers.as_ref().map_or_else(Vec::new, |timers| {
+            timers
+                .take_notices()
+                .into_iter()
+                .map(|text| QueuedPrompt {
+                    text,
+                    kind: lofi_types::PromptKind::Notice,
+                })
+                .collect()
+        })
+    }
+
     /// Fresh job snapshot for the modal, newest first. Empty when no agent.
     pub(in crate::tui) fn jobs_snapshot(&self) -> Vec<lofi_core::JobInfo> {
         self.jobs

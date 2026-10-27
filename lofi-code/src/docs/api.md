@@ -273,6 +273,63 @@ Errors with `ok: false` when the key is unknown or the job is not a tty job.
 
 **Returns:** `{ ok, id, key }`.
 
+## lofi.sleep(seconds)
+
+Wait inside the exec for `seconds` seconds (a number; fractions are fine). The
+wait observes run cancellation, so a cancelled turn leaves it at once. `seconds`
+must be at most 86400 (one day): for a longer pause, schedule a wake-up with
+`notifyAt` and end the turn instead of holding the exec open.
+
+**Parameters:**
+- `seconds` (number, required) — how long to wait, in seconds. `0` resolves
+  at once.
+
+**Returns:** `{ ok }`. Throws when `seconds` is not a non-negative number
+within the cap, or when the run is cancelled mid-wait.
+
+## lofi.notifyAt(at, message?)
+
+Queue a one-shot wake-up notice for the session. When `at` passes, the host
+delivers the notice as a notice prompt — the same path a finished background
+job's notice takes — so the agent wakes to it whether or not it is mid-turn.
+An `at` in the past fires on the next host poll.
+
+Nothing is persisted: the timer lives and dies with the session, and a `/new`
+session drops pending timers.
+
+**Parameters:**
+- `at` (string, required) — an RFC 3339 timestamp with a timezone offset,
+  e.g. `2026-10-25T05:00:00+0900` or `2026-10-25T05:00:00Z`.
+- `message` (string, optional) — carried in the notice as
+  `notifyAt fired: <message>`. Without one the notice reads `notifyAt fired`.
+  Limited to 500 characters.
+
+**Returns:** `{ ok, at, message }`. Throws when `at` is not a parseable RFC
+3339 timestamp or `message` is not a string within the limit.
+
+## lofi.notifyEvery(every, message?)
+
+Like `notifyAt`, but re-armed: the first notice comes one `every` duration
+from now and each interval after it. A host that polls late gets one notice
+per elapsed window, never a burst of the missed ones.
+
+**Parameters:**
+- `every` (string, required) — a duration like `5m`, `1h30m`, or `500ms`.
+  Every segment carries a unit: `ms`, `s`, `m`, `h`, or `d`. At least 1s.
+- `message` (string, optional) — carried in each notice as
+  `notifyEvery fired: <message>`. Without one the notice reads
+  `notifyEvery fired`. Limited to 500 characters.
+
+**Returns:** `{ ok, every, message }`. Throws when `every` is not a parseable
+duration at least 1s, or `message` is not a string within the limit.
+
+## lofi.notifyCancel()
+
+Drop every pending `notifyAt` and `notifyEvery` of this caller. A subagent
+cancels its own timers, not the session's.
+
+**Returns:** `{ ok, cancelled }` with the number of timers dropped.
+
 ## lofi.tmpDir
 
 A string property: the absolute path to the per-session tmp directory backing

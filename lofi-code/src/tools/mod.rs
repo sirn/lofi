@@ -19,6 +19,7 @@ mod bash_util;
 mod fs;
 pub mod jobs;
 pub mod skills;
+pub mod timers;
 pub mod truncate;
 pub mod write;
 
@@ -32,6 +33,7 @@ pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
     JobStyle,
 };
+pub use timers::TimerRegistry;
 pub use truncate::{
     format_size, truncate_head, truncate_head_with, truncate_tail, truncate_tail_with, Truncated,
 };
@@ -78,8 +80,13 @@ pub struct BuiltinTools {
     /// agent so jobs survive across the per-exec tool bundles. Explicit host
     /// shutdown kills survivors; dropping the last clone is the fallback.
     jobs: JobRegistry,
+    /// Wake-up timers scheduled by this session (`lofi.notifyAt` and
+    /// `lofi.notifyEvery`). Shared with the owning agent so the host can
+    /// hand each fired notice back to the agent.
+    timers: TimerRegistry,
     /// Owning subagent run id when this tool bundle serves one. Spawned
-    /// jobs are tagged with it for kill-by-owner and the per-owner cap.
+    /// jobs and timers are tagged with it for kill-by-owner and the
+    /// per-owner cap.
     job_owner: Option<String>,
     on_job_acquired: Option<crate::JobAcquireFn>,
     /// Visible-output caps for tool results (file reads and bash output).
@@ -144,6 +151,7 @@ impl BuiltinTools {
             read_roots,
             cancel: None,
             jobs: JobRegistry::new(),
+            timers: TimerRegistry::new(),
             job_owner: None,
             on_job_acquired: None,
             truncate: truncate::TruncatedCap::default(),
@@ -175,8 +183,18 @@ impl BuiltinTools {
         self
     }
 
-    /// Tags spawned jobs with the owning subagent run id so a subagent
-    /// cancellation kills exactly its own process tree.
+    /// Shares the owning session's wake-up timer registry. Without this
+    /// each exec would get a fresh registry and a notice scheduled by one
+    /// call could not fire on the next.
+    #[must_use]
+    pub fn with_timers(mut self, timers: TimerRegistry) -> Self {
+        self.timers = timers;
+        self
+    }
+
+    /// Tags spawned jobs and timers with the owning subagent run id so a
+    /// subagent cancellation kills exactly its own process tree and
+    /// `notifyCancel` drops exactly its own timers.
     #[must_use]
     pub fn with_job_owner(mut self, owner: Option<String>) -> Self {
         self.job_owner = owner;

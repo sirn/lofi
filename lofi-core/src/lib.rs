@@ -27,7 +27,7 @@ pub use lofi_code::memory::release_freed_memory;
 pub use lofi_code::policy::{default_mode as default_approval_mode, PolicyOverride};
 pub use lofi_code::tools::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
-    JobStyle,
+    JobStyle, TimerRegistry,
 };
 pub use lofi_code::ConfirmReason;
 pub use lofi_error::{Error, Result};

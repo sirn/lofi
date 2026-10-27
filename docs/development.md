@@ -71,6 +71,7 @@ The `code` is parsed as TypeScript, stripped of types with swc, wrapped in an as
 - File and search: `read`, `ls`, `find`, `grep`, `write`, `edit`, and `patch`.
 - Foreground shell: `bash`.
 - Background jobs: `jobSpawn`, `jobStatus`, `jobList`, `jobRead`, `jobScreen`, `jobKill`, `jobNotify`, `jobType`, and `jobKeyPress`.
+- Sleep and wake-up timers: `sleep`, `notifyAt`, `notifyEvery`, and `notifyCancel`. Fired notices arrive like job notices.
 - Session recovery: `recall` and `result`. They report unavailability without a persisted session.
 - Skills: `skills` and `skill`.
 - Embedded reference: `docs` and `docsSearch`.

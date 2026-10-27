@@ -362,6 +362,7 @@ pub(crate) async fn run_loop(
         // Session-scoped state, read through the executor both backends own.
         let executor = a.tool_executor();
         app.jobs = Some(executor.jobs());
+        app.timers = Some(executor.timers());
         app.subagents = Some(a.subagents());
         // The `/policy` dialog writes the choice here; every exec in the
         // session reads it. Cloned (not moved) so model switches keep it.
@@ -631,6 +632,7 @@ pub(crate) async fn run_loop(
                                     app.system_prompt = new_agent.system_prompt().into();
                                     let executor = new_agent.tool_executor();
                                     app.jobs = Some(executor.jobs());
+                                    app.timers = Some(executor.timers());
                                     app.policy_override = Some(executor.policy_override());
                                     app.auto_mode_configured = executor.has_auto_mode();
                                     let new_subagents = Some(new_agent.subagents());
@@ -730,10 +732,13 @@ pub(crate) async fn run_loop(
             }
             _ = tick.tick() => {
                 close_finished_run(&mut current_run);
-                // One pull per tick. Taking a notice also drops its job from
-                // the notification area, so this loop hands the prompt over
-                // in the same frame the line goes away.
-                for queued in app.take_job_notices() {
+                // One pull per tick. Taking a job notice also drops its
+                // job from the notification area, so this loop hands the
+                // prompt over in the same frame the line goes away. Fired
+                // timer notices join the same prompts.
+                let mut queued_notices = app.take_job_notices();
+                queued_notices.extend(app.take_timer_notices());
+                for queued in queued_notices {
                     if app.busy() {
                         app.prompt_queue.push(queued);
                         if let Some(r) = &current_run {

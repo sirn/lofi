@@ -151,6 +151,10 @@ pub struct Agent {
     /// spawned in one round is visible to the next. The host shuts down
     /// survivors when the session ends.
     jobs: lofi_code::tools::JobRegistry,
+    /// Session-scoped wake-up timers (`lofi.notifyAt`/`lofi.notifyEvery`)
+    /// shared with every exec; the host polls fired notices and hands them
+    /// back to the agent as notice prompts.
+    timers: lofi_code::tools::TimerRegistry,
     /// Owning subagent run id; set on child agents so their spawned jobs
     /// are tagged for kill-by-owner and the per-owner cap.
     job_owner: Option<String>,
@@ -218,6 +222,7 @@ impl Agent {
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
             jobs: lofi_code::tools::JobRegistry::new(),
+            timers: lofi_code::tools::TimerRegistry::new(),
             job_owner: None,
             mailbox: None,
             exec_worker: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -259,6 +264,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
             mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
@@ -290,6 +296,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
             mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
@@ -324,6 +331,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir,
             jobs: self.jobs.clone(),
+            timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
             mailbox: self.mailbox.clone(),
             exec_worker: self.exec_worker.clone(),
@@ -357,6 +365,7 @@ impl Agent {
             policy_override: executor.policy_override.clone(),
             skills_dir: executor.skills_dir.clone(),
             jobs: executor.jobs.clone(),
+            timers: executor.timers.clone(),
             job_owner: executor.job_owner.clone(),
             exec_worker: executor.exec_worker.clone(),
             mailbox: executor.mailbox.clone(),
@@ -432,6 +441,7 @@ impl Agent {
             policy_override: self.policy_override.clone(),
             skills_dir: self.skills_dir.clone(),
             jobs: self.jobs.clone(),
+            timers: self.timers.clone(),
             job_owner: self.job_owner.clone(),
             exec_worker: self.exec_worker.clone(),
             subagent: self.subagent_hook(),
@@ -463,6 +473,7 @@ impl Agent {
         self.policy_override = executor.policy_override;
         self.skills_dir = executor.skills_dir;
         self.jobs = executor.jobs;
+        self.timers = executor.timers;
         self.exec_worker = executor.exec_worker;
         self.job_owner = executor.job_owner;
         // A fork built from this executor carries the mailbox the spawner
@@ -526,6 +537,13 @@ impl Agent {
     #[must_use]
     pub fn jobs(&self) -> lofi_code::tools::JobRegistry {
         self.jobs.clone()
+    }
+
+    /// Session-scoped wake-up timers, for a host to poll the notices fired
+    /// since its last pull.
+    #[must_use]
+    pub fn timers(&self) -> lofi_code::tools::TimerRegistry {
+        self.timers.clone()
     }
 
     /// The session's subagent registry (shared by every clone). The UI keeps

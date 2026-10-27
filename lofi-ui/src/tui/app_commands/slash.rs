@@ -320,6 +320,11 @@ impl App {
         if let Some(jobs) = &self.jobs {
             jobs.reset();
         }
+        // Pending timers belong to the old conversation; a `/new` session
+        // must not be woken by them.
+        if let Some(timers) = &self.timers {
+            timers.reset();
+        }
         self.jobs_modal = None;
         self.prompt_queue
             .retain(|queued| queued.kind == lofi_types::PromptKind::User);

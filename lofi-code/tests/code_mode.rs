@@ -27,6 +27,7 @@ fn ctx(root: &Path) -> ExecCtx {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        timers: lofi_code::tools::TimerRegistry::new(),
         job_owner: None,
         on_job_acquired: None,
         subagent: None,
@@ -350,6 +351,7 @@ async fn strings_exposed_as_lofi_strings() {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        timers: lofi_code::tools::TimerRegistry::new(),
         job_owner: None,
         on_job_acquired: None,
         subagent: None,
@@ -516,6 +518,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        timers: lofi_code::tools::TimerRegistry::new(),
         job_owner: None,
         on_job_acquired: None,
         subagent: None,
@@ -581,6 +584,7 @@ async fn hook_backed_tools_emit_tool_events() {
         skills_dir: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
+        timers: lofi_code::tools::TimerRegistry::new(),
         job_owner: None,
         on_job_acquired: None,
         subagent: None,
@@ -1013,4 +1017,47 @@ async fn job_spawn_honours_shell_policy_deny() {
     let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
     assert_eq!(res.value["ok"], json!(false));
     assert!(res.value["status"].as_str().is_some(), "res: {}", res.value);
+}
+
+#[tokio::test]
+async fn sleep_blocks_inside_the_exec() {
+    let dir = tempfile::tempdir().unwrap();
+    let cx = trusted_ctx(dir.path());
+    let src = "const t = Date.now(); await lofi.sleep(0.05); return Date.now() - t >= 40;";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value, json!(true));
+}
+
+#[tokio::test]
+async fn notify_at_queues_a_wake_up_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let cx = trusted_ctx(dir.path());
+    let src =
+        "const r = await lofi.notifyAt('2020-01-01T00:00:00Z', 'check the build'); return r.ok;";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value, json!(true));
+    assert_eq!(
+        cx.timers.take_notices(),
+        vec!["notifyAt fired: check the build"]
+    );
+}
+
+#[tokio::test]
+async fn notify_cancel_cancels_pending_timers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cx = trusted_ctx(dir.path());
+    let src = "await lofi.notifyAt('2030-01-01T00:00:00Z'); \
+               await lofi.notifyEvery('5m', 'tick'); \
+               return (await lofi.notifyCancel()).cancelled;";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(res.value, json!(2));
+    assert!(cx.timers.take_notices().is_empty());
+}
+
+#[tokio::test]
+async fn notify_at_rejects_a_bad_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let cx = trusted_ctx(dir.path());
+    let src = "return await lofi.notifyAt('tomorrow');";
+    exec(src, &cx, &ExecOptions::default()).await.unwrap_err();
 }

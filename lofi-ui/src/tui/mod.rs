@@ -288,6 +288,9 @@ pub(crate) struct App {
     /// startup. `None` when no agent is configured. Backs the `/job` modal
     /// and the persistent running-jobs badge.
     jobs: Option<lofi_core::JobRegistry>,
+    /// The session's wake-up timer registry, cloned from the agent
+    /// alongside `jobs`. Fired notices leave here as notice prompts.
+    timers: Option<lofi_core::TimerRegistry>,
     /// The session's subagent registry, cloned from the agent alongside
     /// `jobs`. `/new` clears it so old subagent ids cannot resume into the
     /// new session.

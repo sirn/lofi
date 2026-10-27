@@ -183,6 +183,7 @@ pub async fn exec(src: &str, ctx: &ExecCtx, opts: &ExecOptions) -> Result<ExecRe
         .with_cancel(opts.cancel.clone())
         .with_truncate(ctx.truncate)
         .with_jobs(ctx.jobs.clone())
+        .with_timers(ctx.timers.clone())
         .with_job_owner(ctx.job_owner.clone())
         .with_on_job_acquired(ctx.on_job_acquired.clone()),
     );

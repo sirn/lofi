@@ -24,6 +24,7 @@ pub(super) fn bind_tools<'js>(
 ) -> rquickjs::Result<()> {
     bind_file_tools(ctx, lofi, tools)?;
     bind_job_tools(ctx, lofi, tools)?;
+    bind_time_tools(ctx, lofi, tools)?;
     bind_recall_tool(ctx, lofi, tools, recall)?;
     bind_result_tool(ctx, lofi, tools, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
@@ -493,6 +494,143 @@ fn bind_job_tools<'js>(
                         args: String::new(),
                     });
                     let res = t.job_list(serde_json::Value::Null).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+    Ok(())
+}
+
+/// Sleep and wake-up timers share the tool-event path of the file and job
+/// tools, so their calls tile in the UI and record in the transcript like
+/// every other exec tool. The guest sees functions on `lofi`; the
+/// arguments stay positional (`notifyAt(at, message?)`) to match the API
+/// examples.
+#[allow(clippy::too_many_lines)]
+fn bind_time_tools<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+) -> rquickjs::Result<()> {
+    let t = tools.clone();
+    lofi.set(
+        "sleep",
+        Function::new(
+            ctx.clone(),
+            Async(move |seconds: Value| {
+                let t = t.clone();
+                let args = js_to_json(&seconds);
+                let label = cap_first_line(&format!("sleep {args}"), 120);
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "sleep".into(),
+                        args: label,
+                    });
+                    let res = t.sleep(args).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "notifyAt",
+        Function::new(
+            ctx.clone(),
+            Async(move |at: Value, message: Opt<Value>| {
+                let t = t.clone();
+                let at = js_to_json(&at);
+                let message = message.0.as_ref().map(js_to_json);
+                let label = cap_first_line(
+                    &format!("notifyAt {}", at.as_str().unwrap_or_default()),
+                    120,
+                );
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "notifyAt".into(),
+                        args: label,
+                    });
+                    let res = t.notify_at(at, message).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    let t = tools.clone();
+    lofi.set(
+        "notifyEvery",
+        Function::new(
+            ctx.clone(),
+            Async(move |every: Value, message: Opt<Value>| {
+                let t = t.clone();
+                let every = js_to_json(&every);
+                let message = message.0.as_ref().map(js_to_json);
+                let label = cap_first_line(
+                    &format!("notifyEvery {}", every.as_str().unwrap_or_default()),
+                    120,
+                );
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "notifyEvery".into(),
+                        args: label,
+                    });
+                    let res = t.notify_every(every, message).await;
+                    let (result, is_error) = tool_preview(&res);
+                    t.emit(ToolEvent::End {
+                        id,
+                        result,
+                        is_error,
+                    });
+                    tool_result(res)
+                }
+            }),
+        )?,
+    )?;
+
+    // notifyCancel takes no arguments; a required `Value` parameter
+    // would reject the zero-argument call, so the binding takes `Opt<Value>`.
+    let t = tools.clone();
+    lofi.set(
+        "notifyCancel",
+        Function::new(
+            ctx.clone(),
+            Async(move |_: Opt<Value>| {
+                let t = t.clone();
+                async move {
+                    let id = t.next_tool_id();
+                    t.emit(ToolEvent::Start {
+                        id,
+                        name: "notifyCancel".into(),
+                        args: String::new(),
+                    });
+                    let res = t.notify_cancel(serde_json::Value::Null).await;
                     let (result, is_error) = tool_preview(&res);
                     t.emit(ToolEvent::End {
                         id,

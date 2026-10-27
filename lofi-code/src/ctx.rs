@@ -190,6 +190,8 @@ pub struct ExecCtx {
     /// Session-scoped background job registry shared with the owning
     /// agent.
     pub jobs: crate::tools::JobRegistry,
+    /// Session-scoped wake-up timer registry shared with the owning agent.
+    pub timers: crate::tools::TimerRegistry,
     /// Owning subagent run id when this exec belongs to one. Jobs spawned
     /// here are tagged with it so the subagent can be cancelled with its
     /// process tree.
