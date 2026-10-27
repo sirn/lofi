@@ -45,7 +45,7 @@ return {
   docs: docs.entries.length,
   doc: doc.name,
   search: search.results[0].name,
-  tmp: lofi.tmp_dir,
+  tmp: lofi.tmpDir,
 };
 "#,
         ),

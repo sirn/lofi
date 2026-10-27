@@ -74,7 +74,7 @@ The `code` is parsed as TypeScript, stripped of types with swc, wrapped in an as
 - Session recovery: `recall` and `result`. They report unavailability without a persisted session.
 - Skills: `skills` and `skill`.
 - Embedded reference: `docs` and `docsSearch`.
-- `tmp_dir`, the per-session temporary directory path.
+- `tmpDir`, the per-session temporary directory path.
 
 The precise arguments, structured return values, paging limits, and safety caps are documented in the embedded API reference (`lofi --docs`) and `lofi-code/src/docs/api.md`.
 

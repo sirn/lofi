@@ -334,7 +334,7 @@ fn install_globals<'js>(
     bind_tools(
         ctx, &lofi, tools, recall, result, skills_dir, subagent, models,
     )?;
-    lofi.set("tmp_dir", tools.tmp_dir().to_string_lossy().to_string())?;
+    lofi.set("tmpDir", tools.tmp_dir().to_string_lossy().to_string())?;
     let install_tracker: Function = ctx.eval(TRACK_FOREGROUND_TOOLS)?;
     let drain_tools = install_tracker.call((lofi.clone(),))?;
     ctx.globals().set("lofi", lofi)?;

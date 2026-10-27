@@ -2,7 +2,7 @@
 
 The agent's single tool is `exec`. Inside `exec` code, call async functions on
 the global `lofi` object. Use `await`. All file paths are resolved against the
-workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmp_dir` and skill directories. Mutation paths that escape the workspace root are rejected.
+workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories. Mutation paths that escape the workspace root are rejected.
 
 ## lofi.read(path, opts?)
 
@@ -130,7 +130,7 @@ stderr are merged.
 **Returns:** `{ ok, output, code, command, directory, signal, duration_ms,
 status }`. `code` is the exit status (null on signal/timeout); `signal` is the
 Unix signal number (null unless killed by a signal); `duration_ms` is wall
-time; `status` is `"exited"`, `"signaled"`, or `"timeout"` after execution. A command blocked before execution returns `"denied"` or `"needs_confirmation"`, with `ok: false` and no exit code. Output is tail-truncated to the configured `[truncate] max_lines` and `max_bytes` values (defaults: 2000 lines and 50 KiB), keeping the end where errors land. When truncated, the full output is saved to a file under `lofi.tmp_dir`; the notice names it so you can page through it with `lofi.read(path)`. The child env is
+time; `status` is `"exited"`, `"signaled"`, or `"timeout"` after execution. A command blocked before execution returns `"denied"` or `"needs_confirmation"`, with `ok: false` and no exit code. Output is tail-truncated to the configured `[truncate] max_lines` and `max_bytes` values (defaults: 2000 lines and 50 KiB), keeping the end where errors land. When truncated, the full output is saved to a file under `lofi.tmpDir`; the notice names it so you can page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are
 present but their values are replaced with `[redacted]` in the output.
 
@@ -169,7 +169,7 @@ finish. Inspect state and output with `jobStatus` and `jobRead`.
 
 **Returns:** `{ ok, id, state, command, directory, pid, timeoutMs,
 logPath, tty, cols, rows, idleMs }`. `state` starts as `"running"`.
-`logPath` names the merged stdout/stderr log under `lofi.tmp_dir`; it is a
+`logPath` names the merged stdout/stderr log under `lofi.tmpDir`; it is a
 read root, so `lofi.read` on it also works. For a tty job the driver copies
 PTY output into this log. The log grows unbounded for the life of the job
 and is removed with the session; page through it with `jobRead` rather than
@@ -273,7 +273,7 @@ Errors with `ok: false` when the key is unknown or the job is not a tty job.
 
 **Returns:** `{ ok, id, key }`.
 
-## lofi.tmp_dir
+## lofi.tmpDir
 
 A string property: the absolute path to the per-session tmp directory backing
 `lofi.bash` full-output logs. This directory is a read root — `lofi.read`,

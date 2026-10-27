@@ -481,12 +481,12 @@ async fn exec_bash_read_pages_bash_log() {
 #[tokio::test]
 async fn exec_tmp_dir_exposed() {
     let dir = tempfile::tempdir().unwrap();
-    let src = "return lofi.tmp_dir;";
+    let src = "return lofi.tmpDir;";
     let res = exec(src, &ctx(dir.path()), &ExecOptions::default())
         .await
         .unwrap();
     let s: &str = res.value.as_str().unwrap();
-    assert!(s.contains("lofi-test"), "tmp_dir should be exposed: {s}");
+    assert!(s.contains("lofi-test"), "tmpDir should be exposed: {s}");
 }
 
 #[tokio::test]
