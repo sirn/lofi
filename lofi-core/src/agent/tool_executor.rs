@@ -479,6 +479,20 @@ impl ToolExecutor {
                         as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
                 }) as lofi_code::ConfirmFn
             });
+            let approve_dir: Option<lofi_code::ApproveDirFn> = self.confirm_tx.as_ref().map(|tx| {
+                let tx = tx.clone();
+                let counter = self.confirm_counter.clone();
+                let root = self.root.clone();
+                Arc::new(move |dir: PathBuf| {
+                    let tx = tx.clone();
+                    let counter = counter.clone();
+                    let root = root.clone();
+                    Box::pin(async move { approve_outside_dir(&root, dir, &tx, &counter).await })
+                        as std::pin::Pin<
+                            Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>,
+                        >
+                }) as lofi_code::ApproveDirFn
+            });
             let exec_ctx = ExecCtx {
                 root: self.root.clone(),
                 tmp_dir: self.tmp_dir.clone(),
@@ -489,6 +503,7 @@ impl ToolExecutor {
                 bash_env: self.bash_env.clone(),
                 shell_policy: self.shell_policy.clone(),
                 confirm,
+                approve_dir,
                 auto_mode: self.auto_mode.clone(),
                 policy_override: self.policy_override.clone(),
                 skills_dir: self.skills_dir.clone(),
@@ -652,4 +667,133 @@ pub(super) fn upgrade_exec_image(
         obj.insert("media_type".to_string(), serde_json::json!(&media_type));
     }
     Ok(Some(lofi_types::ToolResultImage { bytes, media_type }))
+}
+
+/// Asks the user to approve one directory tree for use outside the workspace
+/// root, and remembers an approval in the per-workspace state file so later
+/// sessions do not ask again. Returns the granted root: the remembered
+/// ancestor that already covers `dir`, or `dir` itself once approved. A
+/// refused prompt, or a closed confirmation channel, keeps the path rejected.
+async fn approve_outside_dir(
+    root: &std::path::Path,
+    dir: PathBuf,
+    tx: &tokio::sync::mpsc::UnboundedSender<ConfirmRequest>,
+    counter: &Arc<AtomicU64>,
+) -> Option<PathBuf> {
+    // A state file that cannot be opened only costs the prompt: the grant
+    // is then not remembered for the next session.
+    let state = state::WorkspaceState::open(root).ok();
+    if let Some(granted) = state.as_ref().and_then(|s| s.approved_root_for(&dir)) {
+        return Some(granted);
+    }
+    let id = counter.fetch_add(1, Ordering::SeqCst);
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let req = ConfirmRequest {
+        id,
+        command: dir.display().to_string(),
+        reason: Arc::new(Mutex::new(lofi_code::ConfirmReason::OutsideRoot {
+            dir: dir.display().to_string(),
+        })),
+        active: Arc::new(AtomicBool::new(true)),
+        respond: resp_tx,
+    };
+    if tx.send(req).is_err() {
+        return None;
+    }
+    if !resp_rx.await.unwrap_or(false) {
+        return None;
+    }
+    // The grant is reused only by this call's retry; a failed save means
+    // the next request asks again.
+    if let Some(state) = &state {
+        let _ = state.remember_approved_root(&dir);
+    }
+    Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn state_env() -> tempfile::TempDir {
+        let state_home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOFI_STATE_HOME", state_home.path());
+        state_home
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn approval_is_remembered_across_sessions() {
+        let _lock = state::STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _state_home = state_env();
+        let ws = tempfile::tempdir().unwrap();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+        let responder = tokio::spawn(async move {
+            let req = rx.recv().await.unwrap();
+            assert_eq!(req.command, "/data/dir");
+            assert!(matches!(
+                *req.reason
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                lofi_code::ConfirmReason::OutsideRoot { .. }
+            ));
+            req.respond.send(true).unwrap();
+        });
+        let granted =
+            approve_outside_dir(ws.path(), PathBuf::from("/data/dir"), &tx, &counter).await;
+        responder.await.unwrap();
+        assert_eq!(granted, Some(PathBuf::from("/data/dir")));
+
+        // A later session reads the state file: the call returns at once and
+        // no prompt opens on the channel.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            approve_outside_dir(ws.path(), PathBuf::from("/data/dir/sub"), &tx, &counter),
+        )
+        .await
+        .expect("remembered approval must not wait for a prompt");
+        assert_eq!(second, Some(PathBuf::from("/data/dir")));
+        assert!(rx.try_recv().is_err());
+
+        std::env::remove_var("LOFI_STATE_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn refusal_is_not_remembered() {
+        let _lock = state::STATE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _state_home = state_env();
+        let ws = tempfile::tempdir().unwrap();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // A refusal is not cached: both calls ask again and both are denied.
+        for _ in 0..2 {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmRequest>();
+            let responder = tokio::spawn(async move {
+                let req = rx.recv().await.unwrap();
+                req.respond.send(false).unwrap();
+            });
+            let granted =
+                approve_outside_dir(ws.path(), PathBuf::from("/data/dir"), &tx, &counter).await;
+            responder.await.unwrap();
+            assert_eq!(granted, None);
+        }
+        assert_eq!(
+            state::WorkspaceState::open(ws.path())
+                .unwrap()
+                .approved_root_for(std::path::Path::new("/data/dir")),
+            None
+        );
+
+        std::env::remove_var("LOFI_STATE_HOME");
+    }
 }

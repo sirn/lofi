@@ -6,8 +6,8 @@ Shell approval settings are in `policy.toml` in the same directory.
 
 Set `$LOFI_CONFIG` to use another configuration file.
 Set `$LOFI_POLICY` to use another shell policy file.
-Lofi stores sessions and model-discovery data in `$XDG_STATE_HOME/lofi/`,
-which defaults to `~/.local/state/lofi/`.
+Lofi stores sessions, model-discovery data, and approved outside-workspace
+directories in `$XDG_STATE_HOME/lofi/`, which defaults to `~/.local/state/lofi/`.
 The configuration directory remains read-only.
 
 ## Quick start
@@ -795,11 +795,24 @@ max_delay_ms = 60000
 
 Later delays use exponential backoff. Overload responses, HTTP 429/5xx, network drops, and truncated streams are retried. Authentication, quota/billing, and context-overflow failures are not.
 
+## Workspace directories
+
+File tools work in the workspace root.
+Reads also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories.
+Relative paths cannot leave the workspace root.
+
+An absolute path outside every allowed root opens one prompt.
+The prompt names the directory that the request uses: the directory itself, or the directory that holds the requested file.
+Approving allows reads and writes in that directory and its subdirectories.
+Lofi remembers an approved directory per workspace in `$XDG_STATE_HOME/lofi/states/<workspace-key>/state.json`, so a restart does not ask again.
+A refused prompt keeps the path rejected, and the next request asks again.
+Approval covers the file tools only. A `lofi.bash` command can reach any path the user can, and the shell policy gates it.
+
 ## Shell policy
 
 Shell policy lives in `policy.toml`, alongside `config.toml` by default. Every `lofi.bash` command is parsed structurally and evaluated against allow, ask, and deny rules. Unmatched commands fail closed to `ask`.
 
-`lofi.bash` runs through host `sh -c`. The policy controls approval; it is not a filesystem or network sandbox. A command approved by the user can read or modify anything available to that user. The default therefore requires confirmation for every model-generated shell command. Filesystem tools such as `lofi.read`, `lofi.write`, and `lofi.edit` remain confined to their registered roots.
+`lofi.bash` runs through host `sh -c`. The policy controls approval; it is not a filesystem or network sandbox. A command approved by the user can read or modify anything available to that user. The default therefore requires confirmation for every model-generated shell command. Filesystem tools such as `lofi.read`, `lofi.write`, and `lofi.edit` remain confined to the workspace root, registered roots, and directories the user approved.
 
 ### Modes
 

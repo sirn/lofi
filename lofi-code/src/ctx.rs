@@ -76,6 +76,11 @@ pub type JobAcquireFn = Arc<dyn Fn(u64) -> Option<JobReleaseFn> + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmReason {
     Policy,
+    /// A tool path outside the workspace root wants one directory approved
+    /// for read and write.
+    OutsideRoot {
+        dir: String,
+    },
     AutoEvaluating {
         started_at: std::time::Instant,
     },
@@ -106,6 +111,21 @@ pub type ConfirmFn = Arc<
     dyn Fn(
             ConfirmPrompt,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + Sync>>
+        + Send
+        + Sync,
+>;
+
+/// Asks the host to approve one directory tree for use outside the workspace
+/// root. The input is the directory the request would use. The result is the
+/// granted root that covers it — a remembered or newly approved directory —
+/// or `None` when the user refuses. A granted root covers its
+/// subdirectories, and a host that persists approvals answers without
+/// prompting on later runs.
+pub type ApproveDirFn = Arc<
+    dyn Fn(
+            PathBuf,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>>
         + Send
         + Sync,
 >;
@@ -180,6 +200,10 @@ pub struct ExecCtx {
     pub bash_env: BashEnv,
     pub shell_policy: crate::policy::ResolvedPolicy,
     pub confirm: Option<ConfirmFn>,
+    /// Approves one directory for use outside the workspace root. `None`
+    /// where no confirmation channel exists (tests, nested sandboxes); a path
+    /// outside every allowed root stays rejected there.
+    pub approve_dir: Option<ApproveDirFn>,
     pub auto_mode: Option<AutoModeFn>,
     /// Session-scoped `/policy` approval override shared with the owning
     /// agent.
@@ -221,6 +245,7 @@ impl std::fmt::Debug for ExecCtx {
             .field("bash_env", &self.bash_env)
             .field("shell_policy", &"<resolved>")
             .field("confirm", &self.confirm.is_some())
+            .field("approve_dir", &self.approve_dir.is_some())
             .field("auto_mode", &self.auto_mode.is_some())
             .field("subagent", &self.subagent.is_some())
             .field("models", &self.models.is_some())

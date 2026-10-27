@@ -27,8 +27,9 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    atomic_write, find_walk, parse_grep_args, reject_non_regular, reject_symlink_leaf,
-    resolve_for_read, resolve_under, walk_files_capped, WalkCeilings, WalkLimit,
+    approval_candidate, atomic_write, find_walk, is_outside_error, parse_grep_args,
+    reject_non_regular, reject_symlink_leaf, resolve_for_read, walk_files_capped, WalkCeilings,
+    WalkLimit, OUTSIDE_ROOT_ERROR,
 };
 pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
@@ -76,6 +77,8 @@ pub struct BuiltinTools {
     policy_override: crate::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
+    /// Approves one directory for use outside the workspace root.
+    approve_dir: Option<crate::ApproveDirFn>,
     cancel: Option<Arc<AtomicBool>>,
     /// Background jobs spawned by this session. Shared with the owning
     /// agent so jobs survive across the per-exec tool bundles. Explicit host
@@ -150,6 +153,7 @@ impl BuiltinTools {
             policy_override: crate::policy::PolicyOverride::default(),
             skills_dir,
             read_roots,
+            approve_dir: None,
             cancel: None,
             jobs: JobRegistry::new(),
             timers: TimerRegistry::new(),
@@ -212,6 +216,13 @@ impl BuiltinTools {
     #[must_use]
     pub fn with_policy_override(mut self, policy_override: crate::policy::PolicyOverride) -> Self {
         self.policy_override = policy_override;
+        self
+    }
+
+    /// Installs the outside-workspace directory approval hook.
+    #[must_use]
+    pub fn with_approve_dir(mut self, approve_dir: Option<crate::ApproveDirFn>) -> Self {
+        self.approve_dir = approve_dir;
         self
     }
 
@@ -279,20 +290,67 @@ impl BuiltinTools {
         self.skills_dir.as_deref()
     }
 
-    pub(super) fn resolve_for_read(&self, p: &str) -> Result<PathBuf> {
-        resolve_for_read(&self.root, &self.read_roots, p)
+    /// Resolves a read-only tool path against the workspace root and the
+    /// registered read roots. Returns the resolved path and the root that
+    /// contains it, which `ls`/`find`/`grep` strip from results.
+    pub(super) async fn resolve_read(&self, p: &str) -> Result<(PathBuf, PathBuf)> {
+        let mut roots = Vec::with_capacity(1 + self.read_roots.len());
+        roots.push(self.root.clone());
+        roots.extend(self.read_roots.iter().cloned());
+        self.resolve_with_approval(p, roots).await
     }
 
-    pub(super) fn root_for(&self, resolved: &Path) -> &Path {
-        if resolved.starts_with(&self.root) {
-            return &self.root;
-        }
-        for root in &self.read_roots {
-            if resolved.starts_with(root) {
-                return root;
+    /// Resolves a mutation path. Relative paths land under the workspace
+    /// root; a registered read root stays read-only without a prompt. An
+    /// absolute path outside every root offers a one-directory approval
+    /// first.
+    pub(super) async fn resolve_mutate(&self, p: &str) -> Result<PathBuf> {
+        if let Ok((resolved, root)) = resolve_for_read(&self.root, &self.read_roots, p) {
+            if root != self.root {
+                return Err(Error::Tool(format!("path is read-only: {p}")));
             }
+            return Ok(resolved);
         }
-        &self.root
+        self.resolve_with_approval(p, vec![self.root.clone()])
+            .await
+            .map(|(resolved, _)| resolved)
+    }
+
+    /// [`resolve_for_read`] with a one-directory approval for an absolute
+    /// path outside every root in `roots`. The approval is offered only for
+    /// the outside-roots rejection — it cannot fix a "cannot resolve" or
+    /// "invalid path" failure — and never for a filesystem-root candidate.
+    /// On approval the granted root is appended and the lookup runs again,
+    /// so the granted root also names the root that contains the result. A
+    /// refused or unavailable approval keeps the path rejected; relative
+    /// paths never reach the hook.
+    async fn resolve_with_approval(
+        &self,
+        p: &str,
+        mut roots: Vec<PathBuf>,
+    ) -> Result<(PathBuf, PathBuf)> {
+        match resolve_for_read(&roots[0], &roots[1..], p) {
+            Err(err)
+                if Path::new(p).is_absolute()
+                    && matches!(&err, Error::Tool(msg) if is_outside_error(msg)) =>
+            {
+                let Some(approve) = &self.approve_dir else {
+                    return Err(err);
+                };
+                let Some(candidate) = approval_candidate(Path::new(p)) else {
+                    return Err(err);
+                };
+                let Some(granted) = approve(candidate.clone()).await else {
+                    return Err(Error::Tool(format!(
+                        "{OUTSIDE_ROOT_ERROR}: {p} (user refused {})",
+                        candidate.display()
+                    )));
+                };
+                roots.push(granted);
+                resolve_for_read(&roots[0], &roots[1..], p)
+            }
+            result => result,
+        }
     }
 
     pub(crate) fn next_tool_id(&self) -> u64 {
@@ -316,6 +374,15 @@ mod tests {
 
     fn tools() -> (tempfile::TempDir, BuiltinTools) {
         let dir = tempdir().unwrap();
+        let tmp = dir.path().join("lofi-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tools = tools_in(dir.path().to_path_buf(), tmp);
+        (dir, tools)
+    }
+
+    /// A bundle whose registered read root (`tmp_dir`) sits outside the
+    /// workspace root, like the real session temporary directory.
+    fn tools_in(root: PathBuf, tmp_dir: PathBuf) -> BuiltinTools {
         let policy = crate::policy::ResolvedPolicy {
             allow: Vec::new(),
             ask: Vec::new(),
@@ -326,17 +393,7 @@ mod tests {
             yolo: true,
             allow_by_default: true,
         };
-        let tmp = dir.path().join("lofi-tmp");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let tools = BuiltinTools::with_tool_cb(
-            dir.path().to_path_buf(),
-            None,
-            tmp,
-            BashEnv::default(),
-            policy,
-            None,
-        );
-        (dir, tools)
+        BuiltinTools::with_tool_cb(root, None, tmp_dir, BashEnv::default(), policy, None)
     }
 
     fn grep_lines(v: &Value) -> Vec<String> {
@@ -1042,5 +1099,208 @@ mod tests {
         assert!(files.contains("target/built.rs"), "files: {files:?}");
         assert!(files.contains(".hidden/dot.rs"), "files: {files:?}");
         assert!(files.contains("src/main.rs"), "files: {files:?}");
+    }
+
+    /// An approval hook that records every requested candidate and answers
+    /// with `answer`.
+    fn recording_hook(
+        answer: Option<PathBuf>,
+        asked: Arc<Mutex<Vec<PathBuf>>>,
+    ) -> crate::ApproveDirFn {
+        Arc::new(move |dir: PathBuf| {
+            let answer = answer.clone();
+            let asked = asked.clone();
+            Box::pin(async move {
+                asked.lock().unwrap().push(dir);
+                answer
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + Sync>,
+                >
+        })
+    }
+
+    #[tokio::test]
+    async fn outside_read_asks_and_grants_the_holding_directory() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("sub")).unwrap();
+        std::fs::write(outside.path().join("sub/b.txt"), "hello").unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(outside_root.clone()),
+            asked.clone(),
+        )));
+
+        let path = outside
+            .path()
+            .join("sub/b.txt")
+            .to_string_lossy()
+            .into_owned();
+        let v = tools.read(&path, None, None).await.unwrap();
+        assert_eq!(v["content"], json!("hello"));
+
+        // The candidate is the directory that holds the file, not the whole
+        // outside tree.
+        assert_eq!(*asked.lock().unwrap(), vec![outside_root.join("sub")]);
+
+        // Results are shown against the granted root, the same way workspace
+        // results are shown against the workspace root.
+        let dir = outside.path().join("sub").to_string_lossy().into_owned();
+        let v = tools.ls(&dir).await.unwrap();
+        assert_eq!(v["entries"], json!(["sub/b.txt"]));
+    }
+
+    #[tokio::test]
+    async fn outside_write_grants_the_holding_directory() {
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        let outside_root = outside.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(outside_root.clone()),
+            asked.clone(),
+        )));
+
+        let path = outside
+            .path()
+            .join("new.txt")
+            .to_string_lossy()
+            .into_owned();
+        let v = tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("new.txt")).unwrap(),
+            "x"
+        );
+        assert_eq!(*asked.lock().unwrap(), vec![outside_root]);
+    }
+
+    #[tokio::test]
+    async fn outside_new_directory_is_granted_at_the_request() {
+        // A candidate that does not exist yet is granted as named, so a new
+        // top-level directory never turns into a grant for its parent.
+        let (_dir, tools) = tools();
+        let outside = tempdir().unwrap();
+        let candidate = outside.path().canonicalize().unwrap().join("new/deep");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools =
+            tools.with_approve_dir(Some(recording_hook(Some(candidate.clone()), asked.clone())));
+
+        let path = outside
+            .path()
+            .join("new/deep/file.txt")
+            .to_string_lossy()
+            .into_owned();
+        tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("new/deep/file.txt")).unwrap(),
+            "x"
+        );
+        assert_eq!(*asked.lock().unwrap(), vec![candidate]);
+    }
+
+    #[tokio::test]
+    async fn outside_refusal_keeps_the_path_rejected() {
+        let (_dir, tools) = tools();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(None, asked.clone())));
+
+        let err = tools.read("/etc/passwd", None, None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("path outside allowed roots"), "got: {msg}");
+        assert!(msg.contains("user refused"), "got: {msg}");
+        assert_eq!(*asked.lock().unwrap(), vec![PathBuf::from("/etc")]);
+    }
+
+    #[tokio::test]
+    async fn filesystem_root_is_never_an_approval_candidate() {
+        let (_dir, tools) = tools();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(PathBuf::from("/")),
+            asked.clone(),
+        )));
+
+        let err = tools.ls("/").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("path outside allowed roots"), "got: {msg}");
+        assert!(!msg.contains("user refused"), "got: {msg}");
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_under_a_read_root_is_read_only_without_a_prompt() {
+        // The read root must sit outside the workspace root, like the real
+        // session temporary directory, for the read-only contract to apply.
+        let ws = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        let tools = tools_in(ws.path().to_path_buf(), tmp.path().to_path_buf());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(tmp.path().to_path_buf()),
+            asked.clone(),
+        )));
+
+        let path = tools
+            .tmp_dir()
+            .join("out.txt")
+            .to_string_lossy()
+            .into_owned();
+        let err = tools
+            .write(json!({ "path": path, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("path is read-only"), "got: {err}");
+        assert!(!tools.tmp_dir().join("out.txt").exists());
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_request_approves_the_resolved_directory() {
+        use std::os::unix::fs::symlink;
+        let (_dir, tools) = tools();
+        let target = tempdir().unwrap();
+        std::fs::write(target.path().join("x.txt"), "payload").unwrap();
+        let holder = tempdir().unwrap();
+        symlink(target.path().join("x.txt"), holder.path().join("link")).unwrap();
+        let target_root = target.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(target_root.clone()),
+            asked.clone(),
+        )));
+
+        let path = holder.path().join("link").to_string_lossy().into_owned();
+        let v = tools.read(&path, None, None).await.unwrap();
+        assert_eq!(v["content"], json!("payload"));
+        // The candidate is the directory the symlink resolves into, so the
+        // retry after approval succeeds instead of failing again.
+        assert_eq!(*asked.lock().unwrap(), vec![target_root]);
+    }
+
+    #[tokio::test]
+    async fn relative_escape_never_asks() {
+        let (_dir, tools) = tools();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools.with_approve_dir(Some(recording_hook(
+            Some(PathBuf::from("/")),
+            asked.clone(),
+        )));
+
+        let err = tools.read("../escape", None, None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "got: {err}"
+        );
+        assert!(asked.lock().unwrap().is_empty());
     }
 }

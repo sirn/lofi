@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 impl BuiltinTools {
     /// # Errors
     /// Returns an error for invalid arguments, unsafe paths, or filesystem failures.
-    #[allow(clippy::unused_async)]
     pub async fn write(&self, args: Value) -> Result<Value> {
         let path = args
             .get("path")
@@ -20,7 +19,7 @@ impl BuiltinTools {
             .to_owned();
         let content = text.clone();
         reject_symlink_leaf(&self.root, &path, &format!("write {path}"))?;
-        let resolved = resolve_under(&self.root, &path)?;
+        let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("write {path}"), &resolved)?;
         let label = path.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {

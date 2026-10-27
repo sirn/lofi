@@ -27,10 +27,10 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if the path escapes the root, exceeds the file
     /// size limit, cannot be read, or `offset` is beyond the end of the file.
     pub async fn read(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<Value> {
-        // Symlinks are allowed: resolve_for_read canonicalizes the path
-        // (following symlinks) and checks the result is under an allowed
-        // root — that is the security boundary, not symlink rejection.
-        let resolved = self.resolve_for_read(path)?;
+        // Symlinks are allowed: resolution canonicalizes the path (following
+        // symlinks) and checks the result is under an allowed root — that is
+        // the security boundary, not symlink rejection.
+        let (resolved, _) = self.resolve_read(path).await?;
         reject_non_regular(&format!("read {path}"), &resolved)?;
         let label = path.to_string();
         let label_inner = label.clone();

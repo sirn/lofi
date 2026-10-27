@@ -7,7 +7,6 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] if `path` escapes the root, if `old` is absent,
     /// or if `old` occurs more than once (an ambiguous edit).
-    #[allow(clippy::unused_async)]
     pub async fn edit(&self, args: Value) -> Result<Value> {
         let path = args
             .get("path")
@@ -27,7 +26,7 @@ impl BuiltinTools {
         let old_echo = old.clone();
         let new_echo = new.clone();
         reject_symlink_leaf(&self.root, &path, &format!("edit {path}"))?;
-        let resolved = resolve_under(&self.root, &path)?;
+        let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("edit {path}"), &resolved)?;
         let label = path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {

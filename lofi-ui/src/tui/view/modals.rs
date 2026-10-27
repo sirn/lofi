@@ -751,6 +751,9 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .clone();
     let explanation = match reason {
         lofi_core::ConfirmReason::Policy => "Shell wants to run this command".to_string(),
+        lofi_core::ConfirmReason::OutsideRoot { dir } => {
+            format!("lofi wants to use {dir} and its subdirectories, read and write")
+        }
         lofi_core::ConfirmReason::AutoEvaluating { started_at } => {
             format!("Auto evaluation for {}s...", started_at.elapsed().as_secs())
         }

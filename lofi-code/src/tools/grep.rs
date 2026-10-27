@@ -76,7 +76,6 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] on an invalid pattern, an escaped path, or when
     /// a safety ceiling is exceeded.
-    #[allow(clippy::unused_async)]
     #[allow(clippy::too_many_lines)]
     pub async fn grep(&self, pattern: Value, path: Option<&str>) -> Result<Value> {
         let (re_src, ic, ctx, filtered) = parse_grep_args(pattern)?;
@@ -85,8 +84,7 @@ impl BuiltinTools {
         let re = builder
             .build()
             .map_err(|e| Error::Tool(format!("invalid regex {re_src:?}: {e}")))?;
-        let base = self.resolve_for_read(path.unwrap_or(""))?;
-        let root = self.root_for(&base).to_path_buf();
+        let (base, root) = self.resolve_read(path.unwrap_or("")).await?;
         let re_src_inner = re_src.clone();
         let (matches, oversize, unreadable) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, u64, u64)> {

@@ -10,10 +10,8 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] if `dir` escapes the root or the directory
     /// exceeds [`MAX_LS_ENTRIES`].
-    #[allow(clippy::unused_async)]
     pub async fn ls(&self, dir: &str) -> Result<Value> {
-        let resolved = self.resolve_for_read(dir)?;
-        let strip_root = self.root_for(&resolved).to_path_buf();
+        let (resolved, strip_root) = self.resolve_read(dir).await?;
         let label = dir.to_string();
         let mut entries = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let mut entries = Vec::new();

@@ -10,13 +10,11 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] if `dir` escapes the root, the glob is invalid,
     /// or a safety ceiling is exceeded.
-    #[allow(clippy::unused_async)]
     pub async fn find(&self, glob: &str, dir: Option<&str>, filtered: bool) -> Result<Value> {
-        let base = self.resolve_for_read(dir.unwrap_or(""))?;
+        let (base, root) = self.resolve_read(dir.unwrap_or("")).await?;
         let matcher = Glob::new(glob)
             .map_err(|e| Error::Tool(format!("invalid glob {glob:?}: {e}")))?
             .compile_matcher();
-        let root = self.root_for(&base).to_path_buf();
         let glob_inner = glob.to_string();
         let paths = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let mut hits = Vec::new();

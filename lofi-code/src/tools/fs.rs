@@ -110,14 +110,16 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
 /// Absolute paths are canonicalized (existing prefix) and checked against
 /// `primary_root` and every `extra_root`. Symlinks are followed by
 /// canonicalization; the final `starts_with` check against the allowed roots
-/// is the security boundary.
+/// is the security boundary. Returns the resolved path and the root that
+/// contains it, so result paths can be shown relative to that root.
 pub(super) fn resolve_for_read(
     primary_root: &Path,
     extra_roots: &[PathBuf],
     p: &str,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PathBuf)> {
     if p.is_empty() || !Path::new(p).is_absolute() {
-        return resolve_under(primary_root, p);
+        return resolve_under(primary_root, p)
+            .map(|resolved| (resolved, primary_root.to_path_buf()));
     }
 
     let path = Path::new(p);
@@ -149,14 +151,83 @@ pub(super) fn resolve_for_read(
     };
 
     if resolved.starts_with(primary_root) {
-        return Ok(resolved);
+        return Ok((resolved, primary_root.to_path_buf()));
     }
     for root in extra_roots {
         if resolved.starts_with(root) {
-            return Ok(resolved);
+            return Ok((resolved, root.clone()));
         }
     }
-    Err(Error::Tool(format!("path outside allowed roots: {p}")))
+    Err(Error::Tool(format!("{OUTSIDE_ROOT_ERROR}: {p}")))
+}
+
+/// The rejection a directory approval can fix. Shared with the approval
+/// flow so only this error prompts — approval cannot repair a "cannot
+/// resolve" or "invalid path" failure.
+pub(super) const OUTSIDE_ROOT_ERROR: &str = "path outside allowed roots";
+
+/// Whether `msg` is the outside-roots rejection built with
+/// [`OUTSIDE_ROOT_ERROR`].
+pub(super) fn is_outside_error(msg: &str) -> bool {
+    msg.starts_with(OUTSIDE_ROOT_ERROR)
+}
+
+/// Canonicalizes the deepest existing ancestor of `p` and re-joins the
+/// missing tail, so a path that does not exist yet still compares against
+/// canonical roots.
+fn canonicalize_partial(p: &Path) -> PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    let mut existing = p.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            return p.to_path_buf();
+        };
+        tail.push(name.to_owned());
+        let Some(parent) = existing.parent() else {
+            return p.to_path_buf();
+        };
+        existing = parent.to_path_buf();
+    }
+    let Ok(mut resolved) = existing.canonicalize() else {
+        return p.to_path_buf();
+    };
+    for name in tail.into_iter().rev() {
+        resolved.push(name);
+    }
+    resolved
+}
+
+/// The directory an outside-workspace request would use: the requested
+/// directory itself, or the directory that holds the requested file. This is
+/// the unit of approval. The full path is canonicalized first, so a symlink
+/// names the directory the retry will resolve into; the parent-chain walk
+/// below covers a not-yet-existing file. The candidate comes from the
+/// request instead of the nearest existing ancestor, so writing a new
+/// top-level directory never turns into a grant for its parent (or for
+/// `/`).
+pub(super) fn approval_candidate(p: &Path) -> Option<PathBuf> {
+    let dir = if let Ok(canon) = p.canonicalize() {
+        if canon.is_dir() {
+            canon
+        } else {
+            canon.parent()?.to_path_buf()
+        }
+    } else {
+        let dir = if p.is_dir() {
+            p.to_path_buf()
+        } else {
+            p.parent()?.to_path_buf()
+        };
+        canonicalize_partial(&dir)
+    };
+    // A filesystem root as the approval unit would grant read and write
+    // access to the whole tree, remembered across sessions, so it is never
+    // offered.
+    dir.parent()?;
+    Some(dir)
 }
 
 pub(super) fn reject_non_regular(label: &str, path: &Path) -> Result<()> {

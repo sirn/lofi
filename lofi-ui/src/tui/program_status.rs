@@ -176,7 +176,7 @@ fn waiting(app: &App) -> Option<&ConfirmRequest> {
         ConfirmReason::AutoAsk { .. }
         | ConfirmReason::AutoRisk { .. }
         | ConfirmReason::AutoFailed { .. } => true,
-        ConfirmReason::Policy => app
+        ConfirmReason::Policy | ConfirmReason::OutsideRoot { .. } => app
             .confirm_waiting
             .is_some_and(|(_, since)| since.elapsed() >= PERMISSION_DEBOUNCE),
     };

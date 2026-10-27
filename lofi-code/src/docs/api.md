@@ -2,7 +2,7 @@
 
 The agent's single tool is `exec`. Inside `exec` code, call async functions on
 the global `lofi` object. Use `await`. All file paths are resolved against the
-workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories. Mutation paths that escape the workspace root are rejected.
+workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories. Relative paths that escape the workspace root are rejected. An absolute path outside every allowed root asks the user to approve its directory for reads and writes; the approval covers the directory and its subdirectories and is remembered across sessions. Use an absolute path to reach an approved directory.
 
 ## lofi.read(path, opts?)
 

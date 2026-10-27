@@ -92,6 +92,123 @@ pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()>
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+/// The per-workspace state document: `state.json` in a directory under
+/// `states/`, keyed like `sessions/` and `tmp/`, so a project's remembered
+/// state never crosses into another workspace. The manager owns the document's format
+/// and its read-modify-write cycle, so the rest of the code reaches state
+/// through methods instead of reading the file itself.
+pub struct WorkspaceState {
+    path: PathBuf,
+}
+
+impl WorkspaceState {
+    /// Open the state of the workspace rooted at `cwd`. Nothing is read or
+    /// written yet: the file appears only when something is remembered.
+    /// # Errors
+    /// Returns [`Error::State`] if the base state directory cannot be
+    /// resolved.
+    pub fn open(cwd: &Path) -> Result<Self> {
+        let mut path = state_dir()?;
+        path.push("states");
+        path.push(workspace_key(cwd));
+        path.push("state.json");
+        Ok(Self { path })
+    }
+
+    /// The remembered approved directory that covers `dir`, if any. The
+    /// longest match wins, so a nested grant names the narrowest root.
+    /// Reads fail toward "not approved": a missing, unreadable, or corrupt
+    /// document only costs one more prompt.
+    #[must_use]
+    pub fn approved_root_for(&self, dir: &std::path::Path) -> Option<PathBuf> {
+        self.load()
+            .into_iter()
+            .filter(|approved| dir.starts_with(approved))
+            .max_by_key(|approved| approved.components().count())
+    }
+
+    /// The parsed list, or empty on a read failure or corrupt JSON: a
+    /// corrupt file is treated as no approvals rather than aborting the
+    /// caller.
+    fn load(&self) -> Vec<PathBuf> {
+        std::fs::read(&self.path)
+            .map(|bytes| parse_dirs(&bytes))
+            .unwrap_or_default()
+    }
+
+    /// Remember `dir` as approved for use outside the workspace root, so
+    /// later sessions do not ask again.
+    /// # Errors
+    /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`]
+    /// if the document cannot be serialized.
+    pub fn remember_approved_root(&self, dir: &std::path::Path) -> Result<()> {
+        // Concurrent approvals read-modify-write the same file, so the whole
+        // operation is serialized and the existing list is re-read and merged
+        // inside the lock instead of trusting an earlier read.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A first approval has no file to merge into, but any other read
+        // failure must abort the save: treating it as an empty list would
+        // overwrite a good file and drop every remembered approval.
+        let mut dirs = match std::fs::read(&self.path) {
+            Ok(bytes) => parse_dirs(&bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        if !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_path_buf());
+            dirs.sort();
+        }
+        self.write(&dirs)
+    }
+
+    /// Replace the document atomically beside its destination, so a torn
+    /// write cannot drop every remembered directory. The tmp name carries
+    /// a timestamp so writers in other processes cannot clobber one tmp
+    /// file before the rename.
+    /// # Errors
+    /// Returns [`Error::Io`] on filesystem failure, or [`Error::State`]
+    /// if the state path has no parent.
+    fn write(&self, dirs: &[PathBuf]) -> Result<()> {
+        let root = self
+            .path
+            .parent()
+            .ok_or_else(|| Error::State("workspace state path has no parent".to_string()))?;
+        ensure_private_dir(root)?;
+        let value = serde_json::json!({ "version": 1, "dirs": dirs });
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|e| Error::State(format!("serialize workspace state: {e}")))?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let tmp = root.join(format!(".{}-{nanos}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        ensure_private_file(&tmp)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+/// The parsed list, or empty on corrupt JSON: a corrupt file is treated
+/// as no approvals rather than aborting the caller.
+fn parse_dirs(bytes: &[u8]) -> Vec<PathBuf> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("dirs")
+        .and_then(serde_json::Value::as_array)
+        .map(|dirs| {
+            dirs.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) struct SessionTempDir {
     path: PathBuf,
     _lease: std::fs::File,
@@ -356,5 +473,114 @@ mod tests {
 
         collect_abandoned_tmp_dirs(root.path()).unwrap();
         assert!(staging.exists());
+    }
+
+    #[test]
+    fn approved_roots_remember_across_restarts_and_stay_workspace_scoped() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("lofi_state_test_approved_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        let ws = Path::new("/ws/proj");
+        let state = WorkspaceState::open(ws).unwrap();
+        assert_eq!(state.approved_root_for(Path::new("/data/dir")), None);
+
+        state
+            .remember_approved_root(Path::new("/data/dir"))
+            .unwrap();
+
+        // Every lookup re-reads the file, so these cover a restart.
+        assert_eq!(
+            state.approved_root_for(Path::new("/data/dir")),
+            Some(PathBuf::from("/data/dir"))
+        );
+        assert_eq!(
+            state.approved_root_for(Path::new("/data/dir/sub/x.txt")),
+            Some(PathBuf::from("/data/dir"))
+        );
+
+        // A nested grant wins over its parent, so the narrowest root names
+        // the tree the tool result is shown against.
+        state.remember_approved_root(Path::new("/data")).unwrap();
+        assert_eq!(
+            state.approved_root_for(Path::new("/data/dir/sub")),
+            Some(PathBuf::from("/data/dir"))
+        );
+        assert_eq!(
+            state.approved_root_for(Path::new("/data/other")),
+            Some(PathBuf::from("/data"))
+        );
+
+        // A sibling of every grant stays unapproved, and another workspace
+        // remembers nothing.
+        assert_eq!(state.approved_root_for(Path::new("/elsewhere")), None);
+        assert_eq!(
+            WorkspaceState::open(Path::new("/ws/other"))
+                .unwrap()
+                .approved_root_for(Path::new("/data/dir")),
+            None
+        );
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn approved_roots_survive_a_corrupt_file() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "lofi_state_test_approved_corrupt_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        let ws = Path::new("/ws/proj");
+        let state = WorkspaceState::open(ws).unwrap();
+        let path = state.path.clone();
+        ensure_private_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        assert_eq!(state.approved_root_for(Path::new("/data/dir")), None);
+        state
+            .remember_approved_root(Path::new("/data/dir"))
+            .unwrap();
+        assert_eq!(
+            state.approved_root_for(Path::new("/data/dir")),
+            Some(PathBuf::from("/data/dir"))
+        );
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn remember_aborts_when_the_existing_list_cannot_be_read() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "lofi_state_test_approved_unreadable_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        // A directory at the file path makes the merge read fail with an
+        // error other than NotFound.
+        let ws = Path::new("/ws/proj");
+        let state = WorkspaceState::open(ws).unwrap();
+        let path = state.path.clone();
+        ensure_private_dir(&path).unwrap();
+
+        // The save must abort rather than merge into an empty list and
+        // overwrite the file.
+        assert!(state
+            .remember_approved_root(Path::new("/data/dir"))
+            .is_err());
+        assert!(path.is_dir());
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

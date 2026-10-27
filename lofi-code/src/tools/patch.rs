@@ -1,4 +1,4 @@
-use super::{atomic_write, reject_non_regular, reject_symlink_leaf, resolve_under, BuiltinTools};
+use super::{atomic_write, reject_non_regular, reject_symlink_leaf, BuiltinTools};
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
@@ -19,7 +19,6 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Tool`] if the patch is malformed, a hunk's context
     /// cannot be matched in the file, or the write fails.
-    #[allow(clippy::unused_async)]
     pub async fn patch(&self, args: Value) -> Result<Value> {
         let path = args
             .get("path")
@@ -32,7 +31,7 @@ impl BuiltinTools {
             .ok_or_else(|| Error::Tool("patch: missing 'patch'".into()))?
             .to_owned();
         reject_symlink_leaf(&self.root, &path, &format!("patch {path}"))?;
-        let resolved = resolve_under(&self.root, &path)?;
+        let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("patch {path}"), &resolved)?;
         let label = path.clone();
         let hunks = parse_unified_patch(&diff_text)
@@ -50,7 +49,7 @@ impl BuiltinTools {
         .map_err(|e| Error::Tool(format!("patch {label}: {e}")))??;
         let updated = apply_hunks(&content, &hunks)
             .map_err(|e| Error::Tool(format!("patch {label}: {e}")))?;
-        let resolved2 = resolve_under(&self.root, &path)?;
+        let resolved2 = self.resolve_mutate(&path).await?;
         tokio::task::spawn_blocking(move || {
             atomic_write(&resolved2, updated.as_bytes())
                 .map_err(|e| Error::Tool(format!("patch: {e}")))
