@@ -35,6 +35,53 @@ pub fn build_wrapper_map(entries: &[lofi_types::WrapperRuleConfig]) -> WrapperRu
         .collect()
 }
 
+/// Wrapper kinds whose word list is the inner command's argv: the wrapper
+/// runs it in the foreground and forwards its outcome. `ShellC` is not one:
+/// its argument is a shell program, not an argv. `DockerRun` is not one
+/// either: `--detach` runs the container in the background, so the inner
+/// command is never a foreground call.
+const ARGV_WRAPPERS: &[WrapperKind] = &[
+    WrapperKind::Env,
+    WrapperKind::UtilityOperand,
+    WrapperKind::Xargs,
+];
+
+/// The argv a command runs with the shell's transparent decorations gone:
+/// the leading `NAME=value` words and argv wrappers (`env`, `sudo`, `nice`,
+/// ...) per the configured wrapper rules. Callers classify this argv to
+/// decide what the command actually runs.
+#[must_use]
+pub fn effective_argv(words: &[&str], wrappers: &WrapperRuleMap) -> Vec<String> {
+    let mut argv: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
+    strip_command_assignments(&mut argv);
+    while let Some(kind) = argv
+        .first()
+        .and_then(|w| wrappers.get(&w.to_ascii_lowercase()))
+        .copied()
+    {
+        if !ARGV_WRAPPERS.contains(&kind) {
+            break;
+        }
+        let Some(inner) = unwrap_wrapper(kind, &argv) else {
+            break;
+        };
+        argv = inner;
+        // A wrapper can take its own NAME=value operands (`nice FOO=1
+        // sleep 5`), which the one-time strip above does not reach, so
+        // re-strip before the next wrapper check and the final argv.
+        strip_command_assignments(&mut argv);
+    }
+    argv
+}
+
+fn strip_command_assignments(argv: &mut Vec<String>) {
+    let mut assigned = 0;
+    while argv.get(assigned).is_some_and(|w| is_command_assignment(w)) {
+        assigned += 1;
+    }
+    argv.drain(..assigned);
+}
+
 const SKIP_SEGMENT: &[&str] = &["for", "case", "select", "in", "done", "fi", "esac"];
 
 const STRIP_KEYWORDS: &[&str] = &["while", "until", "if", "elif", "do", "then", "else"];
@@ -141,9 +188,33 @@ pub fn extract_commands(
     results
 }
 
+/// A `name=value` operand `env` forwards to the environment. `env` is not
+/// the shell: it takes names the shell would reject, so any word with a
+/// non-leading `=` counts.
 fn is_assignment(word: &str) -> bool {
     word.find('=').is_some_and(|i| i > 0)
 }
+
+/// A `NAME=value` word the shell applies to one command. A shell name is
+/// required: `foo-bar=x` names a command, it is not an assignment.
+fn is_command_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// Option arity is per-command, so these tables cover only the common
+// value-taking options of the configured argv wrappers (`sudo -u`,
+// `nice -n`, `env -u`, ...). Bundled or unknown options keep the old
+// behavior (only the dash word is skipped), and a positional operand
+// like `timeout 5 sleep 5` is a known gap.
+const UTILITY_VALUE_OPTIONS: &[&str] = &["-u", "-g", "-p", "-r", "-t", "-C", "-n"];
+
+const ENV_VALUE_OPTIONS: &[&str] = &["-u", "-C", "-S"];
 
 fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
     match kind {
@@ -159,21 +230,23 @@ fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
         }
         WrapperKind::UtilityOperand | WrapperKind::Xargs => {
             let mut saw_dash = false;
-            for w in &words[1..] {
+            let mut i = 1;
+            while i < words.len() {
+                let w = &words[i];
                 if !saw_dash && w == "--" {
                     saw_dash = true;
+                    i += 1;
                     continue;
                 }
                 if !saw_dash && w.starts_with('-') {
+                    if UTILITY_VALUE_OPTIONS.contains(&w.as_str()) {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                     continue;
                 }
-                return Some(
-                    words
-                        .iter()
-                        .skip_while(|x| !std::ptr::eq(*x, w))
-                        .cloned()
-                        .collect(),
-                );
+                return Some(words[i..].to_vec());
             }
             None
         }
@@ -188,7 +261,11 @@ fn unwrap_wrapper(kind: WrapperKind, words: &[String]) -> Option<Vec<String>> {
                     continue;
                 }
                 if !saw_dash && w.starts_with('-') {
-                    i += 1;
+                    if ENV_VALUE_OPTIONS.contains(&w.as_str()) {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                     continue;
                 }
                 if is_assignment(w) {

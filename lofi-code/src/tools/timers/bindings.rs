@@ -82,7 +82,8 @@ impl BuiltinTools {
         let message = parse_message("notifyAt", message)?;
         let at_time = parse_timestamp(at).ok_or_else(|| {
             Error::Tool(
-                "notifyAt: 'at' must be an RFC 3339 timestamp like 2026-10-25T05:00:00+0900".into(),
+                "notifyAt: 'at' must be an RFC 3339 timestamp like 2026-01-01T09:00:00+00:00"
+                    .into(),
             )
         })?;
         if !self.timer_slot_available() {
@@ -171,7 +172,7 @@ fn parse_message(tool: &str, message: Option<Value>) -> Result<Option<String>> {
 }
 
 /// Parse an RFC 3339 timestamp, accepting the offset with or without a
-/// colon (`+0900` and `+09:00` both appear in the API examples).
+/// colon (`+0000` and `+00:00` are both accepted).
 fn parse_timestamp(at: &str) -> Option<SystemTime> {
     let normalized = normalize_offset(at);
     let dt = chrono::DateTime::parse_from_rfc3339(&normalized).ok()?;

@@ -19,6 +19,7 @@ mod bash_util;
 mod fs;
 pub mod jobs;
 pub mod skills;
+mod steer;
 pub mod timers;
 pub mod truncate;
 pub mod write;
@@ -841,6 +842,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_sleep_command_is_refused_by_steering() {
+        let (_dir, tools) = tools();
+        let v = tools.bash(json!({ "cmd": "sleep 0.1" })).await.unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["status"], json!("denied"));
+        assert_eq!(v["duration_ms"], json!(0));
+        let output = v["output"].as_str().unwrap();
+        assert!(output.contains("End the turn"), "output: {output}");
+        assert!(
+            output.contains("Set steer: false to run this command."),
+            "output: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_steer_false_runs_the_command() {
+        let (_dir, tools) = tools();
+        let v = tools
+            .bash(json!({ "cmd": "sleep 0.1", "steer": false }))
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert!(!v["output"].as_str().unwrap().contains("Steering"));
+    }
+
+    #[tokio::test]
+    async fn bash_external_agent_cli_is_refused_by_steering() {
+        let (_dir, tools) = tools();
+        // The refusal follows the parsed command shape: the CLI need not
+        // exist, and the command does not run.
+        let v = tools
+            .bash(json!({ "cmd": "codex --help", "timeoutMs": 5000 }))
+            .await
+            .unwrap();
+        assert_eq!(v["status"], json!("denied"));
+        assert!(v["output"].as_str().unwrap().contains("lofi.subagent"));
+    }
+
+    #[tokio::test]
+    async fn bash_backgrounding_refusal_names_jobspawn() {
+        let (_dir, tools) = tools();
+        let v = tools.bash(json!({ "cmd": "sleep 30 &" })).await.unwrap();
+        assert_eq!(v["status"], json!("denied"));
+        let output = v["output"].as_str().unwrap();
+        assert!(output.contains("bare & is not allowed"), "output: {output}");
+        assert!(output.contains("jobSpawn"), "output: {output}");
+        // The refusal has no opt-out; no line may promise one.
+        assert!(!output.contains("steer: false"), "output: {output}");
+    }
+
+    #[tokio::test]
+    async fn bash_backgrounding_refusal_drops_the_suggestion_with_steer_false() {
+        let (_dir, tools) = tools();
+        // Every detach idiom keeps its refusal with steer: false; only the
+        // jobSpawn suggestion is dropped.
+        for (cmd, base) in [
+            ("sleep 0.1 &", "bare & is not allowed"),
+            ("nohup sleep 5", "nohup is not allowed"),
+        ] {
+            let v = tools
+                .bash(json!({ "cmd": cmd, "steer": false }))
+                .await
+                .unwrap();
+            assert_eq!(v["status"], json!("denied"), "cmd: {cmd}");
+            let output = v["output"].as_str().unwrap();
+            assert!(output.contains(base), "cmd: {cmd}, output: {output}");
+            assert!(!output.contains("jobSpawn"), "cmd: {cmd}, output: {output}");
+            assert!(
+                !output.contains("steer: false"),
+                "cmd: {cmd}, output: {output}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn bash_keeps_only_a_compact_tail_and_saves_full_output() {
         // A bash output cap this small forces truncation of a 30-line output
         // so the tail behavior is pinchable in a tiny fixture.
@@ -887,8 +963,10 @@ mod tests {
     #[tokio::test]
     async fn bash_timeout() {
         let (_dir, tools) = tools();
+        // Not a plain `sleep`: steering refuses that command, and this
+        // test pins the bare timeout output.
         let v = tools
-            .bash(json!({ "cmd": "sleep 5", "timeoutMs": 50 }))
+            .bash(json!({ "cmd": "tail -f /dev/null", "timeoutMs": 50 }))
             .await
             .unwrap();
         assert_eq!(v["ok"], json!(false));
@@ -897,7 +975,7 @@ mod tests {
         assert_eq!(v["status"], json!("timeout"));
         assert_eq!(v["duration_ms"], json!(50));
         assert_eq!(v["signal"], Value::Null);
-        assert_eq!(v["command"], json!("sleep 5"));
+        assert_eq!(v["command"], json!("tail -f /dev/null"));
     }
 
     #[tokio::test]

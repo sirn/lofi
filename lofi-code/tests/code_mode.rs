@@ -379,6 +379,62 @@ async fn exec_bash_echo() {
 }
 
 #[tokio::test]
+async fn exec_bash_steering_refuses_unless_opted_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "const on = await lofi.bash({ cmd: 'sleep 0.1' }); const off = await lofi.bash({ cmd: 'sleep 0.1', steer: false }); return { refused: on.ok === false && on.output.includes('Set steer: false to run this command.'), ran: off.ok === true && !off.output.includes('Steering') };";
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!({ "refused": true, "ran": true }));
+}
+
+#[tokio::test]
+async fn exec_bash_steering_matches_the_parsed_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "const opt = await lofi.bash({ cmd: 'sleep -- 5' }); const wrapped = await lofi.bash({ cmd: \"env claude -p 'review this'\" }); const shell = await lofi.bash({ cmd: \"sh -c 'sleep 0.1'\" }); return { opt: opt.output.includes('notifyAt') && opt.output.includes('lofi.sleep') && opt.output.includes('notifyEvery'), wrapped: wrapped.output.includes('lofi.subagent'), shell: shell.ok === true && !shell.output.includes('Steering') };";
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.value,
+        json!({ "opt": true, "wrapped": true, "shell": true })
+    );
+}
+
+#[tokio::test]
+async fn exec_bash_policy_deny_beats_steering() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = trusted_ctx(dir.path());
+    cx.shell_policy = lofi_code::policy::defaults::resolve(&lofi_types::ShellPolicyConfig {
+        mode: lofi_types::ShellPolicyMode::Unrestricted,
+        deny: vec![lofi_types::CommandEntry {
+            match_str: "sleep".into(),
+            mode: lofi_types::MatchMode::Prefix,
+        }],
+        ..lofi_types::ShellPolicyConfig::default()
+    });
+    let src = "const on = await lofi.bash({ cmd: 'sleep 0.1' }); const off = await lofi.bash({ cmd: 'sleep 0.1', steer: false }); return { onPolicy: on.output.includes('blocked by shell policy'), onSteering: on.output.includes('Steering'), offPolicy: off.output.includes('blocked by shell policy'), offSteering: off.output.includes('Steering') };";
+    let res = exec(src, &cx, &ExecOptions::default()).await.unwrap();
+    assert_eq!(
+        res.value,
+        json!({ "onPolicy": true, "onSteering": false, "offPolicy": true, "offSteering": false })
+    );
+}
+
+#[tokio::test]
+async fn exec_bash_backgrounding_stays_refused_with_the_opt_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "const on = await lofi.bash({ cmd: 'sleep 0.1 &' }); const off = await lofi.bash({ cmd: 'sleep 0.1 &', steer: false }); return { onDenied: on.output.includes('bare & is not allowed'), onHint: on.output.includes('jobSpawn'), offDenied: off.output.includes('bare & is not allowed'), offHint: off.output.includes('jobSpawn'), offOptOut: off.output.includes('steer: false') };";
+    let res = exec(src, &trusted_ctx(dir.path()), &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.value,
+        json!({ "onDenied": true, "onHint": true, "offDenied": true, "offHint": false, "offOptOut": false })
+    );
+}
+
+#[tokio::test]
 async fn exec_drains_unawaited_bash_success() {
     let dir = tempfile::tempdir().unwrap();
     let res = exec(

@@ -95,7 +95,8 @@ impl BuiltinTools {
             return Err(Error::Tool("jobSpawn: run cancelled".into()));
         }
 
-        if let Some(blocked) = self.check_policy(&cmd).await {
+        // Steering is a bash tool behavior; a job runs its command plain.
+        if let Some(blocked) = self.check_policy(&cmd, false).await {
             return Ok(blocked);
         }
         // A kill can land while the prompt was open; stop before the child

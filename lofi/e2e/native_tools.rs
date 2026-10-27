@@ -111,7 +111,7 @@ const read = await lofi.read("many.txt");
 const bash = await lofi.bash({ cmd: "for i in $(seq 1 20); do echo shell-$i; done" });
 const fullPath = bash.output.match(/Full output: (.+?)\. Use lofi\.read/)[1];
 const full = await lofi.read(fullPath);
-const timedBash = await lofi.bash({ cmd: "sleep 60", timeoutMs: 20 });
+const timedBash = await lofi.bash({ cmd: "sleep 60", timeoutMs: 20, steer: false });
 let escape;
 try { await lofi.read("../outside.txt"); } catch (error) { escape = String(error); }
 let ambiguous;
@@ -157,7 +157,7 @@ const first = await lofi.jobSpawn({ cmd: "printf job-page-one; sleep 0.2; printf
 const notify = await lofi.jobNotify({ id: first.id, enabled: true, intervalMs: 1, changed: false });
 const silenced = await lofi.jobNotify({ id: first.id, enabled: false });
 const running = await lofi.jobStatus({ id: first.id });
-await lofi.bash({ cmd: "sleep 0.3" });
+await lofi.bash({ cmd: "sleep 0.3", steer: false });
 const done = await lofi.jobStatus({ id: first.id });
 const page1 = await lofi.jobRead({ id: first.id, limit: 12 });
 const page2 = await lofi.jobRead({ id: first.id, cursor: page1.cursor, limit: 100 });
@@ -168,7 +168,7 @@ const killedAgain = await lofi.jobKill({ id: second.id, reason: "idempotent mark
 const timed = await lofi.jobSpawn({ cmd: "sleep 60", timeoutMs: 20, notify: false });
 const failed = await lofi.jobSpawn({ cmd: "printf failed-job-marker; exit 23", notify: false });
 const large = await lofi.jobSpawn({ cmd: "yes x | head -c 70000", notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const timedStatus = await lofi.jobStatus({ id: timed.id });
 const failedStatus = await lofi.jobStatus({ id: failed.id });
 const failedLog = await lofi.jobRead({ id: failed.id });
@@ -177,7 +177,7 @@ const pastEnd = await lofi.jobRead({ id: large.id, cursor: 999999, limit: 1 });
 const concurrentA = await lofi.jobSpawn({ cmd: "sleep 0.05; printf concurrent-a", notify: false });
 const concurrentB = await lofi.jobSpawn({ cmd: "sleep 0.03; printf concurrent-b", notify: false });
 const concurrentC = await lofi.jobSpawn({ cmd: "sleep 0.01; printf concurrent-c", notify: false });
-await lofi.bash({ cmd: "sleep 0.1" });
+await lofi.bash({ cmd: "sleep 0.1", steer: false });
 const concurrentDoneA = await lofi.jobStatus({ id: concurrentA.id });
 const concurrentDoneB = await lofi.jobStatus({ id: concurrentB.id });
 const concurrentDoneC = await lofi.jobStatus({ id: concurrentC.id });
@@ -320,10 +320,10 @@ fn interactive_job_accepts_typed_input() {
             "interactive-job-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'Name? '; read name; echo \"hello:$name\"", tty: true, notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const typed = await lofi.jobType({ id: s.id, text: "ada" });
 const entered = await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { tty: s.tty, typed: typed.sent, entered: entered.ok, state: done.state, output: log.output };
@@ -362,15 +362,15 @@ fn tty_job_answers_a_multi_prompt_flow() {
             "multi-prompt-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf 'A: '; read a; printf 'B: '; read b; echo sum:$a$b", tty: true, notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const screen1 = await lofi.jobScreen({ id: s.id });
 const t1 = await lofi.jobType({ id: s.id, text: "one" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const screen2 = await lofi.jobScreen({ id: s.id });
 const t2 = await lofi.jobType({ id: s.id, text: "two" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { screen1: screen1.screen, screen2: screen2.screen, t1: t1.sent, t2: t2.sent, state: done.state, output: log.output };
@@ -406,11 +406,11 @@ fn tty_job_key_presses_deliver_xterm_byte_sequences() {
             "key-bytes-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "stty -icanon -echo; echo READY; od -An -tx1 -N 5; echo", tty: true, notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 await lofi.jobKeyPress({ id: s.id, key: "Backspace" });
 await lofi.jobKeyPress({ id: s.id, key: "Left" });
 await lofi.jobType({ id: s.id, text: "X" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { state: done.state, output: log.output };
@@ -439,9 +439,9 @@ fn tty_job_ctrl_c_interrupts_a_running_program() {
             "ctrl-c-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "sleep 60", tty: true, notify: false });
-await lofi.bash({ cmd: "sleep 0.3" });
+await lofi.bash({ cmd: "sleep 0.3", steer: false });
 await lofi.jobKeyPress({ id: s.id, key: "Ctrl+C" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 return { state: done.state, signal: done.signal };
 "#,
@@ -469,13 +469,13 @@ fn tty_job_ctrl_d_closes_stdin_to_a_read_loop() {
             "ctrl-d-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo go; while IFS= read -r line; do echo line:$line; done; echo eof", tty: true, notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 await lofi.jobType({ id: s.id, text: "hello" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 await lofi.jobType({ id: s.id, text: "world" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
 await lofi.jobKeyPress({ id: s.id, key: "Ctrl+D" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { state: done.state, output: log.output };
@@ -509,10 +509,10 @@ fn tty_job_has_term_dimensions_and_a_working_controlling_terminal() {
             "terminal-env-call",
             r#"
 const s = await lofi.jobSpawn({ cmd: "echo term=$TERM; stty size; read x < /dev/tty; echo tty:$x", tty: true, cols: 88, rows: 26, notify: false });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 await lofi.jobType({ id: s.id, text: "data" });
 await lofi.jobKeyPress({ id: s.id, key: "Enter" });
-await lofi.bash({ cmd: "sleep 0.2" });
+await lofi.bash({ cmd: "sleep 0.2", steer: false });
 const done = await lofi.jobStatus({ id: s.id });
 const log = await lofi.jobRead({ id: s.id });
 return { tty: s.tty, cols: s.cols, rows: s.rows, state: done.state, output: log.output };
@@ -550,7 +550,7 @@ fn plain_job_reports_idle_when_configured_via_job_notify() {
             r#"
 const s = await lofi.jobSpawn({ cmd: "printf burst; sleep 60", notify: false });
 const n = await lofi.jobNotify({ id: s.id, idleMs: 500, enabled: false });
-await lofi.bash({ cmd: "sleep 0.6" });
+await lofi.bash({ cmd: "sleep 0.6", steer: false });
 const status = await lofi.jobStatus({ id: s.id });
 await lofi.jobKill({ id: s.id });
 return { notifyIdleMs: n.idleMs, statusIdle: status.idle, idleMs: status.idleMs, tty: status.tty };

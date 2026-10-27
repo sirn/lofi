@@ -118,7 +118,7 @@ changes — the hunks locate their targets by context, not by exact string match
 **Returns:** `{ ok, path, hunks }` — number of hunks applied. Errors if the
 patch is malformed, a hunk's context is not found, or hunks are out of order.
 
-## lofi.bash({ cmd, timeoutMs? })
+## lofi.bash({ cmd, timeoutMs?, steer? })
 
 Run a shell command with `sh -c`, cwd pinned to the workspace root. Stdout and
 stderr are merged.
@@ -126,6 +126,8 @@ stderr are merged.
 **Parameters:**
 - `cmd` (string, required) — the shell command.
 - `timeoutMs` (number, optional) — timeout in milliseconds (default 120000).
+- `steer` (boolean, optional) — set `false` to run the command without
+  steering refusals (default `true`).
 
 **Returns:** `{ ok, output, code, command, directory, signal, duration_ms,
 status }`. `code` is the exit status (null on signal/timeout); `signal` is the
@@ -133,6 +135,25 @@ Unix signal number (null unless killed by a signal); `duration_ms` is wall
 time; `status` is `"exited"`, `"signaled"`, or `"timeout"` after execution. A command blocked before execution returns `"denied"` or `"needs_confirmation"`, with `ok: false` and no exit code. Output is tail-truncated to the configured `[truncate] max_lines` and `max_bytes` values (defaults: 2000 lines and 50 KiB), keeping the end where errors land. When truncated, the full output is saved to a file under `lofi.tmpDir`; the notice names it so you can page through it with `lofi.read(path)`. The child env is
 stripped to a minimal baseline by default; env vars the user approved are
 present but their values are replaced with `[redacted]` in the output.
+
+**Steering:** by default the tool refuses a command that is only a sleep
+call, or whose program word is the `claude` or `codex` CLI, before the run.
+Detection inspects the command's leading words only, so a CLI nested later in
+the command (for example after `&&`) is not refused. The refusal
+names the tool to use instead with one example call and the `steer: false`
+opt-out: `lofi.sleep` for a short wait, `notifyAt` to end the turn on a
+long pause (`notifyEvery` for a repeating one), or `lofi.subagent` for an
+agent call. With `steer: false` the command runs without steering. Bare `&`
+backgrounding is always refused with no opt-out: the refusal names
+`jobSpawn`, and `steer: false` drops that suggestion but keeps the refusal.
+Matching uses the parsed command, not a substring: leading `NAME=value`
+words and argv wrappers (`env`, `sudo`, `nice`, ...) are unwrapped, so
+`env claude` is refused like `claude` and `sleep -- 5` is refused like
+`sleep 5`. A wrapper that takes a shell program (`sh -c '...'`) is not
+matched through. Configured policy rules always apply. Steering is a
+`bash` tool behavior: `jobSpawn` runs its command without steering and
+still refuses bare `&`, dropping the `jobSpawn` suggestion because the
+caller already uses it.
 
 ## lofi.jobSpawn({ cmd, tty?, cols?, rows?, idleMs?, timeoutMs?, notify?, notifyIntervalMs? })
 
@@ -299,7 +320,7 @@ session drops pending timers.
 
 **Parameters:**
 - `at` (string, required) — an RFC 3339 timestamp with a timezone offset,
-  e.g. `2026-10-25T05:00:00+0900` or `2026-10-25T05:00:00Z`.
+  e.g. `2026-01-01T09:00:00+00:00` or `2026-01-01T09:00:00Z`.
 - `message` (string, optional) — carried in the notice as
   `notifyAt fired: <message>`. Without one the notice reads `notifyAt fired`.
   Limited to 500 characters.

@@ -24,8 +24,10 @@ impl BuiltinTools {
     /// Evaluate the command against the configured and session shell policy.
     /// Auto-mode emits an evaluating confirmation request immediately and
     /// races its decision against a manual response. Presentation and timing
-    /// policy belong to consumers of that event.
-    pub(super) async fn check_policy(&self, cmd: &str) -> Option<Value> {
+    /// policy belong to consumers of that event. With `steer` off (also used
+    /// by `jobSpawn`), a deny keeps its refusal but drops the steering
+    /// suggestion, and no steering refusal applies.
+    pub(super) async fn check_policy(&self, cmd: &str, steer: bool) -> Option<Value> {
         // Allow-all auto-passes allow and ask decisions but explicit deny
         // rules still block; deny-all is absolute and overrides even the
         // allow list.
@@ -43,12 +45,24 @@ impl BuiltinTools {
             .as_deref()
             .map(|c| format!(" (command: {c})"))
             .unwrap_or_default();
+        // A deny is authoritative and wins over steering; steering refuses
+        // only what would otherwise run or prompt. The backgrounding deny
+        // has no opt-out: it stays a refusal with and without steering.
+        if steer && decision.action != lofi_types::PolicyAction::Deny {
+            if let Some(msg) = super::steer::refusal_for(cmd, &self.shell_policy.wrappers) {
+                return Some(self.blocked_result(cmd, &msg, "denied"));
+            }
+        }
         match decision.action {
-            lofi_types::PolicyAction::Deny => Some(self.blocked_result(
-                cmd,
-                &format!("blocked by shell policy: {}{}", decision.reason, suffix),
-                "denied",
-            )),
+            lofi_types::PolicyAction::Deny => {
+                let reason = if steer {
+                    decision.reason.as_str()
+                } else {
+                    decision.reason_without_steering()
+                };
+                let output = format!("blocked by shell policy: {reason}{suffix}");
+                Some(self.blocked_result(cmd, &output, "denied"))
+            }
             lofi_types::PolicyAction::Ask => {
                 if mode == lofi_types::BashApprovalMode::AllowAll {
                     return None;
@@ -78,8 +92,8 @@ impl BuiltinTools {
         }
     }
 
-    /// Shared result shape for a command that did not run (denied or left
-    /// un-confirmed).
+    /// Shared result shape for a command that did not run (denied, steered,
+    /// or left un-confirmed).
     fn blocked_result(&self, cmd: &str, output: &str, status: &str) -> Value {
         json!({
             "ok": false,
@@ -250,9 +264,10 @@ impl BuiltinTools {
             .get("timeoutMs")
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
+        let steer = args.get("steer").and_then(Value::as_bool).unwrap_or(true);
         let dur = Duration::from_millis(timeout_ms);
 
-        if let Some(blocked) = self.check_policy(&cmd).await {
+        if let Some(blocked) = self.check_policy(&cmd, steer).await {
             return Ok(blocked);
         }
 
@@ -665,9 +680,9 @@ mod tests {
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AllowAll));
         // Unmatched commands fail closed to ask; allow-all passes them
         // without prompting.
-        assert!(tools.check_policy("echo clean").await.is_none());
+        assert!(tools.check_policy("echo clean", true).await.is_none());
         let res = tools
-            .check_policy("curl https://example.com")
+            .check_policy("curl https://example.com", true)
             .await
             .unwrap();
         assert_eq!(res["status"], json!("denied"));
@@ -682,7 +697,7 @@ mod tests {
         let (_dir, tools) = tools_for_policy(&config, None, None);
         let tools =
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::DenyAll));
-        let res = tools.check_policy("echo hi").await.unwrap();
+        let res = tools.check_policy("echo hi", true).await.unwrap();
         assert_eq!(res["status"], json!("denied"));
     }
 
@@ -709,7 +724,7 @@ mod tests {
         );
         let tools =
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskManual));
-        assert!(tools.check_policy("special-cmd").await.is_none());
+        assert!(tools.check_policy("special-cmd", true).await.is_none());
         assert!(!auto_called.load(Ordering::Relaxed));
     }
 
@@ -723,7 +738,7 @@ mod tests {
         );
         let tools =
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto));
-        assert!(tools.check_policy("special-cmd").await.is_none());
+        assert!(tools.check_policy("special-cmd", true).await.is_none());
     }
 
     #[tokio::test]
@@ -744,6 +759,6 @@ mod tests {
         let tools =
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto));
         // Auto allowed it; the manual prompt answer (false) must not win.
-        assert!(tools.check_policy("special-cmd").await.is_none());
+        assert!(tools.check_policy("special-cmd", true).await.is_none());
     }
 }

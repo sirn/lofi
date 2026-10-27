@@ -739,6 +739,33 @@ async fn job_type_rejects_a_non_tty_job() {
 }
 
 #[tokio::test]
+async fn job_spawn_refuses_backgrounding_without_a_suggestion() {
+    // Steering is a bash tool behavior: a job runs its command plain, so a
+    // plain sleep spawns, and bare `&` stays denied with the jobSpawn
+    // suggestion dropped instead of shown to the caller of jobSpawn itself.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_dir, tools) = tools_with_cancel(cancel);
+    let plain = tools
+        .job_spawn(json!({ "cmd": "sleep 30", "notify": false }))
+        .await
+        .unwrap();
+    assert_eq!(plain["ok"], json!(true));
+    tools
+        .job_kill(json!({ "id": plain["id"].as_str().unwrap() }))
+        .await
+        .unwrap();
+    let blocked = tools
+        .job_spawn(json!({ "cmd": "sleep 0.1 &", "notify": false }))
+        .await
+        .unwrap();
+    assert_eq!(blocked["ok"], json!(false));
+    assert_eq!(blocked["status"], json!("denied"));
+    let output = blocked["output"].as_str().unwrap();
+    assert!(output.contains("bare & is not allowed"), "output: {output}");
+    assert!(!output.contains("jobSpawn"), "output: {output}");
+}
+
+#[tokio::test]
 async fn tty_job_queues_one_idle_notice() {
     let cancel = Arc::new(AtomicBool::new(false));
     let (_dir, tools) = tools_with_cancel(cancel);

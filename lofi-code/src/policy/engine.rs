@@ -8,6 +8,22 @@ pub struct Decision {
     pub action: PolicyAction,
     pub reason: String,
     pub matched_command: Option<String>,
+    /// The steering suggestion folded into `reason` after `"; "`. Only the
+    /// backgrounding deny sets it; callers drop it when steering does not
+    /// apply (`jobSpawn`, and the bash tool for `steer: false`).
+    pub steer: Option<String>,
+}
+
+impl Decision {
+    /// The reason with the steering suggestion dropped.
+    #[must_use]
+    pub fn reason_without_steering(&self) -> &str {
+        self.steer
+            .as_deref()
+            .and_then(|h| self.reason.strip_suffix(h))
+            .and_then(|r| r.strip_suffix("; "))
+            .unwrap_or(&self.reason)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -34,18 +50,20 @@ impl ResolvedPolicy {
                     action: PolicyAction::Ask,
                     reason: format!("unparseable: {e}"),
                     matched_command: Some(command.to_string()),
+                    steer: None,
                 };
             }
         };
 
-        // Hard-coded (not a per-rule deny): no config knob turns this off,
-        // because a detached child outlives the Bash call and the model
-        // never sees its output.
-        if let Some(reason) = detect_backgrounding(&tokens) {
+        // Hard-coded (not a per-rule deny): no opt-out and no config knob
+        // turn this off, because a detached child outlives the Bash call and
+        // the model never sees its output.
+        if let Some((base, suggestion)) = detect_backgrounding(&tokens) {
             return Decision {
                 action: PolicyAction::Deny,
-                reason,
+                reason: format!("{base}; {suggestion}"),
                 matched_command: Some(command.to_string()),
+                steer: Some(suggestion),
             };
         }
 
@@ -55,6 +73,7 @@ impl ResolvedPolicy {
                 action: PolicyAction::Ask,
                 reason: "empty or unrecognized command".into(),
                 matched_command: Some(command.to_string()),
+                steer: None,
             };
         }
 
@@ -94,6 +113,9 @@ impl ResolvedPolicy {
                 winner.reason.clone()
             },
             matched_command: winner.matched_command.clone(),
+            // Only the backgrounding deny (an early return above) carries a
+            // steering suggestion, so a merged winner never does.
+            steer: None,
         }
     }
 
@@ -110,6 +132,7 @@ impl ResolvedPolicy {
                     action: PolicyAction::Deny,
                     reason: format!("denied: {}", cmd.name),
                     matched_command: Some(cmd.full_text.clone()),
+                    steer: None,
                 };
             }
 
@@ -149,6 +172,7 @@ impl ResolvedPolicy {
             action: result,
             reason,
             matched_command: matched,
+            steer: None,
         }
     }
 
@@ -170,6 +194,7 @@ impl ResolvedPolicy {
                         action: self.redirects.action,
                         reason: format!("redirect {op} {target}"),
                         matched_command: Some(cmd.full_text.clone()),
+                        steer: None,
                     };
                 }
             }
@@ -178,6 +203,7 @@ impl ResolvedPolicy {
             action: PolicyAction::Allow,
             reason: String::new(),
             matched_command: None,
+            steer: None,
         }
     }
 
@@ -193,6 +219,7 @@ impl ResolvedPolicy {
                     action: self.heredocs.action,
                     reason: "heredoc detected".into(),
                     matched_command: Some(cmd.full_text.clone()),
+                    steer: None,
                 };
             }
         }
@@ -200,38 +227,39 @@ impl ResolvedPolicy {
             action: PolicyAction::Allow,
             reason: String::new(),
             matched_command: None,
+            steer: None,
         }
     }
 }
 
-/// Detect a shell idiom that detaches work from the Bash call. Returns a
-/// human-readable deny reason on match, None when the input is clean.
+/// Detect a shell idiom that detaches work from the Bash call. Returns the
+/// deny reason and its steering suggestion on match, None when the input is
+/// clean.
 ///
 /// Recurses into subshells and command substitution so "sh -c 'sleep 1 &'"
 /// cannot sneak past the top-level scan.
-fn detect_backgrounding(tokens: &[Token]) -> Option<String> {
+fn detect_backgrounding(tokens: &[Token]) -> Option<(String, String)> {
     const DETACH_WORDS: &[&str] = &["nohup", "setsid", "disown"];
+    const JOBSPAWN: &str = "use lofi.jobSpawn for background jobs";
 
     let mut start_of_segment = true;
     for tok in tokens {
         match tok {
             Token::Operator(op) if op == "&" => {
-                return Some("bare & is not allowed; use lofi.jobSpawn for background jobs".into());
+                return Some(("bare & is not allowed".into(), JOBSPAWN.into()));
             }
             Token::Operator(_) => {
                 start_of_segment = true;
             }
             Token::Word(w) => {
                 if start_of_segment && DETACH_WORDS.contains(&w.as_str()) {
-                    return Some(format!(
-                        "{w} is not allowed; use lofi.jobSpawn for background jobs"
-                    ));
+                    return Some((format!("{w} is not allowed"), JOBSPAWN.into()));
                 }
                 start_of_segment = false;
             }
             Token::Group { tokens, .. } => {
-                if let Some(reason) = detect_backgrounding(tokens) {
-                    return Some(reason);
+                if let Some(found) = detect_backgrounding(tokens) {
+                    return Some(found);
                 }
             }
             Token::Redirect { .. } => {}
@@ -401,6 +429,15 @@ mod tests {
         let d = p.evaluate("sleep 30 &");
         assert_eq!(d.action, PolicyAction::Deny);
         assert!(d.reason.contains("jobSpawn"), "reason: {}", d.reason);
+        // The suggestion is steering: the full reason carries it and
+        // reason_without_steering drops only that part.
+        assert_eq!(
+            d.steer.as_deref(),
+            Some("use lofi.jobSpawn for background jobs")
+        );
+        let plain = d.reason_without_steering();
+        assert!(plain.contains("bare & is not allowed"), "reason: {plain}");
+        assert!(!plain.contains("jobSpawn"), "reason: {plain}");
     }
 
     #[test]
@@ -417,6 +454,13 @@ mod tests {
         for cmd in ["nohup sleep 5", "setsid cargo watch", "disown %1"] {
             let d = p.evaluate(cmd);
             assert_eq!(d.action, PolicyAction::Deny, "cmd: {cmd}");
+            // The suggestion rides in `reason` and drops out of
+            // `reason_without_steering`.
+            assert!(d.reason.contains("jobSpawn"), "cmd: {cmd}");
+            assert!(
+                !d.reason_without_steering().contains("jobSpawn"),
+                "cmd: {cmd}"
+            );
         }
     }
 

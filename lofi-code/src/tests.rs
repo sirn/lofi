@@ -597,7 +597,7 @@ async fn exec_awaited_tool_does_not_consume_cpu_budget() {
     };
     let src = r#"
         for (let i = 0; i < 3; i++) {
-            await lofi.bash({ cmd: "sleep 1" });
+            await lofi.bash({ cmd: "sleep 1", steer: false }); // The test needs a real 1s wait; steering would refuse it.
         }
         return "done";
     "#;
