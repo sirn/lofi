@@ -5,8 +5,8 @@ use super::*;
 impl App {
     pub(crate) fn render_header_line(&self, width: usize) -> Line<'static> {
         let t = self.theme;
-        let wordmark = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-        let muted = Style::new().fg(t.muted);
+        let wordmark = t.accent_heading_style();
+        let muted = t.muted_style();
         let lofi_w = unicode_width::UnicodeWidthStr::width("lofi");
         let model = self.render_footer_right();
         let model_w: usize = model
@@ -45,10 +45,7 @@ impl App {
         if footer_segments_width(&segments) > width {
             segments.clear();
         }
-        Line::from(vec![Span::styled(
-            segments.join(" · "),
-            Style::new().fg(t.muted),
-        )])
+        Line::from(vec![Span::styled(segments.join(" · "), t.muted_style())])
     }
 
     /// `labels` keeps the `context` word and the `N% cached` suffix;
@@ -218,11 +215,11 @@ impl App {
         let mut spans = Vec::new();
         if let Some(badge) = self.policy_badge() {
             spans.push(Span::styled(badge, Style::new().fg(t.warn)));
-            spans.push(Span::styled(" · ", Style::new().fg(t.muted)));
+            spans.push(Span::styled(" · ", t.muted_style()));
         }
         spans.push(Span::styled(
             fmt_cost(self.cost + self.turn_cost),
-            Style::new().fg(t.muted),
+            t.muted_style(),
         ));
         Line::from(spans)
     }
@@ -235,7 +232,7 @@ impl App {
         if let Some(st) = &self.service_label {
             label.push_str(st);
         }
-        Line::from(vec![Span::styled(label, Style::new().fg(self.theme.muted))])
+        Line::from(vec![Span::styled(label, self.theme.muted_style())])
     }
 }
 

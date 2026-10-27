@@ -128,7 +128,7 @@ fn jobs_terminal_view_preserves_cell_colors_and_attributes() {
 fn theme_picker_opens_preselected_on_current_mode() {
     use lofi_types::ThemeMode;
     let mut a = app();
-    a.theme_mode = ThemeMode::Dark; // test-only construction defaults to Auto
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Dark));
     a.open_theme_picker();
     let picker = a.theme_picker.as_ref().unwrap();
     assert_eq!(picker.modes.len(), 3);
@@ -140,7 +140,7 @@ fn theme_picker_opens_preselected_on_current_mode() {
 fn theme_picker_confirm_updates_mode_and_clears_frozen_cache() {
     use lofi_types::ThemeMode;
     let mut a = app();
-    a.theme_mode = ThemeMode::Dark;
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Dark));
     // Seed the frozen cache so we can prove confirm clears it.
     a.layout.frozen_render.insert(0, Vec::new());
     assert!(a.layout.frozen_render.contains(0));
@@ -149,33 +149,220 @@ fn theme_picker_confirm_updates_mode_and_clears_frozen_cache() {
     a.theme_picker.as_mut().unwrap().selected = 1;
     a.theme_picker_confirm();
     assert!(a.theme_picker.is_none());
-    assert_eq!(a.theme_mode, ThemeMode::Light);
+    assert_eq!(a.theme_manager.mode(), ThemeMode::Light);
     assert!(!a.layout.frozen_render.contains(0));
 }
 
 #[test]
-fn apply_resolved_theme_clears_frozen_only_on_change() {
+fn theme_update_clears_frozen_only_on_change() {
     let mut a = app();
-    a.theme = Theme::dark();
     a.layout.frozen_render.insert(0, Vec::new());
-    assert!(!a.apply_resolved_theme(Theme::dark()));
+    assert!(!a.update_theme(theme::ThemeEvent::SetMode(lofi_types::ThemeMode::Dark)));
     assert!(a.layout.frozen_render.contains(0));
-    assert!(a.apply_resolved_theme(Theme::light()));
+    assert!(a.update_theme(theme::ThemeEvent::SetMode(lofi_types::ThemeMode::Light)));
     assert_eq!(a.theme, Theme::light());
     assert!(!a.layout.frozen_render.contains(0));
 }
 
 #[test]
 fn apply_color_scheme_applies_only_in_auto() {
-    use crate::tui::tty_events::ColorScheme;
+    use crate::tui::theme::ColorScheme;
     use lofi_types::ThemeMode;
     let mut a = app();
-    a.theme_mode = ThemeMode::Auto;
-    a.theme = Theme::dark();
-    assert!(a.apply_color_scheme(ColorScheme::Light));
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Auto));
+    assert!(a.update_theme(theme::ThemeEvent::ColorScheme(ColorScheme::Light)));
     assert_eq!(a.theme, Theme::light());
-    a.theme_mode = ThemeMode::Dark;
-    assert!(!a.apply_color_scheme(ColorScheme::Light));
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Dark));
+    assert!(!a.update_theme(theme::ThemeEvent::ColorScheme(ColorScheme::Light)));
+}
+
+#[test]
+fn apply_background_applies_only_in_auto() {
+    use crate::tui::terminal_bg::Rgb;
+    use lofi_types::ThemeMode;
+    let mut a = app();
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Auto));
+    assert!(a.update_theme(theme::ThemeEvent::Background(Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    })));
+    assert_eq!(a.theme, Theme::light());
+    a.update_theme(theme::ThemeEvent::SetMode(ThemeMode::Light));
+    assert!(!a.update_theme(theme::ThemeEvent::Background(Rgb { r: 0, g: 0, b: 0 })));
+}
+
+#[test]
+fn inverted_palette_updates_input_and_cached_transcript() {
+    use crate::tui::terminal_bg::Rgb;
+    use ratatui::{style::Color, Terminal};
+
+    let mut a = app();
+    a.update_theme(theme::ThemeEvent::SetMode(lofi_types::ThemeMode::Light));
+    a.insert_str("input");
+    a.begin_prompt_turn("prompt".into(), lofi_types::PromptKind::User);
+    a.layout.frozen_render.insert(0, Vec::new());
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    let black = Rgb { r: 0, g: 0, b: 0 };
+    assert!(!a.update_theme(theme::ThemeEvent::Palette(255, black)));
+    assert!(a.update_theme(theme::ThemeEvent::Palette(232, white)));
+    assert!(!a.layout.frozen_render.contains(0));
+    assert_eq!(a.theme.panel_bg, Color::Indexed(232));
+    assert!(!a.update_theme(theme::ThemeEvent::Palette(231, black)));
+    assert!(a.update_theme(theme::ThemeEvent::Palette(16, white)));
+    assert_eq!(a.theme.fg, Color::Indexed(231));
+    assert_eq!(a.theme.select_cursor, Color::Indexed(66));
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    terminal
+        .draw(|f| crate::tui::view::render(f, &mut a))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let input = &buffer[(a.input_rect.x, a.input_rect.y)];
+    assert_eq!(input.symbol(), "i");
+    assert_eq!(input.bg, Color::Indexed(232));
+    assert_eq!(input.fg, Color::Indexed(231));
+    assert!(buffer
+        .content
+        .iter()
+        .any(|cell| cell.symbol() == "p" && cell.fg == Color::Indexed(231)));
+}
+
+#[test]
+fn palette_direction_is_independent_of_theme_mode_and_reply_order() {
+    use crate::tui::terminal_bg::Rgb;
+    use crate::tui::theme::ColorScheme;
+    use lofi_types::ThemeMode;
+    use ratatui::style::Color;
+
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    let black = Rgb { r: 0, g: 0, b: 0 };
+    for mode in [ThemeMode::Auto, ThemeMode::Light, ThemeMode::Dark] {
+        let mut a = app();
+        a.update_theme(theme::ThemeEvent::SetMode(mode));
+        let light = a.theme.is_light();
+        a.update_theme(theme::ThemeEvent::Palette(16, white));
+        a.update_theme(theme::ThemeEvent::Palette(231, black));
+        a.update_theme(theme::ThemeEvent::Palette(232, white));
+        a.update_theme(theme::ThemeEvent::Palette(255, black));
+        assert_eq!(a.theme.is_light(), light);
+        assert_eq!(
+            a.theme.panel_bg,
+            Color::Indexed(if light { 232 } else { 255 })
+        );
+        if mode == ThemeMode::Auto {
+            a.update_theme(theme::ThemeEvent::ColorScheme(ColorScheme::Light));
+            assert_eq!(a.theme.panel_bg, Color::Indexed(232));
+            assert_eq!(a.theme.fg, Color::Indexed(231));
+        }
+        // A partial refresh must not combine a new endpoint with an old one.
+        a.update_theme(theme::ThemeEvent::Refresh);
+        let previous = a.theme;
+        a.update_theme(theme::ThemeEvent::Palette(232, black));
+        assert_eq!(a.theme, previous);
+        a.update_theme(theme::ThemeEvent::Palette(255, white));
+        a.update_theme(theme::ThemeEvent::Palette(231, white));
+        a.update_theme(theme::ThemeEvent::Palette(16, black));
+        assert_eq!(
+            a.theme,
+            if a.theme.is_light() {
+                Theme::light()
+            } else {
+                Theme::dark()
+            }
+        );
+    }
+}
+
+#[test]
+fn missing_or_equal_palette_endpoints_keep_existing_colors() {
+    use crate::tui::terminal_bg::Rgb;
+    let mut a = app();
+    a.update_theme(theme::ThemeEvent::SetMode(lofi_types::ThemeMode::Light));
+    let before = a.theme;
+    assert!(!a.update_theme(theme::ThemeEvent::Palette(
+        232,
+        Rgb {
+            r: 128,
+            g: 128,
+            b: 128
+        }
+    )));
+    assert_eq!(a.theme, before);
+    assert!(!a.update_theme(theme::ThemeEvent::Palette(
+        255,
+        Rgb {
+            r: 128,
+            g: 128,
+            b: 128
+        }
+    )));
+    assert_eq!(a.theme, before);
+    assert!(!a.update_theme(theme::ThemeEvent::Palette(
+        42,
+        Rgb {
+            r: 255,
+            g: 255,
+            b: 255
+        }
+    )));
+}
+
+#[test]
+fn selected_picker_item_preserves_contrast_after_palette_changes() {
+    use crate::tui::terminal_bg::Rgb;
+    use lofi_types::ThemeMode;
+    use ratatui::Terminal;
+
+    let black = Rgb { r: 0, g: 0, b: 0 };
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for reversed in [false, true] {
+            let mut a = app();
+            a.update_theme(theme::ThemeEvent::SetMode(mode));
+            a.update_theme(theme::ThemeEvent::Palette(
+                232,
+                if reversed { white } else { black },
+            ));
+            a.update_theme(theme::ThemeEvent::Palette(
+                255,
+                if reversed { black } else { white },
+            ));
+            a.open_theme_picker();
+            // Select an inactive row so its text does not set an accent color.
+            let (selected, label) = if mode == ThemeMode::Light {
+                (2, "d")
+            } else {
+                (1, "l")
+            };
+            a.theme_picker.as_mut().unwrap().selected = selected;
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            terminal
+                .draw(|f| crate::tui::view::render(f, &mut a))
+                .unwrap();
+            let cell = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .find(|cell| cell.symbol() == label && cell.bg == a.theme.primary)
+                .unwrap();
+            assert_eq!(cell.fg, a.theme.panel_bg);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
+    }
 }
 
 #[test]

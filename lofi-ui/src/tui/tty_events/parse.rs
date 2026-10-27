@@ -10,13 +10,15 @@ use crossterm::event::{
     MediaKeyCode, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::ColorScheme;
+use crate::tui::theme::ColorScheme;
 
 // Parse result. Crossterm's private event enum plus color scheme.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Parsed {
     Event(Event),
     ColorScheme(ColorScheme),
+    Background(crate::tui::terminal_bg::Rgb),
+    Palette(u8, crate::tui::terminal_bg::Rgb),
     CursorPosition(u16, u16),
     KeyboardEnhancementFlags(KeyboardEnhancementFlags),
     PrimaryDeviceAttributes,
@@ -74,6 +76,7 @@ pub(crate) fn parse_event(buffer: &[u8], input_available: bool) -> io::Result<Op
                         }
                     }
                     b'[' => parse_csi(buffer),
+                    b']' => parse_osc(buffer),
                     b'\x1B' => Ok(Some(Parsed::Event(Event::Key(KeyCode::Esc.into())))),
                     _ => parse_event(&buffer[1..], input_available).map(|event_option| {
                         event_option.map(|event| {
@@ -234,6 +237,40 @@ fn modifier_and_kind_parsed(iter: &mut dyn Iterator<Item = &str>) -> io::Result<
     } else {
         Ok((modifier_mask, 1))
     }
+}
+
+// Longest OSC we are willing to buffer while waiting for its terminator.
+const OSC_MAX: usize = 4096;
+
+// OSC (ESC ]) reply, such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL` answering a
+// background-colour query. Unknown finished OSC replies are dropped, like
+// finished DEC private reports; otherwise the `ESC` becomes an Alt prefix and the
+// payload is typed into the prompt. An `ESC ]` that is not followed by a
+// digit cannot be a reply, so drop it too; this costs one Alt+] keystroke, the
+// trade `parse_csi` already makes for Alt+[.
+fn parse_osc(buffer: &[u8]) -> io::Result<Option<Parsed>> {
+    assert!(buffer.starts_with(b"\x1B]")); // ESC ]
+
+    if buffer.len() == 2 {
+        return Ok(None);
+    }
+    if !buffer[2].is_ascii_digit() || buffer.len() > OSC_MAX {
+        return Err(could_not_parse_event_error());
+    }
+    // Terminator: BEL, or ST (ESC backslash).
+    for (idx, byte) in buffer.iter().enumerate().skip(2) {
+        if *byte == 0x07 || (*byte == b'\\' && buffer[idx - 1] == 0x1B) {
+            let reply = &buffer[..=idx];
+            if let Some((index, rgb)) = crate::tui::terminal_bg::parse_osc4(reply) {
+                return Ok(Some(Parsed::Palette(index, rgb)));
+            }
+            return match crate::tui::terminal_bg::parse_osc11(reply) {
+                Some(rgb) => Ok(Some(Parsed::Background(rgb))),
+                None => Err(could_not_parse_event_error()),
+            };
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn parse_csi_cursor_position(buffer: &[u8]) -> io::Result<Option<Parsed>> {

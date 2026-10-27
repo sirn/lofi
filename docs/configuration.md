@@ -266,9 +266,19 @@ theme = "auto"
 
 `theme` accepts `auto`, `light`, or `dark`.
 The default is `auto`.
-Lofi queries the terminal background with OSC 11 to select a theme.
+In Auto mode, Lofi enables theme-change reports with terminal mode 2031.
+CSI 997 reports take priority over OSC 11 background replies.
+Lofi queries both at startup and on focus gain.
 It uses the dark theme if the terminal gives no reply.
+Forced Light and Dark modes do not follow detection results.
 Use `/theme` to change the theme for the current session.
+
+Lofi queries palette entries with OSC 4 to detect grayscale and color-cube
+direction. This supports generated palettes, including Ghostty
+`palette-harmonious`, without replacing the terminal colors.
+It queries again on color-scheme reports, focus gain, and `/theme` changes.
+If palette replies are missing, Lofi keeps the last known direction.
+Before the first complete reply pair, it assumes the standard xterm palette.
 
 ## Thinking levels
 

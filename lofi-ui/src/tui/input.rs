@@ -9,6 +9,10 @@ pub(super) fn handle_event(
     agent: Option<&BackendRef>,
     current_run: &mut Option<RunHandle>,
 ) {
+    if matches!(ev, Event::FocusGained) {
+        app.update_theme(theme::ThemeEvent::Refresh);
+        return;
+    }
     if let Event::Mouse(m) = ev {
         if !app.modal_open() {
             handle_mouse(*m, app);

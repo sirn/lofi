@@ -650,12 +650,7 @@ fn render_log(f: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     vis[rel] = Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(
-                            " ",
-                            Style::new()
-                                .fg(app.theme.on_accent_text())
-                                .bg(app.theme.warn),
-                        ),
+                        Span::styled(" ", app.theme.badge_style(app.theme.warn)),
                     ]);
                 }
             } else if app.mode == Mode::Navigate {
@@ -714,7 +709,11 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let content = scroll_area.content;
     let content_w = content.width as usize;
     let active = app.mode == Mode::Input && !app.modal_open();
-    let text_style = Style::new().fg(if active { t.fg } else { t.muted });
+    let text_style = if active {
+        t.text_style()
+    } else {
+        t.muted_style()
+    };
 
     let rows = app.input_select_rows(content_w);
     let total = rows.len();
@@ -726,10 +725,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     for seg in &rows[start..end] {
         lines.push(Line::from(vec![Span::styled(seg.clone(), text_style)]));
     }
-    f.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(t.panel_bg)),
-        content,
-    );
+    f.render_widget(Paragraph::new(lines).style(t.panel_style()), content);
 
     if active {
         let (vrow, x_in) = app.input_cursor_pos(content_w);
@@ -758,7 +754,7 @@ fn render_footer_block(f: &mut Frame, area: Rect, app: &mut App) {
     let t = app.theme;
     let w = area.width;
     let panel = area;
-    f.render_widget(Block::default().style(Style::new().bg(t.panel_bg)), panel);
+    f.render_widget(Block::default().style(t.panel_style()), panel);
     let active = app.mode == Mode::Input && !app.modal_open();
     let bar = if !active {
         t.subtle
@@ -812,12 +808,12 @@ fn render_toast(f: &mut Frame, area: Rect, footer_y: u16, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(color))
         .padding(Padding::horizontal(1))
-        .style(Style::new().fg(app.theme.fg));
+        .style(app.theme.text_style());
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let text_lines: Vec<Line<'static>> = lines
         .into_iter()
-        .map(|line| Line::from(Span::styled(line, Style::new().fg(app.theme.fg))))
+        .map(|line| Line::from(Span::styled(line, app.theme.text_style())))
         .collect();
     f.render_widget(Paragraph::new(text_lines), inner);
 }
@@ -825,7 +821,7 @@ fn render_toast(f: &mut Frame, area: Rect, footer_y: u16, app: &App) {
 fn render_debug_bar(f: &mut Frame, area: Rect, app: &App) {
     if let Some(line) = app.debug_memory_line() {
         f.render_widget(
-            Paragraph::new(line).style(Style::new().fg(app.theme.panel_bg).bg(app.theme.warn)),
+            Paragraph::new(line).style(app.theme.badge_style(app.theme.warn)),
             area,
         );
     }
@@ -839,8 +835,5 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .render_footer_left(w.saturating_sub(right_w).saturating_sub(1))
         .spans;
     let line = HStack::new(w).left(left).right(right).build();
-    f.render_widget(
-        Paragraph::new(line).style(Style::new().bg(app.theme.panel_bg)),
-        area,
-    );
+    f.render_widget(Paragraph::new(line).style(app.theme.panel_style()), area);
 }

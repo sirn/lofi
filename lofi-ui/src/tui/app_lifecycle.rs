@@ -99,7 +99,7 @@ impl App {
             slash_complete: None,
             no_models_hint: None,
             theme: Theme::default(),
-            theme_mode: lofi_types::ThemeMode::default(),
+            theme_manager: theme::ThemeManager::default(),
             kill_ring: String::new(),
             last_kill_was_kill: false,
             ctrl_c_at: None,

@@ -483,11 +483,18 @@ impl DebugState {
             .as_ref()
             .map_or(0, store::SessionCursor::len);
         let context_tokens = app.status_usage.map_or(0, |usage| usage.context_tokens());
+        let palette = app.theme_manager.palette_directions();
         let record = serde_json::json!({
             "schema_version": 1,
             "timestamp_ms": timestamp_ms,
             "elapsed_ms": self.started.elapsed().as_millis(),
             "event": event,
+            "theme": {
+                "mode": app.theme_manager.mode().as_str(),
+                "resolved": if app.theme.is_light() { "light" } else { "dark" },
+                "gray_reversed": palette.0,
+                "cube_reversed": palette.1,
+            },
             "process": {
                 "rss_bytes": process.rss_bytes,
                 "rss_peak_bytes": process.rss_peak_bytes,

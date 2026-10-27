@@ -199,9 +199,6 @@ pub(crate) async fn run(
 ) -> Result<()> {
     tty_events::ensure_terminal_input().map_err(Error::Io)?;
     enable_raw_mode().map_err(Error::Io)?;
-    // `Theme::resolve(Auto)` probes via OSC 11; that requires raw mode
-    // (see terminal_bg module doc for why).
-    let theme = Theme::resolve(ui_theme);
     let setup = (|| -> std::io::Result<_> {
         let mut stdout = io::stdout();
         execute!(
@@ -236,7 +233,6 @@ pub(crate) async fn run(
         Box::pin(run_loop(
             &mut guard,
             agent,
-            theme,
             ui_theme,
             model_label,
             thinking,
@@ -273,7 +269,6 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> &str {
 pub(crate) async fn run_loop(
     guard: &mut TerminalGuard,
     mut agent: Option<BackendRef>,
-    theme: Theme,
     theme_mode: lofi_types::ThemeMode,
     model_label: String,
     thinking: ThinkingLevel,
@@ -309,8 +304,6 @@ pub(crate) async fn run_loop(
         app.selected_model_label =
             Some(format!("{}/{}", backend.name(), backend.selection().model));
     }
-    app.theme = theme;
-    app.theme_mode = theme_mode;
     app.model_choices = model_choices;
     app.lifecycle.set_workspace_root(cwd.clone());
     app.session = SessionState { sink, cursor, cwd };
@@ -396,10 +389,7 @@ pub(crate) async fn run_loop(
     // next run reports `working`.
     let mut settled = program_status::Settled::default();
     let mut events = tty_events::TtyEvents::start().map_err(Error::Io)?;
-    app.sync_color_scheme_reports();
-    if app.theme_mode == lofi_types::ThemeMode::Auto {
-        tty_events::request_color_scheme();
-    }
+    app.update_theme(theme::ThemeEvent::SetMode(theme_mode));
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
             .map_err(Error::Io)?;
@@ -597,7 +587,19 @@ pub(crate) async fn run_loop(
                 match maybe_ev {
                     Some(Ok(tty_events::TuiEvent::ColorScheme(scheme))) => {
                         defer_redraw = false;
-                        if app.apply_color_scheme(scheme) {
+                        if app.update_theme(theme::ThemeEvent::ColorScheme(scheme)) {
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Background(rgb))) => {
+                        defer_redraw = false;
+                        if app.update_theme(theme::ThemeEvent::Background(rgb)) {
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(tty_events::TuiEvent::Palette(index, rgb))) => {
+                        defer_redraw = false;
+                        if app.update_theme(theme::ThemeEvent::Palette(index, rgb)) {
                             dirty = true;
                         }
                     }

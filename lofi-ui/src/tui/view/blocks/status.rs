@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::Span;
 
 use crate::tui::theme::active_indicator;
@@ -25,9 +25,9 @@ impl Component for WorkingLine {
                     "Working for {} with ",
                     prim::fmt_duration(cx.app.run_elapsed())
                 ),
-                Style::new().fg(t.subtle),
+                t.subtle_style(),
             ),
-            Span::styled(cx.app.run_label(), Style::new().fg(t.muted)),
+            Span::styled(cx.app.run_label(), t.muted_style()),
         ];
         // A cancel is a request the turn answers on its own schedule. Say so
         // while it is pending, and say plainly when the turn has stopped
@@ -39,7 +39,7 @@ impl Component for WorkingLine {
                     Style::new().fg(t.error),
                 )
             } else {
-                (" · cancelling", Style::new().fg(t.subtle))
+                (" · cancelling", t.subtle_style())
             };
             content.push(Span::styled(text, style));
         }
@@ -65,7 +65,7 @@ impl Component for RunningJobLine<'_> {
         let cmd = self.job.cmd.trim();
         let text = format!("job {} running ({dur}): {cmd}", self.job.id);
         let mark = Style::new().fg(t.info);
-        let body_style = Style::new().fg(t.muted);
+        let body_style = t.muted_style();
         render_markdown_body(
             &text,
             t,
@@ -92,7 +92,7 @@ impl Component for RunningSubagentLine<'_> {
             format!("subagent {} running ({dur}): {task}", self.run.id)
         };
         let mark = Style::new().fg(t.info);
-        let body_style = Style::new().fg(t.muted);
+        let body_style = t.muted_style();
         render_markdown_body(
             &text,
             t,
@@ -112,13 +112,10 @@ pub(super) struct QueuedPromptLine<'a> {
 impl Component for QueuedPromptLine<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        let mark = Style::new().fg(t.muted);
+        let mark = t.muted_style();
         let (bar, body_style) = match self.kind {
-            lofi_types::PromptKind::Notice => (
-                "▎ ",
-                Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
-            ),
-            lofi_types::PromptKind::User => ("▌ ", Style::new().fg(t.muted)),
+            lofi_types::PromptKind::Notice => ("▎ ", t.annotation_style()),
+            lofi_types::PromptKind::User => ("▌ ", t.muted_style()),
         };
         render_markdown_body(
             self.text.trim(),
@@ -173,7 +170,7 @@ impl Component for UserShellLine<'_> {
         let failed = !self.running
             && (self.cancelled || self.signal.is_some() || self.exit_code.is_some_and(|c| c != 0));
         let status_color = if failed { t.error } else { t.success };
-        let command_style = Style::new().fg(t.fg);
+        let command_style = t.text_style();
         let mut out = Vec::new();
 
         let command_avail = cx.width.saturating_sub(4);
@@ -194,10 +191,7 @@ impl Component for UserShellLine<'_> {
 
         let lines = split_lines(self.output);
         let key = DetailKey::UserShell(self.id);
-        let deco = vec![
-            Span::raw("  "),
-            Span::styled("  ", Style::new().fg(t.subtle)),
-        ];
+        let deco = vec![Span::raw("  "), Span::styled("  ", t.subtle_style())];
         let total = detail_row_count(&lines, cx.width, &deco);
         let has_detail = !self.output.is_empty();
         let status = if self.running {
@@ -219,7 +213,7 @@ impl Component for UserShellLine<'_> {
             }
             status
         };
-        let content = vec![Span::styled(status, Style::new().fg(t.fg))];
+        let content = vec![Span::styled(status, t.text_style())];
         let corner = if self.running {
             prim::status_icon(t, true, false, cx.spinner())
         } else {
@@ -231,7 +225,7 @@ impl Component for UserShellLine<'_> {
         let mut header = prim::rline(
             vec![
                 Span::raw("  "),
-                Span::styled("└ ", Style::new().fg(t.subtle)),
+                Span::styled("└ ", t.subtle_style()),
                 corner,
             ],
             content,
@@ -292,13 +286,10 @@ impl Component for TurnEnd {
         let t = cx.theme;
         let dur = prim::fmt_duration(self.elapsed);
         vec![prim::render(
+            vec![Span::raw("  "), Span::styled("◇ ", t.subtle_style())],
             vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![
-                Span::styled(format!("Done in {dur} with "), Style::new().fg(t.subtle)),
-                Span::styled(self.label.clone(), Style::new().fg(t.muted)),
+                Span::styled(format!("Done in {dur} with "), t.subtle_style()),
+                Span::styled(self.label.clone(), t.muted_style()),
             ],
             vec![],
         )]
@@ -410,11 +401,8 @@ impl Component for CompactionLine {
             self.summarized, self.kept
         );
         let marker = prim::render(
-            vec![
-                Span::raw("  "),
-                Span::styled("◇ ", Style::new().fg(t.subtle)),
-            ],
-            vec![Span::styled(body, Style::new().fg(t.muted))],
+            vec![Span::raw("  "), Span::styled("◇ ", t.subtle_style())],
+            vec![Span::styled(body, t.muted_style())],
             vec![],
         );
         vec![marker]

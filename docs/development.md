@@ -6,6 +6,25 @@ See [End-to-end testing](e2e.md) for the current coverage map, test architecture
 
 Run the process-level suite with `just e2e`. Run all format, lint, and workspace tests with `just check`.
 
+## UI theme
+
+`theme::ThemeManager` owns the selected mode, detected appearance, and palette
+direction. It accepts typed `ThemeEvent` values and returns terminal-query
+requests. It performs no terminal I/O. CSI 997 reports take priority over
+background luminance; forced Light and Dark modes override detection.
+
+`tty_events` writes the queries and parses replies through the shared input
+reader. `App::update_theme` applies each event, updates the resolved `Theme`
+snapshot, and clears cached rendering only when its colors change. The event
+loop then requests a redraw. Components use the snapshot through their render
+context; they do not subscribe to theme changes or perform detection.
+
+`Theme` provides shared semantic styles for text emphasis, annotations,
+headings, key hints, message markers, selected items, panels, and badges.
+These styles use the resolved palette. Components keep layout and
+content-specific attributes local. Panel styles set only the background,
+so they can be combined with text styles without replacing text attributes.
+
 ## Session transcripts
 
 `lofi` persists each interactive session as a JSON Lines transcript under `$XDG_STATE_HOME/lofi/sessions/<workspace-name>-<path-hash>/`, with one `.jsonl` file per session. The hash isolates workspaces whose readable names collide; legacy slug-only directories remain readable. The first line is a `meta` header containing `version`, `created`, `cwd`, and the raw `model` identity. Every subsequent line is a session event. `--no-session` disables persistence, `--continue` resumes the most recently active session for the workspace, and `--resume <id>` resumes a specific one.

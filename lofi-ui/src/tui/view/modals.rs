@@ -13,14 +13,14 @@ fn rich_modal_block(t: Theme) -> WidgetBlock<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(t.primary))
         .padding(Padding::horizontal(1))
-        .style(Style::new().fg(t.fg))
+        .style(t.text_style())
 }
 
 fn modal_title(t: Theme, title: impl Into<String>) -> Line<'static> {
     let title = title.into();
     Line::from(Span::styled(
         title.trim().to_string(),
-        Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
+        t.accent_heading_style(),
     ))
 }
 
@@ -29,8 +29,8 @@ fn modal_help(t: Theme, text: impl Into<String>) -> Line<'static> {
     let leading = text.starts_with(' ');
     let trailing = text.ends_with(' ');
     let groups: Vec<&str> = text.trim().split("  ").filter(|s| !s.is_empty()).collect();
-    let key_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let description_style = Style::new().fg(t.subtle);
+    let key_style = t.key_hint_style();
+    let description_style = t.subtle_style();
     let mut spans = Vec::new();
     if leading {
         spans.push(Span::styled(" ", description_style));
@@ -118,13 +118,6 @@ fn modal_scroll_area(content: Rect) -> prim::ScrollArea {
     ))
 }
 
-fn focus_style(t: Theme) -> Style {
-    Style::new()
-        .fg(t.panel_bg)
-        .bg(t.primary)
-        .add_modifier(Modifier::BOLD)
-}
-
 fn relative_age(then: std::time::SystemTime) -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(then)
@@ -155,7 +148,7 @@ fn resume_preview_spans(t: Theme, preview: String) -> Vec<Span<'static>> {
         None
     };
     let Some((role, color)) = role else {
-        return vec![Span::styled(preview, Style::new().fg(t.fg))];
+        return vec![Span::styled(preview, t.text_style())];
     };
     let rest = preview[role.len()..].to_string();
     vec![
@@ -163,7 +156,7 @@ fn resume_preview_spans(t: Theme, preview: String) -> Vec<Span<'static>> {
             role.to_string(),
             Style::new().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(rest, Style::new().fg(t.fg)),
+        Span::styled(rest, t.text_style()),
     ]
 }
 
@@ -232,14 +225,14 @@ pub(super) fn render_picker(f: &mut Frame, area: Rect, app: &App) {
             ListItem::new(
                 HStack::new(row_width)
                     .left(resume_preview_spans(t, preview))
-                    .right([Span::styled(meta, Style::new().fg(t.muted))])
+                    .right([Span::styled(meta, t.muted_style())])
                     .build(),
             )
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let selected = (picker.selected < total).then_some(picker.selected.saturating_sub(start));
     let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, content, &mut state);
@@ -323,8 +316,8 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
     let need_sb = total > content_rows.height as usize;
     let scroll_area = modal_scroll_area(content_rows);
     let content = scroll_area.content;
-    let cmd_style = Style::new().fg(t.fg);
-    let desc_style = Style::new().fg(t.subtle);
+    let cmd_style = t.text_style();
+    let desc_style = t.subtle_style();
     let items: Vec<ListItem> = sc
         .candidates
         .iter()
@@ -337,8 +330,8 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let mut state = ListState::default().with_selected(Some(sc.selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
@@ -355,8 +348,8 @@ pub(super) fn render_slash_complete(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_info_lines(lines: &[InfoLine], width: usize, t: Theme) -> Vec<Line<'static>> {
-    let section_style = Style::new().fg(t.fg).add_modifier(Modifier::BOLD);
-    let rule_style = Style::new().fg(t.subtle);
+    let section_style = t.heading_style();
+    let rule_style = t.subtle_style();
     let mut out = Vec::new();
     for line in lines {
         match line {
@@ -408,8 +401,8 @@ pub(super) fn render_info_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let view_h = total.min(max_body_h);
     let desired_frame_h = u16::try_from(view_h + 4).unwrap_or(12);
 
-    let key_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let dim = Style::new().fg(t.muted);
+    let key_style = t.key_hint_style();
+    let dim = t.muted_style();
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
     if need_sb {
         hint_spans.push(Span::styled("j/k", key_style));
@@ -483,8 +476,8 @@ fn render_pick_modal(
     let need_sb = total > frame.content.height as usize;
     let scroll_area = modal_scroll_area(frame.content);
     let content = scroll_area.content;
-    let active_style = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::new().fg(t.fg);
+    let active_style = t.accent_heading_style();
+    let inactive_style = t.text_style();
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -500,8 +493,8 @@ fn render_pick_modal(
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let mut state = ListState::default().with_selected(Some(selected));
     f.render_stateful_widget(list, content, &mut state);
     if need_sb {
@@ -568,7 +561,10 @@ pub(super) fn render_theme_picker(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|m| m.as_str().to_string())
         .collect();
-    let active = picker.modes.iter().position(|m| *m == app.theme_mode);
+    let active = picker
+        .modes
+        .iter()
+        .position(|m| *m == app.theme_manager.mode());
     render_pick_modal(
         f,
         area,
@@ -691,7 +687,7 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         .saturating_sub(view_h.saturating_sub(1))
         .min(total.saturating_sub(view_h));
     let end = (start + view_h).min(total);
-    let tree_art = Style::new().fg(t.subtle);
+    let tree_art = t.subtle_style();
     let items: Vec<ListItem> = picker.entries[start..end]
         .iter()
         .map(|entry| {
@@ -715,8 +711,8 @@ pub(super) fn render_tree_picker(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let selected = (picker.selected < total).then_some(picker.selected.saturating_sub(start));
     let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, content, &mut state);
@@ -743,7 +739,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     f.buffer_mut()
-        .set_style(area, Style::new().fg(t.subtle).bg(t.panel_bg));
+        .set_style(area, t.panel_style().patch(t.subtle_style()));
 
     let desired_w = area.width.saturating_mul(3).saturating_div(5).max(52);
     let w = desired_w.min(100).min(area.width);
@@ -797,16 +793,16 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
     let popup = centered_modal(area, w, desired_frame_h);
     f.render_widget(Clear, popup);
 
-    let key = Style::new().fg(t.primary).add_modifier(Modifier::BOLD);
+    let key = t.key_hint_style();
     let help = Line::from(vec![
         Span::styled("↑/↓", key),
-        Span::styled(" scroll  ", Style::new().fg(t.subtle)),
+        Span::styled(" scroll  ", t.subtle_style()),
         Span::styled("←/→", key),
-        Span::styled(" choose  ", Style::new().fg(t.subtle)),
+        Span::styled(" choose  ", t.subtle_style()),
         Span::styled("enter", key),
-        Span::styled(" confirm  ", Style::new().fg(t.subtle)),
+        Span::styled(" confirm  ", t.subtle_style()),
         Span::styled("esc", key),
-        Span::styled(" deny", Style::new().fg(t.subtle)),
+        Span::styled(" deny", t.subtle_style()),
     ]);
 
     let queue_count = app.pending_confirms.len();
@@ -845,19 +841,16 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
             "
 ",
         ))
-        .style(Style::new().fg(t.muted)),
+        .style(t.muted_style()),
         rows[0],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "Command",
-            Style::new().fg(t.primary).add_modifier(Modifier::BOLD),
-        )),
+        Paragraph::new(Span::styled("Command", t.accent_heading_style())),
         rows[2],
     );
 
     let command_panel = WidgetBlock::default()
-        .style(Style::new().fg(t.fg).bg(t.panel_bg))
+        .style(t.panel_style().patch(t.text_style()))
         .padding(Padding::horizontal(1));
     let command_inner = command_panel.inner(rows[3]);
     let command_scroll_area = modal_scroll_area(command_inner);
@@ -874,7 +867,7 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|line| {
             Line::from(Span::styled(
                 line.clone(),
-                Style::new().fg(t.fg).bg(t.panel_bg),
+                t.panel_style().patch(t.text_style()),
             ))
         })
         .collect();
@@ -893,9 +886,9 @@ pub(super) fn render_confirm_modal(f: &mut Frame, area: Rect, app: &mut App) {
 
     let button = |label: &'static str, selected: bool| {
         let style = if selected {
-            focus_style(t)
+            t.selected_item_style()
         } else {
-            Style::new().fg(t.muted).bg(t.panel_bg)
+            t.panel_style().patch(t.muted_style())
         };
         Span::styled(format!(" {label} "), style)
     };
@@ -1024,7 +1017,7 @@ fn render_subagents_modal_inner(
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "no subagents this session",
-                Style::new().fg(t.muted),
+                t.muted_style(),
             ))),
             rows.content,
         );
@@ -1036,16 +1029,16 @@ fn render_subagents_modal_inner(
         .iter()
         .map(|row| {
             let style = if row.running {
-                Style::new().fg(t.fg)
+                t.text_style()
             } else {
-                Style::new().fg(t.muted)
+                t.muted_style()
             };
             ListItem::new(Span::styled(row_for(row), style))
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let selected = modal.selected.min(modal.rows.len() - 1);
     let mut state = ListState::default().with_selected(Some(selected));
     f.render_stateful_widget(list, rows.content, &mut state);
@@ -1273,7 +1266,7 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
                     .iter()
                     .skip(start)
                     .take(body_h)
-                    .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(t.fg))))
+                    .map(|line| Line::from(Span::styled(line.clone(), t.text_style())))
                     .collect();
                 f.render_widget(Paragraph::new(visible), rows.content);
                 if total > body_h {
@@ -1342,7 +1335,7 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "no background jobs this session",
-                Style::new().fg(t.muted),
+                t.muted_style(),
             ))),
             rows.content,
         );
@@ -1353,16 +1346,16 @@ pub(super) fn render_jobs_modal(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|j| {
             let style = if j.running {
-                Style::new().fg(t.fg)
+                t.text_style()
             } else {
-                Style::new().fg(t.muted)
+                t.muted_style()
             };
             ListItem::new(Span::styled(row_for(j), style))
         })
         .collect();
     let list = List::new(items)
-        .style(Style::default().fg(t.fg))
-        .highlight_style(focus_style(t));
+        .style(t.text_style())
+        .highlight_style(t.selected_item_style());
     let selected = modal.selected.min(jobs.len() - 1);
     let mut state = ListState::default().with_selected(Some(selected));
     f.render_stateful_widget(list, rows.content, &mut state);

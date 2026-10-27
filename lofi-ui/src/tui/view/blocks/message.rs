@@ -1,7 +1,5 @@
-use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
-use crate::tui::theme::{agent_indicator, user_indicator};
 use crate::tui::ThinkingBlock;
 
 use crate::tui::view::component::{Component, Cx};
@@ -19,13 +17,13 @@ impl Component for UserMessage<'_> {
         let t = cx.theme;
         let w = cx.width;
         let content_w = w.saturating_sub(2);
-        let mark = Style::new().fg(user_indicator(t));
+        let mark = t.user_marker_style();
         render_markdown_body(
             self.prompt.trim(),
             t,
             w,
             content_w,
-            Style::new().fg(t.fg),
+            t.text_style(),
             move |_| vec![Span::styled("▌ ", mark)],
         )
     }
@@ -36,13 +34,13 @@ impl Component for UserMessage<'_> {
 
     fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
         let t = cx.theme;
-        let mark = Style::new().fg(user_indicator(t));
+        let mark = t.user_marker_style();
         render_markdown_body_window(
             self.prompt.trim(),
             t,
             cx.width,
             cx.width.saturating_sub(2),
-            Style::new().fg(t.fg),
+            t.text_style(),
             move |_| vec![Span::styled("▌ ", mark)],
             range,
         )
@@ -62,8 +60,8 @@ impl Component for NoticeMessage<'_> {
         // quarter-block bar and stay de-emphasized so an app-injected prompt
         // never competes visually with typed input: muted color for marker
         // and body, italic body.
-        let mark = Style::new().fg(t.muted);
-        let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
+        let mark = t.muted_style();
+        let body_style = t.annotation_style();
         render_markdown_body(self.prompt.trim(), t, w, content_w, body_style, move |_| {
             vec![Span::styled("▎ ", mark)]
         })
@@ -75,8 +73,8 @@ impl Component for NoticeMessage<'_> {
 
     fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
         let t = cx.theme;
-        let mark = Style::new().fg(t.muted);
-        let body_style = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
+        let mark = t.muted_style();
+        let body_style = t.annotation_style();
         render_markdown_body_window(
             self.prompt.trim(),
             t,
@@ -102,8 +100,8 @@ impl Component for AssistantText<'_> {
         if text.is_empty() {
             return Vec::new();
         }
-        let mark = Style::new().fg(agent_indicator(t));
-        render_markdown_body(text, t, w, content_w, Style::new().fg(t.fg), move |_| {
+        let mark = t.agent_marker_style();
+        render_markdown_body(text, t, w, content_w, t.text_style(), move |_| {
             vec![Span::styled("▌ ", mark)]
         })
     }
@@ -120,13 +118,13 @@ impl Component for AssistantText<'_> {
 
     fn lines_window(&self, cx: &Cx, range: std::ops::Range<usize>) -> Vec<RenderLine> {
         let t = cx.theme;
-        let mark = Style::new().fg(agent_indicator(t));
+        let mark = t.agent_marker_style();
         render_markdown_body_window(
             self.text.trim(),
             t,
             cx.width,
             cx.width.saturating_sub(2),
-            Style::new().fg(t.fg),
+            t.text_style(),
             move |_| vec![Span::styled("▌ ", mark)],
             range,
         )
@@ -140,7 +138,7 @@ pub(super) struct Thinking<'a> {
 impl Component for Thinking<'_> {
     fn lines(&self, cx: &Cx) -> Vec<RenderLine> {
         let t = cx.theme;
-        let body = Style::new().fg(t.muted).add_modifier(Modifier::ITALIC);
+        let body = t.annotation_style();
         let content_w = cx.width.saturating_sub(2);
         let text = trim_reasoning_summary(&self.block.text);
         let working = self.block.elapsed.is_none() && cx.active_turn;
@@ -163,15 +161,12 @@ impl Component for Thinking<'_> {
                 if !out.is_empty() {
                     out.push(prim::rblank());
                 }
-                let thought_lead = vec![
-                    Span::raw("  "),
-                    Span::styled("◇ ", Style::new().fg(t.subtle)),
-                ];
+                let thought_lead = vec![Span::raw("  "), Span::styled("◇ ", t.subtle_style())];
                 out.push(prim::rline(
                     thought_lead,
                     vec![Span::styled(
                         format!("Thought for {}", prim::fmt_duration(d)),
-                        Style::new().fg(t.subtle),
+                        t.subtle_style(),
                     )],
                 ));
             }

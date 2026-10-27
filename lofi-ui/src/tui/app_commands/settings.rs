@@ -135,7 +135,7 @@ impl App {
         let modes = ThemePickerState::MODES;
         let selected = modes
             .iter()
-            .position(|m| m == &self.theme_mode)
+            .position(|m| *m == self.theme_manager.mode())
             .unwrap_or(0);
         self.theme_picker = Some(ThemePickerState { modes, selected });
     }
@@ -143,44 +143,9 @@ impl App {
     pub(in crate::tui) fn theme_picker_confirm(&mut self) {
         if let Some(picker) = self.theme_picker.take() {
             if let Some(&mode) = picker.modes.get(picker.selected) {
-                self.theme_mode = mode;
-                self.sync_color_scheme_reports();
-                match mode {
-                    lofi_types::ThemeMode::Auto => {
-                        crate::tui::tty_events::request_color_scheme();
-                    }
-                    lofi_types::ThemeMode::Light => {
-                        self.apply_resolved_theme(Theme::light());
-                    }
-                    lofi_types::ThemeMode::Dark => {
-                        self.apply_resolved_theme(Theme::dark());
-                    }
-                }
+                self.update_theme(theme::ThemeEvent::SetMode(mode));
             }
         }
-    }
-
-    pub(in crate::tui) fn apply_color_scheme(
-        &mut self,
-        scheme: crate::tui::tty_events::ColorScheme,
-    ) -> bool {
-        if self.theme_mode != lofi_types::ThemeMode::Auto {
-            return false;
-        }
-        self.apply_resolved_theme(Theme::from_scheme(scheme))
-    }
-
-    pub(in crate::tui) fn sync_color_scheme_reports(&self) {
-        crate::tui::tty_events::set_reports_enabled(self.theme_mode == lofi_types::ThemeMode::Auto);
-    }
-
-    pub(in crate::tui) fn apply_resolved_theme(&mut self, next: Theme) -> bool {
-        if self.theme == next {
-            return false;
-        }
-        self.theme = next;
-        self.layout.frozen_render.clear();
-        true
     }
 
     /// `/policy`: open the bash approval mode dialog. The choice is

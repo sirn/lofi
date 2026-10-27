@@ -11,6 +11,7 @@ mod app_input;
 mod app_lifecycle;
 mod app_nav;
 mod app_render;
+mod app_theme;
 mod debug_stats;
 mod input;
 mod modals;
@@ -298,8 +299,9 @@ pub(crate) struct App {
     info: Option<InfoModal>,
     slash_complete: Option<SlashComplete>,
     no_models_hint: Option<String>,
+    /// Rendering snapshot, updated only through `update_theme`.
     theme: Theme,
-    theme_mode: lofi_types::ThemeMode,
+    theme_manager: theme::ThemeManager,
     kill_ring: String,
     /// True when the previous command was `C-k` so a consecutive `C-k`
     /// appends to the kill ring instead of replacing it.
