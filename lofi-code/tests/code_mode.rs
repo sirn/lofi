@@ -26,6 +26,7 @@ fn ctx(root: &Path) -> ExecCtx {
         auto_mode: None,
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
+        memory: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         timers: lofi_code::tools::TimerRegistry::new(),
@@ -351,6 +352,7 @@ async fn strings_exposed_as_lofi_strings() {
         auto_mode: None,
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
+        memory: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         timers: lofi_code::tools::TimerRegistry::new(),
@@ -550,6 +552,61 @@ async fn exec_tmp_dir_exposed() {
 }
 
 #[tokio::test]
+async fn memory_tool_reads_and_rewrites_the_workspace_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = dir.path().join("state").join("memory.md");
+    let mut cx = ctx(dir.path());
+    cx.memory = Some(memory.clone());
+
+    let res = exec("return await lofi.memory();", &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!(""));
+
+    let res = exec(
+        "return await lofi.memory(\"Next: ship it\");",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value, json!(13));
+    assert_eq!(std::fs::read_to_string(&memory).unwrap(), "Next: ship it");
+
+    let res = exec("return await lofi.memory();", &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.value, json!("Next: ship it"));
+}
+
+#[tokio::test]
+async fn memory_tool_rejects_an_over_limit_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cx = ctx(dir.path());
+    cx.memory = Some(dir.path().join("memory.md"));
+    let res = exec(
+        "return await lofi.memory(\"x\".repeat(3001));",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await;
+    assert!(res.is_err());
+    assert!(!dir.path().join("memory.md").exists());
+}
+
+#[tokio::test]
+async fn memory_tool_reports_no_attached_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let res = exec(
+        "return await lofi.memory();",
+        &ctx(dir.path()),
+        &ExecOptions::default(),
+    )
+    .await;
+    assert!(res.is_err());
+}
+
+#[tokio::test]
 async fn write_and_edit_emit_written_content_as_result() {
     use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
@@ -575,6 +632,7 @@ async fn write_and_edit_emit_written_content_as_result() {
         auto_mode: None,
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
+        memory: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         timers: lofi_code::tools::TimerRegistry::new(),
@@ -642,6 +700,7 @@ async fn hook_backed_tools_emit_tool_events() {
         auto_mode: None,
         policy_override: lofi_code::policy::PolicyOverride::default(),
         skills_dir: None,
+        memory: None,
         truncate: lofi_code::TruncatedCap::default(),
         jobs: lofi_code::tools::JobRegistry::new(),
         timers: lofi_code::tools::TimerRegistry::new(),

@@ -125,6 +125,7 @@ pub struct Agent {
     root: PathBuf,
     tmp_dir: PathBuf,
     tmp_lease: Option<Arc<state::SessionTempDir>>,
+    memory: Option<PathBuf>,
     retry: crate::retry::RetryPolicy,
     pub(crate) system_prompt: String,
     max_output_tokens: Option<u64>,
@@ -199,12 +200,14 @@ impl Agent {
             max_bytes: truncate.max_bytes,
         };
         let shell_policy = lofi_code::policy::defaults::resolve(shell_policy_config);
+        let memory = state::workspace_memory_path(&root).ok();
         Self {
             provider: Arc::from(provider),
             model,
             root,
             tmp_dir,
             tmp_lease: None,
+            memory,
             retry: crate::retry::RetryPolicy::default(),
             system_prompt,
             max_output_tokens,
@@ -247,6 +250,7 @@ impl Agent {
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
             tmp_lease: self.tmp_lease.clone(),
+            memory: self.memory.clone(),
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
@@ -282,6 +286,7 @@ impl Agent {
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
             tmp_lease: self.tmp_lease.clone(),
+            memory: self.memory.clone(),
             retry: self.retry,
             system_prompt,
             max_output_tokens: self.max_output_tokens,
@@ -317,6 +322,7 @@ impl Agent {
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
             tmp_lease: self.tmp_lease.clone(),
+            memory: self.memory.clone(),
             retry: self.retry,
             system_prompt: self.system_prompt.clone(),
             max_output_tokens: self.max_output_tokens,
@@ -353,6 +359,7 @@ impl Agent {
             root: executor.root.clone(),
             tmp_dir: executor.tmp_dir.clone(),
             tmp_lease: executor.tmp_lease.clone(),
+            memory: executor.memory.clone(),
             bash_env: executor.bash_env.clone(),
             shell_policy: executor.shell_policy.clone(),
             truncate: executor.truncate,
@@ -429,6 +436,7 @@ impl Agent {
             root: self.root.clone(),
             tmp_dir: self.tmp_dir.clone(),
             tmp_lease: self.tmp_lease.clone(),
+            memory: self.memory.clone(),
             bash_env: self.bash_env.clone(),
             shell_policy: self.shell_policy.clone(),
             truncate: self.truncate,
@@ -461,6 +469,7 @@ impl Agent {
         self.root = executor.root;
         self.tmp_dir = executor.tmp_dir;
         self.tmp_lease = executor.tmp_lease;
+        self.memory = executor.memory;
         self.bash_env = executor.bash_env;
         self.shell_policy = executor.shell_policy;
         self.truncate = executor.truncate;

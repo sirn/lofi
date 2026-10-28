@@ -92,6 +92,25 @@ pub(crate) fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()>
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+/// The workspace memory file `memory.md` in the workspace's directory
+/// under `states/`, keyed like `sessions/` and `tmp/` so a project's
+/// memory never crosses into another workspace. The agent maintains it
+/// through the `lofi.memory` sandbox tool; the compaction hook reads it.
+/// The directory is created here (mode 0700, like the rest of the state
+/// tree) so a first write lands inside a private tree; the file itself
+/// appears only when the agent writes it.
+/// # Errors
+/// Returns [`Error::State`] if the base state directory cannot be resolved,
+/// or [`Error::Io`] on filesystem failure.
+pub fn workspace_memory_path(cwd: &Path) -> Result<PathBuf> {
+    let mut path = ensure_state_dir()?;
+    path.push("states");
+    path.push(workspace_key(cwd));
+    ensure_private_dir(&path)?;
+    path.push("memory.md");
+    Ok(path)
+}
+
 /// The per-workspace state document: `state.json` in a directory under
 /// `states/`, keyed like `sessions/` and `tmp/`, so a project's remembered
 /// state never crosses into another workspace. The manager owns the document's format
@@ -391,6 +410,31 @@ mod tests {
 
         std::env::remove_var("LOFI_STATE_HOME");
         std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn workspace_memory_path_is_workspace_scoped() {
+        let _env = super::STATE_ENV_LOCK.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("lofi_state_test_memory_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("LOFI_STATE_HOME", &tmp);
+
+        let path = workspace_memory_path(Path::new("/ws/proj")).unwrap();
+        assert!(path.ends_with("memory.md"));
+        assert!(path.starts_with(&tmp));
+        let key = path
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(key, workspace_key(Path::new("/ws/proj")));
+        // Another workspace gets its own memory file.
+        assert_ne!(workspace_memory_path(Path::new("/ws/other")).unwrap(), path);
+
+        std::env::remove_var("LOFI_STATE_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

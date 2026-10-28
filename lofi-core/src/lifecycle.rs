@@ -244,7 +244,10 @@ impl AgentLifecycle {
             max_kept_tokens: self.compact_budget(),
             edit: self.compaction.edit.clone(),
             hooks: vec![Arc::new(CodeCompactionHook::new(
-                self.workspace_root.clone().unwrap_or_default(),
+                self.workspace_root
+                    .as_deref()
+                    .and_then(|root| crate::state::workspace_memory_path(root).ok())
+                    .unwrap_or_default(),
             ))],
         };
         let Some(compaction) = compact(&events, &options) else {
@@ -589,9 +592,16 @@ mod tests {
         let memory = "Next: wire the timer list into the run driver.";
         let mut config = CompactionConfig::default();
         config.auto.max_context_tokens = Some(50);
+        // The memory file lives under the state dir, not the workspace.
+        let _env = crate::state::STATE_ENV_LOCK.lock().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::env::set_var("LOFI_STATE_HOME", state.path());
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
-        std::fs::write(dir.path().join(".lofi/memory.md"), memory).unwrap();
+        std::fs::write(
+            crate::state::workspace_memory_path(dir.path()).unwrap(),
+            memory,
+        )
+        .unwrap();
         let store = crate::session::store::SessionStore::new(dir.path().join("sessions"));
         let cursor = store.create_cursor(dir.path(), &"p/m".into()).unwrap();
         let mut events = Vec::new();
@@ -631,6 +641,8 @@ mod tests {
             compaction.summary
         );
         assert!(compaction.summary.contains(memory));
+
+        std::env::remove_var("LOFI_STATE_HOME");
     }
 
     #[test]

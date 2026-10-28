@@ -22,6 +22,9 @@ pub struct ToolExecutor {
     pub(super) auto_mode_hints: lofi_code::AutoModeHintHandle,
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
     pub(super) skills_dir: Option<PathBuf>,
+    /// Workspace memory file the `lofi.memory` tool maintains, resolved
+    /// once from the workspace root.
+    pub(super) memory: Option<PathBuf>,
     pub(super) jobs: lofi_code::tools::JobRegistry,
     pub(super) timers: lofi_code::tools::TimerRegistry,
     pub(super) job_owner: Option<String>,
@@ -87,6 +90,7 @@ impl ToolExecutor {
             auto_mode_hints: super::auto_mode::hint_handle(),
             policy_override: lofi_code::policy::PolicyOverride::default(),
             skills_dir: None,
+            memory: state::workspace_memory_path(root).ok(),
             jobs: lofi_code::tools::JobRegistry::new(),
             timers: lofi_code::tools::TimerRegistry::new(),
             job_owner: None,
@@ -507,6 +511,7 @@ impl ToolExecutor {
                 auto_mode: self.auto_mode.clone(),
                 policy_override: self.policy_override.clone(),
                 skills_dir: self.skills_dir.clone(),
+                memory: self.memory.clone(),
                 truncate: self.truncate,
                 jobs: self.jobs.clone(),
                 timers: self.timers.clone(),

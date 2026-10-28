@@ -185,6 +185,7 @@ fn agent_with(rounds: Vec<Vec<StreamingEvent>>, root: &std::path::Path) -> Agent
         root: root.to_path_buf(),
         tmp_dir: std::env::temp_dir().join("lofi-agent-test"),
         tmp_lease: None,
+        memory: None,
         retry: crate::retry::RetryPolicy::default(),
         system_prompt: "sys".to_string(),
         max_output_tokens: None,

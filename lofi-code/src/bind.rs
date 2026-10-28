@@ -28,6 +28,7 @@ pub(super) fn bind_tools<'js>(
     bind_recall_tool(ctx, lofi, tools, recall)?;
     bind_result_tool(ctx, lofi, tools, result)?;
     bind_skills_tools(ctx, lofi, tools, skills_dir)?;
+    bind_memory_tool(ctx, lofi, tools)?;
     bind_docs_tools(ctx, lofi, tools)?;
     bind_subagent_tool(ctx, lofi, tools, subagent)?;
     bind_models_tool(ctx, lofi, tools, models)?;
@@ -707,6 +708,49 @@ fn bind_skills_tools<'js>(
         )?,
     )?;
 
+    Ok(())
+}
+
+/// `lofi.memory` reads the workspace memory with no argument and rewrites
+/// it with a string argument. The file lives in the state directory outside
+/// the workspace, so the model cannot reach it with the file tools; this
+/// binding is the only writer and the path is host-chosen.
+fn bind_memory_tool<'js>(
+    ctx: &Ctx<'js>,
+    lofi: &Object<'js>,
+    tools: &Arc<BuiltinTools>,
+) -> rquickjs::Result<()> {
+    let t = tools.clone();
+    lofi.set(
+        "memory",
+        Function::new(
+            ctx.clone(),
+            Async(move |text: Opt<String>| {
+                let t = t.clone();
+                async move {
+                    let preview = text
+                        .0
+                        .as_deref()
+                        .map_or_else(String::new, |s| cap_first_line(s, 120));
+                    let id = emit_start(&t, "memory", preview);
+                    let res = match text.0 {
+                        None => t.memory_read(),
+                        Some(text) => t.memory_write(&text),
+                    };
+                    match res {
+                        Ok(value) => {
+                            emit_end(&t, id, &value);
+                            Ok::<JsonV, rquickjs::Error>(JsonV(value))
+                        }
+                        Err(err) => {
+                            emit_end_err(&t, id, &err.to_string());
+                            Err(rquickjs::Error::Unknown)
+                        }
+                    }
+                }
+            }),
+        )?,
+    )?;
     Ok(())
 }
 

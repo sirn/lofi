@@ -677,13 +677,17 @@ Older tool results and tool-call code become event-id stubs; the compaction hand
 
 ### Workspace memory
 
-A compaction reads `<root>/.lofi/memory.md` and puts it in the handoff as a `Workspace Memory` section.
-The path is fixed; there is no config key.
-The file is clipped at 3000 characters, and the summary says so when the clip happens.
+Each workspace keeps a memory file under the state directory
+(`$XDG_STATE_HOME/lofi/states/<workspace-key>/memory.md`), shared by every
+session opened in the same directory. There is no config key.
+The agent maintains the file with the `lofi.memory` sandbox tool: `lofi.memory()`
+reads it, `lofi.memory(text)` rewrites it, and a rewrite above 3000 characters
+is rejected. A compaction puts the file in the handoff as a `Workspace Memory`
+section, clipped at 3000 characters; the summary says so when the clip happens.
 
-Rewrite the file when the task state changes.
-Do not append to it.
-An append-only file grows past the clip and loses the oldest state first.
+Concurrent sessions share the file with no locking: a rewrite is whole-file
+and the last writer wins. Keep the rewrite whole-file too — an append-only
+file grows past the clip and loses the oldest state first.
 
 ## Bash environment
 

@@ -218,6 +218,9 @@ pub struct ExecCtx {
     /// agent.
     pub policy_override: crate::policy::PolicyOverride,
     pub skills_dir: Option<PathBuf>,
+    /// Workspace memory file the `lofi.memory` tool maintains. `None`
+    /// where no workspace state directory exists (nested sandboxes, tests).
+    pub memory: Option<PathBuf>,
     /// Visible-output cap applied to file reads and bash output.
     pub truncate: crate::tools::truncate::TruncatedCap,
     /// Session-scoped background job registry shared with the owning
@@ -247,6 +250,7 @@ impl std::fmt::Debug for ExecCtx {
         f.debug_struct("ExecCtx")
             .field("root", &self.root)
             .field("tmp_dir", &self.tmp_dir)
+            .field("memory", &self.memory)
             .field("strings", &self.strings)
             .field("recall", &self.recall.is_some())
             .field("result", &self.result.is_some())

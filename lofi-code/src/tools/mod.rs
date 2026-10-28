@@ -18,6 +18,7 @@ pub mod read;
 mod bash_util;
 mod fs;
 pub mod jobs;
+pub mod memory;
 pub mod skills;
 mod steer;
 pub mod timers;
@@ -76,6 +77,9 @@ pub struct BuiltinTools {
     /// dialog pick applies to every later exec in the session.
     policy_override: crate::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
+    /// Workspace memory file the `lofi.memory` tool maintains. `None`
+    /// keeps the tool bound but unavailable (tests, nested sandboxes).
+    memory: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     /// Approves one directory for use outside the workspace root.
     approve_dir: Option<crate::ApproveDirFn>,
@@ -152,6 +156,7 @@ impl BuiltinTools {
             auto_mode,
             policy_override: crate::policy::PolicyOverride::default(),
             skills_dir,
+            memory: None,
             read_roots,
             approve_dir: None,
             cancel: None,
@@ -288,6 +293,37 @@ impl BuiltinTools {
     #[must_use]
     pub fn skills_dir(&self) -> Option<&Path> {
         self.skills_dir.as_deref()
+    }
+
+    /// Attaches the workspace memory file the `lofi.memory` tool maintains.
+    /// The path is host-chosen and never resolved from guest input.
+    #[must_use]
+    pub fn with_memory(mut self, memory: Option<PathBuf>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Read the workspace memory; an empty string is the "no memory yet"
+    /// case.
+    /// # Errors
+    /// Returns [`Error::Tool`] when no memory path is attached or the read
+    /// fails.
+    pub(crate) fn memory_read(&self) -> Result<serde_json::Value> {
+        let path = self.memory.as_deref().ok_or_else(|| {
+            Error::Tool("lofi.memory is not available in this context".to_string())
+        })?;
+        memory::read(path).map(serde_json::Value::String)
+    }
+
+    /// Replace the workspace memory with `text`.
+    /// # Errors
+    /// Returns [`Error::Tool`] when no memory path is attached, the text
+    /// exceeds the limit, or the write fails.
+    pub(crate) fn memory_write(&self, text: &str) -> Result<serde_json::Value> {
+        let path = self.memory.as_deref().ok_or_else(|| {
+            Error::Tool("lofi.memory is not available in this context".to_string())
+        })?;
+        memory::write(path, text).map(|count| serde_json::json!(count))
     }
 
     /// Resolves a read-only tool path against the workspace root and the

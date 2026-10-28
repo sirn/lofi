@@ -4,10 +4,7 @@ use std::path::PathBuf;
 use lofi_types::{clip, CompactBlock, CompactionHook, NativeToolRecord, SummarySection};
 
 use crate::docs;
-
-/// The model rewrites this file as its own task state.
-const WORKSPACE_MEMORY: &str = ".lofi/memory.md";
-const WORKSPACE_MEMORY_LIMIT: usize = 3_000;
+use crate::tools::memory::MEMORY_LIMIT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileEffect {
@@ -81,20 +78,22 @@ fn skill_blurb(result: &str) -> String {
 
 #[derive(Default)]
 pub struct CodeCompactionHook {
-    root: PathBuf,
+    memory: PathBuf,
 }
 
 impl CodeCompactionHook {
     #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(memory: impl Into<PathBuf>) -> Self {
+        Self {
+            memory: memory.into(),
+        }
     }
 
     fn workspace_memory(&self) -> Option<SummarySection> {
-        if self.root.as_os_str().is_empty() {
+        if self.memory.as_os_str().is_empty() {
             return None;
         }
-        let text = match std::fs::read_to_string(self.root.join(WORKSPACE_MEMORY)) {
+        let text = match std::fs::read_to_string(&self.memory) {
             Ok(text) => text,
             // A missing file is the normal "no memory yet" case. Any other
             // failure would drop the model's task state without a signal.
@@ -102,7 +101,7 @@ impl CodeCompactionHook {
             Err(err) => {
                 return Some(SummarySection {
                     title: "Workspace Memory".to_string(),
-                    items: vec![format!("cannot read {WORKSPACE_MEMORY}: {err}")],
+                    items: vec![format!("cannot read the workspace memory: {err}")],
                 })
             }
         };
@@ -110,9 +109,9 @@ impl CodeCompactionHook {
         if text.is_empty() {
             return None;
         }
-        let clipped = text.chars().count() > WORKSPACE_MEMORY_LIMIT;
+        let clipped = text.chars().count() > MEMORY_LIMIT;
         let text = if clipped {
-            clip(text, WORKSPACE_MEMORY_LIMIT)
+            clip(text, MEMORY_LIMIT)
         } else {
             text.to_string()
         };
@@ -126,7 +125,7 @@ impl CodeCompactionHook {
             .collect();
         if clipped {
             items.push(format!(
-                "clipped at {WORKSPACE_MEMORY_LIMIT} characters; rewrite {WORKSPACE_MEMORY} to fit"
+                "clipped at {MEMORY_LIMIT} characters; rewrite it with lofi.memory to fit"
             ));
         }
         Some(SummarySection {
@@ -391,7 +390,7 @@ mod tests {
 
     fn hook() -> (tempfile::TempDir, CodeCompactionHook) {
         let dir = tempfile::tempdir().unwrap();
-        let hook = CodeCompactionHook::new(dir.path());
+        let hook = CodeCompactionHook::new(dir.path().join("memory.md"));
         (dir, hook)
     }
 
@@ -456,9 +455,8 @@ mod tests {
     #[test]
     fn sections_lead_with_the_workspace_memory_file() {
         let (dir, hook) = hook();
-        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
         std::fs::write(
-            dir.path().join(WORKSPACE_MEMORY),
+            dir.path().join("memory.md"),
             "Next: wire the timer list into the run driver.\n",
         )
         .unwrap();
@@ -473,9 +471,8 @@ mod tests {
     #[test]
     fn sections_split_the_memory_into_items() {
         let (dir, hook) = hook();
-        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
         std::fs::write(
-            dir.path().join(WORKSPACE_MEMORY),
+            dir.path().join("memory.md"),
             "[Blocked] waiting on review\n\nNext: ship it\n",
         )
         .unwrap();
@@ -496,11 +493,10 @@ mod tests {
     #[test]
     fn sections_clip_a_long_workspace_memory_file() {
         let (dir, hook) = hook();
-        std::fs::create_dir_all(dir.path().join(".lofi")).unwrap();
-        std::fs::write(dir.path().join(WORKSPACE_MEMORY), "x".repeat(4_000)).unwrap();
+        std::fs::write(dir.path().join("memory.md"), "x".repeat(4_000)).unwrap();
         let sections = hook.sections(&[]);
         let memory = &sections[0];
-        assert_eq!(memory.items[0].chars().count(), WORKSPACE_MEMORY_LIMIT);
+        assert_eq!(memory.items[0].chars().count(), MEMORY_LIMIT);
         assert!(memory.items[1].contains("clipped at 3000 characters"));
     }
 }
