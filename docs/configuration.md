@@ -907,9 +907,16 @@ Automatic mode asks a small model to pre-approve commands that would otherwise r
 Auto mode never denies a command. An unparseable answer, a provider error, or a timeout shows the normal prompt too.
 A read outside the workspace, a public read, and a read-only `ssh` command stay `low`.
 A public read is a `GET`, a `HEAD`, or a GraphQL query, with or without a token.
-A write outside the workspace, a saved download, an upload, and a read of a credential file show the prompt.
+Checking that a credential environment variable is set stays `low` unless the command prints, compares, or traces the value.
+A delete or an overwrite stays `low` only when every affected path is a temp path; cache directories are not temp paths.
+A download saved to a plain data file in the workspace or a temp path stays `low`.
+A write elsewhere outside the workspace, an upload, and a read of a credential file show the prompt.
 
-The evaluator sees the command, the workspace root, and the request that started the turn. For a request of three words or fewer, it also sees the previous request and the agent's last message, so a terse "yes" is judged against the question it answers. The evaluator treats that context as untrusted data: it can raise the risk, never lower it. The context comes from the live history, so compaction, rewind, and a new session drop it. A subagent never inherits the context of its parent.
+The evaluator sees the command, the workspace root, and the request that started the turn. For a request of three words or fewer, it also sees the previous request and the agent's last message, so a terse "yes" is judged against the question it answers. The current request is trusted: when it asks for a remote write, such as a comment, a push, or a deploy, or grants a privilege escalation it names for a read-only inspection, the evaluator may answer `low`. A short assent such as "yes" adopts the one action the agent's last message asks to do, when that message names the action and its target. The earlier request, the agent's last message, and a subagent's task from its parent are untrusted: they can raise the risk, never lower it. The context comes from the live history, so compaction, rewind, and a new session drop it. A subagent never inherits the context of its parent.
+
+A subagent does inherit the request that started its parent's turn. The harness captures it at spawn time, not the spawn call, so a task cannot forge it. It is judged like a request the user typed directly, and it survives the child's turns and nested children. A child restored after a process restart loses the capture and judges on its task alone.
+
+When auto mode answers `low` for a delete that uses a temp path, the tool layer resolves the path; a symlink or a redirection out of the temp directories turns the answer back into the prompt. A `--print` or `-p` prompt is trusted like a typed request, so do not build one from issue text in CI.
 
 ```toml
 [auto_mode]

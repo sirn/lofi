@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use lofi_code::policy::auto_mode::{self, AutoModeRisk};
 use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome};
-use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, Role};
+use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, PromptKind, Role};
 use std::sync::Arc;
 
 use lofi_error::{Error, Result};
@@ -269,14 +269,21 @@ pub(super) async fn evaluate_command(
 /// last message are passed only for a terse request, because "yes" answers
 /// the agent's question and cannot be judged on its own.
 #[must_use]
-pub fn derive_hints(messages: &[Message], current: Option<&str>) -> AutoModeHints {
-    let Some(current) = current else {
-        return AutoModeHints::default();
-    };
+pub fn derive_hints(messages: &[Message], current: Option<(&str, PromptKind)>) -> AutoModeHints {
+    // A subagent's task is written by the parent agent, so it is context,
+    // never authorization. It is found in the current prompt of the child's
+    // first turn, or in the history a resumed child replays.
     let mut hints = AutoModeHints {
-        prompt: Some(auto_mode::bound(current)),
+        parent_task: current
+            .filter(|(_, kind)| *kind == PromptKind::Task)
+            .map(|(text, _)| auto_mode::bound(text))
+            .or_else(|| messages.iter().find_map(task_text).map(auto_mode::bound)),
         ..AutoModeHints::default()
     };
+    let Some((current, PromptKind::User)) = current else {
+        return hints;
+    };
+    hints.prompt = Some(auto_mode::bound_request(current));
     if !auto_mode::is_terse(current) {
         return hints;
     }
@@ -291,6 +298,18 @@ pub fn derive_hints(messages: &[Message], current: Option<&str>) -> AutoModeHint
         .find_map(assistant_text)
         .map(|text| auto_mode::bound(&text));
     hints
+}
+
+/// The task a parent agent gave a subagent. It renders as context, not as a
+/// request.
+fn task_text(message: &Message) -> Option<&str> {
+    if message.role != Role::User || message.kind != PromptKind::Task {
+        return None;
+    }
+    message.blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 /// The text of a request that a human typed. Compaction summaries and

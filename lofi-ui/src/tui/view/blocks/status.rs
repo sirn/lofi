@@ -115,7 +115,7 @@ impl Component for QueuedPromptLine<'_> {
         let mark = t.muted_style();
         let (bar, body_style) = match self.kind {
             lofi_types::PromptKind::Notice => ("▎ ", t.annotation_style()),
-            lofi_types::PromptKind::User => ("▌ ", t.muted_style()),
+            lofi_types::PromptKind::User | lofi_types::PromptKind::Task => ("▌ ", t.muted_style()),
         };
         render_markdown_body(
             self.text.trim(),

@@ -110,7 +110,8 @@ impl BuiltinTools {
     async fn auto_mode_decision(&self, cmd: &str, auto_mode: &crate::AutoModeFn) -> bool {
         let mut evaluation = auto_mode(cmd.to_string());
         let Some(confirm) = &self.confirm else {
-            return matches!(evaluation.await, crate::AutoModeOutcome::Allow { .. });
+            let outcome = guard_temp_escape(cmd, evaluation.await);
+            return matches!(outcome, crate::AutoModeOutcome::Allow { .. });
         };
 
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -128,6 +129,7 @@ impl BuiltinTools {
         tokio::select! {
             biased;
             outcome = &mut evaluation => {
+                let outcome = guard_temp_escape(cmd, outcome);
                 let Some(decided) = Self::confirm_reason(outcome) else {
                     active.store(false, std::sync::atomic::Ordering::Relaxed);
                     return true;
@@ -411,6 +413,92 @@ fn temp_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     format!("{nanos:016x}")
+}
+
+/// Second layer for the temp exception. The evaluator judges command text, so
+/// it cannot see a symlink planted in a temp directory or a redirected temp
+/// variable. Resolve the literal temp paths a destructive command names; when
+/// one resolves outside the temp directories, turn the allowance into a
+/// confirmation. It never denies a command.
+fn guard_temp_escape(cmd: &str, outcome: crate::AutoModeOutcome) -> crate::AutoModeOutcome {
+    match outcome {
+        crate::AutoModeOutcome::Allow { reason } if temp_path_escapes(cmd) => {
+            crate::AutoModeOutcome::Ask {
+                reason: format!(
+                    "a temp path in the command resolves outside the temp directories: {reason}"
+                ),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Verbs whose effect is to delete or replace what they name.
+const DESTRUCTIVE_VERBS: [&str; 7] = ["rm", "rmdir", "shred", "unlink", "truncate", "mv", "cp"];
+
+fn temp_path_escapes(cmd: &str) -> bool {
+    let destructive = cmd
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')'))
+        .any(|word| DESTRUCTIVE_VERBS.contains(&word));
+    destructive
+        && temp_path_tokens(cmd)
+            .iter()
+            .any(|path| escapes_temp_roots(path))
+}
+
+/// The literal temp paths the command names: /tmp/..., /var/tmp/...,
+/// /dev/shm/..., and the TMPDIR forms expanded with their fallback. A bare
+/// variable or an unset TMPDIR names nothing resolvable, so it is skipped.
+fn temp_path_tokens(cmd: &str) -> Vec<String> {
+    let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    cmd.split_whitespace()
+        .filter_map(|token| {
+            let token = token.trim_matches(|c: char| {
+                matches!(c, '"' | '\'' | ',' | ';' | ')' | '(' | '*' | '?')
+            });
+            let expanded = if let Some(rest) = token.strip_prefix("${TMPDIR:-/tmp}").or_else(|| {
+                token
+                    .strip_prefix("${TMPDIR}")
+                    .or_else(|| token.strip_prefix("$TMPDIR"))
+            }) {
+                if rest.is_empty() || std::env::var("TMPDIR").is_err() {
+                    return None;
+                }
+                format!("{tmpdir}{rest}")
+            } else {
+                token.to_string()
+            };
+            ["/tmp/", "/var/tmp/", "/dev/shm/"]
+                .iter()
+                .any(|root| expanded.starts_with(root))
+                .then_some(expanded)
+        })
+        .collect()
+}
+
+/// Resolve the deepest part of the path that exists and report whether it
+/// stays inside a temp directory. A path whose ancestors cannot be resolved
+/// at all names nothing to check.
+fn escapes_temp_roots(path: &str) -> bool {
+    let roots: Vec<std::path::PathBuf> = {
+        let mut roots = ["/tmp", "/var/tmp", "/dev/shm"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        if let Ok(root) = std::env::temp_dir().canonicalize() {
+            roots.push(root);
+        }
+        roots
+    };
+    let mut current = std::path::PathBuf::from(path);
+    loop {
+        if let Ok(resolved) = current.canonicalize() {
+            return !roots.iter().any(|root| resolved.starts_with(root));
+        }
+        if !current.pop() {
+            return false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -760,5 +848,59 @@ mod tests {
             tools.with_policy_override(mode_override(lofi_types::BashApprovalMode::AskAuto));
         // Auto allowed it; the manual prompt answer (false) must not win.
         assert!(tools.check_policy("special-cmd", true).await.is_none());
+    }
+
+    fn allow(reason: &str) -> crate::AutoModeOutcome {
+        crate::AutoModeOutcome::Allow {
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn temp_guard_keeps_a_plain_temp_delete_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build");
+        std::fs::create_dir(&path).unwrap();
+        let cmd = format!("rm -rf {}", path.display());
+        assert!(!temp_path_escapes(&cmd));
+        assert!(matches!(
+            guard_temp_escape(&cmd, allow("safe")),
+            crate::AutoModeOutcome::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn temp_guard_downgrades_a_symlink_planted_in_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("x");
+        std::os::unix::fs::symlink(std::env::current_dir().unwrap(), &link).unwrap();
+        let cmd = format!("rm -rf {}", link.display());
+        assert!(temp_path_escapes(&cmd));
+        assert!(matches!(
+            guard_temp_escape(&cmd, allow("safe")),
+            crate::AutoModeOutcome::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn temp_guard_ignores_deletes_without_a_temp_path() {
+        assert!(!temp_path_escapes("rm -rf target"));
+        assert!(!temp_path_escapes("cat /tmp/notes"));
+        assert!(!temp_path_escapes("echo rm /tmp/x"));
+    }
+
+    #[test]
+    fn temp_guard_never_turns_a_non_allow_into_something_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("x");
+        std::os::unix::fs::symlink(std::env::current_dir().unwrap(), &link).unwrap();
+        let cmd = format!("rm -rf {}", link.display());
+        let ask = crate::AutoModeOutcome::Ask {
+            reason: "deletes".to_string(),
+        };
+        assert!(matches!(
+            guard_temp_escape(&cmd, ask),
+            crate::AutoModeOutcome::Ask { .. }
+        ));
     }
 }

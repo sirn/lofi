@@ -140,15 +140,25 @@ pub async fn run(
     // Deriving it here (instead of accumulating it as the turn runs) is what
     // makes compaction, rewind, and a new session drop the context: the scan
     // simply stops finding the old requests.
-    let typed_prompt = prompt_message
-        .as_ref()
-        .and_then(super::auto_mode::typed_prompt)
-        .map(str::to_string);
-    *executor
-        .auto_mode_hints
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        super::auto_mode::derive_hints(messages, typed_prompt.as_deref());
+    let current_request = prompt_message.as_ref().and_then(|message| {
+        let text = message.blocks.iter().find_map(|block| match block {
+            ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })?;
+        Some((text, message.kind))
+    });
+    {
+        let mut handle = executor
+            .auto_mode_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hints = super::auto_mode::derive_hints(messages, current_request);
+        // A subagent session keeps the request it inherited at spawn time:
+        // the derivation above reads the child's own history, which holds
+        // only the task, so the inherited request must survive the overwrite.
+        hints.root_request.clone_from(&handle.root_request);
+        *handle = hints;
+    }
     // Background subagents and job drivers need a runtime that outlives this
     // turn's worker runtime. Both registries capture one at construction; these
     // calls repair registries built outside any runtime and are no-ops otherwise

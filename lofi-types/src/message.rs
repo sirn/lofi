@@ -12,6 +12,9 @@ pub enum PromptKind {
     #[default]
     User,
     Notice,
+    /// A subagent's task, written by the parent agent. It renders like a
+    /// prompt but is never trusted as user authorization.
+    Task,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

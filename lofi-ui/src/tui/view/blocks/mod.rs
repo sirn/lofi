@@ -165,9 +165,12 @@ fn turn_stack(turn: &Turn) -> Stack<'_> {
     let mut stack = Stack::new();
     if !turn.prompt.is_empty() {
         match turn.kind {
-            lofi_types::PromptKind::User => stack.push(UserMessage {
-                prompt: &turn.prompt,
-            }),
+            // A subagent's task renders like the prompt it stands in for.
+            lofi_types::PromptKind::User | lofi_types::PromptKind::Task => {
+                stack.push(UserMessage {
+                    prompt: &turn.prompt,
+                });
+            }
             lofi_types::PromptKind::Notice => stack.push(NoticeMessage {
                 prompt: &turn.prompt,
             }),

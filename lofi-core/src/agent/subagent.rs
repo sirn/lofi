@@ -1932,7 +1932,9 @@ async fn run_turn_with_timeout(
     );
     let turn = backend.run_turn(
         &mut messages,
-        TurnRequest::prompt(prompt, PromptKind::User),
+        // The task is parent-written, so it must not read as user
+        // authorization in the child's auto-mode context.
+        TurnRequest::prompt(prompt, PromptKind::Task),
         tx,
         cursor.as_ref(),
         RunControls {
@@ -2163,12 +2165,42 @@ pub(super) fn isolate_auto_mode(executor: &mut ToolExecutor, support: &SubagentS
 /// The child's execution state: the session's jobs, policy, truncation and
 /// sandbox configuration stay shared; the sandbox thread, the auto-mode
 /// context and the run-management hook are the child's own.
-fn child_executor(template: &dyn Backend, support: &SubagentSupport) -> ToolExecutor {
+/// The user request a child inherits: the request its parent inherited
+/// (a nested child), else the parent session's current request. Read from
+/// the parent's hints handle, which the turn session fills from user input,
+/// so a spawn call can never supply it.
+pub(super) fn inherited_request(template: &dyn Backend) -> Option<String> {
+    let executor = template.tool_executor();
+    let hints = executor
+        .auto_mode_hints
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    hints.root_request.clone().or_else(|| hints.prompt.clone())
+}
+
+pub(super) fn child_executor(
+    template: &dyn Backend,
+    support: &SubagentSupport,
+    root_request: Option<String>,
+) -> ToolExecutor {
     let mut executor = template
         .tool_executor()
         .reset_exec_worker()
         .with_fresh_auto_mode_hints();
     isolate_auto_mode(&mut executor, support);
+    // Seed the inherited request into the handle the turn loop preserves:
+    // the child's own history holds only its task, so a later turn cannot
+    // recover the request the user typed in the parent session. Seeded after
+    // `isolate_auto_mode`, which hands the child a fresh handle.
+    if let Some(request) = root_request {
+        *executor
+            .auto_mode_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = lofi_code::AutoModeHints {
+            root_request: Some(request),
+            ..lofi_code::AutoModeHints::default()
+        };
+    }
     // A child cannot manage runs; it gets its own inbox once it has an id.
     executor.with_child_identity("", None, None, None)
 }
@@ -2247,11 +2279,13 @@ async fn child_backend(
                 .ok_or_else(|| Error::Tool(format!("unknown thinking level: {level}")))
         })
         .transpose()?;
+    // Captured once, before the fork, from the parent session's live hints.
+    let root_request = inherited_request(template.as_ref());
     let mut child = if let Some(query) = model {
         // An explicit level is resolved together with the model so it is
         // validated against the supported levels of the target.
         let query = override_query(support, template.as_ref(), query, level.clone())?;
-        let executor = child_executor(template.as_ref(), support);
+        let executor = child_executor(template.as_ref(), support, root_request.clone());
         // The factory opens a session backend; a child forks from it so it
         // runs without run management of its own.
         let opened = support
@@ -2261,7 +2295,7 @@ async fn child_backend(
             .map_err(|e| Error::Tool(format!("invalid model override: {e}")))?;
         opened.fork(executor)
     } else {
-        let child = template.fork(child_executor(template.as_ref(), support));
+        let child = template.fork(child_executor(template.as_ref(), support, root_request));
         match level {
             Some(level) => with_thinking(child, &level)?,
             None => child,
@@ -2472,7 +2506,9 @@ fn restore_entry(
     // or model removed from the config), keep the session model and say so
     // on the entry instead of failing the restore.
     let mut note = None;
-    let executor = child_executor(template, support);
+    // A restored entry lost the capture across the restart, so it inherits
+    // nothing: the current parent request did not start this run.
+    let executor = child_executor(template, support, None);
     let mut child = template.fork(executor.clone());
     let selection = child.selection();
     let current = format!(

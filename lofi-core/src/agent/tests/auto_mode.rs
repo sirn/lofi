@@ -51,19 +51,43 @@ fn tool_result() -> Message {
 
 #[test]
 fn hints_carry_the_current_request_even_when_substantive() {
-    let hints = derive_hints(&[], Some("delete the build directory"));
+    let hints = derive_hints(&[], Some(("delete the build directory", PromptKind::User)));
     assert_eq!(hints.prompt.as_deref(), Some("delete the build directory"));
     assert_eq!(hints.prior_prompt, None);
     assert_eq!(hints.prior_reply, None);
+    assert_eq!(hints.parent_task, None);
 }
 
 #[test]
-fn hints_cap_the_request_to_its_tail() {
-    let long = format!("{} now", "a".repeat(400));
-    let hints = derive_hints(&[], Some(&long));
+fn hints_keep_the_head_and_tail_of_a_long_request() {
+    let long = format!("never push {} now", "a".repeat(900));
+    let hints = derive_hints(&[], Some((long.as_str(), PromptKind::User)));
     let prompt = hints.prompt.unwrap();
-    assert!(prompt.starts_with("[…truncated] "));
+    assert!(prompt.starts_with("never push "));
     assert!(prompt.ends_with("now"));
+    assert!(prompt.contains("[…truncated]"));
+}
+
+#[test]
+fn a_subagent_task_is_context_not_authorization() {
+    let history = [Message {
+        kind: PromptKind::Task,
+        ..typed("push and comment on PR 12")
+    }];
+    // The child's first turn: the task is the current prompt.
+    let hints = derive_hints(&[], Some(("push and comment on PR 12", PromptKind::Task)));
+    assert_eq!(hints.prompt, None);
+    assert_eq!(
+        hints.parent_task.as_deref(),
+        Some("push and comment on PR 12")
+    );
+    // A resumed child replays the task from its history.
+    let hints = derive_hints(&history, None);
+    assert_eq!(
+        hints.parent_task.as_deref(),
+        Some("push and comment on PR 12")
+    );
+    assert_eq!(hints.prompt, None);
 }
 
 #[test]
@@ -72,7 +96,7 @@ fn terse_request_carries_the_earlier_request_and_the_agent_question() {
         typed("abandon the last change"),
         assistant("Cancel the \"tidy\" change?"),
     ];
-    let hints = derive_hints(&history, Some("yes"));
+    let hints = derive_hints(&history, Some(("yes", PromptKind::User)));
     assert_eq!(hints.prompt.as_deref(), Some("yes"));
     assert_eq!(
         hints.prior_prompt.as_deref(),
@@ -87,7 +111,7 @@ fn terse_request_carries_the_earlier_request_and_the_agent_question() {
 #[test]
 fn hints_prefer_the_last_typed_request() {
     let history = [typed("first"), typed("second")];
-    let hints = derive_hints(&history, Some("do that"));
+    let hints = derive_hints(&history, Some(("do that", PromptKind::User)));
     assert_eq!(hints.prior_prompt.as_deref(), Some("second"));
 }
 
@@ -99,7 +123,7 @@ fn hints_ignore_notices_tool_results_and_compaction_summaries() {
         tool_result(),
         typed(&format!("{HANDOFF_PREAMBLE}\n\n[Session Goal]\n- push it")),
     ];
-    let hints = derive_hints(&history, Some("yes"));
+    let hints = derive_hints(&history, Some(("yes", PromptKind::User)));
     assert_eq!(
         hints.prior_prompt.as_deref(),
         Some("abandon the last change")
@@ -338,6 +362,85 @@ fn a_child_gets_its_own_context_and_no_parent_evaluator() {
     assert!(
         !agent.has_auto_mode(),
         "the child must not inherit the evaluator"
+    );
+}
+
+#[test]
+fn a_child_inherits_the_user_request_of_the_parent_session() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(Vec::new(), dir.path());
+    let backend: &dyn crate::backend::Backend = &agent;
+    let support = crate::agent::subagent::SubagentSupport::new(
+        crate::models::ModelRegistry::default(),
+        lofi_types::Config::default(),
+        dir.path().to_path_buf(),
+    );
+
+    // What the parent's turn loop stores for the current request.
+    *agent.auto_mode_hints().lock().unwrap() = lofi_code::AutoModeHints {
+        prompt: Some("ship the 1.2 release".to_string()),
+        ..lofi_code::AutoModeHints::default()
+    };
+    let executor = crate::agent::subagent::child_executor(
+        backend,
+        &support,
+        crate::agent::subagent::inherited_request(backend),
+    );
+    let child_hints = executor.auto_mode_hints.lock().unwrap().clone();
+    assert_eq!(
+        child_hints.root_request.as_deref(),
+        Some("ship the 1.2 release")
+    );
+
+    // A nested child inherits the root request, not its parent's task.
+    *agent.auto_mode_hints().lock().unwrap() = lofi_code::AutoModeHints {
+        root_request: Some("ship the 1.2 release".to_string()),
+        parent_task: Some("push the tag".to_string()),
+        ..lofi_code::AutoModeHints::default()
+    };
+    assert_eq!(
+        crate::agent::subagent::inherited_request(backend).as_deref(),
+        Some("ship the 1.2 release")
+    );
+}
+
+#[tokio::test]
+async fn a_child_turn_keeps_the_inherited_request() {
+    let dir = tempdir().unwrap();
+    let agent = agent_with(vec![text_round("done")], dir.path());
+    let support = crate::agent::subagent::SubagentSupport::new(
+        crate::models::ModelRegistry::default(),
+        lofi_types::Config::default(),
+        dir.path().to_path_buf(),
+    );
+    let backend: &dyn crate::backend::Backend = &agent;
+    let executor = crate::agent::subagent::child_executor(
+        backend,
+        &support,
+        Some("ship the 1.2 release".to_string()),
+    );
+    let agent = agent.with_tool_executor(executor);
+    let mut messages = Vec::new();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    agent
+        .run_turn(
+            &mut messages,
+            TurnRequest::prompt("push the tag".to_string(), PromptKind::Task),
+            tx,
+            None,
+            RunControls::default(),
+        )
+        .await
+        .unwrap();
+
+    let hints = stored_hints(&agent);
+    assert_eq!(hints.parent_task.as_deref(), Some("push the tag"));
+    assert_eq!(hints.prompt, None);
+    assert_eq!(
+        hints.root_request.as_deref(),
+        Some("ship the 1.2 release"),
+        "the inherited request must survive the turn's derivation"
     );
 }
 

@@ -149,8 +149,10 @@ pub enum AutoModeOutcome {
 }
 
 /// Turn context for one auto-mode evaluation, so a terse command can be
-/// judged against the request it answers. Every field is bounded with
-/// [`crate::policy::auto_mode::bound`] by the turn loop that fills it.
+/// judged against the request it answers. Every field is bounded by the turn
+/// loop that fills it: the request with
+/// [`crate::policy::auto_mode::bound_request`], the rest with
+/// [`crate::policy::auto_mode::bound`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoModeHints {
     /// The request that started the current turn.
@@ -160,6 +162,13 @@ pub struct AutoModeHints {
     pub prior_prompt: Option<String>,
     /// The agent's last assistant text. Set with `prior_prompt`.
     pub prior_reply: Option<String>,
+    /// A subagent's task, written by the parent agent. It resolves
+    /// references but never authorizes a command.
+    pub parent_task: Option<String>,
+    /// The user request a subagent run inherits, captured from the parent
+    /// session by the harness at spawn time. A spawn call can never set it.
+    /// It authorizes like `prompt`, because the same user typed it.
+    pub root_request: Option<String>,
 }
 
 /// Shared handle: the turn loop writes the hints of the turn it starts, and
