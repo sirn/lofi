@@ -703,6 +703,12 @@ impl App {
         let Some(usage) = self.status_usage else {
             return;
         };
+        // The gate is cheap and pure, so an under-threshold turn never
+        // starts a lifecycle operation: the slot it would occupy for a
+        // scheduler-dependent moment drops a manual /compact instead.
+        if !self.lifecycle.should_auto_compact(usage) {
+            return;
+        }
         if self.start_lifecycle_operation(LifecycleOperation::AutoCompact(usage)) {
             return;
         }

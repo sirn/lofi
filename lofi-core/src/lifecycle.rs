@@ -293,6 +293,19 @@ impl AgentLifecycle {
         Ok(Some(compaction))
     }
 
+    /// The cheap, pure gate [`Self::auto_compact`] applies before any
+    /// history work. The UI checks it before starting a lifecycle operation,
+    /// so a turn that stays under the threshold never occupies the lifecycle
+    /// slot and drops a manual `/compact` submitted right after it.
+    #[must_use]
+    pub fn should_auto_compact(&self, usage: Usage) -> bool {
+        self.compaction.auto.enable
+            && self
+                .compaction
+                .soft_threshold(self.context_window)
+                .is_some_and(|threshold| usage.context_tokens() > threshold)
+    }
+
     /// Compact when the settled round's context fill exceeds the soft
     /// threshold.
     /// # Errors
@@ -303,13 +316,7 @@ impl AgentLifecycle {
         cursor: Option<&SessionCursor>,
         system_prompt: &str,
     ) -> Result<Option<Compaction>> {
-        if !self.compaction.auto.enable {
-            return Ok(None);
-        }
-        let Some(threshold) = self.compaction.soft_threshold(self.context_window) else {
-            return Ok(None);
-        };
-        if usage.context_tokens() <= threshold {
+        if !self.should_auto_compact(usage) {
             return Ok(None);
         }
         self.compact(cursor, system_prompt)
