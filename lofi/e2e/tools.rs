@@ -442,6 +442,8 @@ fn compaction_and_resume_keep_latest_tool_cycle_valid() {
     }
     first.submit("compact tool prompt");
     first.wait_for("compact tool answer", WAIT);
+    // The journal records turn_end before the app clears its run state.
+    first.wait_idle(WAIT);
     first.submit("/compact");
     first.wait_for("Compacted", WAIT);
     first.submit("/quit");

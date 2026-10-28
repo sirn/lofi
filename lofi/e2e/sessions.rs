@@ -15,6 +15,12 @@ use crate::support::{
     MockServer, ProcessGuard, WAIT,
 };
 
+/// RSS settles slower than screen state: under a fully parallel test run
+/// the picker's cleanup work competes for CPU, so the release waits get a
+/// longer ceiling than screen waits. The pass path still returns as soon as
+/// the memory drops.
+const MEMORY_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
 #[test]
 fn completion_keeps_its_owner_across_later_execs() {
     let server = MockServer::start(vec![
@@ -333,6 +339,8 @@ fn tree_rollback_after_compacted_failure_keeps_retained_context() {
         tui.wait_for(answer, WAIT);
         tui.clear_output();
     }
+    // The journal records turn_end before the app clears its run state.
+    tui.wait_idle(WAIT);
     tui.submit("/compact");
     tui.wait_for("Compacted", WAIT);
 
@@ -617,7 +625,7 @@ fn closing_large_tree_picker_releases_transient_memory() {
     // itself rather than leaving the worker-owned snapshot behind.
     tui.submit("/tree");
     tui.send(b"\x1b");
-    let closed_before_ready = tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT);
+    let closed_before_ready = tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, MEMORY_WAIT);
     assert!(
         closed_before_ready <= baseline + 16 * 1024,
         "closing before tree readiness retained memory: baseline={baseline} KiB, closed={closed_before_ready} KiB"
@@ -631,7 +639,8 @@ fn closing_large_tree_picker_releases_transient_memory() {
     tui.wait_for_screen("Roll back to a turn", WAIT);
     tui.send("\x1b[A".repeat(40).as_bytes());
     tui.send(b"\x1b");
-    let closed_during_hydration = tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT);
+    let closed_during_hydration =
+        tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, MEMORY_WAIT);
     assert!(
         closed_during_hydration <= baseline + 16 * 1024,
         "closing during tree hydration retained memory: baseline={baseline} KiB, closed={closed_during_hydration} KiB"
@@ -645,7 +654,7 @@ fn closing_large_tree_picker_releases_transient_memory() {
         tui.submit("/tree");
         tui.wait_for("074999", WAIT);
         tui.send(b"\x1b");
-        closed_samples.push(tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, WAIT));
+        closed_samples.push(tui.wait_for_resident_kib_at_most(baseline + 16 * 1024, MEMORY_WAIT));
     }
 
     let highest_closed = closed_samples.iter().copied().max().unwrap();

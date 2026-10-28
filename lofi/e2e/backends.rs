@@ -543,7 +543,7 @@ fn claude_initialization_model_stays_visible_and_survives_resume() {
             .unwrap();
         assert_eq!(terminal["model"]["id"], "claude-opus-5-5");
         tui.send(b"\x1b");
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tui.wait_gone("Workspace", WAIT);
         tui.clear_output();
     }
     tui.submit("/quit");
@@ -560,7 +560,7 @@ fn claude_initialization_model_stays_visible_and_survives_resume() {
         "default"
     );
     tui.send(b"\x1b");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.wait_gone("Workspace", WAIT);
     tui.submit("/quit");
     tui.wait_exit();
 }
@@ -1410,7 +1410,7 @@ fn configured_backend_models_are_listed_without_native_credentials() {
     assert!(tui.screen_text().contains("claude/other-model"));
     assert!(!tui.screen_text().contains("mock/chat"));
     tui.send(b"\x1b");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.wait_gone("Switch model", WAIT);
     tui.submit("/quit");
     tui.wait_exit();
 }

@@ -603,18 +603,20 @@ fn slash_commands_autocomplete_and_information_modals_work() {
     tui.send(b"/he\t\r");
     tui.wait_for("Keys", WAIT);
     tui.send(b"\x1b");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.wait_gone("Keys", WAIT);
 
     tui.clear_output();
     tui.submit("/session");
     tui.wait_for("Workspace", WAIT);
     tui.send(b"\x1b");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.wait_gone("Workspace", WAIT);
 
     tui.clear_output();
     tui.submit("/theme");
     tui.wait_for("Color scheme", WAIT);
+    // Down plus Enter confirms a scheme, which closes the picker.
     tui.send(b"\x1b[B\r");
+    tui.wait_gone("Color scheme", WAIT);
 
     tui.clear_output();
     tui.submit("/unknown-e2e-command");
@@ -1213,9 +1215,11 @@ fn escape_clears_input_and_ctrl_d_exits() {
     let mut tui = fixture.spawn(&[]);
 
     tui.send(b"input that escape must clear");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Ctrl+D exits only on an empty input, so wait until the draft has been
+    // both rendered and cleared rather than racing a fixed sleep.
+    tui.wait_for("input that escape must clear", WAIT);
     tui.send(b"\x1b");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    tui.wait_gone("input that escape must clear", WAIT);
     assert_eq!(server.request_count(), 0);
     tui.send(b"\x04");
     tui.wait_exit();
