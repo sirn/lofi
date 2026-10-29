@@ -257,11 +257,7 @@ impl BuiltinTools {
     /// # Errors
     /// Returns [`Error::Io`] only if the process cannot be spawned.
     pub async fn bash(&self, args: Value) -> Result<Value> {
-        let cmd = args
-            .get("cmd")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("bash: missing 'cmd'".into()))?
-            .to_owned();
+        let cmd = require_str("bash", &args, "cmd")?;
         let timeout_ms = args
             .get("timeoutMs")
             .and_then(Value::as_u64)

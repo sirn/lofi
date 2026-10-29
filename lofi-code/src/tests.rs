@@ -643,6 +643,144 @@ async fn exec_docs_search() {
 }
 
 #[tokio::test]
+async fn exec_tool_result_rejects_string_coercion() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let opts = ExecOptions::default();
+    // Template interpolation, String(), and a nested result object must all
+    // throw instead of silently producing [object Object].
+    let src = r#"
+        const res = await lofi.read('a.txt');
+        const idx = await lofi.docs();
+        let a, b, c;
+        try { a = `${res}`; } catch (e) { a = e.message; }
+        try { b = String(res); } catch (e) { b = e.message; }
+        try { c = `${idx.entries[0]}`; } catch (e) { c = e.message; }
+        const hidden = Object.keys(globalThis).indexOf("__lofiArmResult");
+        return { a, b, c, hidden };
+    "#;
+    let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+    for key in ["a", "b", "c"] {
+        let msg = res.value[key].as_str().unwrap_or_default();
+        assert!(
+            msg.starts_with("tool result is an object, not a string"),
+            "got {key}: {msg}"
+        );
+    }
+    // The installer is hidden from guest enumeration.
+    assert_eq!(res.value["hidden"], json!(-1));
+}
+
+#[tokio::test]
+async fn exec_tool_result_survives_stringify_and_return() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let opts = ExecOptions::default();
+    let src = r"
+        const res = await lofi.read('a.txt');
+        const round = JSON.parse(JSON.stringify(res));
+        const keys = [];
+        for (const k in res) keys.push(k);
+        return { direct: res, round: round.content, keys: keys };
+    ";
+    let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+    assert_eq!(res.value["direct"]["content"], json!("hello"));
+    assert_eq!(res.value["round"], json!("hello"));
+    // The guard lives on the prototype, so returning the result must not
+    // leak a toString field back to the host, and for...in must not see it.
+    assert!(!res.value["direct"]
+        .as_object()
+        .unwrap()
+        .contains_key("toString"));
+    let keys: Vec<&str> = res.value["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default())
+        .collect();
+    assert!(!keys.contains(&"toString"), "got {keys:?}");
+}
+
+#[tokio::test]
+async fn exec_docs_index_carries_return_shapes() {
+    let dir = tempdir().unwrap();
+    let opts = ExecOptions::default();
+    let src = r#"
+        const idx = await lofi.docs();
+        const read = idx.entries.find(e => e.name === "lofi.read");
+        const bash = idx.entries.find(e => e.name === "lofi.bash");
+        const docs = idx.entries.find(e => e.name === "lofi.docs");
+        return { read: read.returns, bash: bash.returns, docs: docs.returns };
+    "#;
+    let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+    assert!(res.value["read"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("{ ok, content"));
+    // The shape wraps mid-list in api.md, so the joined paragraph must carry
+    // the closing fields instead of a fragment that looks complete.
+    let bash_returns = res.value["bash"].as_str().unwrap_or_default();
+    assert!(bash_returns.contains("duration_ms"), "got {bash_returns}");
+    assert!(bash_returns.contains("status }"), "got {bash_returns}");
+    assert!(!bash_returns.ends_with(','), "got {bash_returns}");
+    // The capture ends at the shape's closing backtick, so a later Returns
+    // variant never joins in as literal markup.
+    assert_eq!(
+        res.value["docs"],
+        json!("`{ ok, entries: [{ name, summary, returns? }] }`")
+    );
+}
+
+#[tokio::test]
+async fn exec_write_edit_patch_name_wrong_typed_arguments() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let opts = ExecOptions::default();
+    // A wrong-typed argument must name the key and the type it got, so the
+    // model can fix the call instead of guessing at a missing argument.
+    let src = r"
+        const out = [];
+        try { await lofi.write({ path: 'x.txt', text: { a: 1 } }); }
+        catch (e) { out.push(e.message); }
+        try { await lofi.write({ path: 'x.txt' }); }
+        catch (e) { out.push(e.message); }
+        try { await lofi.edit({ path: 'a.txt', old: 1, new: 'y' }); }
+        catch (e) { out.push(e.message); }
+        try { await lofi.patch({ path: 'a.txt', patch: ['a'] }); }
+        catch (e) { out.push(e.message); }
+        try { await lofi.bash({ cmd: 1 }); }
+        catch (e) { out.push(e.message); }
+        return out;
+    ";
+    let res = exec(src, &ctx(dir.path()), &opts).await.unwrap();
+    let msgs: Vec<&str> = res
+        .value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(msgs.len(), 5, "got {msgs:?}");
+    assert!(
+        msgs[0].contains("'text' must be a string, got object"),
+        "got {msgs:?}"
+    );
+    assert!(msgs[1].contains("missing 'text'"), "got {msgs:?}");
+    assert!(
+        msgs[2].contains("'old' must be a string, got number"),
+        "got {msgs:?}"
+    );
+    assert!(
+        msgs[3].contains("'patch' must be a string, got array"),
+        "got {msgs:?}"
+    );
+    assert!(
+        msgs[4].contains("'cmd' must be a string, got number"),
+        "got {msgs:?}"
+    );
+}
+
+#[tokio::test]
 async fn exec_read_pages_whole_file_via_next_offset() {
     // The documented paging loop must reassemble a multi-page file exactly.
     let dir = tempdir().unwrap();

@@ -7,7 +7,7 @@ use serde_json::{json, Value as Json};
 
 use lofi_error::Error;
 
-use crate::convert::{js_to_json, json_to_js};
+use crate::convert::{js_to_json, json_to_js_result};
 use crate::ctx::{ModelsFn, RecallFn, ResultFn, SubagentFn, SubagentOp, ToolEvent};
 use crate::tools::BuiltinTools;
 
@@ -817,7 +817,7 @@ struct JsonV(Json);
 
 impl<'js> IntoJs<'js> for JsonV {
     fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-        json_to_js(ctx, &self.0)
+        json_to_js_result(ctx, &self.0)
     }
 }
 
@@ -829,7 +829,7 @@ enum ToolOutput {
 impl<'js> IntoJs<'js> for ToolOutput {
     fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
         match self {
-            Self::Value(value) => json_to_js(ctx, &value),
+            Self::Value(value) => json_to_js_result(ctx, &value),
             Self::Error(message) => Err(Exception::throw_message(ctx, &message)),
         }
     }

@@ -8,21 +8,9 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if `path` escapes the root, if `old` is absent,
     /// or if `old` occurs more than once (an ambiguous edit).
     pub async fn edit(&self, args: Value) -> Result<Value> {
-        let path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("edit: missing 'path'".into()))?
-            .to_owned();
-        let old = args
-            .get("old")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("edit: missing 'old'".into()))?
-            .to_owned();
-        let new = args
-            .get("new")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("edit: missing 'new'".into()))?
-            .to_owned();
+        let path = require_str("edit", &args, "path")?;
+        let old = require_str("edit", &args, "old")?;
+        let new = require_str("edit", &args, "new")?;
         let old_echo = old.clone();
         let new_echo = new.clone();
         reject_symlink_leaf(&self.root, &path, &format!("edit {path}"))?;

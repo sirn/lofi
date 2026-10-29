@@ -490,11 +490,7 @@ pub(super) fn parse_grep_args(pattern: Value) -> Result<(String, bool, usize, bo
     match pattern {
         Value::String(s) => Ok((s, false, 0, true)),
         Value::Object(_) => {
-            let re_src = pattern
-                .get("regex")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::Tool("grep: missing 'regex'".into()))?
-                .to_owned();
+            let re_src = require_str("grep", &pattern, "regex")?;
             let ic = pattern.get("ic").and_then(Value::as_bool).unwrap_or(false);
             let ctx = usize::try_from(pattern.get("ctx").and_then(Value::as_u64).unwrap_or(0))
                 .unwrap_or(0);

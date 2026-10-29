@@ -127,7 +127,67 @@ fn js_to_json_with_mode(v: &Value<'_>, max_bytes: usize, truncate: bool) -> (Jso
     }
 }
 
-pub(super) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Value<'js>> {
+/// Name of the global installer defined by the arming script below. Tool
+/// results pass through it so string coercion throws instead of silently
+/// producing [object Object].
+const ARM_RESULT_GLOBAL: &str = "__lofiArmResult";
+
+/// Installs a global that arms every plain object of a tool result with a
+/// prototype whose toString throws. The guard lives on the prototype, not
+/// as an own property, so serializing the value back to the host (a guest
+/// return of the result) still sees only the real fields.
+const ARM_RESULT_JS: &str = r#"
+const arm = function (v) {
+  const proto = Object.create(Object.prototype);
+  Object.defineProperty(proto, "toString", {
+    value: function () {
+      throw new Error(
+        "tool result is an object, not a string: read its fields or JSON.stringify(result)"
+      );
+    }
+  });
+  const seen = new Set();
+  const walk = function (x) {
+    if (x === null || typeof x !== "object" || seen.has(x)) return;
+    seen.add(x);
+    if (Array.isArray(x)) {
+      for (let i = 0; i < x.length; i++) walk(x[i]);
+      return;
+    }
+    Object.setPrototypeOf(x, proto);
+    const keys = Object.keys(x);
+    for (let i = 0; i < keys.length; i++) walk(x[keys[i]]);
+  };
+  walk(v);
+};
+Object.defineProperty(globalThis, "__lofiArmResult", { value: arm });
+arm;
+"#;
+
+/// Convert a tool result for the guest. Unlike the plain conversion, plain
+/// objects in the result reject string coercion so a script bug cannot write
+/// [object Object] to disk or a log line.
+pub(super) fn json_to_js_result<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Value<'js>> {
+    let val = json_to_js(ctx, v)?;
+    if val.is_object() {
+        arm_result(ctx, &val)?;
+    }
+    Ok(val)
+}
+
+fn arm_result<'js>(ctx: &Ctx<'js>, val: &Value<'js>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let arm: Option<Function> = globals.get(ARM_RESULT_GLOBAL).ok();
+    let arm = if let Some(f) = arm {
+        f
+    } else {
+        ctx.eval::<Function, _>(ARM_RESULT_JS)?
+    };
+    arm.call::<_, ()>((val.clone(),))?;
+    Ok(())
+}
+
+fn json_to_js<'js>(ctx: &Ctx<'js>, v: &Json) -> rquickjs::Result<Value<'js>> {
     let val: Value = match v {
         Json::Null => Value::new_null(ctx.clone()),
         Json::Bool(b) => b.into_js(ctx)?,

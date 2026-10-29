@@ -19,7 +19,7 @@ use super::{
     DEFAULT_TTY_IDLE_MS, DEFAULT_TTY_ROWS, MAX_JOB_READ_BYTES, MAX_TTY_DIM, MAX_TTY_WRITE_BYTES,
     MIN_IDLE_MS, MIN_NOTIFY_INTERVAL_MS,
 };
-use crate::tools::BuiltinTools;
+use crate::tools::{require_str, BuiltinTools};
 
 /// Maximum concurrently running jobs one subagent may hold. Bounds a
 /// runaway child without capping the session's own jobs.
@@ -52,11 +52,7 @@ impl BuiltinTools {
     /// the log file or the process cannot be created.
     #[allow(clippy::too_many_lines)]
     pub async fn job_spawn(&self, args: Value) -> Result<Value> {
-        let cmd = args
-            .get("cmd")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("jobSpawn: missing 'cmd'".into()))?
-            .to_owned();
+        let cmd = require_str("jobSpawn", &args, "cmd")?;
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
 
         // Notifications at spawn. Default: terminal only. `notify: false`
@@ -533,10 +529,7 @@ impl BuiltinTools {
         let Some(handle) = self.jobs.get(id) else {
             return Ok(no_such_job(id));
         };
-        let text = args
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("jobType: missing 'text'".into()))?;
+        let text = require_str("jobType", &args, "text")?;
         if text.len() > MAX_TTY_WRITE_BYTES {
             return Err(Error::Tool("jobType: text too long".into()));
         }
@@ -555,14 +548,11 @@ impl BuiltinTools {
         let Some(handle) = self.jobs.get(id) else {
             return Ok(no_such_job(id));
         };
-        let key = args
-            .get("key")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("jobKeyPress: missing 'key'".into()))?;
+        let key = require_str("jobKeyPress", &args, "key")?;
         let application_cursor = handle
             .application_cursor
             .load(std::sync::atomic::Ordering::Relaxed);
-        let bytes = key_press_bytes(key, application_cursor)
+        let bytes = key_press_bytes(&key, application_cursor)
             .ok_or_else(|| Error::Tool(format!("jobKeyPress: unknown key '{key}'")))?;
         let sent = write_to_master(&handle, bytes)?;
         if sent != bytes.len() {

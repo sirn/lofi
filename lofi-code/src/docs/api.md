@@ -1,7 +1,9 @@
 # lofi API reference
 
 The agent's single tool is `exec`. Inside `exec` code, call async functions on
-the global `lofi` object. Use `await`. All file paths are resolved against the
+the global `lofi` object. Use `await`. Tool results are objects: coercing one
+to a string (template interpolation, `String()`, `+`) throws, so read its fields
+or `JSON.stringify` it. All file paths are resolved against the
 workspace root. Read-only tools also accept absolute paths under registered roots, such as `lofi.tmpDir` and skill directories, and under granted directories. Relative paths that escape the workspace root are rejected. An absolute path outside every allowed root asks the user to grant its directory: read-only or read and write, covering the directory and its subdirectories and remembered across sessions. A write under a read-only grant asks the user to widen it. Use an absolute path to reach a granted directory.
 
 ## lofi.read(path, opts?)
@@ -688,7 +690,7 @@ Get the API reference index or a specific entry.
 - `name` (string, optional) — an entry name like `lofi.read`. Omit to get the
   full index.
 
-**Returns (no arg):** `{ ok, entries: [{ name, summary }] }`.
+**Returns (no arg):** `{ ok, entries: [{ name, summary, returns? }] }`.
 **Returns (with name):** `{ ok, name, content }` — the full markdown text for
 that entry, or `{ ok: false, error }` if not found.
 

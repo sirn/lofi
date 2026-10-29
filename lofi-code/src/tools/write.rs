@@ -7,16 +7,8 @@ impl BuiltinTools {
     /// # Errors
     /// Returns an error for invalid arguments, unsafe paths, or filesystem failures.
     pub async fn write(&self, args: Value) -> Result<Value> {
-        let path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("write: missing 'path'".into()))?
-            .to_owned();
-        let text = args
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("write: missing 'text'".into()))?
-            .to_owned();
+        let path = require_str("write", &args, "path")?;
+        let text = require_str("write", &args, "text")?;
         let content = text.clone();
         reject_symlink_leaf(&self.root, &path, &format!("write {path}"))?;
         let resolved = self.resolve_mutate(&path).await?;

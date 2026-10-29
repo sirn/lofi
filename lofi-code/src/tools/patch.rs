@@ -1,4 +1,4 @@
-use super::{atomic_write, reject_non_regular, reject_symlink_leaf, BuiltinTools};
+use super::{atomic_write, reject_non_regular, reject_symlink_leaf, require_str, BuiltinTools};
 use lofi_error::{Error, Result};
 use serde_json::{json, Value};
 
@@ -20,16 +20,8 @@ impl BuiltinTools {
     /// Returns [`Error::Tool`] if the patch is malformed, a hunk's context
     /// cannot be matched in the file, or the write fails.
     pub async fn patch(&self, args: Value) -> Result<Value> {
-        let path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("patch: missing 'path'".into()))?
-            .to_owned();
-        let diff_text = args
-            .get("patch")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("patch: missing 'patch'".into()))?
-            .to_owned();
+        let path = require_str("patch", &args, "path")?;
+        let diff_text = require_str("patch", &args, "patch")?;
         reject_symlink_leaf(&self.root, &path, &format!("patch {path}"))?;
         let resolved = self.resolve_mutate(&path).await?;
         reject_non_regular(&format!("patch {path}"), &resolved)?;

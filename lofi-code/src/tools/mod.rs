@@ -55,6 +55,35 @@ const MAX_FIND_VISITED: usize = 65_536;
 const MAX_GREP_VISITED: usize = 65_536;
 const MAX_PENDING_IMAGES: usize = 32;
 
+/// Fetch a required string argument, separating a missing key from a wrong
+/// type so the error names the exact coercion the caller made instead of
+/// the generic missing-argument guess.
+pub(super) fn require_str(tool: &str, args: &Value, key: &str) -> Result<String> {
+    let Some(value) = args.get(key) else {
+        return Err(Error::Tool(format!("{tool}: missing '{key}'")));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(Error::Tool(format!(
+            "{tool}: '{key}' must be a string, got {}",
+            json_kind(value)
+        )));
+    };
+    Ok(text.to_owned())
+}
+
+/// The JSON type name used in argument errors, matching what a model sees
+/// in the tool schema.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct PendingImage {
     pub file: std::fs::File,
