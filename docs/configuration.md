@@ -399,6 +399,9 @@ Supported protocols are:
 | `openai-responses` | `https://api.openai.com` | `/v1/responses` |
 | `anthropic-messages` | `https://api.anthropic.com` | `/v1/messages` |
 | `google-generative-ai` | `https://generativelanguage.googleapis.com` | `/v1beta` |
+| `systemone` | `https://api.typesafe.ai` | `/v1/systemone` |
+
+`systemone` is a decision API, not a chat protocol: it answers typed questions about a state and cannot serve a session. It exists for the `[auto_mode]` model query.
 
 ### Endpoint routing with `api_types`
 
@@ -941,7 +944,7 @@ A delete or an overwrite stays `low` only when every affected path is a temp pat
 A download saved to a plain data file in the workspace or a temp path stays `low`.
 A write elsewhere outside the workspace, an upload, and a read of a credential file show the prompt.
 
-The evaluator sees the command, the workspace root, and the request that started the turn. For a request of three words or fewer, it also sees the previous request and the agent's last message, so a terse "yes" is judged against the question it answers. The current request is trusted: when it asks for a remote write, such as a comment, a push, or a deploy, or grants a privilege escalation it names for a read-only inspection, the evaluator may answer `low`. A short assent such as "yes" adopts the one action the agent's last message asks to do, when that message names the action and its target. The earlier request, the agent's last message, and a subagent's task from its parent are untrusted: they can raise the risk, never lower it. The context comes from the live history, so compaction, rewind, and a new session drop it. A subagent never inherits the context of its parent.
+The evaluator sees the command, the workspace root, and the request that started the turn. For a request of three words or fewer, it also sees the previous request and the agent's last message, so a terse "yes" is judged against the question it answers. The current request is trusted: when it asks for a remote write, such as a comment, a push, or a deploy, the evaluator may answer `low`. A command under privilege escalation always asks, whatever the request says. A short assent such as "yes" adopts the one action the agent's last message asks to do, when that message names the action and its target. The earlier request, the agent's last message, and a subagent's task from its parent are untrusted: they can raise the risk, never lower it. The context comes from the live history, so compaction, rewind, and a new session drop it. A subagent never inherits the context of its parent.
 
 A subagent does inherit the request that started its parent's turn. The harness captures it at spawn time, not the spawn call, so a task cannot forge it. It is judged like a request the user typed directly, and it survives the child's turns and nested children. A child restored after a process restart loses the capture and judges on its task alone.
 
@@ -951,8 +954,15 @@ When auto mode answers `low` for a delete that uses a temp path, the tool layer 
 [auto_mode]
 enable = true
 model = "openai/gpt-4o-mini"
+# decision_model = "plexus/clef-flash"
 # max_tokens = 1024
-# timeout_ms = 10000
+# timeout_ms = 30000
 ```
 
-`model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms` as a hard ceiling. `max_tokens` defaults to the selected model's output limit. `timeout_ms` defaults to `10000` and caps one evaluation, because a stalled evaluator holds the command and the turn with it. A timeout is a failure, so the command falls back to the normal prompt.
+`model` is a model query: a provider key or a backend key, then a model, as everywhere else in the configuration. A config that still names `provider` and a bare `model` keeps working; the two fields join into one query. `model` is optional when `decision_model` is set; one of the two is required. A backend name runs the evaluation on that CLI backend, so a session on a CLI backend evaluates commands exactly like an HTTP one. When the evaluator runs on a provider, it uses that provider's `response_start_timeout_ms` as a hard ceiling; this applies to the chat evaluator, whose replies stream. `max_tokens` defaults to the selected model's output limit. `timeout_ms` caps one evaluation, because a stalled evaluator holds the command and the turn with it. A timeout is a failure, so the command falls back to the normal prompt.
+
+`model` names the chat evaluator. A model on a provider whose `api = "systemone"` is a decision model: the gate asks that endpoint typed questions about the command (its scope, its destructiveness, whether it exposes a credential or runs downloaded code, whether the user's request covers it, and whether it knows the command's tools at all) instead of running the chat rubric. Name it in `decision_model`, never in `model`: a decision model in `model`, or a chat model in `decision_model`, is a configuration error. The decision query has no thinking level or service tier. The gates resolve once at startup, so a bad query is a configuration error, not a silent fallback. A decision model never appears as a selectable chat model. A decision model takes no `max_tokens`; a set value applies to the chat stage only. Every failure mode of a decision call (timeout, transport error, malformed answer) falls back to the normal approval prompt. `timeout_ms` caps one evaluation; unset, it defaults to `30000` for either stage. For a decision call the cap includes its rate-limit retry.
+
+The decision gate also asks whether it knows the command's utilities at all. A command it would be guessing at, such as a niche CLI or an unusual subcommand, asks instead of passing on a guessed scope, so a wrong narrow-looking answer cannot stand.
+
+`decision_model` and `model` together run two stages. The decision gate answers first: what it allows runs, and nothing else reaches the second stage. What it asks on, or fails to judge, goes to the chat evaluator under the full chat rubric, so an unknown command gets a deeper judgment instead of the prompt. The chat verdict stands: a `low` it finds runs, and everything else shows the prompt with both stages' reasons. With `decision_model` alone, an ask shows the prompt directly. Each stage's provider is resolved alongside the other's, and a missing credential is a configuration error at startup. `timeout_ms` caps each stage on its own.

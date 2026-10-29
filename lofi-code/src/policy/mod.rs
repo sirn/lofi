@@ -4,6 +4,7 @@
 //! errors or unmatched commands.
 
 pub mod auto_mode;
+pub mod decision;
 pub mod defaults;
 pub mod engine;
 pub mod extract;

@@ -1,10 +1,19 @@
 use futures::StreamExt;
 use lofi_code::policy::auto_mode::{self, AutoModeRisk};
+use lofi_code::policy::decision;
 use lofi_code::{AutoModeFn, AutoModeHintHandle, AutoModeHints, AutoModeOutcome};
 use lofi_types::{AutoModeConfig, Config, ContentBlock, Message, PromptKind, Role};
 use std::sync::Arc;
 
 use lofi_error::{Error, Result};
+
+/// One evaluation's default wait. A stalled evaluator holds the command and
+/// the turn with it, but a timeout is a prompt, so the wait errs long: a
+/// slow provider answer beats an interrupt.
+const CHAT_TIMEOUT_MS: u64 = 30_000;
+/// The same default for the decision stage: a slow first answer falls to
+/// the chat stage, which is still quieter than a prompt.
+const DECISION_TIMEOUT_MS: u64 = 30_000;
 
 use crate::backend::{BackendFactory, BackendRef};
 
@@ -35,16 +44,30 @@ pub async fn configure(
         return Ok(executor);
     };
     let _env_guard = crate::config_loader::apply_env_specs(env);
-    let query = auto_cfg.query();
-    let parsed = crate::backend::parse_query(&query)
-        .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+    // Each configured stage runs on its own provider, so both stay in the
+    // resolved config; every other provider's credentials stay unresolved.
+    let mut keep = Vec::new();
+    for (field, query) in [
+        ("decision_model", auto_cfg.decision_query()),
+        ("model", auto_cfg.chat_query()),
+    ] {
+        let Some(query) = query else { continue };
+        let parsed = crate::backend::parse_query(&query)
+            .map_err(|error| Error::Config(format!("auto_mode.{field}: {error}")))?;
+        keep.push(parsed.provider);
+    }
+    if keep.is_empty() {
+        return Err(Error::Config(
+            "auto_mode: set model or decision_model".to_string(),
+        ));
+    }
     let mut evaluator_config = config.clone();
     evaluator_config
         .providers
-        .retain(|name, _| name == &parsed.provider);
+        .retain(|name, _| keep.contains(name));
     evaluator_config
         .backends
-        .retain(|name, _| name == &parsed.provider);
+        .retain(|name, _| keep.contains(name));
     crate::config_loader::resolve_config(&mut evaluator_config).await?;
     let registry = match crate::models::ModelRegistry::load_async(&evaluator_config).await {
         Ok(registry) => registry,
@@ -80,9 +103,53 @@ pub(super) fn attach(
         executor.auto_mode_config = None;
         return Ok(());
     };
+    // Two optional gates: a decision model gates first, and a chat model
+    // judges what it does not allow. One of the two must be configured.
+    let decision_query = auto_cfg.decision_query();
+    let chat_query = auto_cfg.chat_query();
+    if let Some(query) = decision_query {
+        let parsed = crate::backend::parse_query(&query)
+            .map_err(|error| Error::Config(format!("auto_mode.decision_model: {error}")))?;
+        // A backend name cannot serve the decision gate.
+        if config.backends.contains_key(&parsed.provider) {
+            return Err(Error::Config(
+                "auto_mode.decision_model: a backend cannot run a decision model".to_string(),
+            ));
+        }
+        // Resolve on the bare model id: the query's level or tier suffix
+        // would defeat pattern matching, and the decision path rejects
+        // those suffixes itself.
+        let model = registry
+            .resolve_for_provider(&parsed.model, &parsed.provider)
+            .filter(|m| m.api.is_decision())
+            .ok_or_else(|| {
+                Error::Config(
+                    "auto_mode.decision_model: the model does not resolve to a decision model"
+                        .to_string(),
+                )
+            })?;
+        return attach_decision(executor, config, &auto_cfg, model, &parsed, registry);
+    }
+    let Some(query) = chat_query else {
+        return Err(Error::Config(
+            "auto_mode: set model or decision_model".to_string(),
+        ));
+    };
+    let parsed = crate::backend::parse_query(&query)
+        .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+    // A decision model named as the chat stage is a naming mistake: it
+    // cannot run the chat rubric.
+    if !config.backends.contains_key(&parsed.provider)
+        && registry
+            .resolve_for_provider(&parsed.model, &parsed.provider)
+            .is_some_and(|m| m.api.is_decision())
+    {
+        return Err(Error::Config(
+            "auto_mode.model: a decision model belongs in decision_model".to_string(),
+        ));
+    }
     let factory = BackendFactory::new(config.clone(), &executor.root, Vec::new())?
         .with_resolved_registry(registry.clone());
-    let query = auto_cfg.query();
     let evaluator = factory
         .open_resolved(Some(&query), executor.clone())
         .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
@@ -96,6 +163,250 @@ pub(super) fn attach(
     ));
     executor.auto_mode_config = Some(std::sync::Arc::new(config.clone()));
     Ok(())
+}
+
+/// Build the gate from a decision model. The model, its provider, and its
+/// credentials are resolved here, once: a misconfigured gate stops the
+/// session from starting instead of failing on the first dangerous command.
+fn attach_decision(
+    executor: &mut super::ToolExecutor,
+    config: &Config,
+    auto_cfg: &AutoModeConfig,
+    model: &lofi_types::Model,
+    parsed: &crate::backend::ParsedQuery,
+    registry: &crate::models::ModelRegistry,
+) -> Result<()> {
+    if parsed.level.is_some() || parsed.tier != lofi_types::ServiceTier::Auto {
+        return Err(Error::Config(
+            "auto_mode.decision_model: a decision model has no thinking level or service tier"
+                .to_string(),
+        ));
+    }
+    // A decision model answers typed questions, so max_tokens does not
+    // apply. Ignored rather than rejected: a file-level value cannot be
+    // unset through an env override, and the chat evaluator still uses it.
+    let provider_cfg = config.providers.get(&parsed.provider).ok_or_else(|| {
+        Error::Config(
+            "auto_mode.model: the provider is missing from the resolved config".to_string(),
+        )
+    })?;
+    let client = lofi_providers::open_decision(model.api, provider_cfg, model.base_url.as_deref())
+        .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+    let client = Arc::from(client);
+    let hints = executor.auto_mode_hints.clone();
+    let gate = build_decision_auto_mode(
+        client,
+        &model.id,
+        std::time::Duration::from_millis(auto_cfg.timeout_ms.unwrap_or(DECISION_TIMEOUT_MS)),
+        &executor.root,
+        executor.skills_dir.as_deref(),
+        &hints,
+    );
+    // A chat stage answers what the decision model does not allow, so an
+    // unknown or hedged command gets a full rubric judgment before the
+    // prompt shows. Without one, the ask goes straight to the user.
+    let gate = match auto_cfg.chat_query() {
+        Some(chat_query) => {
+            let factory = BackendFactory::new(config.clone(), &executor.root, Vec::new())?
+                .with_resolved_registry(registry.clone());
+            let evaluator = factory
+                .open_resolved(Some(&chat_query), executor.clone())
+                .map_err(|error| Error::Config(format!("auto_mode.model: {error}")))?;
+            let chat = build_auto_mode(
+                evaluator,
+                auto_cfg,
+                &executor.root,
+                executor.skills_dir.as_deref(),
+                &hints,
+            );
+            chat_stage_after_decision(gate, chat)
+        }
+        None => gate,
+    };
+    executor.auto_mode = Some(gate);
+    executor.auto_mode_config = Some(std::sync::Arc::new(config.clone()));
+    Ok(())
+}
+
+/// Everything one decision call needs. Held in one struct so the closure
+/// clones a single value and the evaluation stays under the argument limit.
+struct DecisionGate {
+    client: Arc<dyn lofi_providers::Decision>,
+    model: String,
+    questions: std::collections::BTreeMap<String, lofi_types::DecisionQuestion>,
+    timeout: std::time::Duration,
+    cwd: std::path::PathBuf,
+    skill_dirs: Vec<std::path::PathBuf>,
+}
+
+/// Build the gate from an opened decision client. Mirrors
+/// `build_auto_mode`: the questions are static, the state is built per
+/// command, and the call runs under the decision deadline.
+#[must_use]
+pub fn build_decision_auto_mode(
+    client: Arc<dyn lofi_providers::Decision>,
+    model: &str,
+    timeout: std::time::Duration,
+    cwd: &std::path::Path,
+    skills_dir: Option<&std::path::Path>,
+    hints: &AutoModeHintHandle,
+) -> AutoModeFn {
+    // Skill roots that actually exist are named in the state so a decision
+    // model can treat installed skill scripts as pre-vetted.
+    let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = skills_dir.filter(|d| d.is_dir()) {
+        skill_dirs.push(dir.to_path_buf());
+    }
+    let ws_skills = cwd.join(".lofi").join("skills");
+    if ws_skills.is_dir() {
+        skill_dirs.push(ws_skills);
+    }
+    let gate = Arc::new(DecisionGate {
+        client,
+        model: model.to_string(),
+        questions: decision::questions(),
+        timeout,
+        cwd: cwd.to_path_buf(),
+        skill_dirs,
+    });
+
+    let hints = hints.clone();
+    Arc::new(move |command: String| {
+        let gate = gate.clone();
+        let turn = hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            let handle =
+                tokio::task::spawn(async move { evaluate_decision(&gate, &command, &turn).await });
+            let mut abort_on_drop = AbortOnDrop(Some(handle.abort_handle()));
+            let outcome = match handle.await {
+                Ok(outcome) => outcome,
+                Err(e) => AutoModeOutcome::Failed {
+                    reason: format!("evaluation task failed: {e}"),
+                },
+            };
+            abort_on_drop.disarm();
+            outcome
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
+    })
+}
+
+/// The message every outcome carries, for chaining two stages.
+fn outcome_reason(outcome: &AutoModeOutcome) -> &str {
+    match outcome {
+        AutoModeOutcome::Allow { reason }
+        | AutoModeOutcome::Ask { reason }
+        | AutoModeOutcome::HighRisk { reason }
+        | AutoModeOutcome::Failed { reason } => reason,
+    }
+}
+
+/// Run the decision gate, then the chat evaluator on what it does not
+/// allow. The decision stage stays the only path for an allow, so a cheap
+/// fast gate keeps the common case; the chat stage sees exactly the
+/// commands the decision model asked on or failed to judge, and its own
+/// outcome stands: a low risk it finds runs, everything else shows the
+/// prompt carrying both reasons.
+#[must_use]
+pub fn chat_stage_after_decision(decision: AutoModeFn, chat: AutoModeFn) -> AutoModeFn {
+    Arc::new(move |command: String| {
+        let decision = decision.clone();
+        let chat = chat.clone();
+        Box::pin(async move {
+            let first = decision(command.clone()).await;
+            if let AutoModeOutcome::Allow { reason } = first {
+                return AutoModeOutcome::Allow { reason };
+            }
+            let second = chat(command).await;
+            match second {
+                AutoModeOutcome::Allow { reason } => AutoModeOutcome::Allow { reason },
+                AutoModeOutcome::Ask { reason } => AutoModeOutcome::Ask {
+                    reason: format!("{reason}; decision gate: {}", outcome_reason(&first)),
+                },
+                AutoModeOutcome::HighRisk { reason } => AutoModeOutcome::HighRisk {
+                    reason: format!("{reason}; decision gate: {}", outcome_reason(&first)),
+                },
+                // A chat failure keeps the decision stage's verdict: the
+                // command was already refused once, and a failed second
+                // judgment must not read as a pass.
+                AutoModeOutcome::Failed { reason } => AutoModeOutcome::Failed {
+                    reason: format!("{reason}; decision gate: {}", outcome_reason(&first)),
+                },
+            }
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
+    })
+}
+
+async fn evaluate_decision(
+    gate: &DecisionGate,
+    command: &str,
+    turn: &AutoModeHints,
+) -> AutoModeOutcome {
+    // A command is never sent cut: a truncated command can hide its
+    // dangerous tail, so an oversized one asks without a network call.
+    let state = match decision::build_state(command, &gate.cwd, &gate.skill_dirs, turn) {
+        Ok(state) => state,
+        Err(too_long) => {
+            return AutoModeOutcome::Ask {
+                reason: format!(
+                    "command is {} bytes, over the {}-byte gate limit",
+                    too_long.bytes,
+                    decision::MAX_COMMAND_BYTES
+                ),
+            };
+        }
+    };
+    let request = lofi_providers::DecisionRequest {
+        model: gate.model.clone(),
+        state,
+        questions: gate.questions.clone(),
+    };
+    let started = std::time::Instant::now();
+    // The deadline covers the call and its rate-limit retry, so a long
+    // Retry-After surfaces as a timeout instead of a hang. A timeout or a
+    // transport failure falls back to the manual prompt.
+    match tokio::time::timeout(gate.timeout, gate.client.decide(&request)).await {
+        Ok(Ok(response)) => {
+            let outcome = decision::decide(&response.answers);
+            // The outcome carries the threshold summary; the answers matter
+            // most when the outcome fails on them.
+            if matches!(outcome, AutoModeOutcome::Failed { .. }) {
+                tracing::debug!(answers = ?response.answers, "auto-mode: decision answers");
+            }
+            tracing::debug!(
+                command = command,
+                model = response.model.as_str(),
+                outcome = ?outcome,
+                elapsed_ms = started.elapsed().as_millis(),
+                input_tokens = response.usage.input_tokens,
+                output_tokens = response.usage.output_tokens,
+                "auto-mode: decision answered"
+            );
+            outcome
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "auto-mode: decision call failed");
+            AutoModeOutcome::Failed {
+                reason: format!("decision call failed: {e}"),
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = gate.timeout.as_millis(),
+                "auto-mode: decision call timed out"
+            );
+            AutoModeOutcome::Failed {
+                reason: format!(
+                    "decision call timed out after {} ms",
+                    gate.timeout.as_millis()
+                ),
+            }
+        }
+    }
 }
 
 /// A fresh, empty context handle. Each agent gets its own so a subagent
@@ -136,7 +447,7 @@ pub fn build_auto_mode(
     hints: &AutoModeHintHandle,
 ) -> AutoModeFn {
     let max_tokens = auto_cfg.max_tokens;
-    let timeout = std::time::Duration::from_millis(auto_cfg.timeout_ms);
+    let timeout = std::time::Duration::from_millis(auto_cfg.timeout_ms.unwrap_or(CHAT_TIMEOUT_MS));
     let cwd = cwd.to_path_buf();
 
     // Skill roots that actually exist are marked pre-vetted in the evaluator

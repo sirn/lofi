@@ -612,23 +612,29 @@ fn shell_policy_presets_remain_deserializable() {
 fn auto_mode_query_accepts_both_config_shapes() {
     let split: AutoModeConfig =
         serde_json::from_str(r#"{"enable":true,"provider":"mock","model":"alt"}"#).unwrap();
-    assert_eq!(split.query(), "mock/alt");
+    assert_eq!(split.chat_query().as_deref(), Some("mock/alt"));
     let qualified: AutoModeConfig =
         serde_json::from_str(r#"{"enable":true,"model":"mock/alt:high"}"#).unwrap();
-    assert_eq!(qualified.query(), "mock/alt:high");
+    assert_eq!(qualified.chat_query().as_deref(), Some("mock/alt:high"));
     let migrated: AutoModeConfig =
         serde_json::from_str(r#"{"enable":true,"provider":"mock","model":"mock/alt"}"#).unwrap();
-    assert_eq!(migrated.query(), "mock/alt");
+    assert_eq!(migrated.chat_query().as_deref(), Some("mock/alt"));
+    let gate_only: AutoModeConfig =
+        serde_json::from_str(r#"{"enable":true,"decision_model":"mock/jev"}"#).unwrap();
+    assert_eq!(gate_only.chat_query(), None);
+    assert_eq!(gate_only.decision_query().as_deref(), Some("mock/jev"));
 }
 
 #[test]
-fn auto_mode_timeout_defaults_to_ten_seconds() {
+fn auto_mode_timeout_is_unset_by_default_and_keeps_an_explicit_value() {
+    // Unset means the default of the gate the model resolves to, so the
+    // config stores None rather than a fixed number.
     let cfg: AutoModeConfig =
         serde_json::from_str(r#"{"enable":true,"model":"mock/alt"}"#).unwrap();
-    assert_eq!(cfg.timeout_ms, 10_000);
+    assert_eq!(cfg.timeout_ms, None);
     let set: AutoModeConfig =
         serde_json::from_str(r#"{"enable":true,"model":"mock/alt","timeout_ms":1500}"#).unwrap();
-    assert_eq!(set.timeout_ms, 1500);
+    assert_eq!(set.timeout_ms, Some(1500));
 }
 
 #[test]

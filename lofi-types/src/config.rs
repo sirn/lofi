@@ -360,39 +360,52 @@ pub enum BashApprovalMode {
 pub struct AutoModeConfig {
     #[serde(default)]
     pub enable: bool,
-    /// The model to run: an id, or a model query
-    /// `provider-or-backend/model[:level][@tier]`.
-    pub model: String,
+    /// The chat model that judges commands under the chat rubric: an id,
+    /// or a model query `provider-or-backend/model[:level][@tier]`.
+    /// Optional when `decision_model` is set; one of the two is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The provider or backend that runs `model`, in a config written before
-    /// model queries. Read the pair through [`AutoModeConfig::query`].
+    /// model queries. Read the pair through [`AutoModeConfig::chat_query`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// A decision model that gates commands first with typed questions:
+    /// an id, or a model query. What it allows runs; what it asks on or
+    /// fails to judge goes to `model`, or to the prompt when `model` is
+    /// unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_model: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
     /// How long one evaluation may take before the command falls back to the
     /// manual prompt. A stalled evaluator holds the command and the turn, so
     /// the wait is capped here instead of at the provider's own timeout, which
-    /// is sized for a whole turn.
-    #[serde(default = "default_auto_mode_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_auto_mode_timeout_ms() -> u64 {
-    10_000
+    /// is sized for a whole turn. Unset picks the default for the gate the
+    /// model resolves to: 30000 ms for a chat evaluator and a decision
+    /// model alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl AutoModeConfig {
     /// The model query to resolve.
     ///
-    /// A config that names a provider and an id separately joins them into one
-    /// query, which is what the two fields meant together. A model that is
-    /// already qualified keeps the provider it names.
+    /// The chat model query to resolve, when a chat evaluator is set. A
+    /// config that names a provider and an id separately joins them into
+    /// one query, which is what the two fields meant together. A model
+    /// that is already qualified keeps the provider it names.
     #[must_use]
-    pub fn query(&self) -> String {
-        match &self.provider {
-            Some(provider) if !self.model.contains('/') => format!("{provider}/{}", self.model),
-            _ => self.model.clone(),
-        }
+    pub fn chat_query(&self) -> Option<String> {
+        self.model.as_ref().map(|model| match &self.provider {
+            Some(provider) if !model.contains('/') => format!("{provider}/{model}"),
+            _ => model.clone(),
+        })
+    }
+
+    /// The decision model query to resolve, when a decision gate is set.
+    #[must_use]
+    pub fn decision_query(&self) -> Option<String> {
+        self.decision_model.clone()
     }
 }
 

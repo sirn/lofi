@@ -483,10 +483,11 @@ async fn the_configured_timeout_reaches_the_evaluator() {
     });
     let cfg = lofi_types::AutoModeConfig {
         enable: true,
-        model: "test/reply".into(),
+        model: Some("test/reply".into()),
         provider: None,
+        decision_model: None,
         max_tokens: None,
-        timeout_ms: 20,
+        timeout_ms: Some(20),
     };
     let hints = crate::agent::auto_mode::hint_handle();
     let evaluate = crate::agent::auto_mode::build_auto_mode(
@@ -503,4 +504,468 @@ async fn the_configured_timeout_reaches_the_evaluator() {
             reason: "evaluation timed out after 20 ms".into()
         }
     );
+}
+
+/// A decision endpoint that answers from a canned response and records the
+/// commands it saw, so tests can tell an unanswered command from a refused
+/// one.
+struct FakeDecision {
+    answers: std::collections::BTreeMap<String, lofi_types::DecisionAnswer>,
+    delay: std::time::Duration,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl lofi_providers::Decision for FakeDecision {
+    async fn decide(
+        &self,
+        request: &lofi_providers::DecisionRequest,
+    ) -> lofi_error::Result<lofi_providers::DecisionResponse> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(request.state["command"].as_str().unwrap().to_string());
+        tokio::time::sleep(self.delay).await;
+        Ok(lofi_providers::DecisionResponse {
+            model: "fake".to_string(),
+            answers: self.answers.clone(),
+            usage: lofi_providers::DecisionUsage {
+                input_tokens: 100,
+                output_tokens: 0,
+            },
+        })
+    }
+}
+
+fn choice_answer(
+    choice: &str,
+    probabilities: &[(&str, f64)],
+    confidence: Option<f64>,
+) -> lofi_types::DecisionAnswer {
+    lofi_types::DecisionAnswer::Choice {
+        choice: choice.to_string(),
+        probabilities: probabilities
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), *v))
+            .collect(),
+        confidence,
+    }
+}
+
+fn noul_answer(p: f64) -> lofi_types::DecisionAnswer {
+    lofi_types::DecisionAnswer::Noul { noul: p }
+}
+
+fn decision_gate(
+    fake: FakeDecision,
+    timeout: std::time::Duration,
+) -> (lofi_code::AutoModeFn, std::sync::Arc<FakeDecision>) {
+    let fake = std::sync::Arc::new(fake);
+    let gate = crate::agent::auto_mode::build_decision_auto_mode(
+        fake.clone(),
+        "jev-latest",
+        timeout,
+        std::path::Path::new("/repo"),
+        None,
+        &crate::agent::auto_mode::hint_handle(),
+    );
+    (gate, fake)
+}
+
+#[tokio::test]
+async fn the_decision_gate_allows_a_safe_command() {
+    let mut answers = std::collections::BTreeMap::new();
+    answers.insert(
+        "scope".to_string(),
+        choice_answer("workspace", &[("workspace", 1.0)], Some(0.9)),
+    );
+    answers.insert("destructive".to_string(), noul_answer(0.02));
+    answers.insert("exposure".to_string(), noul_answer(0.02));
+    answers.insert("authorized".to_string(), noul_answer(0.2));
+    answers.insert("recognized".to_string(), noul_answer(0.95));
+    let (gate, _) = decision_gate(
+        FakeDecision {
+            answers,
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        },
+        std::time::Duration::from_secs(5),
+    );
+    assert!(matches!(
+        gate("cargo test".to_string()).await,
+        AutoModeOutcome::Allow { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_decision_gate_asks_on_a_destructive_command() {
+    let mut answers = std::collections::BTreeMap::new();
+    answers.insert(
+        "scope".to_string(),
+        choice_answer("workspace", &[("workspace", 1.0)], Some(0.9)),
+    );
+    answers.insert("destructive".to_string(), noul_answer(0.95));
+    answers.insert("exposure".to_string(), noul_answer(0.05));
+    answers.insert("authorized".to_string(), noul_answer(0.1));
+    answers.insert("recognized".to_string(), noul_answer(0.95));
+    let (gate, _) = decision_gate(
+        FakeDecision {
+            answers,
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        },
+        std::time::Duration::from_secs(5),
+    );
+    assert!(matches!(
+        gate("rm -rf build".to_string()).await,
+        AutoModeOutcome::Ask { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_decision_gate_falls_back_to_the_prompt_on_timeout() {
+    let (gate, _) = decision_gate(
+        FakeDecision {
+            answers: std::collections::BTreeMap::new(),
+            delay: std::time::Duration::from_secs(30),
+            calls: std::sync::Mutex::new(Vec::new()),
+        },
+        std::time::Duration::from_millis(20),
+    );
+    assert_eq!(
+        gate("jj abandon".to_string()).await,
+        AutoModeOutcome::Failed {
+            reason: "decision call timed out after 20 ms".into()
+        }
+    );
+}
+
+/// A decision endpoint that always fails, so a transport error can be
+/// told apart from an ask.
+struct FailingDecision;
+
+#[async_trait]
+impl lofi_providers::Decision for FailingDecision {
+    async fn decide(
+        &self,
+        _request: &lofi_providers::DecisionRequest,
+    ) -> lofi_error::Result<lofi_providers::DecisionResponse> {
+        Err(lofi_error::Error::Provider("unreachable".to_string()))
+    }
+}
+
+/// A gate that answers from a fixed queue, so a two-stage composition
+/// can be tested without a backend.
+fn scripted_gate(
+    outcomes: Vec<AutoModeOutcome>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> lofi_code::AutoModeFn {
+    let outcomes = std::sync::Arc::new(std::sync::Mutex::new(outcomes));
+    std::sync::Arc::new(move |command: String| {
+        let outcomes = outcomes.clone();
+        let seen = seen.clone();
+        Box::pin(async move {
+            seen.lock().unwrap().push(command);
+            outcomes.lock().unwrap().remove(0)
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = AutoModeOutcome> + Send + Sync>>
+    })
+}
+
+#[tokio::test]
+async fn the_chat_stage_sees_only_what_the_decision_gate_refuses() {
+    let decision_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chat_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let staged = crate::agent::auto_mode::chat_stage_after_decision(
+        scripted_gate(
+            vec![
+                AutoModeOutcome::Allow {
+                    reason: "scope=workspace".into(),
+                },
+                AutoModeOutcome::Ask {
+                    reason: "scope=read_only known=0.35".into(),
+                },
+            ],
+            decision_seen.clone(),
+        ),
+        scripted_gate(
+            vec![AutoModeOutcome::Ask {
+                reason: "not reached".into(),
+            }],
+            chat_seen.clone(),
+        ),
+    );
+    assert!(matches!(
+        staged("cargo test".to_string()).await,
+        AutoModeOutcome::Allow { .. }
+    ));
+    assert_eq!(decision_seen.lock().unwrap().len(), 1);
+    assert!(chat_seen.lock().unwrap().is_empty());
+
+    // The refused command reaches the chat stage, whose verdict stands.
+    match staged("exa search rust release notes".to_string()).await {
+        AutoModeOutcome::Ask { reason } => {
+            assert!(reason.contains("known=0.35"), "{reason}");
+        }
+        other => panic!("the chat verdict must stand: {other:?}"),
+    }
+    assert_eq!(chat_seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_chat_stage_allows_what_the_decision_gate_asked_on() {
+    let staged = crate::agent::auto_mode::chat_stage_after_decision(
+        scripted_gate(
+            vec![AutoModeOutcome::Ask {
+                reason: "scope=read_only known=0.40".into(),
+            }],
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ),
+        scripted_gate(
+            vec![AutoModeOutcome::Allow {
+                reason: "a public search with no payload".into(),
+            }],
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ),
+    );
+    assert!(matches!(
+        staged("exa search rust release notes".to_string()).await,
+        AutoModeOutcome::Allow { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_chat_stage_never_runs_after_a_decision_allow() {
+    let chat_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let staged = crate::agent::auto_mode::chat_stage_after_decision(
+        scripted_gate(
+            vec![AutoModeOutcome::Allow {
+                reason: "scope=read_only".into(),
+            }],
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ),
+        scripted_gate(vec![], chat_seen.clone()),
+    );
+    assert!(matches!(
+        staged("uptime".to_string()).await,
+        AutoModeOutcome::Allow { .. }
+    ));
+    assert!(chat_seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_transport_error_fails_the_gate_closed() {
+    let gate = crate::agent::auto_mode::build_decision_auto_mode(
+        std::sync::Arc::new(FailingDecision),
+        "jev-latest",
+        std::time::Duration::from_secs(5),
+        std::path::Path::new("/repo"),
+        None,
+        &crate::agent::auto_mode::hint_handle(),
+    );
+    match gate("jj abandon".to_string()).await {
+        AutoModeOutcome::Failed { reason } => {
+            assert!(reason.contains("unreachable"), "{reason}");
+        }
+        other => panic!("a transport error must fail closed: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_command_asks_without_a_call() {
+    let (gate, fake) = decision_gate(
+        FakeDecision {
+            answers: std::collections::BTreeMap::new(),
+            delay: std::time::Duration::ZERO,
+            calls: std::sync::Mutex::new(Vec::new()),
+        },
+        std::time::Duration::from_secs(5),
+    );
+    let long = "x".repeat(8 * 1024 + 1);
+    let outcome = gate(long).await;
+    assert!(matches!(outcome, AutoModeOutcome::Ask { .. }));
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+fn auto_mode_config(model: &str) -> lofi_types::Config {
+    let mut providers = IndexMap::new();
+    providers.insert(
+        "chat".to_string(),
+        lofi_types::ProviderConfig {
+            api_type: Some(Api::OpenAiCompletions),
+            base_url: Some("https://chat.example.com".to_string()),
+            api_key: Some("sk-test".to_string()),
+            models: models(&["haiku"]),
+            ..provider_default()
+        },
+    );
+    providers.insert(
+        "typesafe".to_string(),
+        lofi_types::ProviderConfig {
+            api_type: Some(Api::SystemOne),
+            base_url: Some("https://typesafe.example.com".to_string()),
+            api_key: Some("sk-test".to_string()),
+            models: models(&["jev-latest"]),
+            ..provider_default()
+        },
+    );
+    let mut config = lofi_types::Config {
+        providers,
+        ..lofi_types::Config::default()
+    };
+    config.shell_policy.auto_mode = Some(lofi_types::AutoModeConfig {
+        enable: true,
+        model: Some(model.to_string()),
+        provider: None,
+        decision_model: None,
+        max_tokens: None,
+        timeout_ms: None,
+    });
+    config
+}
+
+/// A config whose decision gate is `decision_model`, with model as the
+/// chat stage when given.
+fn decision_config(decision_model: &str, model: Option<&str>) -> lofi_types::Config {
+    let mut config = auto_mode_config(model.unwrap_or("chat/haiku"));
+    let auto = config.shell_policy.auto_mode.as_mut().unwrap();
+    auto.model = model.map(str::to_string);
+    auto.decision_model = Some(decision_model.to_string());
+    config
+}
+
+fn models(ids: &[&str]) -> IndexMap<String, lofi_types::ModelConfig> {
+    ids.iter()
+        .map(|id| ((*id).to_string(), serde_json::from_str("{}").unwrap()))
+        .collect()
+}
+
+fn provider_default() -> lofi_types::ProviderConfig {
+    serde_json::from_str("{}").unwrap()
+}
+
+async fn configured(model: &str) -> lofi_error::Result<ToolExecutor> {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    crate::agent::auto_mode::configure(executor, &auto_mode_config(model), &[]).await
+}
+
+async fn configured_decision(
+    decision_model: &str,
+    model: Option<&str>,
+) -> lofi_error::Result<ToolExecutor> {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    crate::agent::auto_mode::configure(executor, &decision_config(decision_model, model), &[]).await
+}
+
+#[tokio::test]
+async fn a_level_on_a_decision_model_is_a_config_error() {
+    match configured_decision("typesafe/jev-latest:high", None).await {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("no thinking level or service tier"),
+            "unexpected error: {error}"
+        ),
+        Ok(_) => panic!("a decision model query has no thinking level"),
+    }
+}
+
+#[tokio::test]
+async fn a_max_tokens_on_a_decision_model_is_ignored() {
+    let mut config = decision_config("typesafe/jev-latest", None);
+    config.shell_policy.auto_mode.as_mut().unwrap().max_tokens = Some(1024);
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Ok(executor) => assert!(executor.auto_mode.is_some()),
+        Err(error) => panic!("a decision model must ignore max_tokens: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn a_decision_model_builds_the_gate() {
+    match configured_decision("typesafe/jev-latest", None).await {
+        Ok(executor) => assert!(executor.auto_mode.is_some()),
+        Err(error) => panic!("a systemone model must open as a decision gate: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn a_chat_model_still_builds_the_chat_gate() {
+    match configured("chat/haiku").await {
+        Ok(executor) => assert!(executor.auto_mode.is_some()),
+        Err(error) => panic!("a chat model must open as a chat evaluator: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn a_decision_model_named_as_the_chat_stage_is_a_config_error() {
+    let config = auto_mode_config("typesafe/jev-latest");
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Err(error) => assert!(
+            error.to_string().contains("belongs in decision_model"),
+            "unexpected error: {error}"
+        ),
+        Ok(_) => panic!("a decision model cannot be the chat stage"),
+    }
+}
+
+#[tokio::test]
+async fn a_configured_stage_without_either_model_is_a_config_error() {
+    let mut config = auto_mode_config("chat/haiku");
+    config.shell_policy.auto_mode.as_mut().unwrap().model = None;
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Err(error) => assert!(
+            error.to_string().contains("set model or decision_model"),
+            "unexpected error: {error}"
+        ),
+        Ok(_) => panic!("auto mode needs one of the two models"),
+    }
+}
+
+#[tokio::test]
+async fn a_chat_stage_builds_on_the_decision_gate() {
+    let config = decision_config("typesafe/jev-latest", Some("chat/haiku"));
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Ok(executor) => assert!(executor.auto_mode.is_some()),
+        Err(error) => panic!("a chat stage must attach to a decision gate: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn a_chat_stage_without_credentials_is_a_config_error() {
+    let mut config = decision_config("typesafe/jev-latest", Some("chat/haiku"));
+    config.providers.get_mut("chat").unwrap().api_key = None;
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Err(error) => assert!(
+            error.to_string().contains("no API key"),
+            "unexpected error: {error}"
+        ),
+        Ok(_) => panic!("a chat stage without credentials must not start"),
+    }
+}
+
+#[tokio::test]
+async fn a_decision_provider_without_credentials_is_a_config_error() {
+    let mut config = decision_config("typesafe/jev-latest", None);
+    config.providers.get_mut("typesafe").unwrap().api_key = None;
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(dir.path(), &lofi_types::Config::default(), &[]).unwrap();
+    match crate::agent::auto_mode::configure(executor, &config, &[]).await {
+        Err(error) => assert!(
+            error.to_string().contains("no api key"),
+            "unexpected error: {error}"
+        ),
+        Ok(_) => panic!("a decision gate without credentials must not start"),
+    }
 }
