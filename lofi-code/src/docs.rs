@@ -144,14 +144,18 @@ pub fn docs_search(query: &str) -> serde_json::Value {
         .iter()
         .take(10)
         .map(|(score, e)| {
+            // The sentence that answers the query usually sits past a
+            // generic opening line, so rank lines by term hits.
             let excerpt = e
                 .body
                 .lines()
-                .find(|l| {
+                .filter_map(|l| {
                     let lo = l.to_ascii_lowercase();
-                    terms.iter().any(|t| lo.contains(t))
+                    let hits = terms.iter().filter(|t| lo.contains(t.as_str())).count();
+                    (hits > 0).then_some((hits, l))
                 })
-                .unwrap_or(&e.summary)
+                .max_by_key(|(hits, _)| *hits)
+                .map_or(e.summary.as_str(), |(_, l)| l)
                 .trim()
                 .to_string();
             serde_json::json!({
@@ -211,6 +215,19 @@ mod tests {
         let results = res["results"].as_array().unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0]["name"], "lofi.bash");
+    }
+
+    #[test]
+    fn search_excerpt_picks_the_most_matching_line() {
+        let res = docs_search("wait for background job completion");
+        let results = res["results"].as_array().unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0]["name"].as_str().unwrap(), "lofi.jobSpawn");
+        let excerpt = results[0]["excerpt"].as_str().unwrap();
+        assert!(
+            excerpt.contains("completion notification"),
+            "got: {excerpt}"
+        );
     }
 
     #[test]

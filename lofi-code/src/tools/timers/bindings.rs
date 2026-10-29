@@ -64,7 +64,23 @@ impl BuiltinTools {
                 None => tokio::time::sleep_until(deadline).await,
             }
         }
-        Ok(json!({ "ok": true }))
+        // A sleep that waits out a background job wastes the whole turn:
+        // the completion notice arrives as a new user message once the turn
+        // ends, not while the sleep holds the exec open.
+        let notifying = self
+            .jobs
+            .snapshot()
+            .iter()
+            .filter(|job| job.running && job.notify)
+            .count();
+        let mut result = json!({ "ok": true });
+        if notifying > 0 {
+            result["note"] = json!(format!(
+                "{notifying} background {} still running; the completion notice arrives as a new user message once the turn ends. End the turn instead of sleeping to wait.",
+                if notifying == 1 { "job is" } else { "jobs are" }
+            ));
+        }
+        Ok(result)
     }
 
     /// `lofi.notifyAt(at, message?)`: queue a one-shot wake-up notice for

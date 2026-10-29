@@ -832,6 +832,41 @@ async fn job_spawn_returns_immediately_and_completes() {
 }
 
 #[tokio::test]
+async fn sleep_notes_a_running_background_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = lofi_code::tools::JobRegistry::new();
+    let mut cx = trusted_ctx(dir.path());
+    cx.jobs = jobs.clone();
+    let spawn = exec(
+        "return await lofi.jobSpawn({ cmd: 'sleep 30' });",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let id = spawn.value["id"].as_str().unwrap().to_string();
+
+    let res = exec("return await lofi.sleep(0);", &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    let note = res.value["note"].as_str().unwrap_or_default();
+    assert!(note.contains("completion notice"), "got: {note}");
+    assert!(note.contains("End the turn"), "got: {note}");
+
+    let _ = exec(
+        &format!("return await lofi.jobKill({{ id: '{id}' }});"),
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let res = exec("return await lofi.sleep(0);", &cx, &ExecOptions::default())
+        .await
+        .unwrap();
+    assert!(res.value.get("note").is_none(), "got: {}", res.value);
+}
+
+#[tokio::test]
 async fn job_completion_keeps_its_spawn_owner() {
     let dir = tempfile::tempdir().unwrap();
     let jobs = lofi_code::tools::JobRegistry::new();

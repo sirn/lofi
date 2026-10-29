@@ -163,7 +163,9 @@ the same shell policy, stripped environment, and output redaction as
 `lofi.bash`. Returns immediately.
 
 Use the default completion notification instead of polling for the job to
-finish. Inspect state and output with `jobStatus` and `jobRead`.
+finish: the notice arrives as a new user message once your turn ends, so end
+the turn rather than sleep or poll. Inspect state and output with `jobStatus`
+and `jobRead`.
 
 **Parameters:**
 - `cmd` (string, required) — the shell command.
@@ -299,7 +301,9 @@ Errors with `ok: false` when the key is unknown or the job is not a tty job.
 Wait inside the exec for `seconds` seconds (a number; fractions are fine). The
 wait observes run cancellation, so a cancelled turn leaves it at once. `seconds`
 must be at most 86400 (one day): for a longer pause, schedule a wake-up with
-`notifyAt` and end the turn instead of holding the exec open.
+`notifyAt` and end the turn instead of holding the exec open. Do not sleep to
+wait for a background job: its completion notice arrives as a new user message
+once the turn ends.
 
 **Parameters:**
 - `seconds` (number, required) — how long to wait, in seconds. `0` resolves
