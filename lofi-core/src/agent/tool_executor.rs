@@ -22,7 +22,7 @@ pub struct ToolExecutor {
     pub(super) auto_mode_hints: lofi_code::AutoModeHintHandle,
     pub(super) policy_override: lofi_code::policy::PolicyOverride,
     pub(super) skills_dir: Option<PathBuf>,
-    /// Workspace memory file the `lofi.memory` tool maintains, resolved
+    /// Workspace memory file `lofi.memory` reports, resolved
     /// once from the workspace root.
     pub(super) memory: Option<PathBuf>,
     pub(super) jobs: lofi_code::tools::JobRegistry,

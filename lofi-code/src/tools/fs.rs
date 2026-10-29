@@ -106,6 +106,26 @@ pub(super) fn resolve_under(root: &Path, p: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+/// Canonicalizes `path` through missing trailing components: the deepest
+/// existing ancestor is canonicalized and the missing tail is appended back,
+/// so a registered root for a not-yet-created file still matches the path a
+/// later resolution computes. Returns `None` when the walk-up runs out of
+/// components or the ancestor cannot be canonicalized.
+pub(super) fn canonicalize_up(path: &Path) -> Option<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let name = existing.file_name()?.to_owned();
+        tail.push(name);
+        existing = existing.parent()?.to_path_buf();
+    }
+    let mut resolved = existing.canonicalize().ok()?;
+    for name in tail.into_iter().rev() {
+        resolved.push(name);
+    }
+    Some(resolved)
+}
+
 /// Relative/empty paths resolve under `primary_root` (via [`resolve_under`]).
 /// Absolute paths are canonicalized (existing prefix) and checked against
 /// `primary_root` and every `extra_root`. Symlinks are followed by
@@ -127,27 +147,7 @@ pub(super) fn resolve_for_read(
         path.canonicalize()
             .map_err(|_| Error::Tool(format!("cannot resolve: {p}")))?
     } else {
-        let mut existing = path.to_path_buf();
-        let mut tail: Vec<std::ffi::OsString> = Vec::new();
-        while !existing.exists() {
-            let name = existing
-                .file_name()
-                .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
-                .to_owned();
-            tail.push(name);
-            existing = existing
-                .parent()
-                .ok_or_else(|| Error::Tool(format!("invalid path: {p}")))?
-                .to_path_buf();
-        }
-        let canon = existing
-            .canonicalize()
-            .map_err(|_| Error::Tool(format!("cannot resolve: {p}")))?;
-        let mut r = canon;
-        for name in tail.into_iter().rev() {
-            r.push(name);
-        }
-        r
+        canonicalize_up(path).ok_or_else(|| Error::Tool(format!("cannot resolve: {p}")))?
     };
 
     if resolved.starts_with(primary_root) {

@@ -680,10 +680,11 @@ Older tool results and tool-call code become event-id stubs; the compaction hand
 Each workspace keeps a memory file under the state directory
 (`$XDG_STATE_HOME/lofi/states/<workspace-key>/memory.md`), shared by every
 session opened in the same directory. There is no config key.
-The agent maintains the file with the `lofi.memory` sandbox tool: `lofi.memory()`
-reads it, `lofi.memory(text)` rewrites it, and a rewrite above 3000 characters
-is rejected. A compaction puts the file in the handoff as a `Workspace Memory`
-section, clipped at 3000 characters; the summary says so when the clip happens.
+The agent reads the file with the `lofi.memory()` sandbox tool, which returns
+its content and file location, and updates it with the normal file tools: the
+path is accepted for read and write without approval. A compaction puts the
+file in the handoff as a `Workspace Memory` section, clipped at 3000
+characters; the summary says so when the clip happens.
 
 Concurrent sessions share the file with no locking: a rewrite is whole-file
 and the last writer wins. Keep the rewrite whole-file too — an append-only

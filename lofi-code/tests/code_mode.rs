@@ -552,46 +552,44 @@ async fn exec_tmp_dir_exposed() {
 }
 
 #[tokio::test]
-async fn memory_tool_reads_and_rewrites_the_workspace_memory() {
+async fn memory_tool_reports_content_and_the_file_tools_update_it() {
     let dir = tempfile::tempdir().unwrap();
     let memory = dir.path().join("state").join("memory.md");
     let mut cx = ctx(dir.path());
     cx.memory = Some(memory.clone());
 
+    // A read with no memory yet reports the path and an empty text.
     let res = exec("return await lofi.memory();", &cx, &ExecOptions::default())
         .await
         .unwrap();
-    assert_eq!(res.value, json!(""));
+    assert_eq!(res.value["path"], json!(memory.to_string_lossy()));
+    assert_eq!(res.value["text"], json!(""));
 
+    // The reported path is accepted by the normal write tools.
     let res = exec(
-        "return await lofi.memory(\"Next: ship it\");",
+        "const m = await lofi.memory(); return await lofi.write({ path: m.path, text: \"Next: ship it\" });",
         &cx,
         &ExecOptions::default(),
     )
     .await
     .unwrap();
-    assert_eq!(res.value, json!(13));
+    assert_eq!(res.value["ok"], json!(true));
     assert_eq!(std::fs::read_to_string(&memory).unwrap(), "Next: ship it");
+
+    let res = exec(
+        "const m = await lofi.memory(); return await lofi.edit({ path: m.path, old: \"ship it\", new: \"land it\" });",
+        &cx,
+        &ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.value["ok"], json!(true));
+    assert_eq!(std::fs::read_to_string(&memory).unwrap(), "Next: land it");
 
     let res = exec("return await lofi.memory();", &cx, &ExecOptions::default())
         .await
         .unwrap();
-    assert_eq!(res.value, json!("Next: ship it"));
-}
-
-#[tokio::test]
-async fn memory_tool_rejects_an_over_limit_rewrite() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut cx = ctx(dir.path());
-    cx.memory = Some(dir.path().join("memory.md"));
-    let res = exec(
-        "return await lofi.memory(\"x\".repeat(3001));",
-        &cx,
-        &ExecOptions::default(),
-    )
-    .await;
-    assert!(res.is_err());
-    assert!(!dir.path().join("memory.md").exists());
+    assert_eq!(res.value["text"], json!("Next: land it"));
 }
 
 #[tokio::test]

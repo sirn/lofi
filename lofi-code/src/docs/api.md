@@ -357,23 +357,19 @@ A string property: the absolute path to the per-session tmp directory backing
 `lofi.bash` full-output logs. This directory is a read root — `lofi.read`,
 `lofi.ls`, `lofi.find`, and `lofi.grep` can access files under it.
 
-## lofi.memory(text?)
+## lofi.memory()
 
-Read or rewrite the workspace memory: a small state file shared by every
-session opened in the same workspace, injected into each compaction handoff.
-The file lives in the state directory outside the workspace, so this tool is
-the only way to reach it.
+Read the workspace memory: a small state file shared by every session opened
+in the same workspace, injected into each compaction handoff.
 
-**Parameters:**
-- `text` (string, optional) — omit to read the current content (an empty
-string when no memory exists). Pass a string to replace the whole file; a
-rewrite above 3000 characters is rejected, so rewrite shorter instead of
-appending. Keep session-specific progress in the conversation; the memory
-carries state every session in the workspace needs.
-
-**Returns:** the current content (string) on a read, or the number of
-characters written on a rewrite.
-
+**Returns:** an object with `path` (string) — the absolute location of the
+memory file — and `text` (string) — its current content, an empty string
+when no memory exists. Update the file with the normal tools
+(`lofi.write`, `lofi.edit`, `lofi.patch`): the path is a registered
+root they accept for read and write without approval. Rewrite the whole file
+rather than appending, and keep it within 3000 characters — a compaction
+clips the file at that limit. Keep session-specific progress in the
+conversation; the memory carries state every session in the workspace needs.
 
 ## lofi.recall({ query?, scope?, page?, expand? })
 

@@ -218,8 +218,8 @@ pub struct ExecCtx {
     /// agent.
     pub policy_override: crate::policy::PolicyOverride,
     pub skills_dir: Option<PathBuf>,
-    /// Workspace memory file the `lofi.memory` tool maintains. `None`
-    /// where no workspace state directory exists (nested sandboxes, tests).
+    /// Workspace memory file `lofi.memory` reports. `None` where no
+    /// workspace state directory exists (nested sandboxes, tests).
     pub memory: Option<PathBuf>,
     /// Visible-output cap applied to file reads and bash output.
     pub truncate: crate::tools::truncate::TruncatedCap,

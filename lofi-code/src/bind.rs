@@ -711,10 +711,10 @@ fn bind_skills_tools<'js>(
     Ok(())
 }
 
-/// `lofi.memory` reads the workspace memory with no argument and rewrites
-/// it with a string argument. The file lives in the state directory outside
-/// the workspace, so the model cannot reach it with the file tools; this
-/// binding is the only writer and the path is host-chosen.
+/// `lofi.memory` reads the workspace memory and reports its file location.
+/// The file lives in the state directory outside the workspace and its path
+/// is host-chosen; it is registered as a root the file tools accept for
+/// read and write.
 fn bind_memory_tool<'js>(
     ctx: &Ctx<'js>,
     lofi: &Object<'js>,
@@ -725,18 +725,11 @@ fn bind_memory_tool<'js>(
         "memory",
         Function::new(
             ctx.clone(),
-            Async(move |text: Opt<String>| {
+            Async(move || {
                 let t = t.clone();
                 async move {
-                    let preview = text
-                        .0
-                        .as_deref()
-                        .map_or_else(String::new, |s| cap_first_line(s, 120));
-                    let id = emit_start(&t, "memory", preview);
-                    let res = match text.0 {
-                        None => t.memory_read(),
-                        Some(text) => t.memory_write(&text),
-                    };
+                    let id = emit_start(&t, "memory", String::new());
+                    let res = t.memory_read();
                     match res {
                         Ok(value) => {
                             emit_end(&t, id, &value);

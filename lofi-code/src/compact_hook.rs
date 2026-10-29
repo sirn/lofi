@@ -125,7 +125,7 @@ impl CodeCompactionHook {
             .collect();
         if clipped {
             items.push(format!(
-                "clipped at {MEMORY_LIMIT} characters; rewrite it with lofi.memory to fit"
+                "clipped at {MEMORY_LIMIT} characters; rewrite it shorter to fit"
             ));
         }
         Some(SummarySection {

@@ -28,9 +28,9 @@ pub mod write;
 pub use bash_env::BashEnv;
 pub use bash_util::{read_capped, wait_for_cancel, PgrpKillGuard};
 use fs::{
-    approval_candidate, atomic_write, find_walk, is_outside_error, parse_grep_args,
-    reject_non_regular, reject_symlink_leaf, resolve_for_read, walk_files_capped, WalkCeilings,
-    WalkLimit, OUTSIDE_ROOT_ERROR,
+    approval_candidate, atomic_write, canonicalize_up, find_walk, is_outside_error,
+    parse_grep_args, reject_non_regular, reject_symlink_leaf, resolve_for_read, walk_files_capped,
+    WalkCeilings, WalkLimit, OUTSIDE_ROOT_ERROR,
 };
 pub use jobs::{
     JobAttributes, JobColor, JobInfo, JobNotice, JobRegistry, JobScreen, JobScreenLine, JobSpan,
@@ -77,8 +77,8 @@ pub struct BuiltinTools {
     /// dialog pick applies to every later exec in the session.
     policy_override: crate::policy::PolicyOverride,
     skills_dir: Option<PathBuf>,
-    /// Workspace memory file the `lofi.memory` tool maintains. `None`
-    /// keeps the tool bound but unavailable (tests, nested sandboxes).
+    /// Workspace memory file `lofi.memory` reports. `None` keeps the
+    /// tool bound but unavailable (tests, nested sandboxes).
     memory: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     /// Approves one directory for use outside the workspace root.
@@ -295,16 +295,24 @@ impl BuiltinTools {
         self.skills_dir.as_deref()
     }
 
-    /// Attaches the workspace memory file the `lofi.memory` tool maintains.
-    /// The path is host-chosen and never resolved from guest input.
+    /// Attaches the workspace memory file `lofi.memory` reports. The path
+    /// is host-chosen and never resolved from guest input. It registers the
+    /// file as a root the file tools accept for read and write without a
+    /// prompt.
     #[must_use]
     pub fn with_memory(mut self, memory: Option<PathBuf>) -> Self {
-        self.memory = memory;
+        if let Some(memory) = memory {
+            let canon = canonicalize_up(&memory).unwrap_or(memory.clone());
+            self.read_roots.push(canon.clone());
+            self.memory = Some(canon);
+        } else {
+            self.memory = None;
+        }
         self
     }
 
-    /// Read the workspace memory; an empty string is the "no memory yet"
-    /// case.
+    /// Read the workspace memory and report its file location; an empty
+    /// string is the "no memory yet" case.
     /// # Errors
     /// Returns [`Error::Tool`] when no memory path is attached or the read
     /// fails.
@@ -312,18 +320,11 @@ impl BuiltinTools {
         let path = self.memory.as_deref().ok_or_else(|| {
             Error::Tool("lofi.memory is not available in this context".to_string())
         })?;
-        memory::read(path).map(serde_json::Value::String)
-    }
-
-    /// Replace the workspace memory with `text`.
-    /// # Errors
-    /// Returns [`Error::Tool`] when no memory path is attached, the text
-    /// exceeds the limit, or the write fails.
-    pub(crate) fn memory_write(&self, text: &str) -> Result<serde_json::Value> {
-        let path = self.memory.as_deref().ok_or_else(|| {
-            Error::Tool("lofi.memory is not available in this context".to_string())
-        })?;
-        memory::write(path, text).map(|count| serde_json::json!(count))
+        let text = memory::read(path)?;
+        Ok(serde_json::json!({
+            "path": path.to_string_lossy(),
+            "text": text,
+        }))
     }
 
     /// Resolves a read-only tool path against the workspace root and the
@@ -337,12 +338,12 @@ impl BuiltinTools {
     }
 
     /// Resolves a mutation path. Relative paths land under the workspace
-    /// root; a registered read root stays read-only without a prompt. An
-    /// absolute path outside every root offers a one-directory approval
-    /// first.
+    /// root; a registered read root stays read-only without a prompt, except
+    /// the memory file, which stays writable. An absolute path outside every
+    /// root offers a one-directory approval first.
     pub(super) async fn resolve_mutate(&self, p: &str) -> Result<PathBuf> {
         if let Ok((resolved, root)) = resolve_for_read(&self.root, &self.read_roots, p) {
-            if root != self.root {
+            if root != self.root && self.memory.as_ref() != Some(&root) {
                 return Err(Error::Tool(format!("path is read-only: {p}")));
             }
             return Ok(resolved);
@@ -1297,6 +1298,42 @@ mod tests {
         assert!(err.to_string().contains("path is read-only"), "got: {err}");
         assert!(!tools.tmp_dir().join("out.txt").exists());
         assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_accepts_the_memory_file_but_not_its_neighbors() {
+        let ws = tempdir().unwrap();
+        let holder = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        let tools = tools_in(ws.path().to_path_buf(), tmp.path().to_path_buf());
+        let memory = holder.path().join("memory.md");
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let tools = tools
+            .with_memory(Some(memory.clone()))
+            .with_approve_dir(Some(recording_hook(None, asked.clone())));
+
+        // The memory file itself is writable without a prompt.
+        let path = memory.to_string_lossy().into_owned();
+        tools
+            .write(json!({ "path": path, "text": "state" }))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&memory).unwrap(), "state");
+
+        // A neighbor in the same directory is not part of the root: the
+        // approval hook is offered, and a refusal keeps it rejected.
+        let neighbor = holder
+            .path()
+            .join("state.json")
+            .to_string_lossy()
+            .into_owned();
+        let err = tools
+            .write(json!({ "path": neighbor, "text": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("user refused"), "got: {err}");
+        assert!(!holder.path().join("state.json").exists());
+        assert_eq!(asked.lock().unwrap().len(), 1);
     }
 
     #[cfg(unix)]
