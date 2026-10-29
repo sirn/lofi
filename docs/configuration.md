@@ -237,6 +237,7 @@ A timeout or failure stops the helper's process group.
 ### Environment overrides
 
 Use `LOFI__SECTION__KEY=VALUE` to override a setting for one invocation.
+Overrides apply to `config.toml` and `policy.toml` sections alike.
 Double underscores select nested tables.
 Key names are converted to lowercase.
 Values are parsed as TOML when possible and as strings otherwise.

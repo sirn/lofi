@@ -57,15 +57,23 @@ pub fn policy_config_path(config_path: &Path) -> Result<PathBuf> {
 /// # Errors
 /// [`Error::Config`] when the file exists but fails to read or parse.
 pub fn load_policy_or_default(path: &Path) -> Result<lofi_types::ShellPolicyConfig> {
+    // Env overrides apply to both documents, so a `LOFI__` var aimed at the
+    // other file lands here as an ignored unknown key and vice versa.
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| Error::Config(format!("failed to read {}: {e}", path.display())))?;
-            toml::from_str(&content)
+            let mut doc: toml::Value = toml::from_str(&content)
+                .map_err(|e| Error::Config(format!("parse error in {}: {e}", path.display())))?;
+            apply_env_overrides(&mut doc)?;
+            doc.try_into()
                 .map_err(|e| Error::Config(format!("parse error in {}: {e}", path.display())))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(lofi_types::ShellPolicyConfig::default())
+            let mut doc = toml::Value::Table(toml::Table::new());
+            apply_env_overrides(&mut doc)?;
+            doc.try_into()
+                .map_err(|e| Error::Config(format!("env override: {e}")))
         }
         Err(e) => Err(Error::Config(format!(
             "policy path {}: {e}",
@@ -778,6 +786,35 @@ base_url = "https://example.invalid"
         assert_eq!(p.base_url.as_deref(), Some("https://override.invalid"));
         assert!(p.no_auth);
         assert_eq!(cfg.default_model.as_deref(), Some("p/plain-model"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_config_honors_policy_env_overrides() {
+        let _g = env_lock();
+        let _a = capture_env("LOFI__AUTO_MODE__MODEL");
+        let _e = capture_env("LOFI__AUTO_MODE__ENABLE");
+        let _r = capture_env("LOFI__RETRY__MAX_RETRIES");
+        std::env::set_var("LOFI__AUTO_MODE__MODEL", "'other/model'");
+        std::env::set_var("LOFI__AUTO_MODE__ENABLE", "true");
+        std::env::set_var("LOFI__RETRY__MAX_RETRIES", "7");
+        let dir = std::env::temp_dir().join("lofi-policy-env-override-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::write(
+            dir.join("policy.toml"),
+            "[auto_mode]\nenable = false\nmodel = 'a/b'\nprovider = 'a'\n",
+        )
+        .unwrap();
+        let cfg = load_config(&path).await.unwrap();
+        let auto = cfg.shell_policy.auto_mode.as_ref().unwrap();
+        assert_eq!(auto.model.as_deref(), Some("other/model"));
+        assert!(auto.enable);
+        // A var aimed at config.toml is an ignored unknown key in the
+        // policy document and still applies to the config document.
+        assert_eq!(cfg.retry.max_retries, 7);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
