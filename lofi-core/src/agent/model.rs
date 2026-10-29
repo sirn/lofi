@@ -359,6 +359,14 @@ fn select_model_impl(
         .iter()
         .any(|a| a.id == model.id && a.provider == model.provider)
     {
+        // A decision model is filtered out of the chat list on purpose, so
+        // it needs its own reason rather than a missing-key guess.
+        if model.api.is_decision() {
+            return Err(Error::NoModels(format!(
+                "model `{provider_name}/{model_id}` answers decision questions, \
+                 not chat: it cannot serve a session"
+            )));
+        }
         return Err(Error::NoModels(format!(
             "model `{provider_name}/{model_id}` is not available: its provider has no API key set. \
              Set its env var (see the provider's `env_name`) or configure credentials in the config file."

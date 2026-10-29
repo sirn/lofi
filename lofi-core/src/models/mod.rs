@@ -181,6 +181,12 @@ impl ModelRegistry {
     pub fn available(&self) -> Vec<Model> {
         self.models
             .iter()
+            .filter(|m| {
+                // A decision API answers typed questions, not chat, so it
+                // cannot serve a turn. Naming it as a chat model fails in
+                // the provider open with that reason.
+                !m.api.is_decision()
+            })
             .filter(|m| match self.providers.get(&m.provider) {
                 Some(p) => {
                     p.no_auth
@@ -621,6 +627,34 @@ mod tests {
         assert!(ids.contains(&"m2"));
         assert!(!ids.contains(&"m3"));
         assert!(!ids.contains(&"m4"));
+    }
+
+    #[test]
+    fn available_hides_decision_models() {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "openai".to_string(),
+            pcfg(Api::OpenAiCompletions, models(&["gpt-4o"])),
+        );
+        providers.insert(
+            "typesafe".to_string(),
+            pcfg(Api::SystemOne, models(&["jev-latest"])),
+        );
+        let reg = ModelRegistry::load(&config_with(providers)).unwrap();
+        // A decision model has credentials, so it would be listed without
+        // the api filter. It cannot serve a chat turn, so it must not
+        // appear for selection.
+        let available = reg.available();
+        let ids: Vec<&str> = available.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-4o"));
+        assert!(!ids.contains(&"jev-latest"));
+        assert!(!reg.choices().iter().any(|c| c.id == "jev-latest"));
+        // Resolution keeps working: the decision gate names its model
+        // directly, outside the chat picker.
+        assert_eq!(
+            reg.resolve("typesafe/jev-latest").map(|m| m.id.clone()),
+            Some("jev-latest".to_string())
+        );
     }
 
     #[test]

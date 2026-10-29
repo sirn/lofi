@@ -25,6 +25,7 @@ fn model_for(api: Api, base_url: &str) -> Model {
         Api::OpenAiResponses => "/v1/responses",
         Api::AnthropicMessages => "/v1/messages",
         Api::GoogleGenerativeAi => "/v1beta",
+        Api::SystemOne => "/v1/systemone",
     };
     Model {
         id: "test-model".to_string(),
@@ -362,4 +363,213 @@ async fn google_generative_ai_maps_canned_stream() {
             },
         ]
     );
+}
+
+fn decision_request() -> lofi_providers::DecisionRequest {
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert(
+        "destructive".to_string(),
+        lofi_types::DecisionQuestion::Noul {
+            instructions: "Is it destructive?".to_string(),
+            criteria: None,
+        },
+    );
+    lofi_providers::DecisionRequest {
+        model: "jev-latest".to_string(),
+        state: serde_json::json!({"command": "ls"}),
+        questions,
+    }
+}
+
+const DECISION_BODY: &str = concat!(
+    r#"{"model":"jev-1.14.0","answers":"#,
+    r#"{"destructive":{"type":"noul","noul":0.1}},"#,
+    r#""usage":{"input_tokens":10,"output_tokens":1}}"#
+);
+
+/// The registry hands the model's endpoint as a complete URL; the client
+/// must not append the default path onto it again.
+#[tokio::test]
+async fn systemone_posts_to_the_model_endpoint_without_doubling_the_path() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/systemone")
+        .match_header("authorization", "Bearer dummy-key")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(DECISION_BODY)
+        .create_async()
+        .await;
+
+    let endpoint = model_for(Api::SystemOne, &server.url()).base_url.unwrap();
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let response = client.decide(&decision_request()).await.unwrap();
+    assert_eq!(response.model, "jev-1.14.0");
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn systemone_joins_the_default_path_when_no_model_endpoint_is_given() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(DECISION_BODY)
+        .create_async()
+        .await;
+
+    let client =
+        lofi_providers::open_decision(Api::SystemOne, &cfg(Api::SystemOne, server.url()), None)
+            .unwrap();
+    client.decide(&decision_request()).await.unwrap();
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn systemone_retries_one_rate_limit() {
+    let mut server = mockito::Server::new_async().await;
+    let limited = server
+        .mock("POST", "/v1/systemone")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .create_async()
+        .await;
+    let ok = server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(DECISION_BODY)
+        .create_async()
+        .await;
+
+    let endpoint = model_for(Api::SystemOne, &server.url()).base_url.unwrap();
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    client.decide(&decision_request()).await.unwrap();
+    limited.assert_async().await;
+    ok.assert_async().await;
+}
+
+#[tokio::test]
+async fn systemone_errors_on_a_non_success_status() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("POST", "/v1/systemone")
+        .with_status(503)
+        .with_body("unavailable")
+        .create_async()
+        .await;
+    let endpoint = format!("{}/v1/systemone", server.url());
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let error = client.decide(&decision_request()).await.unwrap_err();
+    assert!(error.to_string().contains("503"), "{error}");
+}
+
+#[tokio::test]
+async fn systemone_errors_on_a_malformed_body() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("not json")
+        .create_async()
+        .await;
+    let endpoint = format!("{}/v1/systemone", server.url());
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let error = client.decide(&decision_request()).await.unwrap_err();
+    assert!(error.to_string().contains("malformed"), "{error}");
+}
+
+#[tokio::test]
+async fn systemone_refuses_a_provider_without_credentials() {
+    let mut config = cfg(Api::SystemOne, "https://api.example.com".to_string());
+    config.api_key = None;
+    let Err(error) = lofi_providers::open_decision(Api::SystemOne, &config, None) else {
+        panic!("a provider without credentials must not open")
+    };
+    assert!(error.to_string().contains("no api key"), "{error}");
+}
+
+#[tokio::test]
+async fn systemone_does_not_retry_a_rate_limit_without_retry_after() {
+    let mut server = mockito::Server::new_async().await;
+    let limited = server
+        .mock("POST", "/v1/systemone")
+        .with_status(429)
+        .create_async()
+        .await;
+    let endpoint = format!("{}/v1/systemone", server.url());
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let error = client.decide(&decision_request()).await.unwrap_err();
+    assert!(error.to_string().contains("429"), "{error}");
+    limited.assert_async().await;
+}
+
+#[tokio::test]
+async fn systemone_does_not_retry_a_second_rate_limit() {
+    let mut server = mockito::Server::new_async().await;
+    let limited = server
+        .mock("POST", "/v1/systemone")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .expect(2)
+        .create_async()
+        .await;
+    let endpoint = format!("{}/v1/systemone", server.url());
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let error = client.decide(&decision_request()).await.unwrap_err();
+    assert!(error.to_string().contains("429"), "{error}");
+    limited.assert_async().await;
+}
+
+#[tokio::test]
+async fn systemone_refuses_an_oversized_body() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("x".repeat(64 * 1024 + 1))
+        .create_async()
+        .await;
+    let endpoint = format!("{}/v1/systemone", server.url());
+    let client = lofi_providers::open_decision(
+        Api::SystemOne,
+        &cfg(Api::SystemOne, server.url()),
+        Some(&endpoint),
+    )
+    .unwrap();
+    let error = client.decide(&decision_request()).await.unwrap_err();
+    assert!(error.to_string().contains("64 KiB"), "{error}");
 }

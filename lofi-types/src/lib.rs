@@ -3,6 +3,7 @@
 mod api;
 mod compact;
 mod config;
+mod decision;
 mod message;
 mod model;
 pub mod recall;
@@ -15,6 +16,7 @@ pub mod text;
 pub use api::*;
 pub use compact::*;
 pub use config::*;
+pub use decision::*;
 pub use message::*;
 pub use model::*;
 pub use session::*;

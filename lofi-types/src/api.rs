@@ -10,6 +10,8 @@ pub enum Api {
     AnthropicMessages,
     #[serde(rename = "google_generative_ai", alias = "google-generative-ai")]
     GoogleGenerativeAi,
+    #[serde(rename = "systemone", alias = "system-one")]
+    SystemOne,
 }
 
 impl Api {
@@ -20,6 +22,7 @@ impl Api {
             Self::OpenAiResponses => "openai_responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::GoogleGenerativeAi => "google_generative_ai",
+            Self::SystemOne => "systemone",
         }
     }
 
@@ -30,6 +33,7 @@ impl Api {
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
             Self::GoogleGenerativeAi => "google-generative-ai",
+            Self::SystemOne => "systemone",
         }
     }
 
@@ -40,6 +44,7 @@ impl Api {
             Self::OpenAiResponses => "OpenAI Responses",
             Self::AnthropicMessages => "Anthropic Messages",
             Self::GoogleGenerativeAi => "Google Generative AI",
+            Self::SystemOne => "TypeSafe System One",
         }
     }
 
@@ -52,8 +57,17 @@ impl Api {
             "openai_responses" | "openai-responses" => Some(Self::OpenAiResponses),
             "anthropic_messages" | "anthropic-messages" => Some(Self::AnthropicMessages),
             "google_generative_ai" | "google-generative-ai" => Some(Self::GoogleGenerativeAi),
+            "systemone" | "system-one" => Some(Self::SystemOne),
             _ => None,
         }
+    }
+
+    /// Whether this API answers typed decision questions instead of chat
+    /// completions. A decision model cannot run a chat turn, so every chat
+    /// path rejects it; only a decision call can open it.
+    #[must_use]
+    pub fn is_decision(self) -> bool {
+        matches!(self, Self::SystemOne)
     }
 
     /// Default API **host root** for this protocol, used when a provider
@@ -67,6 +81,7 @@ impl Api {
             Self::OpenAiCompletions | Self::OpenAiResponses => "https://api.openai.com",
             Self::AnthropicMessages => "https://api.anthropic.com",
             Self::GoogleGenerativeAi => "https://generativelanguage.googleapis.com",
+            Self::SystemOne => "https://api.typesafe.ai",
         }
     }
 
@@ -77,6 +92,7 @@ impl Api {
             Self::OpenAiResponses => "/v1/responses",
             Self::AnthropicMessages => "/v1/messages",
             Self::GoogleGenerativeAi => "/v1beta",
+            Self::SystemOne => "/v1/systemone",
         }
     }
 }

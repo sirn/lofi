@@ -5,6 +5,7 @@ mod message_assembler;
 mod openai_completions;
 mod openai_responses;
 pub(crate) mod sse;
+mod systemone;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -23,6 +24,7 @@ use google_generative_ai::GoogleGenerativeAiProvider;
 pub use message_assembler::{assemble_message, MessageAssembler};
 use openai_completions::OpenAiCompletionsProvider;
 use openai_responses::OpenAiResponsesProvider;
+pub use systemone::{open_decision, Decision, DecisionRequest, DecisionResponse, DecisionUsage};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToolSchema {
@@ -70,6 +72,15 @@ pub fn open(api: Api, cfg: &ProviderConfig) -> Result<Box<dyn Provider>> {
     let client = http_client()?;
     let response_start_timeout = std::time::Duration::from_millis(cfg.response_start_timeout_ms);
     let provider: Box<dyn Provider> = match api {
+        // A decision API answers typed questions, never a chat turn; the
+        // chat path must fail loudly instead of sending a completion to an
+        // endpoint that cannot answer one.
+        Api::SystemOne => {
+            return Err(Error::Config(
+                "systemone is a decision API, not a chat provider; open it with open_decision"
+                    .to_string(),
+            ));
+        }
         Api::OpenAiCompletions => Box::new(OpenAiCompletionsProvider {
             base_url,
             api_key,
@@ -308,7 +319,9 @@ fn authed_get(
     let req = client.get(url);
     let key = api_key.filter(|k| !k.is_empty());
     match api {
-        Api::OpenAiCompletions | Api::OpenAiResponses => match key {
+        // SystemOne never answers model discovery, but the Bearer scheme is
+        // symmetric with the decision client's.
+        Api::OpenAiCompletions | Api::OpenAiResponses | Api::SystemOne => match key {
             Some(k) => req.bearer_auth(k),
             None => req,
         },
